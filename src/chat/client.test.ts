@@ -3,6 +3,7 @@ import { resetAppBasePathForTests } from "../shared/app-url";
 import type { LiveSubscription, LiveSubscriptionKey } from "../shared/live-protocol";
 import type { LiveChannel, LiveTopicConsumer } from "../shell/live-channel";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError } from "./client";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
 
 const originalDocument = Reflect.get(globalThis, "document");
 
@@ -76,7 +77,7 @@ describe("chat API client", () => {
 
   test("cold reads honor the server allowance while superseded reads abort", async () => {
     const client = new ChatApiClient(async url => {
-      if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "idle" } }] }, { headers: { "x-uatu-chat-startup-read-ms": "100" } });
+      if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: OPENCODE_AGENT, availability: { state: "idle" } }] }, { headers: { "x-uatu-chat-startup-read-ms": "100" } });
       await new Promise(resolve => setTimeout(resolve, 20));
       return Response.json(snapshot());
     }, undefined, { ordinaryMs: 10 });
@@ -112,7 +113,7 @@ describe("chat API client", () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
       requests.push({ url: String(url), init });
-      if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "ready", version: "test" } }] });
+      if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: OPENCODE_AGENT, availability: { state: "ready", version: "test" } }] });
       if (String(url).includes("models")) return Response.json({ models: [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }] });
       if (String(url).includes("commands")) return Response.json({ commands: [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" }] });
       if (String(url).endsWith("conversations")) return init?.method === "POST"
@@ -445,7 +446,7 @@ class FakeChannel implements LiveChannel {
 
 function snapshot() {
   return {
-    conversation: { id: "c/1", title: "Chat", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } },
+    conversation: { id: "c/1", title: "Chat", createdAt: 1, updatedAt: 1, status: "idle", agent: OPENCODE_AGENT },
     configuration: {},
     generation: "g",
     cursor: "cursor",

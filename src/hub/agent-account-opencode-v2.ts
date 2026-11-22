@@ -20,6 +20,7 @@
 
 import { OpenCode } from "@opencode/client";
 
+import { OPENCODE_AGENT } from "../chat/opencode/descriptor";
 import { fieldsFromOpenCodeV2Form } from "./agent-account-fields";
 import { classifyCompletion } from "./agent-account-redirect";
 import { AccountOperationError, AttemptExpiredError, agentErrorMessage, validatedAnswers, type AccountAdapter, type AccountAdapterStatus, type StartedLogin } from "./agent-account-adapter";
@@ -34,7 +35,6 @@ type V2Credential = { id: string; integrationID: string; label: string; active: 
 type V2AttemptStatus = { status: "pending" | "complete" | "failed" | "expired"; message?: string; time?: { expires?: number } };
 
 export const V2_KEY_METHOD_ID = "key";
-const LOGIN_COMMAND = "opencode auth login";
 
 export function createOpenCodeV2AccountAdapter(options: { endpoint: string; password: string; directory: string; fetch?: typeof globalThis.fetch; pollMs?: number }): OpenCodeV2AccountAdapter {
   const authorization = `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`;
@@ -69,7 +69,7 @@ export function methodsForV2Integration(integration: V2Integration): AccountMeth
         break;
       }
       case "command":
-        methods.push({ id: typeof method.id === "string" && method.id ? method.id : "command", kind: "command", label: method.label?.trim() || "Command", command: LOGIN_COMMAND });
+        methods.push({ id: typeof method.id === "string" && method.id ? method.id : "command", kind: "command", label: method.label?.trim() || "Command", command: OPENCODE_AGENT.login.command });
         break;
     }
   }

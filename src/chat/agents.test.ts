@@ -21,6 +21,11 @@ import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visua
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
 import type { AssistantMessageItem, ChatActivity, ChatAvailability, ChatEvent, ConversationItem, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
+import { CLAUDE_CODE_AGENT } from "./claude/descriptor";
+
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
 
 test.each([
   { entry: "history", completion: "message" }, { entry: "history", completion: "conversation" },
@@ -52,7 +57,7 @@ test.each([
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { expect(source).toBe("later.png"); reads++; if (!available) throw new VisualReadError(true); return png; });
-    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: provider }] });
     services.push(service);
     return service;
   };
@@ -119,7 +124,7 @@ test.each(["completedAt", "turn_status"] as const)("historical visuals stay term
   let available = false;
   const store = new VisualStore("/workspace", directory);
   store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]); });
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "test", name: "Test" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "test", name: "Test", login: TEST_LOGIN }, service: provider }] });
   try {
     const first = (await service.history("test:c")).items[0] as AssistantMessageItem;
     expect(first.visuals?.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
@@ -164,7 +169,7 @@ test.each([
       if (!available) throw new VisualReadError(true);
       return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
     });
-    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: provider }] });
     services.push(service);
     return service;
   };
@@ -218,7 +223,7 @@ async function visualSubscriptionHarness(agentId: string, initial: ConversationI
     if (!files.available) throw new VisualReadError(true);
     return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
   });
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: agentId, name: agentId }, service: provider as unknown as WorkspaceChatService }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: agentId, name: agentId, login: TEST_LOGIN }, service: provider as unknown as WorkspaceChatService }] });
   const subscription = await service.subscribe(`${agentId}:c`);
   return {
     replay, projection, current, provider, store, files, service, subscription, directory,
@@ -345,7 +350,7 @@ test.each([
     expect(reads).toBe(missing ? 2 : 1);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { reads++; throw new Error("immutable completed block capture must not reread the overwritten file"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:definition-durable") as AssistantMessageItem;
     expect(reloaded.visuals).toEqual(completed.visuals);
     expect((await restarted.resolveVisual(reloaded.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
@@ -444,7 +449,7 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
     h.provider.history = async () => ({ ...h.current(), items: nativeHistory });
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { h.files.reads++; throw new Error("immutable completed captures must not reread source files"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:durable") as AssistantMessageItem;
     expect(reloaded.markdown).toBe(markdown);
     expect(reloaded.visuals).toEqual(completed.visuals);
@@ -553,7 +558,7 @@ test.each([
     expect((completed.items.find(item => item.id === "message:old") as AssistantMessageItem).visuals).toEqual(initialOld.visuals);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { throw new Error("completed snapshots must not reread image files"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:durable-svg") as AssistantMessageItem;
     expect(reloaded.visuals).toEqual(finalSvg.visuals);
     expect(await restarted.resolveVisual(reloaded.visuals![0]!.id!)).toEqual(capturedSvg);
@@ -569,7 +574,7 @@ test.each(["status-error", "updated"] as const)("visual terminal refresh preserv
       : h.projection.conversationUpdate({ ...summary("c"), status: "completed", title: "Renamed by provider", updatedAt: 99 });
     const delivered = await deliveredBatch(h.replay, h.iterator);
     expect(delivered).toHaveLength(2);
-    expect(delivered[0]).toEqual({ ...original, conversationId: "test:c", ...(original.type === "conversation.updated" ? { conversation: { ...original.conversation, id: "test:c", agent: { id: "test", name: "test" } } } : {}) });
+    expect(delivered[0]).toEqual({ ...original, conversationId: "test:c", ...(original.type === "conversation.updated" ? { conversation: { ...original.conversation, id: "test:c", agent: { id: "test", name: "test", login: TEST_LOGIN } } } : {}) });
     expect(delivered[1]).toEqual({ generation: original.generation, sequence: original.sequence, conversationId: "test:c", type: "resync", reason: "conversation-rewritten" });
     const first = applyChatEvent(projectionFromSnapshot(h.subscription.snapshot), delivered[0]!);
     expect(first.outcome).toBe("applied");
@@ -622,7 +627,7 @@ test.each([false, true])("V2 reconnect text end keeps history order and captures
     expect((await h.service.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
     expect(reads).toBe(missing ? 2 : 1);
     const reloadedStore = new VisualStore("/workspace", h.directory); reloadedStore.setReader(async () => { throw new Error("must not reread overwritten bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = await restarted.history("opencode:c");
     expect((reloaded.items.find(item => item.id === captured.id) as AssistantMessageItem).visuals).toEqual(final.visuals);
     expect((await restarted.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
@@ -780,7 +785,7 @@ test.each(["result", "updated", "footer"] as const)("paged-in Claude pending row
       client = applied.projection;
     });
     expect(delivered).toHaveLength(2);
-    expect(delivered[0]).toEqual({ ...terminal!, conversationId: "claude:c", ...(terminal?.type === "conversation.updated" ? { conversation: { ...terminal.conversation, id: "claude:c", agent: { id: "claude", name: "claude" } } } : {}) });
+    expect(delivered[0]).toEqual({ ...terminal!, conversationId: "claude:c", ...(terminal?.type === "conversation.updated" ? { conversation: { ...terminal.conversation, id: "claude:c", agent: { id: "claude", name: "claude", login: TEST_LOGIN } } } : {}) });
     expect(delivered[1]).toEqual({ generation: terminal!.generation, sequence: terminal!.sequence, conversationId: "claude:c", type: "resync", reason: "conversation-rewritten" });
     expect((await secondIterator.next()).value).toEqual(delivered[0]);
     expect((await secondIterator.next()).value).toEqual(delivered[1]);
@@ -880,7 +885,7 @@ test.each(["during-enrichment", "earlier-history", "before-native-handoff", "pag
     expect((await h.service.resolveVisual((client.snapshot.items[0] as AssistantMessageItem).visuals![0]!.id!))?.bytes).toEqual(seedBytes);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { throw new Error("sealed visuals must not be reread on reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reload = (await restarted.history("claude:c", { cursor: "older" })).items[0] as AssistantMessageItem;
     expect(reload.visuals).toEqual(ready.visuals);
     expect((await restarted.resolveVisual(reload.visuals![0]!.id!))?.bytes).toEqual(pageBytes);
@@ -1400,7 +1405,7 @@ test.each([false, true])("streamed OpenCode shortcut-to-inline revision captures
     expect(await deliveredBatch(h.replay, h.iterator, project)).toEqual([{ ...terminal, conversationId: "opencode:c" }]);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async source => { reads.push(source); return oldBytes; });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
     expect(reloaded.markdown).toBe(markdown);
     expect(reloaded.visuals).toEqual(answer().visuals);
@@ -1472,7 +1477,7 @@ test.each([
     expect(reads).toBe(missing ? 2 : 1);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { reads++; throw new Error("completed source must remain immutable across reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
     expect(reloaded.visuals).toEqual(completed.visuals);
     expect((await restarted.resolveVisual(reloaded.visuals![0]!.id!))?.bytes).toEqual(png);
@@ -1551,7 +1556,7 @@ test.each([false, true])("classic OpenCode text-part end captures a final refere
     h.provider.history = async () => ({ ...h.current(), items: stored });
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async source => { reads.push(source); return new TextEncoder().encode("changed again"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("opencode:c")).items[0] as AssistantMessageItem;
     expect(reloaded.completedAt).toBe(6);
     expect(reloaded.markdown).toBe(markdown);
@@ -1665,7 +1670,7 @@ test("raw HTML image aliases pass the visual-capture precheck", async () => {
     history: async () => ({ ...snapshot("c"), items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: '<IMAGE src="result.png" alt="Result">' }] }),
     dispose: async () => {},
   } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: workspace, visualStore: new VisualStore(workspace, path.join(directory, "state")), agents: [{ descriptor: { id: "test", name: "Test" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: workspace, visualStore: new VisualStore(workspace, path.join(directory, "state")), agents: [{ descriptor: { id: "test", name: "Test", login: TEST_LOGIN }, service: provider }] });
   let reads = 0;
   service.configureVisualReader(async source => { expect(source).toBe("result.png"); reads++; return png; });
   try {
@@ -1700,7 +1705,7 @@ test("Claude native message admissions span text blocks, joined completion and f
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { reads.push(source); return png; });
-    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude Code" }, service: provider }] });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: CLAUDE_CODE_AGENT, service: provider }] });
   };
   const service = makeService();
   const firstText = Array.from({ length: 8 }, (_, i) => `![${i}](old-${i}.png)`).join("\n");
@@ -1781,7 +1786,7 @@ test.each([
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { reads.push(source); return png; });
-    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: provider }] });
   };
   const service = makeService();
   const messageId = "native:api:same";
@@ -1868,7 +1873,7 @@ test("Claude visual captures survive native stream completion and transcript his
     subscribe: async () => { const handoff = replay.handoff(cursor => ({ ...current(), cursor })); return { snapshot: handoff.snapshot, events: handoff.subscription }; },
     dispose: async () => {},
   } as unknown as WorkspaceChatService;
-  const agents: RegisteredChatAgent[] = [{ descriptor: { id: "claude", name: "Claude Code" }, service: provider }];
+  const agents: RegisteredChatAgent[] = [{ descriptor: CLAUDE_CODE_AGENT, service: provider }];
   let reads = 0;
   const reader = createWatchedVisualReader([{ kind: "dir", absolutePath: workspace } as never]);
   const makeService = () => {
@@ -2462,8 +2467,8 @@ function fixture(): { service: MultiAgentChatService; a: StubAgentService; b: St
   const a = new StubAgentService();
   const b = new StubAgentService();
   const agents: RegisteredChatAgent[] = [
-    { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
-    { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+    { descriptor: OPENCODE_AGENT, service: a },
+    { descriptor: CLAUDE_CODE_AGENT, service: b },
   ];
   return { service: new MultiAgentChatService({ workspacePath: process.cwd(), agents }), a, b };
 }
@@ -2499,7 +2504,7 @@ describe("qualified conversation ids", () => {
   test("agent ids with colons are rejected at registration", () => {
     expect(() => new MultiAgentChatService({
       workspacePath: process.cwd(),
-      agents: [{ descriptor: { id: "a:b", name: "Bad" }, service: new StubAgentService() }],
+      agents: [{ descriptor: { id: "a:b", name: "Bad", login: TEST_LOGIN }, service: new StubAgentService() }],
     })).toThrow('agent id must not contain ":"');
   });
 });
@@ -2513,7 +2518,7 @@ describe("routing", () => {
     // The result's conversation is re-qualified and attributed.
     expect(accepted.conversation).toEqual(expect.objectContaining({
       id: "claude:ses_1",
-      agent: { id: "claude", name: "Claude Code" },
+      agent: CLAUDE_CODE_AGENT,
     }));
   });
 
@@ -2553,8 +2558,8 @@ describe("status and retry", () => {
     b.status = async () => { throw new Error("probe exploded"); };
     const statuses = await service.status();
     expect(statuses).toEqual([
-      { agent: { id: "opencode", name: "OpenCode" }, availability: { state: "ready", version: "1.0.0" } },
-      { agent: { id: "claude", name: "Claude Code" }, availability: { state: "unavailable", reason: "startup-failed", message: "probe exploded" } },
+      { agent: OPENCODE_AGENT, availability: { state: "ready", version: "1.0.0" } },
+      { agent: CLAUDE_CODE_AGENT, availability: { state: "unavailable", reason: "startup-failed", message: "probe exploded" } },
     ]);
   });
 
@@ -2573,8 +2578,8 @@ describe("inventory", () => {
     a.conversations = [summary("old", 1)];
     b.conversations = [summary("new", 5)];
     expect(await service.listConversations()).toEqual([
-      expect.objectContaining({ id: "claude:new", agent: { id: "claude", name: "Claude Code" } }),
-      expect.objectContaining({ id: "opencode:old", agent: { id: "opencode", name: "OpenCode" } }),
+      expect.objectContaining({ id: "claude:new", agent: CLAUDE_CODE_AGENT }),
+      expect.objectContaining({ id: "opencode:old", agent: OPENCODE_AGENT }),
     ]);
   });
 
@@ -2599,8 +2604,8 @@ describe("inventory", () => {
       workspacePath: process.cwd(),
       inventoryContributionTimeoutMs: 25,
       agents: [
-        { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
-        { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
       ],
     });
     const subscription = await service.subscribeInventory();
@@ -2629,8 +2634,8 @@ describe("inventory", () => {
       workspacePath: process.cwd(),
       inventoryContributionTimeoutMs: 25,
       agents: [
-        { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
-        { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
       ],
     });
     // The merged subscription answers within the bound on a alone.
@@ -2761,7 +2766,7 @@ describe("qualification of snapshots and events", () => {
     expect(received.map(event => [event.type, event.generation, event.sequence])).toEqual([["conversation.updated", "g1", 1], ["item.upsert", "g1", 2]]);
     expect(received[0]).toEqual(expect.objectContaining({
       conversationId: "claude:ses_1",
-      conversation: expect.objectContaining({ id: "claude:ses_1", agent: { id: "claude", name: "Claude Code" } }),
+      conversation: expect.objectContaining({ id: "claude:ses_1", agent: CLAUDE_CODE_AGENT }),
     }));
     expect(received[1]).toEqual(expect.objectContaining({
       conversationId: "claude:ses_1",
@@ -2851,8 +2856,8 @@ describe("workspace activity merges across agents", () => {
     const service = new MultiAgentChatService({
       workspacePath: process.cwd(),
       agents: [
-        { descriptor: { id: "a", name: "A" }, service: a },
-        { descriptor: { id: "b", name: "B" }, service: b },
+        { descriptor: { id: "a", name: "A", login: TEST_LOGIN }, service: a },
+        { descriptor: { id: "b", name: "B", login: TEST_LOGIN }, service: b },
       ],
     });
     return { service, a, b };

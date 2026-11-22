@@ -17,6 +17,7 @@ import { WorkerDismissalClient, visibleWorkers } from "../chat/worker-dismissal-
 import { workerDismissalIdentities } from "../chat/worker-dismissal-identity";
 import { workerDismissalEvidenceForItem } from "./worker-dismissals-observation";
 import { compactWorkerEvidence } from "../chat/worker-dismissal-evidence";
+import { OPENCODE_AGENT } from "../chat/opencode/descriptor";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -152,7 +153,7 @@ async function fixture() {
     if (!["/s/project/api/chat/conversations/opencode%3Aparent", "/s/project/api/chat/conversations/opencode%3Aparent/worker-evidence"].includes(url.pathname) || url.searchParams.get("t") !== "synthetic-token") return new Response(null, { status: 404 });
     const response = url.pathname.endsWith("/worker-evidence")
       ? Response.json({ version: 1, conversationId: foreign ? "opencode:foreign" : "opencode:parent", complete: true, entries: compactWorkerEvidence(items) })
-      : Response.json({ conversation: { id: foreign ? "opencode:foreign" : "opencode:parent", title: "Synthetic", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } }, configuration: {}, generation: "synthetic", cursor: "synthetic-cursor", items: [...items, ...extraItems] });
+      : Response.json({ conversation: { id: foreign ? "opencode:foreign" : "opencode:parent", title: "Synthetic", createdAt: 1, updatedAt: 1, status: "idle", agent: OPENCODE_AGENT }, configuration: {}, generation: "synthetic", cursor: "synthetic-cursor", items: [...items, ...extraItems] });
     const blocked = nextRead; nextRead = undefined;
     if (blocked) { blocked.entered(); await blocked.waiting; }
     return response;

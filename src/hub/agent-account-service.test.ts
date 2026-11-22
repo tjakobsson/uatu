@@ -143,6 +143,17 @@ function harness(options: { claude?: () => AccountRuntimeStart; fetch?: (input: 
   return { clock, adapters, runtimes, changed, changes, service, setNotify: (next: typeof notify) => { notify = next; } };
 }
 
+describe("account agents", () => {
+  test("list OpenCode and Claude Code, each with its own login command, before and after a read", async () => {
+    const { service } = harness({ claude: () => ({ state: "unavailable", message: "Claude Code is not installed or is not available on PATH." }) });
+    const listed = (snapshot: { agents: Array<{ agent: string; name: string; loginCommand: string }> }) =>
+      snapshot.agents.map(agent => [agent.agent, agent.name, agent.loginCommand]);
+    const expected = [["opencode", "OpenCode", "opencode auth login"], ["claude", "Claude Code", "claude auth login"]];
+    expect(listed(service.snapshot())).toEqual(expected);
+    expect(listed(await service.read())).toEqual(expected);
+  });
+});
+
 describe("account runtimes", () => {
   test("start on the first read, report each agent, and keep one runtime per agent", async () => {
     const { service, runtimes } = harness();

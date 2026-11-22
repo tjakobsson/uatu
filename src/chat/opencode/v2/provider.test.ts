@@ -23,6 +23,7 @@ import type { WorkspaceChatService } from "../../service";
 import type { AssistantMessageItem, ChatEvent, ConversationSnapshot } from "../../types";
 import { CHAT_TEXT_SEAL, executionLive, type ChatTextSeal } from "../../turn-liveness";
 import { eventPump } from "../../../../tests/e2e/opencode-v2-provider-harness";
+import { OPENCODE_AGENT } from "../descriptor";
 
 // The stored records of a real 2.0.13 session: user, assistant (read tool),
 // assistant (text), idle, user — see normalization.test.ts for provenance.
@@ -203,7 +204,7 @@ test.each([
       if (!available) throw new VisualReadError(true);
       return png;
     });
-    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.service }] });
     routers.push(value);
     return value;
   };
@@ -291,7 +292,7 @@ test.each([
       if (!available) throw new VisualReadError(true);
       return bytes;
     });
-    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.service }] });
     routers.push(value); return value;
   };
   const answer = (snapshot: ConversationSnapshot) => snapshot.items.find(item => item.id === "part:current-tool:text:0") as AssistantMessageItem;

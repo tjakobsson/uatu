@@ -14,6 +14,7 @@ import type { WorkspaceChatService } from "../../service";
 import type { AssistantMessageItem, ChatEvent, ConversationItem } from "../../types";
 import type { NormalizedProviderEvent } from "../../provider";
 import { CHAT_STATUS_REPEAT, executionLive, isVisualTurnLive, type ChatStatusLiveness } from "../../turn-liveness";
+import { OPENCODE_AGENT } from "../descriptor";
 
 // Acknowledgement is at the raw source consumer, before merge deduplication.
 // Normalized-event acknowledgements below separately fence projection commits.
@@ -101,7 +102,7 @@ test.each([
     return original;
   });
   const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: async () => {} } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service }] });
   let attach: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
   let restarted: MultiAgentChatService | undefined;
   let draining: Promise<ChatEvent[]> | undefined;
@@ -190,7 +191,7 @@ test.each([
     }
     const reloadedStore = new VisualStore("/workspace", directory);
     reloadedStore.setReader(async () => { throw new Error("reload must not capture future-turn bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: OPENCODE_AGENT, service }] });
     const reloaded = await restarted.history(`opencode:${sessionID}`);
     expect(answer(reloaded, "current").visuals).toEqual(ready.visuals);
     expect(answer(reloaded, "old").visuals?.[0]?.status).toBe("unavailable");
@@ -964,7 +965,7 @@ describe("history across both OpenCode message stores", () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]); });
     const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: async () => {} } as unknown as WorkspaceChatService;
-    const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service }] });
     try {
       const first = await router.history("opencode:ses_history");
       const answer = first.items.find(item => item.id === "part:tool-text") as AssistantMessageItem;

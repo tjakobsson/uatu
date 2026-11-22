@@ -18,6 +18,9 @@ import { resolveWatchRoots } from "../server/roots";
 import { resolveStaticFileRequest } from "../server/static-files";
 import { selectCanonicalChatRoot } from "./workspace";
 
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
+
 let directory: string;
 beforeEach(async () => {
   const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
@@ -42,7 +45,7 @@ test.each([
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { reads.push(source); return png; });
-    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   };
   const service = makeService();
   const subscription = await service.subscribe("a:c");
@@ -87,7 +90,7 @@ test("history remains readable if permanent admission cannot be persisted, and r
   const markdown = "Before\n\n" + Array.from({ length: 9 }, (_, i) => `![${i}](image-${i}.png)`).join("\n\n") + "\n\nAfter";
   const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown }] };
   const provider = { history: async () => snapshot, dispose: async () => {} } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   try {
     const failed = (await service.history("a:c")).items[0] as AssistantMessageItem;
     expect(failed.markdown).toBe(markdown);
@@ -297,7 +300,7 @@ describe("immutable visual snapshots", () => {
     const restarted = new VisualStore("/workspace", directory);
     restarted.setReader(async () => { reads++; return Uint8Array.from([0xff, 0xd8, 0xff]); });
     const provider = { history: async () => ({ conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown }] }), dispose: async () => {} } as unknown as WorkspaceChatService;
-    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: restarted, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: restarted, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
     try {
       const processed = (await service.history("a:c")).items[0] as AssistantMessageItem;
       // Unreleased test-build compatibility is not an admission policy: the
@@ -395,7 +398,7 @@ describe("immutable visual snapshots", () => {
     const markdown = Array.from({ length: 256 }, (_, i) => `![${i}](image-${i}.png)`).join("\n\n");
     let messageId = "first";
     const provider = { history: async () => ({ conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: messageId, type: "assistant_message", createdAt: 1, markdown }] }), dispose: async () => {} } as unknown as WorkspaceChatService;
-    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
     const pending = service.history("a:c");
     try {
       await started;
@@ -1286,7 +1289,7 @@ test("genuine history and streamed deltas capture immediately, terminal status r
     subscribe: async () => ({ snapshot, events }),
     dispose: async () => {},
   } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   const history = await service.history("a:c");
   expect((history.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
   const subscription = await service.subscribe("a:c");
@@ -1348,7 +1351,7 @@ test("reconnect backlog deltas are forwarded unchanged and never appended to the
   } as unknown as WorkspaceChatService;
   const store = new VisualStore("/workspace", directory);
   store.setReader(async () => png);
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   const subscription = await service.subscribe("a:c", { cursor });
   expect((subscription.snapshot.items[0] as AssistantMessageItem).markdown).toBe("Hello world");
   const iterator = subscription.events[Symbol.asyncIterator]();
@@ -1387,7 +1390,7 @@ test("terminal cursor replay resyncs once when snapshot enrichment alone turns a
       return { snapshot: handoff.snapshot, events: handoff.subscription };
     }, dispose: async () => {},
   } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   const cached = await service.history("a:c");
   expect((cached.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
   const nativeDelta = replay.publish({ type: "item.text_delta", itemId: "m", delta: " done" });
@@ -1425,7 +1428,7 @@ test("plain-text streaming preserves 100 native 1-KiB deltas without growing ful
   const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "" }] };
   const events = new ReplaySubscription(() => undefined);
   const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   const subscription = await service.subscribe("a:c");
   const iterator = subscription.events[Symbol.asyncIterator]();
   let deliveredTextBytes = 0;
@@ -1449,7 +1452,7 @@ test("split image syntax and whitespace-separated SVG fences deliver metadata on
   const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "" }] };
   const events = new ReplaySubscription(() => undefined);
   const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   const subscription = await service.subscribe("a:c");
   const iterator = subscription.events[Symbol.asyncIterator]();
   let sequence = 0;
@@ -1495,7 +1498,7 @@ test("concurrent history and subscribe enrichment share one store's four-reader 
   const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items };
   const events = new ReplaySubscription(() => undefined);
   const provider = { history: async () => snapshot, subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   const pending = Promise.all([service.history("a:c"), service.history("a:c"), service.subscribe("a:c")]);
   try {
     await started;
@@ -1521,7 +1524,7 @@ test("subscribe cancels the provider handoff if snapshot enrichment fails or its
   const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, get markdown(): string { throw new Error("broken snapshot"); } }] };
   const store = new VisualStore("/workspace", directory);
   const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent", login: TEST_LOGIN }, service: provider }] });
   type Setup = Awaited<ReturnType<MultiAgentChatService["subscribe"]>>;
   type Outcome = { type: "resolved"; value: Setup } | { type: "rejected"; error: unknown };
   const setups: Array<Promise<Outcome>> = [];

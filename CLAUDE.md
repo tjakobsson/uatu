@@ -51,7 +51,9 @@ src/
 │                   managed-process stops a runtime's child process group
 │                   (SIGTERM, grace, SIGKILL) and keeps a bounded copy of
 │                   its output);
-│                   agent-specific stacks below the seam in
+│                   agent-specific stacks below the seam, each with a
+│                   descriptor.ts (the agent's id, name and declared login,
+│                   which cli.ts registers and the Hub's Agent accounts read), in
 │                   chat/opencode/ (the loopback server runtime, which
 │                   decides the spawned server's generation from its
 │                   readiness answer; agent-runtime, which wraps it for the

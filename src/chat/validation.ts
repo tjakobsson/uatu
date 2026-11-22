@@ -224,9 +224,16 @@ export function parseActivityStatus(value: unknown): ActivityStatus {
 
 export function parseChatAgentDescriptor(value: unknown): ChatAgentDescriptor {
   const record = expectRecord(value, "chat agent");
-  expectKeys(record, ["id", "name"], "chat agent");
+  expectKeys(record, ["id", "name", "login"], "chat agent");
   expectIdentity(record.id, "agent id");
   expectString(record.name, "agent name");
+  // Required: every descriptor comes from the server, which declares each
+  // agent's login, so a client never invents a fallback command.
+  const login = expectRecord(record.login, "agent login");
+  expectKeys(login, ["command", "hubManaged"], "agent login");
+  // Counted in code points, as the contract's `maxLength` is.
+  if ([...expectNonEmptyString(login.command, "agent login command")].length > 512) throw new Error("agent login command is too long");
+  if (typeof login.hubManaged !== "boolean") throw new Error("agent login hubManaged must be a boolean");
   return value as ChatAgentDescriptor;
 }
 
@@ -913,8 +920,9 @@ function expectRecord(value: unknown, field: string): Record<string, unknown> {
 
 function expectKeys(record: Record<string, unknown>, allowed: string[], field: string): void {
   const allowedKeys = new Set(allowed);
+  // By presence, not truthiness: an empty-string key is unknown too.
   const unknown = Object.keys(record).find(key => !allowedKeys.has(key));
-  if (unknown) throw new Error(`unknown ${field} field: ${unknown}`);
+  if (unknown !== undefined) throw new Error(`unknown ${field} field: ${unknown}`);
 }
 
 function expectString(value: unknown, field: string): string {

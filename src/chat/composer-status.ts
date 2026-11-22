@@ -325,11 +325,11 @@ export function usageAsOf(readAt: number, now = Date.now()): string {
   return `as of ${clockTime(readAt)} · ${usageAge(readAt, now)}`;
 }
 
-/** Why a read did not answer, as the readout says it. */
-export function usageReadFailureLabel(reason: UsageReadFailure | "network"): string {
+/** Why a read did not answer, as the readout says it; `agentName` is the agent that was asked. */
+export function usageReadFailureLabel(reason: UsageReadFailure | "network", agentName = "the agent"): string {
   switch (reason) {
     case "timeout": return "timed out";
-    case "unavailable": return "Claude Code could not answer";
+    case "unavailable": return `${agentName} could not answer`;
     case "no-live-session": return "no session is running";
     case "network": return "the workspace did not answer";
   }

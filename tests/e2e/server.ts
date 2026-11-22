@@ -24,6 +24,8 @@ import fontNoticesAsset from "../../src/assets/fonts/NOTICES.md" with { type: "f
 
 import index from "../../src/index.html";
 import { e2ePort, promoteRootReadme, resetE2EWorkspace, workspaceRoot } from "./config";
+import { OPENCODE_AGENT } from "../../src/chat/opencode/descriptor";
+import { CLAUDE_CODE_AGENT } from "../../src/chat/claude/descriptor";
 
 // Per-process workspace root. Captured once at startup from the lazy
 // workspaceRoot() helper (which reads process.env.UATU_E2E_WORKSPACE if
@@ -62,7 +64,7 @@ import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
 import { startOpenCodeV2Fake } from "./opencode-v2-fake";
 import { e2eTerminalShell } from "./terminal-shell";
-import type { ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
+import type { ChatAgentDescriptor, ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
 
 // One-shot hold on GET /api/terminal/sessions, armed by tests that need an
 // inventory read to complete at a moment they choose (after a pagehide, or
@@ -118,7 +120,7 @@ const fakeChatAgent = new FakeE2EChatService({
     await fs.writeFile(target, contents, "utf8");
   },
 });
-const E2E_AGENT_NAMES: Record<string, string> = { opencode: "OpenCode", claude: "Claude Code" };
+const E2E_AGENT_DESCRIPTORS: Record<string, ChatAgentDescriptor> = { opencode: OPENCODE_AGENT, claude: CLAUDE_CODE_AGENT };
 function qualifyControlValue<T>(value: T, agentId = "opencode"): T {
   const walk = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(walk);
@@ -135,7 +137,9 @@ function qualifyControlValue<T>(value: T, agentId = "opencode"): T {
       // A conversation summary is recognizable by its shape; stamp the wire form.
       if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next && !(next.id as string).includes(":")) {
         next.id = `${agentId}:${next.id as string}`;
-        next.agent = { id: agentId, name: E2E_AGENT_NAMES[agentId] ?? agentId };
+        const descriptor = E2E_AGENT_DESCRIPTORS[agentId];
+        if (!descriptor) throw new Error(`no e2e agent registered as ${agentId}`);
+        next.agent = descriptor;
       }
       return next;
     }
@@ -179,15 +183,15 @@ const fakeVisualStore = new VisualStore(E2E_WORKSPACE_ROOT, path.join(E2E_WORKSP
 
 const singleAgentRouter = new MultiAgentChatService({
   workspacePath: E2E_WORKSPACE_ROOT,
-  agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent }],
+  agents: [{ descriptor: OPENCODE_AGENT, service: fakeChatAgent }],
   attachmentStore: fakeAttachmentStore,
   visualStore: fakeVisualStore,
 });
 const dualAgentRouter = new MultiAgentChatService({
   workspacePath: E2E_WORKSPACE_ROOT,
   agents: [
-    { descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent },
-    { descriptor: { id: "claude", name: "Claude Code" }, service: fakeSecondAgent },
+    { descriptor: OPENCODE_AGENT, service: fakeChatAgent },
+    { descriptor: CLAUDE_CODE_AGENT, service: fakeSecondAgent },
   ],
   attachmentStore: fakeAttachmentStore,
   visualStore: fakeVisualStore,
@@ -229,7 +233,7 @@ function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
   });
   openCodeV2Router = new MultiAgentChatService({
     workspacePath: E2E_WORKSPACE_ROOT,
-    agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }],
+    agents: [{ descriptor: OPENCODE_AGENT, service }],
     attachmentStore: fakeAttachmentStore,
     visualStore: fakeVisualStore,
   });

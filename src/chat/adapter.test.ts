@@ -40,6 +40,10 @@ import { ConversationProjection } from "./adapter";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
 import { OPENCODE_COMPLETION_ALIAS, OPENCODE_TEXT_START_FALLBACK } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN, CHAT_TURN_CONTINUES, executionEvidence, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, provisionalTurn, type ChatStatusLiveness, type ChatTextSeal, type ChatTurnIdentity } from "./turn-liveness";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
+
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
 const TEXT_ENDED_FACT = { [CHAT_TEXT_SEAL]: "ended" as const };
 import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
@@ -655,7 +659,7 @@ test.each(["completed", "failed", "interrupted"] as const)("Claude producer resu
   const store = new VisualStore(process.cwd(), directory);
   store.setReader(async source => { reads[source] = (reads[source] ?? 0) + 1; if (!available) throw new VisualReadError(true); return original; });
   const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: adapter.dispose.bind(adapter) } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   const answer = (page: { items: ConversationItem[] }, id: string) => page.items.find(item => item.id === id) as AssistantMessageItem;
   const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN]!;
   let attached: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined, restarted: MultiAgentChatService | undefined;
@@ -689,7 +693,7 @@ test.each(["completed", "failed", "interrupted"] as const)("Claude producer resu
     expect(turn(initial).completed).toBe(false); expect(turn(opened.item).completed).toBe(false);
     expect(initial.visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
     const reloadStore = new VisualStore(process.cwd(), directory); reloadStore.setReader(async () => { throw new Error("must not read future bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     expect(answer(await restarted.history("claude:capture"), final.id).visuals).toEqual(final.visuals);
     expect((await restarted.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(original);
   } finally { release.resolve(); attached?.events.cancel(); await restarted?.dispose(); await router.dispose(); await pumping.catch(() => undefined); await rm(directory, { recursive: true, force: true }); }
@@ -749,7 +753,7 @@ test.each([
     if (!available) throw new VisualReadError(true);
     return png;
   });
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   const prefix = '![Later](later.png)\r\n\r\n```svg\r\n<svg><rect width="10"';
   const close = '/></svg>\r\n```\r\n';
   const svg = '<svg><rect width="10"/></svg>\r\n';
@@ -858,7 +862,7 @@ test.each([
     expect((await router.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(png);
     const reloadedStore = new VisualStore(process.cwd(), directory);
     reloadedStore.setReader(async () => { throw new Error("immutable captures must not reread future-turn bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     const reloaded = answer(await restarted.history("claude:capture"), final.id);
     expect(reloaded.visuals).toEqual(final.visuals);
     expect(await restarted.resolveVisual(reloaded.visuals![1]!.id!)).toEqual(capturedSvg);
@@ -918,7 +922,7 @@ test.each([
     subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
     dispose: () => adapter.dispose(),
   } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   let subscription: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
   let restarted: MultiAgentChatService | undefined;
   const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
@@ -983,7 +987,7 @@ test.each([
     expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
     const reloadedStore = new VisualStore(process.cwd(), directory);
     reloadedStore.setReader(async () => { throw new Error("terminal records must not reread current execution files"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     const reloaded = await restarted.history("claude:capture");
     expect(answer(reloaded, "old").visuals).toEqual(captured.visuals);
     expect(answer(reloaded, "current").visuals).toEqual(answer(completed, "current").visuals);
@@ -1113,7 +1117,7 @@ test.each([
     subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
     dispose: () => adapter.dispose(),
   } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service }] });
   let frame = 0;
   const emit = (type: string, data: Record<string, unknown>) => {
     const normalized = normalize({ id: `frame-${++frame}`, type, created: frame, location: { directory: process.cwd() }, data: { sessionID: "capture", ...data } }, memory);
@@ -1183,7 +1187,7 @@ test.each([
     if (created) expect((await router.resolveVisual(answer(complete).visuals![0]!.id!))?.bytes).toEqual(png);
     const restartedStore = new VisualStore(process.cwd(), directory);
     restartedStore.setReader(async () => { reads++; throw new Error("sealed captures must not reread after reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: OPENCODE_AGENT, service }] });
     const reloaded = await restarted.history("opencode:capture");
     expect(answer(reloaded).visuals).toEqual(answer(complete).visuals);
     if (created) expect((await restarted.resolveVisual(answer(reloaded).visuals![0]!.id!))?.bytes).toEqual(png);

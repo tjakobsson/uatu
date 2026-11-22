@@ -18,9 +18,11 @@ import index from "./index.html";
 import { parseCommand, serveRemovedText, usageText, versionText, type WatchOptions } from "./cli/parse";
 import { LazyChatService } from "./chat/service";
 import { MultiAgentChatService } from "./chat/agents";
+import { CLAUDE_CODE_AGENT } from "./chat/claude/descriptor";
 import { ClaudeProvider } from "./chat/claude/provider";
 import { ClaudeRuntime } from "./chat/claude/runtime";
 import { openCodeAgentRuntime } from "./chat/opencode/agent-runtime";
+import { OPENCODE_AGENT } from "./chat/opencode/descriptor";
 import { pathAgentRuntime } from "./chat/path-agent-runtime";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
@@ -209,26 +211,24 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     // spawned loopback server, Claude Code as probe-only with
     // per-conversation SDK sessions. Registration order is the picker
     // order and the server default.
-    const openCode = { id: "opencode", name: "OpenCode" };
-    const claude = { id: "claude", name: "Claude Code" };
     chatService = new MultiAgentChatService({
       workspacePath: chatRoot,
       agents: [
         {
-          descriptor: openCode,
+          descriptor: OPENCODE_AGENT,
           service: new LazyChatService({
             workspacePath: chatRoot,
             metrics,
-            agentName: openCode.name,
+            agentName: OPENCODE_AGENT.name,
             runtime: openCodeAgentRuntime({ workspacePath: chatRoot }),
           }),
         },
         {
-          descriptor: claude,
+          descriptor: CLAUDE_CODE_AGENT,
           service: new LazyChatService({
             workspacePath: chatRoot,
             metrics,
-            agentName: claude.name,
+            agentName: CLAUDE_CODE_AGENT.name,
             runtime: pathAgentRuntime(
               new ClaudeRuntime({ workspacePath: chatRoot }),
               executable => new ClaudeProvider({ workspacePath: chatRoot, executable }),

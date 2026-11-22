@@ -122,6 +122,30 @@ describe("usage pane: the held report and the read", () => {
     }
   });
 
+  test("a failed read names the agent that was asked, even when another takes the reads meanwhile", async () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    try {
+      let settle!: (result: UsageReadResult) => void;
+      onUsageRead(() => new Promise(resolve => { settle = resolve; }), "Claude Code");
+      const read = readUsageNow("start");
+      // A second agent's stored report lands while the first read is out.
+      onUsageRead(async () => ({ report: null, reason: "unavailable" }), "Stub Agent");
+      settle({ report: null, reason: "unavailable" });
+      expect(await read).toBe(false);
+      expect(usageReadState()).toEqual({ reading: false, failure: "Claude Code could not answer" });
+      // The next read goes to the agent that now holds the reads.
+      expect(await readUsageNow("start")).toBe(false);
+      expect(usageReadState()).toEqual({ reading: false, failure: "Stub Agent could not answer" });
+    } finally {
+      resetUsagePaneForTests();
+      Reflect.deleteProperty(globalThis, "document");
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
   test("a second click joins the read in flight; a failed read keeps the figures and says why", async () => {
     resetUsagePaneForTests();
     const { document, window } = parseHTML(html);

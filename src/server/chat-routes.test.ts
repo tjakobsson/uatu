@@ -25,6 +25,7 @@ import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, ty
 import { ChatApiClient } from "../chat/client";
 import { applyChatEvent, projectionFromSnapshot } from "../chat/projection";
 import { createLiveChannel, type LiveChannelSource } from "../shell/live-channel";
+import { OPENCODE_AGENT } from "../chat/opencode/descriptor";
 
 const TOKEN = "chat-test-token";
 // The conversation route opens with an `open` event naming the cursor its
@@ -268,7 +269,7 @@ function routes(chatService = new FakeChatService(), basePath = "/", chatKeepali
   const routed = new MultiAgentChatService({
     workspacePath: repo,
     ...(visualStore ? { visualStore } : {}),
-    agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: chatService }],
+    agents: [{ descriptor: OPENCODE_AGENT, service: chatService }],
     attachmentStore: {
       directory: '/dev/null',
       save: async bytes => {
@@ -446,14 +447,14 @@ describe("workspace chat routes", () => {
     expect(Object.keys(table).filter(key => key.includes("/api/chat/")).every(key => key.startsWith("/s/project/"))).toBe(true);
     const status = table["/s/project/api/chat/status"] as { GET(request: Request): Promise<Response> };
     expect(await (await status.GET(request("/s/project/api/chat/status"))).json()).toEqual({
-      agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "ready", version: "test" } }],
+      agents: [{ agent: OPENCODE_AGENT, availability: { state: "ready", version: "test" } }],
     });
     const models = table["/s/project/api/chat/models"] as { GET(request: Request): Promise<Response> };
     expect(await (await models.GET(request("/s/project/api/chat/models?agent=opencode"))).json()).toEqual({ models: [expect.objectContaining({ name: "Claude" })] });
     const commands = table["/s/project/api/chat/commands"] as { GET(request: Request): Promise<Response> };
     expect(await (await commands.GET(request("/s/project/api/chat/commands?agent=opencode"))).json()).toEqual({ commands: [expect.objectContaining({ name: "review" })] });
     const inventory = table["/s/project/api/chat/conversations"] as { GET(request: Request): Promise<Response>; POST(request: Request): Promise<Response> };
-    expect(await (await inventory.GET(request("/s/project/api/chat/conversations"))).json()).toEqual({ conversations: [expect.objectContaining({ id: "opencode:local", agent: { id: "opencode", name: "OpenCode" } })] });
+    expect(await (await inventory.GET(request("/s/project/api/chat/conversations"))).json()).toEqual({ conversations: [expect.objectContaining({ id: "opencode:local", agent: OPENCODE_AGENT })] });
     const created = await inventory.POST(request("/s/project/api/chat/conversations", {
       method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: "{}",
     }));
