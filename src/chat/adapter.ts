@@ -829,6 +829,11 @@ export class ChatAdapter {
   // newer terminal transition or move-out.
   private statusClock = 0;
   private readonly statusSequences = new Map<string, number>();
+  // Monotonic per-session revision bumped on newer in-workspace confinement,
+  // move-in, or live activity evidence so a delayed foreign/null lookup or
+  // stale list refresh cannot erase freshly accepted activity or interactions.
+  private presenceClock = 0;
+  private readonly presenceSequences = new Map<string, number>();
   private readonly activeSessionProbes = new Map<string, number>();
   // Request-scoped execution fences, not inbox/activity revisions. A native
   // parent wake can overtake an interrupt response (even across projection
@@ -1021,7 +1026,7 @@ export class ChatAdapter {
 
   async listConversations(): Promise<ConversationSummary[]> {
     const previousListed = new Map<string, number>();
-    for (const id of this.listedSessions.keys()) previousListed.set(id, this.statusSequences.get(id) ?? 0);
+    for (const id of this.listedSessions.keys()) previousListed.set(id, this.presenceSequences.get(id) ?? 0);
     const sessions = await this.provider.listSessions();
     const accepted: ConversationSummary[] = [];
     const inWorkspaceIds = new Set<string>();
@@ -1029,6 +1034,7 @@ export class ChatAdapter {
     for (let session of sessions) {
       const metadata = await this.classifyInventorySession(session);
       if (!metadata.inWorkspace) continue;
+      this.bumpPresenceSequence(session.id);
       inWorkspaceIds.add(session.id);
       // Subagent children stay out of the picker: they are reached from the
       // parent's subagent rows, and listing them as peers buries the real
@@ -1065,7 +1071,7 @@ export class ChatAdapter {
     let droppedListed = false;
     for (const [id, baseline] of previousListed) {
       if (listedTopLevel.has(id)) continue;
-      if ((this.statusSequences.get(id) ?? 0) !== baseline) continue;
+      if ((this.presenceSequences.get(id) ?? 0) !== baseline) continue;
       const wasListed = this.listedSessions.delete(id);
       const cached = this.inventorySessions.get(id);
       const wasVisible = inventoryVisible(cached);
@@ -2507,6 +2513,7 @@ export class ChatAdapter {
   private trackInteraction(conversationId: string, itemId: string, pending: boolean): void {
     const ids = this.pendingInteractions.get(conversationId);
     if (pending) {
+      this.bumpPresenceSequence(conversationId);
       if (ids) ids.add(itemId);
       else this.pendingInteractions.set(conversationId, new Set([itemId]));
     } else if (ids) {
@@ -2527,6 +2534,10 @@ export class ChatAdapter {
 
   private bumpStatusSequence(conversationId: string): void {
     boundedSet(this.statusSequences, conversationId, ++this.statusClock, INVENTORY_SESSION_LIMIT);
+  }
+
+  private bumpPresenceSequence(conversationId: string): void {
+    boundedSet(this.presenceSequences, conversationId, ++this.presenceClock, INVENTORY_SESSION_LIMIT);
   }
 
   private trackedActivityIds(): string[] {
@@ -2563,14 +2574,17 @@ export class ChatAdapter {
   private async verifyTrackedSessions(ids: readonly string[], signal?: AbortSignal): Promise<void> {
     for (const id of ids) {
       if (this.disposed || signal?.aborted) return;
-      const baseline = this.statusSequences.get(id) ?? 0;
+      const baseline = this.presenceSequences.get(id) ?? 0;
       try {
         const session = await this.provider.getSession(id);
         if (this.disposed || signal?.aborted) return;
         const missingOrForeign = !session || !await this.isInWorkspace(session, false);
         if (this.disposed || signal?.aborted) return;
-        if ((this.statusSequences.get(id) ?? 0) !== baseline) continue;
-        if (missingOrForeign) this.forgetMissingSession(id);
+        if (missingOrForeign) {
+          if ((this.presenceSequences.get(id) ?? 0) === baseline) this.forgetMissingSession(id);
+        } else {
+          this.bumpPresenceSequence(id);
+        }
       } catch {
         // Keep tracked activity when a transient provider error prevents verification.
       }
@@ -2627,6 +2641,7 @@ export class ChatAdapter {
   // its activity is re-derived from new events.
   private forgetActivity(conversationId: string): void {
     const known = this.statusSequences.has(conversationId)
+      || this.presenceSequences.has(conversationId)
       || this.activeSessionProbes.has(conversationId)
       || this.projections.has(conversationId)
       || this.liveTurns.has(conversationId)
@@ -2635,7 +2650,10 @@ export class ChatAdapter {
       || this.pendingInteractions.has(conversationId)
       || this.inventorySessions.has(conversationId)
       || this.listedSessions.has(conversationId);
-    if (known) this.bumpStatusSequence(conversationId);
+    if (known) {
+      this.bumpStatusSequence(conversationId);
+      this.bumpPresenceSequence(conversationId);
+    }
     this.eventCoalescer?.discard(conversationId);
     const projection = this.projections.get(conversationId);
     if (projection && (isLiveConversationStatus(projection.status) || projection.status === "background")) {
@@ -6382,8 +6400,10 @@ export class ChatAdapter {
     // Providers without independent observations retain their authoritative
     // background-status behavior; uncertainty must not turn it off globally.
     legacy ||= status === "background" && !hasActivity;
+    const hadBackground = this.backgroundWork.has(id) || this.unresolvedBackgroundWork.has(id);
     if (legacy || verified) this.backgroundWork.set(id, { legacy, verified }); else this.backgroundWork.delete(id);
     if (unresolved) this.unresolvedBackgroundWork.add(id); else this.unresolvedBackgroundWork.delete(id);
+    if ((legacy || verified || unresolved) && !hadBackground) this.bumpPresenceSequence(id);
   }
 
   private drainBackgroundRecoveries(): void {
@@ -7074,12 +7094,13 @@ export class ChatAdapter {
     // A provider failure propagates as itself: the pump treats not-found as
     // "skip this frame" but must restart on transport errors, and the API
     // routes should answer 500, not 404, when the provider is unreachable.
-    const baseline = this.statusSequences.get(id) ?? 0;
+    const baseline = this.presenceSequences.get(id) ?? 0;
     const session = await this.provider.getSession(id);
     if (!session || !await this.isInWorkspace(session, false)) {
-      if ((this.statusSequences.get(id) ?? 0) === baseline) this.forgetMissingSession(id);
+      if ((this.presenceSequences.get(id) ?? 0) === baseline) this.forgetMissingSession(id);
       throw new ConversationNotFoundError();
     }
+    this.bumpPresenceSequence(session.id);
     boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
     return session;
   }
@@ -7140,8 +7161,9 @@ export class ChatAdapter {
         title: previous?.title ?? lifecycle.title,
         deleted: false,
       };
-      // Fence any concurrent stale reconcileTrackedActivity lookup from before move-in.
+      // Fence any concurrent stale lookup or list cleanup from before move-in.
       this.bumpStatusSequence(lifecycle.id);
+      this.bumpPresenceSequence(lifecycle.id);
       this.rememberInventorySession(lifecycle.id, next, true);
       if (parentId === null) {
         boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
@@ -7219,7 +7241,10 @@ export class ChatAdapter {
       // adapter-synthesized `background` and synthetic worker-completion
       // transitions (`sourceTransition === false`) must not suppress an
       // in-flight active-session probe for a live parent turn.
-      if (sourceTransition && status !== "background") this.bumpStatusSequence(id);
+      if (sourceTransition && status !== "background") {
+        this.bumpStatusSequence(id);
+        this.bumpPresenceSequence(id);
+      }
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);

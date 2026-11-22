@@ -13866,6 +13866,72 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("delayed foreign/null lookup does not erase a newer pending interaction after a missed move-in, and pending interactions do not block active-session probes", async () => {
+    const { adapter, provider } = activityAdapter();
+    const arrived = fixtureSession("perm-return");
+    const foreign = fixtureSession("perm-return", `${process.cwd()}-elsewhere`);
+    let resolveStaleLookup!: (session: ProviderSession | null) => void;
+    let firstLookup = true;
+    provider.sessions = [arrived];
+    provider.getSession = async id => {
+      if (id === "perm-return" && firstLookup) {
+        firstLookup = false;
+        return new Promise<ProviderSession | null>(resolve => { resolveStaleLookup = resolve; });
+      }
+      return id === "perm-return" ? arrived : null;
+    };
+    const pump = adapter.startEventPump();
+
+    // Start a lookup while the session is still foreign (before it moves back without a session.moved frame).
+    const staleLookup = adapter.getConversation("perm-return").catch(() => undefined);
+    await waitUntil(() => resolveStaleLookup !== undefined);
+
+    // The session is now back in the workspace and emits a live permission request via the pump.
+    provider.eventQueue.push({ normalized: {
+      conversationId: "perm-return",
+      updates: [{ kind: "upsert", item: permission("p-return") }],
+      outcome: "handled",
+      eventType: "permission.asked",
+    } });
+    await waitUntil(() => adapter.activity().awaiting);
+    expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
+
+    // The older lookup resolves with the stale foreign record; it must not clear awaiting or the pending card.
+    resolveStaleLookup(foreign);
+    await staleLookup;
+    expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
+    expect(adapter.projectionForTests("perm-return").get("permission:p-return")).toMatchObject({ status: "pending" });
+
+    // A pending interaction arriving during a move-in active-session probe must not prevent seeding running.
+    let resolveProbe!: (ids: string[]) => void;
+    provider.listActiveSessions = () => new Promise<string[]>(resolve => { resolveProbe = resolve; });
+    const moved = fixtureSession("perm-probe");
+    provider.sessions = [arrived, moved];
+    provider.getSession = async id => (id === "perm-probe" ? moved : id === "perm-return" ? arrived : null);
+    provider.eventQueue.push({ normalized: {
+      conversationId: "perm-probe",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "perm-probe", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await waitUntil(() => resolveProbe !== undefined);
+    provider.eventQueue.push({ normalized: {
+      conversationId: "perm-probe",
+      updates: [{ kind: "upsert", item: permission("p-probe") }],
+      outcome: "handled",
+      eventType: "permission.asked",
+    } });
+    await waitUntil(() => adapter.projectionForTests("perm-probe").get("permission:p-probe") !== undefined);
+    resolveProbe(["perm-probe"]);
+    await waitUntil(() => adapter.activity().working);
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+    expect(adapter.projectionForTests("perm-probe").status).toBe("running");
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
