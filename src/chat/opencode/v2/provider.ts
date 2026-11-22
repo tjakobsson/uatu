@@ -373,8 +373,8 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   async listActiveSessions(options?: { signal?: AbortSignal }): Promise<string[]> {
     const signal = this.readSignal(options?.signal);
-    const active = await this.client.session.active({ signal });
-    return active && typeof active === "object" && !Array.isArray(active) ? Object.keys(active) : [];
+    const active = await this.readActiveInventory(signal);
+    return Object.keys(active);
   }
 
   async createSession(_id: string, configuration: ConversationConfiguration = {}): Promise<ProviderSession> {
@@ -1787,17 +1787,18 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (owner) owner.historyActiveReads = new Map([...owner.historyParentLaunches?.keys() ?? []].map(child => [child, { started }]));
     const active = await this.client.session.active({ signal });
     signal.throwIfAborted();
-    const sessions = new Set(Object.keys(active));
+    const records = active && typeof active === "object" && !Array.isArray(active) ? active : {};
+    const sessions = new Set(Object.keys(records));
     for (const source of this.historyWorkerSources) for (const id of source.counters.keys()) sessions.add(id);
-    for (const session of sessions) this.sessionChanges.observe(session, "active", active[session] ?? null);
+    for (const session of sessions) this.sessionChanges.observe(session, "active", records[session] ?? null);
     for (const source of this.historyWorkerSources) for (const [child, previous] of source.historyActiveReads ?? []) {
       // Request order, not response arrival: older overlapping answers cannot
       // replace a newer observation or revoke its positive cold activity.
       if (started < previous.started) continue;
-      source.historyActiveReads!.set(child, { started, active: active[child] !== undefined });
+      source.historyActiveReads!.set(child, { started, active: records[child] !== undefined });
       this.observeColdInactivity(source, child);
     }
-    return active;
+    return records;
   }
 
   private async readPendingOutcomes(sessionId: string, signal: AbortSignal) {

@@ -13323,4 +13323,74 @@ describe("OpenCodeV2Provider session moves and active sessions", () => {
       await Promise.allSettled([sourcePump, destPump]);
     }
   });
+
+  test("listActiveSessions routes through the shared active inventory observer to withhold overlapping inferred worker completion", async () => {
+    const directory = process.cwd();
+    const fake = startOpenCodeV2Fake({ directory });
+    let parent: string | undefined;
+    let child: string | undefined;
+    let activeCount = 0;
+    let pausedAtFinalLookup = false;
+    let inRecovery = false;
+    let enteredFinalLookup!: () => void;
+    let releaseFinalLookup!: () => void;
+    const atFinalLookup = new Promise<void>(resolve => { enteredFinalLookup = resolve; });
+    const finalLookupGate = new Promise<void>(resolve => { releaseFinalLookup = resolve; });
+
+    const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const route = new URL(request.url).pathname;
+      if (route === "/api/session/active") {
+        activeCount += 1;
+        return Response.json({ data: activeCount === 1 ? {} : { [child!]: { status: "running" } } });
+      }
+      if (route.endsWith("/inbox")) return Response.json({ data: [] });
+      if (child && route === `/api/session/${child}/message`) {
+        return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+      }
+      if (inRecovery && activeCount >= 1 && !pausedAtFinalLookup && parent && request.method === "GET" && route === `/api/session/${parent}`) {
+        pausedAtFinalLookup = true;
+        enteredFinalLookup();
+        await finalLookupGate;
+      }
+      const response = await fetch(request);
+      if (parent && route === `/api/session/${parent}/message`) {
+        const body = await response.json();
+        const first = body.data[0];
+        if (first?.content?.[0]) {
+          first.time = { created: 10 };
+          first.content[0].time = { created: 10, ran: 11, completed: 12 };
+        }
+        return Response.json({ data: first ? [first] : [], cursor: {} });
+      }
+      return response;
+    }) as typeof globalThis.fetch;
+
+    const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }) as OpenCodeV2Provider;
+    let recovery: Promise<unknown> | undefined;
+    try {
+      parent = (await provider.createSession("Shared active inventory observer")).id;
+      child = fake.launchRequestWorker(parent).childId;
+      inRecovery = true;
+      recovery = provider.reconcileBackgroundTasks!(parent);
+      await atFinalLookup;
+
+      expect(await provider.listActiveSessions()).toEqual([child]);
+      releaseFinalLookup();
+
+      const tasks = await recovery as import("../../types").BackgroundTaskItem[];
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).toMatchObject({
+        childConversationId: child,
+        status: "running",
+        stateUncertain: true,
+        outcomeWithheld: true,
+      });
+    } finally {
+      releaseFinalLookup?.();
+      await recovery?.catch(() => undefined);
+      await provider.dispose();
+      fake.stop();
+    }
+  });
 });
