@@ -13178,7 +13178,7 @@ describe("image-only prompts reach the provider", () => {
 });
 
 describe("workspace activity summary", () => {
-  function activityAdapter(options: { maxProjections?: number } = {}) {
+  function activityAdapter(options: { maxProjections?: number; taskScheduler?: ChatTaskScheduler } = {}) {
     let changes = 0;
     const provider = new FakeProvider();
     const adapter = new ChatAdapter({
@@ -13589,7 +13589,21 @@ describe("workspace activity summary", () => {
   });
 
   test("session.moved into the workspace invalidates inventory, schedules background recovery, seeds active execution, and guards against terminal and move-out races", async () => {
-    const { adapter, provider } = activityAdapter();
+    const probeTasks = new Map<string, Promise<unknown>>();
+    const taskScheduler: ChatTaskScheduler = {
+      run(name, work) {
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("active.probe:")) probeTasks.set(name, result);
+        return result;
+      },
+      setTimeout(_name, work, delay) {
+        return setTimeout(work, delay);
+      },
+      clearTimeout(timer) {
+        if (timer != null) clearTimeout(timer);
+      },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
     const arrived = fixtureSession("arrived");
     const racingTerminal = fixtureSession("racing-terminal");
     const racingMoveOut = fixtureSession("racing-moveout");
@@ -13641,7 +13655,7 @@ describe("workspace activity summary", () => {
     await waitUntil(() => resolvers.length === 1);
     adapter.projectionForTests("racing-terminal").apply({ kind: "status", status: "completed" });
     resolvers[0]!(["racing-terminal"]);
-    await Bun.sleep(20);
+    await probeTasks.get("active.probe:racing-terminal");
     expect(adapter.activity().working).toBe(false);
     expect(adapter.projectionForTests("racing-terminal").status).toBe("completed");
 
@@ -13664,7 +13678,7 @@ describe("workspace activity summary", () => {
     } });
     await expectInventorySignal(inventory);
     resolvers[1]!(["racing-moveout"]);
-    await Bun.sleep(20);
+    await probeTasks.get("active.probe:racing-moveout");
     expect(adapter.activity().working).toBe(false);
     expect(adapter.projectionForTests("racing-moveout").status).toBe("idle");
 
@@ -13740,7 +13754,6 @@ describe("workspace activity summary", () => {
 
     resolveStaleLookup(null);
     await staleLookup;
-    await Bun.sleep(20);
     expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests("arrived").status).toBe("running");
 
@@ -13791,6 +13804,63 @@ describe("workspace activity summary", () => {
     resolveProbe(["ses-list"]);
     await waitUntil(() => adapter.activity().working);
     expect(adapter.projectionForTests("ses-list").status).toBe("running");
+
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("an active-session probe resolving during an in-flight Stop does not mark the stop resumed or leave the workspace working", async () => {
+    const probeTasks = new Map<string, Promise<unknown>>();
+    const taskScheduler: ChatTaskScheduler = {
+      run(name, work) {
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("active.probe:")) probeTasks.set(name, result);
+        return result;
+      },
+      setTimeout(_name, work, delay) {
+        return setTimeout(work, delay);
+      },
+      clearTimeout(timer) {
+        if (timer != null) clearTimeout(timer);
+      },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const stopping = fixtureSession("stopping");
+    provider.sessions = [stopping];
+    let resolveProbe!: (ids: string[]) => void;
+    provider.listActiveSessions = () => new Promise<string[]>(resolve => { resolveProbe = resolve; });
+    let resolveInterrupt!: () => void;
+    provider.interrupt = () => new Promise<void>(resolve => { resolveInterrupt = resolve; });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    provider.eventQueue.push({ normalized: {
+      conversationId: "stopping",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "stopping", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    await waitUntil(() => resolveProbe !== undefined);
+
+    const stop = adapter.abort("stopping", "stop-1");
+    await waitUntil(() => resolveInterrupt !== undefined);
+
+    // Probe resolves while Stop is still in flight; it must not seed running or mark stop.resumed.
+    resolveProbe(["stopping"]);
+    await probeTasks.get("active.probe:stopping");
+    expect(adapter.activity().working).toBe(false);
+
+    // Even a synthetic running status update while Stop is in flight must not block interrupted settlement.
+    adapter.projectionForTests("stopping").statusUpdate("running", undefined, false);
+    resolveInterrupt();
+    await stop;
+    expect(adapter.projectionForTests("stopping").status).toBe("interrupted");
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
 
     inventory.cancel();
     await adapter.dispose();

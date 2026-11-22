@@ -2606,6 +2606,7 @@ export class ChatAdapter {
       for (const id of candidateIds) {
         if (!active.has(id)) continue;
         if ((this.statusSequences.get(id) ?? 0) !== baselines.get(id)) continue;
+        if (this.stoppingTurns.has(id)) continue;
         const metadata = this.inventorySessions.get(id);
         if (metadata && (!metadata.inWorkspace || metadata.deleted)) continue;
         const projection = this.projection(id);
@@ -7146,7 +7147,7 @@ export class ChatAdapter {
         boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
         this.scheduleBackgroundRecovery(lifecycle.id);
       }
-      void this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal);
+      void this.runTask(`active.probe:${lifecycle.id}`, () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal));
       return true;
     }
     // A sparse update names only what changed (2.x's rename: id and title).
@@ -7225,7 +7226,7 @@ export class ChatAdapter {
       if (stop) stop.status = status;
       if (isLiveConversationStatus(status)) {
         this.liveTurns.set(id, status);
-        if (stop) stop.resumed = true;
+        if (stop && sourceTransition) stop.resumed = true;
       } else this.liveTurns.delete(id);
       // Background work still counts as working for the workspace summary,
       // through its own set so the composer rules above stay untouched.
