@@ -50,6 +50,10 @@ type RevealResolver = () => HTMLElement | null | undefined;
 
 const owners = new WeakMap<HTMLElement, CoordinatedScrollOwner>();
 
+export function coordinatedScrollOwner(scroller: HTMLElement): CoordinatedScrollOwner | undefined {
+  return owners.get(scroller);
+}
+
 /** The only automatic position writer for a managed scroller. */
 export class CoordinatedScrollOwner {
   private frame: number | null = null;
@@ -526,9 +530,50 @@ export class CoordinatedScrollOwner {
   pause(): void {
     if (!this.active()) return;
     this.cancel();
+    this.pauseAtCurrent(true);
+  }
+
+  /**
+   * Apply a deliberate navigation scroll (such as Find revealing a match)
+   * through this owner so any active catch-up animation stops immediately,
+   * following pauses at the revealed position, and the resulting native
+   * scroll event is recognized as our own placement rather than downward
+   * catch-up or near-bottom arrival.
+   *
+   * Returns `false` when this owner is inactive so callers can fall back to
+   * direct range scrolling. When active and the match is already in view with
+   * no catch-up pending or in flight, leaves follow state untouched (matching
+   * `resolveReveal`) and returns `true`.
+   */
+  revealBy(delta: number): boolean {
+    if (!this.active()) return false;
+    const top = this.scroller.scrollTop;
+    const limit = Math.max(0, this.scroller.scrollHeight - this.scroller.clientHeight);
+    // `limit` comes from integer scrollHeight/clientHeight while scrollTop can
+    // sit slightly below it at browser zoom or fractional DPR.
+    const catchingUp = this.motion !== null
+      || (this.options.anchor.isPinned() && limit - top > 1);
+    let next = top;
+    if (Math.abs(delta) > 0.5) {
+      const clamped = Math.max(0, Math.min(top + delta, limit));
+      // WebKit reports elastic overscroll outside [0, limit]. If clamping lies
+      // on the far side of `top` from `delta`'s direction, skip writing so the
+      // native rubber-band rebound settles instead of moving opposite the match.
+      if ((clamped - top) * delta >= 0) next = clamped;
+    }
+    const moved = Math.abs(top - next) > 0.5;
+    if (!moved && !catchingUp) return true;
+    this.cancel();
+    this.positioned = true;
+    if (moved) this.scroller.scrollTop = next;
+    this.pauseAtCurrent(false);
+    return true;
+  }
+
+  private pauseAtCurrent(upwardPending: boolean): void {
     const geometry = this.options.measure(!this.pendingPosition, false);
     this.options.anchor.pause(geometry);
-    this.upwardPending = true;
+    this.upwardPending = upwardPending;
     this.previous = geometry;
     this.readerChose();
     this.options.onChange?.();
@@ -697,9 +742,9 @@ export class CoordinatedScrollOwner {
       || geometry.scrollTop > Math.max(0, geometry.scrollHeight - geometry.clientHeight)
       || Math.abs(geometry.scrollTop - navigation.top) <= 1e-6
       || Math.abs(this.revealDelta(navigation.target, undefined, geometry.scrollTop)) > 0.5) return false;
-    this.pause();
     // This is a completed placement, not upward input awaiting native movement.
-    this.upwardPending = false;
+    this.cancel();
+    this.pauseAtCurrent(false);
     return true;
   }
   private wheel = (event: WheelEvent): void => {

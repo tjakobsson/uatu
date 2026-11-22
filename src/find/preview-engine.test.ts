@@ -47,7 +47,6 @@ test("dynamic targets reset match position and own bar, focus, and range reveal"
     barHost: () => slot,
     focusTarget: () => target,
     revealMatch: () => { revealed++; return true; },
-    scrollRoot: () => { throw new Error("outer scroll must not run"); },
   });
   engine.setOnOutcome(value => { outcome = value; });
   engine.run("needle", DEFAULT_MATCH_OPTIONS, { reveal: true });

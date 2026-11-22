@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { TimelineAnchorController } from "./anchor";
-import { CoordinatedScrollOwner } from "./coordinated-scroll";
+import { CoordinatedScrollOwner, coordinatedScrollOwner } from "./coordinated-scroll";
 
 const disposals: Array<() => void> = [];
 afterEach(() => { for (const dispose of disposals.splice(0).reverse()) dispose(); });
@@ -2073,5 +2073,127 @@ describe("coordinated scrolling", () => {
     f.move(400); f.event("scroll");
     expect(f.anchor.isPinned()).toBe(true);
     f.flush(); expect(f.element.scrollTop).toBe(400);
+  });
+  test("revealBy pauses following and stops active smooth catch-up on downward and in-view reveals", () => {
+    const f = fixture(() => "smooth");
+    expect(coordinatedScrollOwner(f.element)).toBe(f.owner);
+    f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(300);
+    // Start smooth catch-up toward 1300 (extent 1600, viewport 300).
+    f.grow(1600);
+    f.owner.request(true);
+    f.flush(16);
+    f.flush(64);
+    const midCatchup = f.element.scrollTop;
+    expect(midCatchup).toBeGreaterThan(300);
+    expect(midCatchup).toBeLessThan(1300);
+    expect(f.frames.size).toBe(1);
+
+    // Downward Find reveal during active catch-up moves to the match, pauses
+    // following, cancels catch-up, and ignores its own async scroll echo.
+    f.owner.revealBy(200);
+    const landed = f.element.scrollTop;
+    expect(landed).toBeCloseTo(midCatchup + 200, 5);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.frames.size).toBe(0);
+    f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.frames.size).toBe(0);
+
+    // Later streamed growth must keep the revealed position instead of catching up.
+    f.grow(2000);
+    f.owner.request(true);
+    f.flush(120);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.element.scrollTop).toBeCloseTo(landed, 5);
+
+    // Resume smooth catch-up, then land an already-in-view Find reveal (delta 0):
+    // catch-up must still stop so the visible match is not scrolled away.
+    f.owner.latest();
+    f.flush(200);
+    f.flush(240);
+    const secondMid = f.element.scrollTop;
+    expect(secondMid).toBeLessThan(1700);
+    expect(f.frames.size).toBe(1);
+    f.owner.revealBy(0);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.frames.size).toBe(0);
+    expect(f.element.scrollTop).toBe(secondMid);
+    f.flush(400);
+    expect(f.element.scrollTop).toBe(secondMid);
+  });
+  test("revealBy landing inside the near-bottom band stays paused until deliberate downward scroll", () => {
+    const f = fixture(() => "smooth", 48);
+    f.owner.request(); f.flush(0);
+    f.grow(1000);
+    f.owner.request(true);
+    f.flush(16);
+    // Jump downward to 680 (within 48px of bottom 700).
+    f.owner.revealBy(680 - f.element.scrollTop);
+    expect(f.element.scrollTop).toBe(680);
+    expect(f.anchor.isPinned()).toBe(false);
+    // Async scroll echo for our own reveal must NOT resume following.
+    f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    // A subsequent deliberate manual downward scroll to bottom DOES resume
+    // (confirming upwardPending was not left set).
+    f.move(695);
+    f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  test("revealBy(0) preserves following when idle at the bottom with no catch-up, including fractional DPR", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(300);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.owner.revealBy(0)).toBe(true);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(300);
+
+    // Browser zoom or fractional DPR can leave settled scrollTop slightly under integer limit.
+    f.grow(1000);
+    f.move(699.1);
+    expect(f.owner.revealBy(0)).toBe(true);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(699.1);
+  });
+  test("revealBy skips writing during elastic overscroll when clamping opposes delta, but moves toward the match", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(1000); // limit = 700
+    f.move(710);
+    f.writes.length = 0;
+
+    // Overscrolled past bottom, match slightly below: clamping to 700 would move upward.
+    expect(f.owner.revealBy(2)).toBe(true);
+    expect(f.writes).toEqual([]);
+    expect(f.element.scrollTop).toBe(710);
+    expect(f.anchor.isPinned()).toBe(true);
+
+    // Overscrolled above top, match further above: clamping to 0 would move downward.
+    f.move(-10);
+    f.owner.pause();
+    f.writes.length = 0;
+    expect(f.owner.revealBy(-2)).toBe(true);
+    expect(f.writes).toEqual([]);
+    expect(f.element.scrollTop).toBe(-10);
+
+    // Overscrolled past bottom, match genuinely above: moves toward the match and pauses.
+    f.owner.latest(); f.flush(20);
+    f.move(710);
+    f.writes.length = 0;
+    expect(f.owner.revealBy(-20)).toBe(true);
+    expect(f.writes).toEqual([690]);
+    expect(f.element.scrollTop).toBe(690);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+  test("revealBy returns false without mutating when the owner is inactive", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.hide();
+    f.writes.length = 0;
+    expect(f.owner.revealBy(-100)).toBe(false);
+    expect(f.writes).toEqual([]);
+    expect(f.anchor.isPinned()).toBe(true);
   });
 });
