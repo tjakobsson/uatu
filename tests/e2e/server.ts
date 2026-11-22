@@ -220,7 +220,8 @@ function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
   };
   const service = new LazyChatService({
     workspacePath: E2E_WORKSPACE_ROOT,
-    agentRuntime: runtime,
+    agentName: "OpenCode",
+    runtime,
     attachmentStore: fakeAttachmentStore,
     // A short settlement wait, so a withdrawal the fake never settles
     // decides from the inbox list within a test's patience.

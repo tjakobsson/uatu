@@ -131,4 +131,3 @@ export function withReplyFactsOf<T extends object>(source: object | undefined, i
   }
   return (merged ?? item) as T;
 }
-

@@ -41,11 +41,22 @@ src/
 │                   the agent's own command outside a Hub; keyboard submission
 │                   steers by default, with Alt/Option+Enter queuing while a
 │                   steering conversation is busy — the dock is one list, steers in
-│                   OpenCode's inbox first, then the Uatu-held queue);
+│                   OpenCode's inbox first, then the Uatu-held queue;
+│                   turn-liveness holds the agent-neutral facts each
+│                   normalizer writes so image capture knows when a reply's
+│                   text is final and its turn has ended; path-agent-runtime
+│                   is the runtime for an agent found on PATH, discovery plus
+│                   one version probe killed after 10 s, which Claude Code
+│                   configures;
+│                   managed-process stops a runtime's child process group
+│                   (SIGTERM, grace, SIGKILL) and keeps a bounded copy of
+│                   its output);
 │                   agent-specific stacks below the seam in
 │                   chat/opencode/ (the loopback server runtime, which
 │                   decides the spawned server's generation from its
-│                   readiness answer, + one stack per OpenCode generation:
+│                   readiness answer; agent-runtime, which wraps it for the
+│                   chat service and holds the per-generation provider
+│                   factories; + one stack per OpenCode generation:
 │                   v1/ is the 1.x provider on `@opencode-ai/sdk` and its
 │                   normalization, v2/ the 2.x provider on
 │                   `@opencode/client`; the shared normalization core sits

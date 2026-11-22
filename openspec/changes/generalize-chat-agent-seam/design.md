@@ -28,7 +28,7 @@ The current state that shapes each decision:
   every agent, and `nativeVisualMessageIdentity` in
   `src/chat/visual-identity.ts` accepts only `"claude" | "opencode"`.
 - **Runtimes.** `src/chat/claude/runtime.ts` implements discovery through
-  `src/chat/executable.ts`, a coalesced `--version` probe with a 10 s timeout,
+  `src/chat/executable.ts`, a coalesced `--version` probe killed after 10 s,
   shadowed-executable diagnostics, version parsing and the
   idle/starting/ready/unavailable states. Only Claude Code uses it.
   `src/cli.ts` (around lines 206–237) wraps it in an inline `AgentRuntime`
@@ -262,8 +262,14 @@ OpenCode stack.
 
 `PathAgentRuntime` is configured with a binary name, display name, version
 parser and message templates, and keeps today's state machine: discovery
-through `executable.ts`, one coalesced probe, a 10 s timeout, shadowed
-executables in diagnostics, and idle, starting, ready and unavailable states.
+through `executable.ts`, one coalesced probe whose child is killed 10 s after
+it starts, shadowed executables in diagnostics, and idle, starting, ready and
+unavailable states. The kill is a deadline for the child, not for the probe's
+answer: the probe still waits for both output pipes to close, so a descendant
+that keeps a pipe open can hold startup pending past it (inherited, unchanged
+here). A hard answer deadline for new PATH agents is deferred to the
+Antigravity change, which owns the requirement that `agy --version` answers
+within its budget.
 Claude Code becomes one configuration. Its messages stay byte-identical:
 "Claude Code is not installed or is not available on PATH.", "Claude Code did
 not answer a version probe within 10s.", and "Claude Code could not be
@@ -282,7 +288,17 @@ so OpenCode's wording is unchanged and a Claude Code failure no longer says
 `ManagedProcess` and a bounded text capture move to a shared chat process
 module. The capture takes an optional scrubber; OpenCode passes its password
 scrubbing, which stays in the OpenCode stack. A per-conversation stdio child
-(the next change) reuses both.
+(the next change) reuses both. OpenCode keeps leader-based escalation: after
+the grace period, SIGKILL is sent only if `opencode serve` itself is still
+running, and the capture is then awaited as today. A stdio child that starts
+its own workers opts into group escalation instead: SIGKILL goes to the whole
+process group if any member is still alive after the grace, even once the
+child itself has exited, and every wait after SIGTERM is bounded, so a worker
+that holds the child's stderr open cannot make shutdown hang. A capture still
+open at its deadline is released: its read is cancelled, which frees the pipe
+and keeps the bytes collected. Group escalation is POSIX-only. On Windows
+there are no process groups here, so both modes signal only the direct child,
+as today.
 
 - Alternative: make `OpenCodeService` the generic base. Rejected: it models a
   long-lived loopback server with health probes, which the other agents do

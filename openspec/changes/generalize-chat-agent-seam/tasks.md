@@ -23,11 +23,11 @@ own. The Antigravity pull request (`add-antigravity-chat`, head
 
 ## 2. Generic PATH runtime and agent-neutral lazy service (commit 2)
 
-- [ ] 2.1 Extract `PathAgentRuntime` from `src/chat/claude/runtime.ts`, configured by binary name, display name, version parser and messages, and keep `ClaudeRuntime` as its Claude Code configuration. Verify that `src/chat/claude/runtime.test.ts` passes unchanged, including the not-installed, timeout and failed-probe messages byte for byte.
-- [ ] 2.2 Replace the inline `AgentRuntime` literal in `src/cli.ts` with a shared adapter, and keep `src/hub/agent-account-runtime.ts` working. Verify typecheck and the agent-account tests.
-- [ ] 2.3 Make `LazyChatService` agent-neutral: it takes the agent's name and runtime, OpenCode's options move to an OpenCode runtime factory, and the restarting and incompatible-version messages name the owning agent. Verify `src/chat/service.test.ts` with OpenCode's wording unchanged, plus a new test that a Claude Code adapter failure names Claude Code.
-- [ ] 2.4 Move `ManagedProcess` and the bounded capture into a shared chat process module. The capture takes an optional scrubber, and OpenCode's password scrubbing stays in its stack. Verify that `opencode-service.test.ts` passes unchanged, and add tests for SIGTERM, grace and SIGKILL escalation and for capture bounding.
-- [ ] 2.5 Update the `CLAUDE.md` folder map and `ARCHITECTURE.md` runtime section for the new shared modules. Verify that `bun run test:ci` passes.
+- [x] 2.1 Extract `PathAgentRuntime` from `src/chat/claude/runtime.ts`, configured by binary name, display name, version parser and messages, and keep `ClaudeRuntime` as its Claude Code configuration. Verify that `src/chat/claude/runtime.test.ts` passes unchanged, including the not-installed, timeout and failed-probe messages byte for byte.
+- [x] 2.2 Replace the inline `AgentRuntime` literal in `src/cli.ts` with a shared adapter, and keep `src/hub/agent-account-runtime.ts` working. Verify typecheck and the agent-account tests.
+- [x] 2.3 Make `LazyChatService` agent-neutral: it takes the agent's name and runtime, OpenCode's options move to an OpenCode runtime factory, and the restarting and incompatible-version messages name the owning agent. Verify `src/chat/service.test.ts` with OpenCode's wording unchanged, plus a new test that a Claude Code adapter failure names Claude Code.
+- [x] 2.4 Move `ManagedProcess` and the bounded capture into a shared chat process module. The capture takes an optional scrubber, and OpenCode's password scrubbing stays in its stack. Verify that `opencode-service.test.ts` passes unchanged, and add tests for SIGTERM, grace and SIGKILL escalation and for capture bounding.
+- [x] 2.5 Update the `CLAUDE.md` folder map and `ARCHITECTURE.md` runtime section for the new shared modules. Verify that `bun run test:ci` passes.
 
 ## 3. Agent-declared login (commit 3)
 
