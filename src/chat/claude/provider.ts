@@ -198,6 +198,11 @@ export type ClaudeProviderOptions = {
    * Tests shorten it.
    */
   backgroundGraceMs?: number;
+  /**
+   * How long shutdown lets work already under way finish before it closes
+   * every query. Tests shorten it.
+   */
+  shutdownGraceMs?: number;
   /** Bound on an on-demand usage read, cold start included. Tests shorten it. */
   usageReadTimeoutMs?: number;
   /**
@@ -258,6 +263,11 @@ const TITLE_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000];
 // own follow-up turn within a fraction of a second (D9). A session whose set
 // emptied and that shows no follow-up inside this window is idle for good.
 const BACKGROUND_FOLLOW_UP_GRACE_MS = 5_000;
+// Shutdown lets admitted work in flight (a history mutation and its rewind,
+// a release) finish for this long before closing every query settles what
+// is still stuck. Interrupts and control requests have no deadline of their
+// own, so the wait needs one.
+const SHUTDOWN_GRACE_MS = 3_000;
 const TITLE_LIMIT = 80;
 
 /**
@@ -674,6 +684,7 @@ export class ClaudeProvider implements ChatProvider {
   private readonly renameGenerations = new Map<string, number>();
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly backgroundGraceMs: number;
+  private readonly shutdownGraceMs: number;
   private readonly usageReadTimeoutMs: number;
   private readonly titleRefreshDelaysMs: number[];
   // Conversations whose last rate-limit signal was a standing (warning or
@@ -732,6 +743,7 @@ export class ClaudeProvider implements ChatProvider {
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
     this.now = options.now ?? (() => Date.now());
     this.backgroundGraceMs = options.backgroundGraceMs ?? BACKGROUND_FOLLOW_UP_GRACE_MS;
+    this.shutdownGraceMs = options.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
     this.usageReadTimeoutMs = options.usageReadTimeoutMs ?? USAGE_READ_TIMEOUT_MS;
     this.titleRefreshDelaysMs = options.titleRefreshDelaysMs ?? TITLE_REFRESH_DELAYS_MS;
   }
@@ -1709,36 +1721,37 @@ export class ClaudeProvider implements ChatProvider {
     if (this.windowRetryTimer) clearTimeout(this.windowRetryTimer);
     for (const timer of this.titleRefreshTimers.values()) clearTimeout(timer);
     this.titleRefreshTimers.clear();
-    // Shutdown runs in this order, so no wait can hold up what releases it:
-    // every pending request ends first, then every session closes, and only
-    // then do admitted history mutations drain and persistence flush.
+    // Shutdown runs in one order, so no wait can hold up what releases it:
+    // (a) the provider is marked disposed (above); (b) every pending request
+    // ends; (c) admitted work in flight gets a bounded grace to finish;
+    // (d) every query closes, which settles whatever is still stuck; (e) what
+    // remains drains (corrective writes, rollbacks); (f) sessions whose own
+    // operation did not settle them get shutdown's outcome; (g) persistence
+    // flushes.
     const shutdown = "The workspace shut down before the user answered.";
     const sessions = [...this.live.values()];
     // Every session started and not yet fully torn down, in the order it
     // was started: displaced queries and closing ones (a retire's, a
     // revert's) alike.
     const others = [...this.startedSessions].filter(session => !sessions.includes(session));
-    const closing = new Map(this.closingSessions);
-    this.startedSessions.clear();
-    this.live.clear();
     // (b) Every pending request ends once, with the shutdown reason, before
-    // anything is closed or waited on; a later abort for one of them finds
-    // it settled. Conversations end one at a time, as they always have: each
-    // live session in order, its conversation's requests (whichever of its
-    // tracked sessions asked them) in the holder's order, then the lost
-    // wakeups of each of those sessions; then any conversation left with
-    // only displaced or closing sessions, in the order they were started.
-    // Shutdown is the process exit a schedule cannot survive (D6).
+    // anything is waited on; a later abort for one of them finds it settled,
+    // and a callback arriving later is answered at once. Conversations end
+    // one at a time, as they always have: each live session in order, its
+    // conversation's requests (whichever of its tracked sessions asked them)
+    // in the holder's order, then the lost wakeups of each of those
+    // sessions; then any conversation left with only displaced or closing
+    // sessions, in the order they were started. Shutdown is the process exit
+    // a schedule cannot survive (D6). A session whose own operation decides
+    // its wakeups (a release under way) waits for (f).
     for (const session of [...sessions, ...others]) session.claims.swept = true;
-    // A session whose release is under way waits: the release decides its
-    // wakeups, and shutdown reports them only if it did not release.
-    const releasing: LiveSession[] = [];
+    const deferred: LiveSession[] = [];
     const endConversation = (group: LiveSession[]) => {
       this.interactions.abandonRegistrations(group.flatMap(session => [...session.claims.requests]), shutdown);
       for (const session of group) {
         this.cancelSessionWindowRead(session);
         this.clearIdleTimer(session);
-        if (session.releasing) releasing.push(session);
+        if (session.releasing) deferred.push(session);
         else this.emitLostWakeups(session);
       }
     };
@@ -1747,12 +1760,23 @@ export class ClaudeProvider implements ChatProvider {
     for (const conversationId of new Set(orphans.map(session => session.id))) {
       endConversation(orphans.filter(session => session.id === conversationId));
     }
-    // (c) Every session closes. The interrupt is sent but not waited on (it
+    // (c) Admitted work in flight (history mutations and their rewinds,
+    // releases, replacement prompts committing a revert) finishes as it
+    // would have, within the grace; new work is refused (see admit).
+    const admitted = () => Promise.all([...this.mutations, ...this.stagedPrompts]);
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([admitted(), new Promise<void>(resolve => { graceTimer = setTimeout(resolve, this.shutdownGraceMs); })]);
+    clearTimeout(graceTimer);
+    // (d) Every query closes. The interrupt is sent but not waited on (it
     // has no deadline); closing the transport is what fails a control
     // request still out (an interrupt, a rewind), including one a closing
     // session's own teardown waits on.
+    const closing = new Map(this.closingSessions);
+    const open = [...new Set([...this.live.values(), ...this.startedSessions])].filter(session => !closing.has(session));
+    this.startedSessions.clear();
+    this.live.clear();
     await Promise.all([
-      ...[...sessions, ...others.filter(session => !closing.has(session))].map(async session => {
+      ...open.map(async session => {
         void session.query.interrupt().catch(() => undefined);
         session.queue.close();
         await session.query.return?.().catch(() => undefined);
@@ -1772,12 +1796,12 @@ export class ClaudeProvider implements ChatProvider {
       await usageProbe.query.return?.().catch(() => undefined);
     }
     await this.hydration?.catch(() => undefined);
-    // (d) History mutations already admitted, and replacement prompts still
-    // committing a revert, finish or roll back; new ones are refused (see
-    // admit and prompt).
-    await Promise.all([...this.mutations, ...this.stagedPrompts]);
-    for (const session of releasing) if (!session.released) this.emitLostWakeups(session);
-    // (e) Nothing durable may still be in flight when the workspace stops.
+    // (e) What remains drains: an operation the close cut short writes its
+    // correction or rollback.
+    await admitted();
+    // (f) A session its own operation did not settle gets shutdown's outcome.
+    for (const session of deferred) if (!session.released) this.emitLostWakeups(session);
+    // (g) Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     this.events_.close();
   }

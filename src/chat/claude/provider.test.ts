@@ -209,7 +209,7 @@ async function raceStarts(provider: ClaudeProvider, queries: FakeQuery[], conver
 
 // A conversation with two stored turns, on a provider that can rewind and
 // fork, so a staged revert can be committed by a replacement prompt.
-function revertingProvider(prepare?: (query: FakeQuery) => void) {
+function revertingProvider(prepare?: (query: FakeQuery) => void, options: Partial<ClaudeProviderOptions> = {}) {
   const { queries, configDir, workspace } = fixture();
   const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
   const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
@@ -239,6 +239,10 @@ function revertingProvider(prepare?: (query: FakeQuery) => void) {
       return query;
     },
     forkSession: async () => ({ sessionId: forkId }),
+    // Short, so a test whose work is stuck at shutdown does not wait long;
+    // a test that needs work to finish inside the grace sets its own.
+    shutdownGraceMs: 50,
+    ...options,
   });
   return { forking, queries, storedId, forkId, workspace };
 }
@@ -4538,11 +4542,10 @@ describe("ClaudeProvider sessions", () => {
     expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
     await new Promise(resolve => setImmediate(resolve));
     expect(disposed).toBe(false);
-    // Shutdown closed the transport without waiting on the interrupt; it
-    // still joins the revert's own teardown before it returns.
-    expect(queries[0]!.returned).toBe(true);
+    // Shutdown gives the revert's teardown its grace before closing.
     release!();
     await disposing;
+    expect(queries[0]!.returned).toBe(true);
     expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
     expect(await forking.listQuestions()).toEqual([]);
     expect(await committing).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
@@ -4658,25 +4661,55 @@ describe("ClaudeProvider sessions", () => {
     expect(abandonedIds(events)).toEqual(["A", "B"]);
   });
 
-  test("a rewind that never settles until its query closes does not hold up shutdown", async () => {
+  test("a rewind still unanswered when the shutdown grace ends is cut off by the close and rolls its boundary back", async () => {
     let rewinding: (() => void) | undefined;
     const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
     let failRewind: ((error: Error) => void) | undefined;
     // The control request stays out until the transport closes.
-    const { forking, queries, storedId } = revertingProvider(query => {
-      query.rewindFiles = () => {
+    const { forking, queries, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = (uuid, options) => {
+        if (options?.dryRun) return rewind(uuid, options);
         rewinding!();
         return new Promise((_resolve, reject) => { failRewind = reject; });
       };
       const close = query.return.bind(query);
       query.return = async () => { failRewind?.(new Error("transport closed")); return close(); };
-    });
+    }, { shutdownGraceMs: 20 });
     const undoing = forking.undo!(storedId).catch(error => error as Error);
     await rewindStarted;
     const query = queries[0]!;
     await forking.dispose();
     expect(query.returned).toBe(true);
     expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
+    expect(stateOnDisk(workspace).staged).toEqual({});
+  });
+
+  test("a rewind answered within the shutdown grace completes, and Redo survives", async () => {
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    let answer: (() => void) | undefined;
+    // Like the SDK's: closing the transport fails a rewind still out.
+    const { forking, queries, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      let fail: ((error: Error) => void) | undefined;
+      query.rewindFiles = (uuid, options) => {
+        if (options?.dryRun) return rewind(uuid, options);
+        rewinding!();
+        return new Promise((resolve, reject) => { answer = () => resolve(rewind(uuid, options)); fail = reject; });
+      };
+      const close = query.return.bind(query);
+      query.return = async () => { fail?.(new Error("transport closed")); return close(); };
+    }, { shutdownGraceMs: 4_000 });
+    const undoing = forking.undo!(storedId);
+    await rewindStarted;
+    const disposing = forking.dispose();
+    // The reply arrives after shutdown has started, inside the grace.
+    answer!();
+    expect((await undoing).outcome).toBe("changed");
+    await disposing;
+    expect(queries[0]!.returned).toBe(true);
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
   });
 
   test("an interrupt that never answers until its query closes does not hold up shutdown, live or mid-revert", async () => {
@@ -4723,34 +4756,6 @@ describe("ClaudeProvider sessions", () => {
       query.return = async () => { fail?.(new Error("transport closed")); return close(); };
     };
   }
-
-  test("a rewind never sent because shutdown closed the query first rolls its boundary back before dispose returns", async () => {
-    let sent = false;
-    const { forking, storedId, workspace } = revertingProvider(closeAwareRewind(() => { sent = true; }));
-    const writeFile = fsPromises.writeFile;
-    let writing: (() => void) | undefined;
-    const writeStarted = new Promise<void>(resolve => { writing = resolve; });
-    let release: (() => void) | undefined;
-    // The write-ahead record stalls until shutdown has closed the query.
-    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
-      fsPromises.writeFile = writeFile;
-      writing!();
-      await new Promise<void>(resolve => { release = resolve; });
-      return writeFile(...args);
-    }) as typeof writeFile;
-    try {
-      const undoing = forking.undo!(storedId).catch(error => error as Error);
-      await writeStarted;
-      const disposing = forking.dispose();
-      release!();
-      await disposing;
-      expect(stateOnDisk(workspace).staged).toEqual({});
-      expect(await undoing).toEqual(expect.objectContaining({ message: "query closed" }));
-    } finally {
-      fsPromises.writeFile = writeFile;
-    }
-    expect(sent).toBe(false);
-  });
 
   test("an undo retiring its session during shutdown cannot deadlock on a callback the sweep settles", async () => {
     let releaseRewind: (() => void) | undefined;
