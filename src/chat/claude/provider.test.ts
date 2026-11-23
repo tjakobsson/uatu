@@ -257,6 +257,18 @@ function readerExit(provider: ClaudeProvider, query: FakeQuery): Promise<void> {
   return session.reader.catch(() => undefined);
 }
 
+// Waits until the provider's durable writes queued so far, and any they
+// queue in turn, have finished: the edge a test needs before it changes
+// what a write will meet on disk.
+async function settledWrites(provider: ClaudeProvider): Promise<void> {
+  const state = provider as unknown as { persistChain: Promise<void> };
+  let chain: Promise<void>;
+  do {
+    chain = state.persistChain;
+    await chain;
+  } while (chain !== state.persistChain);
+}
+
 const requestedIds = (events: NormalizedProviderEvent[]) => events
   .filter(event => event.eventType === "interaction.requested")
   .map(event => (event.updates[0] as { item: { requestId: string } }).item.requestId);
@@ -6179,6 +6191,9 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
 
   test("a cancel or release whose write fails leaves nothing cancelled: the wakeup stays listed and unblocked", async () => {
     const { provider, events, stop, session, query, workspace } = await scheduled([oneShot, recurring]);
+    // Writes the setup queued finish first: one still in flight would race
+    // the directory below (EEXIST) instead of failing.
+    await settledWrites(provider);
     // The state file's temporary path is a directory: every write fails.
     mkdirSync(path.join(workspace, ".uatu-test-state.json.tmp"));
     await expect(provider.cancelWakeup(session.id, "c1")).rejects.toThrow();
