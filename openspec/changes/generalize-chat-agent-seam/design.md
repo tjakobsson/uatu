@@ -613,7 +613,11 @@ map and its rules out of the Claude Code provider:
     closing the transport fails whatever is still out (an interrupt, a
     rewind), including one a closing session's own teardown waits on. A
     usage read still finding its target when shutdown began starts no
-    probe afterwards and writes nothing, so no query outlives this step.
+    probe afterwards and writes nothing, so no query outlives this step. Closing
+    is this step's alone: once shutdown has started, idle retirement (after
+    a context report or a usage read) closes nothing, so a session left
+    idle by the sweep stays open in the grace for a prompt still on its
+    way.
   - (e) What remains drains: an operation the close cut short writes its
     correction or rollback (a rejected rewind rolls its staged boundary
     back, a prompt its configuration or staged revert).

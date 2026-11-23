@@ -3466,6 +3466,9 @@ export class ClaudeProvider implements ChatProvider {
    * after a turn or a control operation comes through here.
    */
   private async retireIfIdle(session: LiveSession): Promise<void> {
+    // Once shutdown has started, closing is its own step (d): a session
+    // idle in the grace may still be about to take an admitted prompt.
+    if (this.disposed) return;
     if (this.live.get(session.id) !== session || !this.idleExceptReads(session)) return;
     if (session.usageReads > 0) {
       session.retireAfterRead = true;
@@ -3967,7 +3970,7 @@ export class ClaudeProvider implements ChatProvider {
       // follow-up grace window (idle timer) keeps its own say.
       const owed = startedForRead || session.retireAfterRead === true;
       if (owed && session.usageReads === 0) session.retireAfterRead = false;
-      if (owed && session.idleTimer === undefined && this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
+      if (owed && !this.disposed && session.idleTimer === undefined && this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
     }
   }
 

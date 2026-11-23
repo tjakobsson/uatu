@@ -6146,10 +6146,10 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
 
   // The spike's sequence for the turn that schedules: tool call, Stop (with
   // the crons), then the result.
-  async function scheduled(crons: unknown[], options: { background?: boolean } = {}) {
+  async function scheduled(crons: unknown[], options: { background?: boolean; prepare?: (query: FakeQuery) => void } = {}) {
     // A grace that cannot expire: the shutdown tests here finish their work
     // inside it, and none of them covers its expiry.
-    const context = fixture(undefined, { shutdownGraceMs: 60_000 });
+    const context = fixture(options.prepare, { shutdownGraceMs: 60_000 });
     const { events, stop } = collect(context.provider);
     const session = await context.provider.createSession("x");
     await context.provider.prompt(session.id, { id: "r1", text: "wake me in a minute", delivery: "queue" });
@@ -6646,6 +6646,49 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
       ["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]],
       ["wakeups.lost", ["wakeup:c2 paused"]],
     ]);
+    stop();
+  });
+
+  test("a context report finishing in the grace leaves the query open for a prompt still reading its attachment", async () => {
+    // The turn-end context report is still out when shutdown begins.
+    const report = Promise.withResolvers<unknown>();
+    const { provider, events, stop, query, session, workspace } = await scheduled([oneShot], { prepare: query => { query.getContextUsage = () => report.promise; } });
+    query.consumeInput();
+    // Counts the report's idle-retirement check once it has run.
+    const state = provider as unknown as { retireIfIdle: (session: unknown) => Promise<void> };
+    const retireIfIdle = state.retireIfIdle.bind(provider);
+    let retireChecks = 0;
+    state.retireIfIdle = async live => { await retireIfIdle(live); retireChecks += 1; };
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      // The sweep reports the wakeup lost, leaving the session idle.
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      report.resolve({ categories: [], totalTokens: 1, maxTokens: 200_000 });
+      await waitFor(() => retireChecks === 1);
+      // Closing is shutdown's: the query stays open for the prompt.
+      expect(query.returned).toBe(false);
+      release!();
+      expect(await prompting).toEqual({ messageId: "r2" });
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    expect(query.takenTexts()).toContainEqual(["image", "with a picture"]);
     stop();
   });
 
