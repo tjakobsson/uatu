@@ -578,7 +578,10 @@ map and its rules out of the Claude Code provider:
   session's wakeups to it: a release that released the session has emitted
   `session.released` with the rows cancelled, and shutdown adds nothing;
   one refused or failed leaves shutdown to emit that session's
-  `wakeups.lost` (lost or paused) once it ends, as for any other session. History mutations are
+  `wakeups.lost` (lost or paused) once it ends, as for any other session. A
+  wakeup cancel works the same way: one admitted operation that reports
+  `wakeup.cancelled` itself, so shutdown never reports that wakeup paused or
+  lost, and reports the session's other wakeups once the cancel has ended. History mutations are
   fenced and drained, in two cases. One that has not changed anything yet
   may be refused safely: a new undo, redo, revert, restore or revert commit
   once shutdown has started, or a cold undo whose start is refused at its

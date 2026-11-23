@@ -288,8 +288,10 @@ type SessionClaims = {
 
 type LiveSession = {
   claims: SessionClaims;
-  // A release under way, and one that released the session (see release).
+  // A release under way, and one that released the session (see release);
+  // wakeup cancels under way (see cancelWakeup).
   releasing?: boolean;
+  cancelling?: number;
   released?: boolean;
   id: string;
   notificationLifecycle: ClaudeNotificationLifecycle;
@@ -1743,7 +1745,7 @@ export class ClaudeProvider implements ChatProvider {
     // sessions; then any conversation left with only displaced or closing
     // sessions, in the order they were started. Shutdown is the process exit
     // a schedule cannot survive (D6). A session whose own operation decides
-    // its wakeups (a release under way) waits for (f).
+    // its wakeups (a release or a wakeup cancel under way) waits for (f).
     for (const session of [...sessions, ...others]) session.claims.swept = true;
     const deferred: LiveSession[] = [];
     const endConversation = (group: LiveSession[]) => {
@@ -1751,7 +1753,7 @@ export class ClaudeProvider implements ChatProvider {
       for (const session of group) {
         this.cancelSessionWindowRead(session);
         this.clearIdleTimer(session);
-        if (session.releasing) deferred.push(session);
+        if (session.releasing || session.cancelling) deferred.push(session);
         else this.emitLostWakeups(session);
       }
     };
@@ -1761,8 +1763,9 @@ export class ClaudeProvider implements ChatProvider {
       endConversation(orphans.filter(session => session.id === conversationId));
     }
     // (c) Admitted work in flight (history mutations and their rewinds,
-    // releases, replacement prompts committing a revert) finishes as it
-    // would have, within the grace; new work is refused (see admit).
+    // releases, wakeup cancels, replacement prompts committing a revert)
+    // finishes as it would have, within the grace; new work is refused (see
+    // admit).
     const admitted = () => Promise.all([...this.mutations, ...this.stagedPrompts]);
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([admitted(), new Promise<void>(resolve => { graceTimer = setTimeout(resolve, this.shutdownGraceMs); })]);
@@ -3119,14 +3122,23 @@ export class ClaudeProvider implements ChatProvider {
     const session = this.live.get(sessionId);
     const live = session?.wakeups.get(wakeupId);
     if (session && live) {
-      await this.recordCancelled(sessionId, [[wakeupId, live.prompt]]);
-      if (this.live.get(sessionId) !== session || !session.wakeups.has(wakeupId)) return;
-      session.wakeups.delete(wakeupId);
-      const updates: NormalizedProviderUpdate[] = [{ kind: "upsert", item: wakeupRow(wakeupId, live, "cancelled") }];
-      const idle = this.idleExceptReads(session) && session.idleTimer === undefined;
-      if (idle) updates.push({ kind: "status", status: "idle" });
-      this.emit(sessionId, { updates, outcome: "handled", eventType: "wakeup.cancelled" });
-      if (idle) await this.retireIfIdle(session);
+      // One admitted operation, which shutdown waits for: the cancel owns
+      // its wakeup's outcome, so shutdown never reports it paused or lost.
+      session.cancelling = (session.cancelling ?? 0) + 1;
+      try {
+        await this.admit(async () => {
+          await this.recordCancelled(sessionId, [[wakeupId, live.prompt]]);
+          if ((this.live.get(sessionId) !== session && !this.disposed) || !session.wakeups.has(wakeupId)) return;
+          session.wakeups.delete(wakeupId);
+          const updates: NormalizedProviderUpdate[] = [{ kind: "upsert", item: wakeupRow(wakeupId, live, "cancelled") }];
+          const idle = this.idleExceptReads(session) && session.idleTimer === undefined;
+          if (idle) updates.push({ kind: "status", status: "idle" });
+          this.emit(sessionId, { updates, outcome: "handled", eventType: "wakeup.cancelled" });
+          if (idle && !this.disposed) await this.retireIfIdle(session);
+        });
+      } finally {
+        session.cancelling -= 1;
+      }
       return;
     }
     const revived = session?.revived.get(wakeupId);

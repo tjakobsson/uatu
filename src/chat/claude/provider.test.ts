@@ -6168,6 +6168,32 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
       return `${item.id} ${item.status}`;
     })]);
 
+  test("a wakeup cancel whose write is in flight at shutdown is reported cancelled, never paused, and shutdown reports only the rest", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    const report = () => events
+      .filter(event => event.eventType === "wakeup.cancelled" || event.eventType === "wakeups.lost")
+      .map(event => [event.eventType, event.updates.filter(update => update.kind === "upsert").map(update => {
+        const item = (update as { item: { id: string; status: string } }).item;
+        return `${item.id} ${item.status}`;
+      })]);
+    await waitFor(() => report().length === 2);
+    expect(report()).toEqual([
+      ["wakeup.cancelled", ["wakeup:c1 cancelled"]],
+      ["wakeups.lost", ["wakeup:w1 lost"]],
+    ]);
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();
