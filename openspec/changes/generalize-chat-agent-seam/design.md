@@ -651,10 +651,12 @@ map and its rules out of the Claude Code provider:
     other conversation's abandonments, because requests must be settled
     first, in (b), to avoid the callback deadlock.
     A wakeup whose cancel is still being written stays that cancel's: a
-    Stop, in the grace or before it, neither settles nor drops it. The
-    cancel reports it `wakeup.cancelled` once its write has succeeded; if
-    the write fails, the wakeup stays in the session and is settled as any
-    other, here by shutdown.
+    Stop, in the grace or before it, neither settles nor drops it, but its
+    word on the wakeup is kept (the latest Stop's). The cancel reports it
+    `wakeup.cancelled` once its write has succeeded; if the write fails, the
+    wakeup takes that kept outcome (fired, with its turn, or reconciled as
+    listed), and one still scheduled is settled as any other, here by
+    shutdown.
   - (g) Persistence flushes. No write lands after `dispose()` returns, a
     durable write never reports success without writing, and a failed
     prompt that changed nothing durable writes nothing. A deferred rename

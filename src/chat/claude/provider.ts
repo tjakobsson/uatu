@@ -323,6 +323,11 @@ type LiveSession = {
   // Wakeups whose cancel is being written: each is that cancel's until it
   // settles, so reconciliation neither settles nor drops it.
   pendingCancels?: Map<string, number>;
+  // The latest Stop's word on a wakeup whose cancel is being written, kept
+  // for the cancel to apply if its write fails: the wakeup as listed (and
+  // its pending row, if that changed), or, once the CLI dropped it, its
+  // fired or cancelled row.
+  cancelStopOutcomes?: Map<string, { keep?: SessionWakeup; update?: NormalizedProviderUpdate }>;
   released?: boolean;
   // Left by shutdown's sweep for its end, because its own release or cancel
   // was under way then: set for the rest of shutdown, after that operation
@@ -3110,10 +3115,9 @@ export class ClaudeProvider implements ChatProvider {
       if (!value || typeof value !== "object") continue;
       const cron = value as Record<string, unknown>;
       if (typeof cron.id !== "string" || !cron.id || typeof cron.schedule !== "string" || !cron.schedule) continue;
-      // Being cancelled: carried over below, as it stands.
-      if (session.pendingCancels?.has(cron.id)) continue;
+      const pendingCancel = session.pendingCancels?.has(cron.id) === true;
       // Cancelled by the user: the CLI still holds it, uatu does not (D12).
-      if (this.cancelledWakeups.get(session.id)?.has(cron.id)) continue;
+      if (!pendingCancel && this.cancelledWakeups.get(session.id)?.has(cron.id)) continue;
       const known = session.wakeups.get(cron.id);
       const wakeup: SessionWakeup = {
         prompt: typeof cron.prompt === "string" ? cron.prompt : "",
@@ -3123,18 +3127,18 @@ export class ClaudeProvider implements ChatProvider {
       };
       const nextFireAt = nextCronFire(wakeup.schedule, now);
       if (nextFireAt !== undefined) wakeup.nextFireAt = nextFireAt;
-      next.set(cron.id, wakeup);
-      if (known && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt) continue;
+      const unchanged = known !== undefined && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt;
       // During shutdown's grace nothing is republished as pending.
-      if (!this.disposed) updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
-    }
-    // A wakeup whose cancel is being written stays the cancel's: kept as it
-    // stands, whatever this Stop lists, and neither settled nor dropped. The
-    // cancel reports it cancelled once its write has succeeded; if the write
-    // fails, it is settled as any other wakeup.
-    for (const wakeupId of session.pendingCancels?.keys() ?? []) {
-      const wakeup = session.wakeups.get(wakeupId);
-      if (wakeup) next.set(wakeupId, wakeup);
+      const update: NormalizedProviderUpdate | undefined = unchanged || this.disposed ? undefined : { kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") };
+      // A wakeup whose cancel is being written stays the cancel's, kept as
+      // it stands; this Stop's word is kept for a cancel whose write fails.
+      if (pendingCancel && known) {
+        next.set(cron.id, known);
+        (session.cancelStopOutcomes ??= new Map()).set(cron.id, { keep: wakeup, ...(update ? { update } : {}) });
+        continue;
+      }
+      next.set(cron.id, wakeup);
+      if (update) updates.push(update);
     }
     // A session shutdown has swept: a wakeup it has reported stays settled,
     // and one first seen now is reported the way shutdown reports it, lost
@@ -3169,9 +3173,17 @@ export class ClaudeProvider implements ChatProvider {
     for (const [wakeupId, wakeup] of session.wakeups) {
       if (next.has(wakeupId)) continue;
       const firedTurnId = wakeup.recurring ? undefined : firedTurn(wakeupId, wakeup.prompt);
-      updates.push({ kind: "upsert", item: firedTurnId !== undefined
+      const update: NormalizedProviderUpdate = { kind: "upsert", item: firedTurnId !== undefined
         ? wakeupRow(wakeupId, wakeup, "fired", { firedTurnId })
-        : wakeupRow(wakeupId, wakeup, "cancelled") });
+        : wakeupRow(wakeupId, wakeup, "cancelled") };
+      // Dropped by the CLI while its cancel is being written: still the
+      // cancel's, and the row is kept for a cancel whose write fails.
+      if (session.pendingCancels?.has(wakeupId)) {
+        next.set(wakeupId, wakeup);
+        (session.cancelStopOutcomes ??= new Map()).set(wakeupId, { update });
+        continue;
+      }
+      updates.push(update);
     }
     // The first Stop of a resumed session is the CLI's own word on what it
     // rebuilt: a paused cron it lists is pending again (above); one that
@@ -3250,6 +3262,7 @@ export class ClaudeProvider implements ChatProvider {
       session.cancelling = (session.cancelling ?? 0) + 1;
       const pendingCancels = (session.pendingCancels ??= new Map());
       pendingCancels.set(wakeupId, (pendingCancels.get(wakeupId) ?? 0) + 1);
+      let failed = false;
       try {
         await this.admit(async () => {
           await this.recordCancelled(sessionId, [[wakeupId, live.prompt]]);
@@ -3261,11 +3274,21 @@ export class ClaudeProvider implements ChatProvider {
           this.emit(sessionId, { updates, outcome: "handled", eventType: "wakeup.cancelled" });
           if (idle && !this.disposed) await this.retireIfIdle(session);
         });
+      } catch (error) {
+        failed = true;
+        throw error;
       } finally {
         session.cancelling -= 1;
         const remaining = (pendingCancels.get(wakeupId) ?? 1) - 1;
         if (remaining > 0) pendingCancels.set(wakeupId, remaining);
-        else pendingCancels.delete(wakeupId);
+        else {
+          pendingCancels.delete(wakeupId);
+          // The last Stop's word while the cancel was out: discarded when it
+          // succeeded (cancelled wins), applied when it failed.
+          const outcome = session.cancelStopOutcomes?.get(wakeupId);
+          session.cancelStopOutcomes?.delete(wakeupId);
+          if (failed && outcome && session.wakeups.has(wakeupId)) this.applyStopOutcome(session, wakeupId, outcome);
+        }
       }
       return;
     }
@@ -3280,6 +3303,17 @@ export class ClaudeProvider implements ChatProvider {
       const { message: _message, ...row } = paused;
       this.emit(sessionId, { updates: [{ kind: "upsert", item: { ...row, status: "cancelled" } }], outcome: "handled", eventType: "wakeup.cancelled" });
     });
+  }
+
+  /**
+   * A failed cancel's wakeup takes the outcome the last Stop gave it while
+   * the cancel was out: the wakeup as listed, or the fired or cancelled row
+   * of one the CLI dropped, so a fire it saw is not lost.
+   */
+  private applyStopOutcome(session: LiveSession, wakeupId: string, outcome: { keep?: SessionWakeup; update?: NormalizedProviderUpdate }): void {
+    if (outcome.keep) session.wakeups.set(wakeupId, outcome.keep);
+    else session.wakeups.delete(wakeupId);
+    if (outcome.update) this.emit(session.id, { updates: [outcome.update], outcome: "handled", eventType: "wakeups.reconciled" });
   }
 
   /**

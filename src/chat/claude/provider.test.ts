@@ -7229,6 +7229,36 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.dispose();
   });
 
+  test("a wakeup that fired before its cancel keeps its fired row when the cancel's write fails", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    // The one-shot fires; then the user cancels it before the CLI's Stop.
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    let cancelError: unknown;
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1").catch(error => { cancelError = error; });
+      await hold.started;
+      // The Stop while the cancel's write is out no longer lists it: it fired.
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(true);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    expect(cancelError).toEqual(expect.objectContaining({ message: "disk full" }));
+    const w1Rows = () => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === "wakeup:w1")
+      .map(update => (update as { item: { status: string; firedTurnId?: string } }).item);
+    // The failed cancel applies the Stop's outcome, which the collector
+    // reads asynchronously.
+    await waitFor(() => w1Rows().some(row => row.status === "fired"));
+    expect(w1Rows().at(-1)).toEqual(expect.objectContaining({ status: "fired", firedTurnId: "message:wakeup:fired-1" }));
+    // No longer scheduled: shutdown reports only the cron.
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["c1"]);
+    stop();
+    await provider.dispose();
+  });
+
   test("a wakeup whose cancel write fails during the grace is reported by shutdown as it would be, never cancelled", async () => {
     const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();
