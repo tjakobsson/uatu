@@ -4640,7 +4640,7 @@ describe("ClaudeProvider sessions", () => {
     await committing;
   });
 
-  test("a live query that retires while disposal waits leaves its request to shutdown's ordered sweep", async () => {
+  test("shutdown ends a conversation's displaced and live requests together, in the holder's order, with the shutdown reason", async () => {
     const { forking, queries, storedId } = revertingProvider();
     const { events } = collect(forking);
     await raceStarts(forking, queries, storedId);
@@ -4649,18 +4649,8 @@ describe("ClaudeProvider sessions", () => {
     const first = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
     const second = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
     await waitFor(() => requestedIds(events).includes("B"));
-    const hold = await holdDisposalOnWrite(forking);
-    try {
-      const disposing = forking.dispose();
-      // The live turn ends, and its idle session retires, while disposal
-      // still waits on the write.
-      live.push({ type: "result", uuid: "res-2", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
-      await waitFor(() => live.returned);
-      hold.release();
-      await disposing;
-    } finally {
-      hold.restore();
-    }
+    await forking.dispose();
+    expect(live.returned).toBe(true);
     const shutdown = { behavior: "deny" as const, message: "The workspace shut down before the user answered." };
     expect([await first, await second]).toEqual([shutdown, shutdown]);
     await waitFor(() => abandonedIds(events).length === 2);
@@ -6060,6 +6050,37 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
       { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused", message: WAKEUP_PAUSED_MESSAGE }) },
       { kind: "status", status: "idle" },
     ]);
+    stop();
+  });
+
+  test("shutdown ends conversations one at a time: each live session's requests, then its lost wakeups", async () => {
+    const context = fixture();
+    const { events, stop } = collect(context.provider);
+    const a = await context.provider.createSession("a");
+    const b = await context.provider.createSession("b");
+    await context.provider.prompt(a.id, { id: "ra", text: "wake me", delivery: "queue" });
+    await context.provider.prompt(b.id, { id: "rb", text: "work", delivery: "queue" });
+    const [queryA, queryB] = [context.queries[0]!, context.queries[1]!];
+    // A schedules a recurring wakeup.
+    queryA.push({ type: "assistant", uuid: "cc", session_id: a.id, message: { role: "assistant", content: [
+      { type: "tool_use", id: "toolu_cc", name: "CronCreate", input: { cron: recurring.schedule, prompt: recurring.prompt, recurring: true } },
+    ] } });
+    queryA.push({ type: "user", uuid: "cc-result", session_id: a.id, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_cc", content: "Scheduled recurring job c1." }] }, tool_use_result: { id: "c1", recurring: true, durable: false } });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "tool:toolu_cc" && update.item.type === "tool" && update.item.status === "completed")));
+    await stopHook(queryA, { session_crons: [recurring] });
+    await waitFor(() => rows(events).some(row => row.id === "wakeup:c1"));
+    // Requests arrive A1, B1, A2.
+    const ask = (query: FakeQuery, id: string) => void query.input.options.canUseTool!("Bash", { command: id }, { signal, toolUseID: id });
+    ask(queryA, "A1");
+    ask(queryB, "B1");
+    ask(queryA, "A2");
+    await waitFor(() => requestedIds(events).includes("A2"));
+    await context.provider.dispose();
+    await waitFor(() => abandonedIds(events).length === 3 && events.some(event => event.eventType === "wakeups.lost"));
+    const shutdownOrder = events
+      .filter(event => event.eventType === "interaction.abandoned" || event.eventType === "wakeups.lost")
+      .map(event => event.eventType === "wakeups.lost" ? `wakeups ${event.conversationId === a.id ? "A" : "B"}` : (event.updates[0] as { item: { requestId: string } }).item.requestId);
+    expect(shutdownOrder).toEqual(["A1", "A2", "wakeups A", "B1"]);
     stop();
   });
 

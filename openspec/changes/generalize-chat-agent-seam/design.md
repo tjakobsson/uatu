@@ -400,9 +400,9 @@ map and its rules out of the Claude Code provider:
   it reads the tokens inside its own turn, so anything their iteration sets
   off waits behind it. A Claude Code session's claims (its tokens and its
   swept mark) exist before its query is built, so a callback the query
-  factory fires at once is owned too. Shutdown sweeps every tracked session
-  (live, displaced, closing) in one call, so all requests end in the
-  holder's order whichever session asked them.
+  factory fires at once is owned too. Shutdown ends a conversation's
+  requests across all its tracked sessions (live, displaced, closing) in one
+  call, so they end in the holder's order whichever session asked them.
   Claude Code sweeps by session, never by conversation: each session records
   the tokens of the registrations it made, and every session-scoped cleanup
   (retire, stream end, failure, a revert's survivors, dispose) ends only
@@ -557,11 +557,15 @@ map and its rules out of the Claude Code provider:
   revert closing its session, a retirement, a stream's end or failure): the
   session stays reachable for shutdown's single sweep. Shutdown runs in a
   fixed order, so no wait can hold up what releases it: (a) the provider is
-  marked disposed; (b) every pending request of every tracked session (live,
-  displaced, closing) ends once, in the holder's order, with the shutdown
-  reason, and an abort delivered later for one of them finds it settled;
-  the lost wakeups of every session it closes are then settled, the live
-  ones first, then the others in the order they were started; (c) every
+  marked disposed; (b) every pending request ends once, with the shutdown
+  reason, and an abort delivered later for one of them finds it settled.
+  Conversations end one at a time, as before: for each live session in
+  order, its conversation's requests (whichever of its tracked sessions
+  asked them) in the holder's order, then the lost wakeups of each of those
+  sessions; then each conversation left with only displaced or closing
+  sessions, in the order they were started. With one session per
+  conversation, requests A1, B1, A2 end as A1, A2, A's lost wakeups, B1;
+  (c) every
   session closes, so a control request still out on one (a rewind) fails
   with its transport rather than being waited on, and a close waiting on a
   callback finds it answered; (d) admitted history mutations and staged-

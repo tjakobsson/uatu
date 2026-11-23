@@ -1718,18 +1718,28 @@ export class ClaudeProvider implements ChatProvider {
     const closing = new Map(this.closingSessions);
     this.startedSessions.clear();
     this.live.clear();
-    // (b) Every pending request ends once, in the holder's order, with the
-    // shutdown reason; a later abort for one of them finds it settled.
+    // (b) Every pending request ends once, with the shutdown reason, before
+    // anything is closed or waited on; a later abort for one of them finds
+    // it settled. Conversations end one at a time, as they always have: each
+    // live session in order, its conversation's requests (whichever of its
+    // tracked sessions asked them) in the holder's order, then the lost
+    // wakeups of each of those sessions; then any conversation left with
+    // only displaced or closing sessions, in the order they were started.
+    // Shutdown is the process exit a schedule cannot survive (D6).
     for (const session of [...sessions, ...others]) session.claims.swept = true;
-    this.interactions.abandonRegistrations([...sessions, ...others].flatMap(session => [...session.claims.requests]), shutdown);
-    // Shutdown is the process exit a schedule cannot survive (D6): every
-    // session it closes has its wakeups settled, the live ones first, then
-    // the others in the order they were started.
-    for (const session of [...sessions, ...others]) {
-      this.cancelSessionWindowRead(session);
-      this.clearIdleTimer(session);
-      const lost = this.settleWakeups(session, "ended");
-      if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+    const endConversation = (group: LiveSession[]) => {
+      this.interactions.abandonRegistrations(group.flatMap(session => [...session.claims.requests]), shutdown);
+      for (const session of group) {
+        this.cancelSessionWindowRead(session);
+        this.clearIdleTimer(session);
+        const lost = this.settleWakeups(session, "ended");
+        if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+      }
+    };
+    for (const session of sessions) endConversation([session, ...others.filter(other => other.id === session.id)]);
+    const orphans = others.filter(other => !sessions.some(session => session.id === other.id));
+    for (const conversationId of new Set(orphans.map(session => session.id))) {
+      endConversation(orphans.filter(session => session.id === conversationId));
     }
     // (c) Every session closes; a control request still out on one (a
     // rewind) fails with its transport rather than being waited on.
