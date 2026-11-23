@@ -2646,6 +2646,68 @@ describe("ClaudeProvider sessions", () => {
 
   });
 
+  test("a turn ending during the shutdown grace leaves its deferred rename for the next start, writing nothing after shutdown", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-shutdown-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const queries: FakeQuery[] = [];
+    const renames: string[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => { renames.push(title); },
+    });
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    // Another conversation's prompt, reading its attachment, keeps the grace open.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    const writeFile = fsPromises.writeFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    let disposeReturned = false;
+    const writesAfterDispose: string[] = [];
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (disposeReturned) writesAfterDispose.push(String(args[0]));
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose().then(() => { disposeReturned = true; });
+      // The renamed conversation's turn ends during the grace.
+      queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+      await new Promise(resolve => setImmediate(resolve));
+      release!();
+      await prompting;
+      await disposing;
+      await new Promise(resolve => setImmediate(resolve));
+    } finally {
+      fsPromises.readFile = readFile;
+      fsPromises.writeFile = writeFile;
+    }
+    expect(renames).toEqual([]);
+    expect(writesAfterDispose).toEqual([]);
+    // The rename is still recorded, for the next start to write.
+    expect(JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")).deferredRenames).toEqual({ [session.id]: "Planned work" });
+  });
+
   test("a session-scoped refusal fallback becomes the conversation's model; a local one does not", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

@@ -621,7 +621,11 @@ map and its rules out of the Claude Code provider:
     first, in (b), to avoid the callback deadlock.
   - (g) Persistence flushes. No write lands after `dispose()` returns, a
     durable write never reports success without writing, and a failed
-    prompt that changed nothing durable writes nothing.
+    prompt that changed nothing durable writes nothing. A deferred rename
+    (one asked for before the transcript existed) is not written once
+    shutdown has started, even when a turn ends in the grace: it is
+    durable, so the next start writes it after that conversation's next
+    turn.
 
   A known limitation, which already exists on `main` and is outside this
   change: a rewind still unanswered when the grace ends is cut off by the

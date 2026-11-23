@@ -4043,6 +4043,10 @@ export class ClaudeProvider implements ChatProvider {
   private async refreshGeneratedTitle(sessionId: string, attempt = 0): Promise<void> {
     const timer = this.titleRefreshTimers.get(sessionId);
     if (timer !== undefined) { clearTimeout(timer); this.titleRefreshTimers.delete(sessionId); }
+    // Not once shutdown has started: a deferred rename is durable, so the
+    // next start writes it after that conversation's next turn, rather than
+    // this one writing after shutdown's final flush.
+    if (this.disposed) return;
     try {
       const generation = this.renameGenerations.get(sessionId) ?? 0;
       const file = sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir);
@@ -4051,12 +4055,15 @@ export class ClaudeProvider implements ChatProvider {
       const deferred = this.deferredRenames.get(sessionId);
       // A newer rename during the existence check supersedes this one: the
       // native write must not land after it and overwrite it.
-      if (deferred !== undefined && await fileExists(file) && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred) {
+      if (deferred !== undefined && await fileExists(file) && !this.disposed && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred) {
         this.deferredRenames.delete(sessionId);
         await this.renameNativeSession(this.nativeId(sessionId), deferred, { dir: this.workspacePath }).catch(() => {
           if (!this.deferredRenames.has(sessionId)) this.deferredRenames.set(sessionId, deferred);
         });
-        this.persistDurableState();
+        // A rename that finished as shutdown began is applied once more on
+        // the next start (the stored record still names it); writing now
+        // could land after the final flush.
+        if (!this.disposed) this.persistDurableState();
       }
       const titles = await readTranscriptTitles(file);
       if ((this.renameGenerations.get(sessionId) ?? 0) !== generation || this.disposed) return;
