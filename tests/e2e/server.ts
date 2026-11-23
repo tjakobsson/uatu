@@ -721,7 +721,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: targetFake.usageReadOutcome,
+      // Through controlJson like every other response, so the usage outcome's
+      // conversationId goes out qualified with the selected agent.
+      return controlJson({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: targetFake.usageReadOutcome,
         // Usage reads stay one list across every fake.
         usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":

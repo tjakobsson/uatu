@@ -62,7 +62,7 @@ test.describe("multi-agent chat", () => {
     // Without `agent`, usageRead's qualified outcome.conversationId picks the fake.
     const outcomeOf = async (agent: string) => (await control(request, { action: "stats", agent }) as { usageReadOutcome: { outcome: string; conversationId?: string } }).usageReadOutcome;
     await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
-    expect(await outcomeOf("claude")).toEqual({ outcome: "fail", conversationId: "conversation-1" });
+    expect(await outcomeOf("claude")).toEqual({ outcome: "fail", conversationId: "claude:conversation-1" });
     expect((await outcomeOf("opencode")).outcome).toBe("no-live-session");
     // A qualifier that names no registered agent is rejected, not sent to the first fake.
     for (const data of [
