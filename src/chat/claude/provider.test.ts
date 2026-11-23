@@ -5291,15 +5291,21 @@ describe("ClaudeProvider sessions", () => {
     expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
   });
 
-  test("a replacement prompt paused at its transcript check when disposal starts is waited for: its rollback lands before dispose returns, nothing after", async () => {
+  test("a replacement prompt paused at its transcript check when the grace ends is drained after the close: its rollback lands before dispose returns, nothing after", async () => {
+    // The grace ends when the test says, while the check is still blocked.
+    const grace = Promise.withResolvers<void>();
     // The undo captures a file, so the staged record carries a recovery
     // snapshot as well as its boundary.
-    const { forking, storedId, forkId, workspace } = revertingProvider(query => {
+    const { forking, queries, storedId, forkId, workspace } = revertingProvider(query => {
       const rewind = query.rewindFiles!.bind(query);
       query.rewindFiles = async (uuid, options) => ({ ...(await rewind(uuid, options)), filesChanged: ["notes.txt"] });
-    });
+    }, { shutdownGrace: () => grace.promise });
     writeFileSync(path.join(workspace, "notes.txt"), "tip");
     await forking.undo!(storedId);
+    // Another conversation's live query, which only shutdown's close ends.
+    const other = await forking.createSession("y");
+    await forking.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    const otherQuery = queries.at(-1)!;
     const stagedBefore = stateOnDisk(workspace).staged[storedId] as { boundaryIndex: number; tipSnapshot: Record<string, unknown> };
     expect(Object.keys(stagedBefore.tipSnapshot)).toEqual([path.join(workspace, "notes.txt")]);
     const access = fsPromises.access;
@@ -5325,12 +5331,15 @@ describe("ClaudeProvider sessions", () => {
       const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
       await paused;
       const disposing = forking.dispose().then(() => { disposeReturned = true; });
-      await new Promise(resolve => setImmediate(resolve));
+      // The grace ends with the check still blocked, and shutdown closes.
+      grace.resolve();
+      await waitFor(() => otherQuery.returned);
       expect(disposeReturned).toBe(false);
+      // Released after the close: only the drain waits for the rollback.
       release!();
       expect(await prompting).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
       await disposing;
-      await new Promise(resolve => setImmediate(resolve));
+      await settledWrites(forking);
     } finally {
       fsPromises.access = access;
       fsPromises.writeFile = writeFile;
