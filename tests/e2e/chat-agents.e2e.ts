@@ -120,6 +120,11 @@ test.describe("multi-agent chat", () => {
     const report = { plan: { fiveHour: { utilization: 9 } }, readAt: 1, conversationId: "claude:conversation-1" };
     await control(request, { action: "usageReport", report });
     expect(await reportOf("claude")).toEqual(report);
+    // With `agent` given, an id whose prefix names no registered agent is a
+    // raw provider id, stored as supplied.
+    const rawReport = { ...report, conversationId: "sub:s1:worker" };
+    await control(request, { action: "usageReport", agent: "claude", report: rawReport });
+    expect(await reportOf("claude")).toEqual(rawReport);
     expect((await request.post("/__e2e/chat", { data: { action: "usageReport", agent: "opencode", report } })).status()).toBe(400);
     // A qualifier that names no registered agent is rejected, not sent to the first fake.
     for (const data of [

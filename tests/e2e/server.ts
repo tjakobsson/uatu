@@ -599,27 +599,26 @@ async function handleE2EChat(request: Request): Promise<Response> {
   if (body.agent !== undefined && typeof body.agent !== "string") {
     return Response.json({ error: `no e2e agent registered as ${JSON.stringify(body.agent)}` }, { status: 400 });
   }
-  // Without `agent`, a qualified id names the owning agent: the top-level
+  // One rule for every id field: a leading segment that names a registered
+  // agent is a qualifier, and any other id is a raw provider id. Without
+  // `agent`, a qualified id names the owning agent: the top-level
   // conversationId, else usageRead's outcome.conversationId or usageReport's
-  // report.conversationId. Remember it
-  // before stripping so conversation-scoped controls reach the right fake
-  // without every spec spelling `agent:` explicitly.
-  // Ids qualify by the production wire rule (the first colon); a qualifier
-  // that names no registered fake is rejected rather than routed to the first.
+  // report.conversationId. Remember it before stripping so conversation-scoped
+  // controls reach the right fake without every spec spelling `agent:`.
   const usageId: unknown = body.action === "usageRead" ? body.outcome?.conversationId : body.action === "usageReport" ? body.report?.conversationId : undefined;
   if (usageId !== undefined && typeof usageId !== "string") {
     return Response.json({ error: `conversationId must be a string, not ${JSON.stringify(usageId)}` }, { status: 400 });
   }
   for (const id of [body.conversationId, usageId]) {
     if (typeof id !== "string") continue;
-    // A colon makes an id qualified; one the wire rule cannot parse (an
-    // empty agent or provider id, `claude:`) is malformed, not raw.
-    if (id.includes(":") && !parseQualifiedConversationId(id)) {
+    if (hasEmptyReservedQualifier(id)) {
       return Response.json({ error: `malformed conversation id ${JSON.stringify(id)}` }, { status: 400 });
     }
-    const qualifier = parseQualifiedConversationId(id)?.agentId;
-    if (qualifier !== undefined && !E2E_FAKES_BY_ID.has(qualifier)) {
-      return Response.json({ error: `no e2e agent registered as ${qualifier}` }, { status: 400 });
+    const qualifier = qualifyingAgent(id);
+    // An id about to choose the agent must name a registered one; otherwise
+    // an unregistered prefix (`claud:`) would silently reach the first fake.
+    if (qualifier === undefined && body.agent === undefined && id.includes(":")) {
+      return Response.json({ error: `${JSON.stringify(id)} names no registered agent` }, { status: 400 });
     }
     // A qualifier must agree with the agent already selected, whether named
     // by `agent` or by an earlier id; a conflict is rejected before stripping.
