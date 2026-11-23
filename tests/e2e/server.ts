@@ -730,7 +730,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "stats":
       // The usage outcome's conversationId goes out qualified with the
       // selected agent, like every other returned id.
-      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: { ...targetFake.usageReadOutcome, ...(targetFake.usageReadOutcome.conversationId ? { conversationId: qualifyConversationId(targetAgentId, targetFake.usageReadOutcome.conversationId) } : {}) },
+      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts.map(attempt => ({ ...attempt, conversationId: qualifyConversationId(targetAgentId, attempt.conversationId) })), permissionChoices: targetFake.permissionChoices, usageReadOutcome: { ...targetFake.usageReadOutcome, ...(targetFake.usageReadOutcome.conversationId ? { conversationId: qualifyConversationId(targetAgentId, targetFake.usageReadOutcome.conversationId) } : {}) },
         // Usage reads stay one list across every fake.
         usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":

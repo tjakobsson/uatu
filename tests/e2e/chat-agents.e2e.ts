@@ -31,7 +31,7 @@ async function bootDualAgentChat(page: Page, request: APIRequestContext): Promis
 test.describe("multi-agent chat", () => {
   // The harness routes a control to the fake it names (ARCHITECTURE.md, "Add
   // an e2e test"); a control aimed at Claude must leave OpenCode's fake alone.
-  test("harness controls reach the agent they name", async ({ request }) => {
+  test("harness controls reach the agent they name", async ({ request, baseURL }) => {
     await request.post("/__e2e/reset");
     await control(request, { action: "agents", count: 2 });
     const interrupted = async (agent: string) => (await control(request, { action: "stats", agent }) as { inventoryTransportInterrupted: boolean }).inventoryTransportInterrupted;
@@ -98,6 +98,14 @@ test.describe("multi-agent chat", () => {
     await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
     expect(await outcomeOf("claude")).toEqual({ outcome: "fail", conversationId: "claude:conversation-1" });
     expect((await outcomeOf("opencode")).outcome).toBe("no-live-session");
+    // So does a reversible attempt's conversationId.
+    await control(request, { action: "declareOnly", agent: "claude", capabilities: ["reversible-history", "usage"] });
+    const undone = await control(request, { action: "seed", agent: "claude", title: "Undo target", items: [] }) as { conversation: { id: string } };
+    await request.post(`/api/chat/conversations/${encodeURIComponent(undone.conversation.id)}/undo?t=${encodeURIComponent(token)}`, {
+      headers: { origin: new URL(baseURL!).origin }, data: { requestId: "harness-undo" },
+    });
+    const attempts = (await control(request, { action: "stats", agent: "claude" }) as { reversibleAttempts: Array<{ conversationId: string; requestId: string }> }).reversibleAttempts;
+    expect(attempts.find(attempt => attempt.requestId === "harness-undo")?.conversationId).toBe(undone.conversation.id);
     // usageReport's report.conversationId selects the agent the same way (the
     // OpenCode fake declares no usage), and the report is served exactly as
     // supplied.
