@@ -64,6 +64,16 @@ test.describe("multi-agent chat", () => {
     }) as { conversation: { id: string }; items: Array<{ childConversationId?: string }> };
     expect(seeded.conversation.id.startsWith("claude:")).toBe(true);
     expect(seeded.items[0]!.childConversationId).toBe("claude:sub:s1:worker");
+    // The seed response qualifies exactly what the production snapshot does:
+    // a tool's childConversationId, not a descendant line's raw conversationId.
+    type Descended = { items: Array<{ descendants?: Array<{ conversationId: string }> }> };
+    const parent = await control(request, {
+      action: "seed", agent: "claude", title: "Descendants",
+      items: [{ id: "tool:parent", type: "tool", createdAt: 1, name: "task", status: "completed",
+        descendants: [{ id: "line:1", parentId: "tool:parent", description: "worker", conversationId: "sub:s1:worker" }] }],
+    }) as Descended & { conversation: { id: string } };
+    const served = await request.get(`/api/chat/conversations/${encodeURIComponent(parent.conversation.id)}?t=${encodeURIComponent(token)}`).then(response => response.json()) as Descended;
+    expect(parent.items[0]!.descendants![0]!.conversationId).toBe(served.items[0]!.descendants![0]!.conversationId);
     // A nested id owned by another registered agent is rejected, not restamped.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Foreign child",

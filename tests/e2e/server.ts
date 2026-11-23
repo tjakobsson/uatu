@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
 import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
-import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId } from "../../src/chat/agents";
+import { MultiAgentChatService, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { VisualStore } from "../../src/chat/visual-store";
@@ -64,7 +64,7 @@ import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
 import { startOpenCodeV2Fake } from "./opencode-v2-fake";
 import { e2eTerminalShell } from "./terminal-shell";
-import type { ChatAgentDescriptor, ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
+import type { ChatAgentDescriptor, ChatCapability, ChatCommand, ChatEvent, ChatModel, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, AgentUsageReport } from "../../src/chat/types";
 
 // One-shot hold on GET /api/terminal/sessions, armed by tests that need an
 // inventory read to complete at a moment they choose (after a pagehide, or
@@ -155,35 +155,6 @@ function qualifyingAgent(value: string): string | undefined {
 }
 function stripAgentQualifier(value: string): string {
   return qualifyingAgent(value) === undefined ? value : parseQualifiedConversationId(value)!.conversationId;
-}
-// The fakes return bare provider ids, which may contain colons themselves
-// (`sub:s1:worker`); every one goes out in the production wire form.
-function qualifyControlValue<T>(value: T, agentId: string): T {
-  const walk = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(walk);
-    if (node && typeof node === "object") {
-      const record = node as Record<string, unknown>;
-      const next: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(record)) {
-        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string") {
-          next[key] = qualifyConversationId(agentId, entry);
-          continue;
-        }
-        next[key] = walk(entry);
-      }
-      // A conversation summary is recognizable by its shape (timeline items
-      // carry no updatedAt); stamp the wire form.
-      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next) {
-        next.id = qualifyConversationId(agentId, next.id as string);
-        const fake = E2E_FAKES_BY_ID.get(agentId);
-        if (!fake) throw new Error(`no e2e agent registered as ${agentId}`);
-        next.agent = fake.descriptor;
-      }
-      return next;
-    }
-    return node;
-  };
-  return walk(value) as T;
 }
 
 // The fake owns attachment persistence (its prompt path validates ids
@@ -680,7 +651,13 @@ async function handleE2EChat(request: Request): Promise<Response> {
   body.item = item;
   // Every conversation a control returns is qualified with the agent it
   // targeted, so request and response name the same owner.
-  const controlJson = (value: unknown) => Response.json(qualifyControlValue(value, targetAgentId));
+  // The fakes return bare provider ids, which may contain colons themselves
+  // (`sub:s1:worker`). Responses use production's own wire mappers, so a
+  // control returns exactly the ids the chat routes would.
+  const descriptor = E2E_FAKES_BY_ID.get(targetAgentId)!.descriptor;
+  const snapshotJson = (snapshot: ConversationSnapshot) => Response.json(qualifyAgentSnapshot(descriptor, snapshot));
+  const summaryJson = (summary: ConversationSummary) => Response.json(qualifyAgentSummary(descriptor, summary));
+  const eventJson = (event: ChatEvent) => Response.json(qualifyAgentEvent(descriptor, event));
   switch (body.action) {
     case "agents": {
       // The only stack is "opencode-v2"; any other value, null included, is
@@ -704,29 +681,29 @@ async function handleE2EChat(request: Request): Promise<Response> {
       return Response.json({ agents: agentCount, ...(body.stack ? { stack: body.stack } : {}) });
     }
     case "seed":
-      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt));
+      return snapshotJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt));
     case "externalCreate":
-      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }));
+      return snapshotJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }));
     case "externalRename":
-      if (body.conversationId) return controlJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
+      if (body.conversationId) return summaryJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
       break;
     case "externalDelete":
-      if (body.conversationId) return controlJson(targetFake.externalDelete(body.conversationId, body.invalidate !== false));
+      if (body.conversationId) return summaryJson(targetFake.externalDelete(body.conversationId, body.invalidate !== false));
       break;
     case "externalSetChild":
       if (body.conversationId && typeof body.child === "boolean") {
-        return controlJson(targetFake.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
+        return summaryJson(targetFake.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
       }
       break;
     case "item":
-      if (body.conversationId && body.item) return controlJson(targetFake.publishItem(body.conversationId, body.item));
+      if (body.conversationId && body.item) return eventJson(targetFake.publishItem(body.conversationId, body.item));
       break;
     case "removeItem":
-      if (body.conversationId && body.itemId) return controlJson(targetFake.removeItem(body.conversationId, body.itemId));
+      if (body.conversationId && body.itemId) return eventJson(targetFake.removeItem(body.conversationId, body.itemId));
       break;
     case "delta":
       if (body.conversationId && body.itemId && typeof body.delta === "string") {
-        return controlJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));
+        return eventJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));
       }
       break;
     case "status":
@@ -736,7 +713,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       break;
     case "configuration":
-      if (body.conversationId && body.configuration) return controlJson(targetFake.publishConfiguration(body.conversationId, body.configuration));
+      if (body.conversationId && body.configuration) return eventJson(targetFake.publishConfiguration(body.conversationId, body.configuration));
       break;
     case "reversibleFiles":
       if (body.conversationId) {
@@ -751,9 +728,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      // Through controlJson like every other response, so the usage outcome's
-      // conversationId goes out qualified with the selected agent.
-      return controlJson({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: targetFake.usageReadOutcome,
+      // The usage outcome's conversationId goes out qualified with the
+      // selected agent, like every other returned id.
+      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: { ...targetFake.usageReadOutcome, ...(targetFake.usageReadOutcome.conversationId ? { conversationId: qualifyConversationId(targetAgentId, targetFake.usageReadOutcome.conversationId) } : {}) },
         // Usage reads stay one list across every fake.
         usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":

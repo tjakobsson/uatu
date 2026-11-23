@@ -285,7 +285,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const lists = await Promise.all(this.order.map(async agent => {
       const read = (async () => {
         const conversations = await agent.service.listConversations();
-        return conversations.map(summary => this.qualifySummary(agent.descriptor, summary));
+        return conversations.map(summary => qualifyAgentSummary(agent.descriptor, summary));
       })();
       read.catch(() => undefined);
       // One agent's stalled startup (a cold probe can run to its timeout)
@@ -354,13 +354,13 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async createConversation(agentId?: string): Promise<AgentConversationSnapshot> {
     const agent = this.requireAgent(agentId ?? this.defaultAgentId());
-    return this.qualifySnapshot(agent.descriptor, await agent.service.createConversation());
+    return qualifyAgentSnapshot(agent.descriptor, await agent.service.createConversation());
   }
 
   async history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot> {
     const { agent, conversationId } = this.resolve(id);
     const page = agent.service.history(conversationId, options).then(snapshot =>
-      this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot), !options?.cursor));
+      this.enrichSnapshot(qualifyAgentSnapshot(agent.descriptor, snapshot), !options?.cursor));
     const read = { id, page };
     this.visualHistoryReads.add(read);
     void page.finally(() => this.visualHistoryReads.delete(read)).catch(() => undefined);
@@ -466,7 +466,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
       const snapshot = native.snapshot;
       boundary = decodeReplayCursor(snapshot.cursor);
-      qualified = await setup(this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot)));
+      qualified = await setup(this.enrichSnapshot(qualifyAgentSnapshot(agent.descriptor, snapshot)));
       if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
     } catch (error) {
       cancel();
@@ -582,7 +582,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       return changed;
     };
     wrapped = new QualifyingEventSubscription(native.events, async raw => {
-        const event = this.qualifyEvent(agent.descriptor, raw);
+        const event = qualifyAgentEvent(agent.descriptor, raw);
         if (event.type === "resync") {
           // Rewrites can replace text without an upsert. Never append a future
           // delta to the pre-rewrite accumulator. A covered history read may
@@ -591,7 +591,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
           historyEpoch++;
           replayNeedsVisualResync = false;
           try {
-            const current = await this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId)));
+            const current = await this.enrichSnapshot(qualifyAgentSnapshot(agent.descriptor, await agent.service.history(conversationId)));
             seed(current);
             boundary = decodeReplayCursor(current.cursor);
           } catch {
@@ -680,7 +680,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const { conversation, ...accepted } = await agent.service.prompt(conversationId, requestId, text, model, mode, variant, attachments, delivery, context, operationReceipt);
     return {
       ...accepted,
-      ...(conversation ? { conversation: this.qualifySummary(agent.descriptor, conversation) } : {}),
+      ...(conversation ? { conversation: qualifyAgentSummary(agent.descriptor, conversation) } : {}),
     };
   }
 
@@ -773,7 +773,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }> {
     const { agent, conversationId } = this.resolve(id);
     const renamed = await agent.service.renameConversation(conversationId, requestId, title);
-    return { conversation: this.qualifySummary(agent.descriptor, renamed.conversation) };
+    return { conversation: qualifyAgentSummary(agent.descriptor, renamed.conversation) };
   }
 
   async cancel(id: string, requestId: string) {
@@ -877,45 +877,49 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     if (!agent) throw new ConversationNotFoundError();
     return { agent, conversationId: parsed.conversationId };
   }
+}
 
-  private qualifySummary(descriptor: ChatAgentDescriptor, summary: ConversationSummary): AgentConversationSummary {
-    return { ...summary, id: qualifyConversationId(descriptor.id, summary.id), agent: descriptor };
-  }
+// The wire form of what an agent's stack returns: summaries, the addressable
+// item fields (a permission or question's conversationId, a tool or
+// background task's childConversationId) and events carry the agent's
+// qualifier. Other nested ids stay as the provider wrote them.
+export function qualifyAgentSummary(descriptor: ChatAgentDescriptor, summary: ConversationSummary): AgentConversationSummary {
+  return { ...summary, id: qualifyConversationId(descriptor.id, summary.id), agent: descriptor };
+}
 
-  private qualifyItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {
-    let next = item;
-    if ((next.type === "permission" || next.type === "question") && next.conversationId) {
-      next = { ...next, conversationId: qualifyConversationId(descriptor.id, next.conversationId) };
-    }
-    if ((next.type === "tool" || next.type === "background_task") && next.childConversationId) {
-      // A subagent child belongs to the same agent as its parent; the
-      // drill-down opens it through the same qualified addressing. A
-      // background task names the same child as its launching tool row —
-      // and names it first, from the start edge, which is what makes a
-      // still-running run openable — so it must be qualified alike.
-      next = { ...next, childConversationId: qualifyConversationId(descriptor.id, next.childConversationId) };
-    }
-    return next;
+export function qualifyAgentItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {
+  let next = item;
+  if ((next.type === "permission" || next.type === "question") && next.conversationId) {
+    next = { ...next, conversationId: qualifyConversationId(descriptor.id, next.conversationId) };
   }
+  if ((next.type === "tool" || next.type === "background_task") && next.childConversationId) {
+    // A subagent child belongs to the same agent as its parent; the
+    // drill-down opens it through the same qualified addressing. A
+    // background task names the same child as its launching tool row —
+    // and names it first, from the start edge, which is what makes a
+    // still-running run openable — so it must be qualified alike.
+    next = { ...next, childConversationId: qualifyConversationId(descriptor.id, next.childConversationId) };
+  }
+  return next;
+}
 
-  private qualifySnapshot(descriptor: ChatAgentDescriptor, snapshot: ConversationSnapshot): AgentConversationSnapshot {
-    return {
-      ...snapshot,
-      conversation: this.qualifySummary(descriptor, snapshot.conversation),
-      items: snapshot.items.map(item => this.qualifyItem(descriptor, item)),
-    };
-  }
+export function qualifyAgentSnapshot(descriptor: ChatAgentDescriptor, snapshot: ConversationSnapshot): AgentConversationSnapshot {
+  return {
+    ...snapshot,
+    conversation: qualifyAgentSummary(descriptor, snapshot.conversation),
+    items: snapshot.items.map(item => qualifyAgentItem(descriptor, item)),
+  };
+}
 
-  private qualifyEvent(descriptor: ChatAgentDescriptor, event: ChatEvent): ChatEvent {
-    const qualified: ChatEvent = { ...event, conversationId: qualifyConversationId(descriptor.id, event.conversationId) };
-    if (qualified.type === "item.upsert") {
-      return { ...qualified, item: this.qualifyItem(descriptor, qualified.item) };
-    }
-    if (qualified.type === "conversation.updated") {
-      return { ...qualified, conversation: this.qualifySummary(descriptor, qualified.conversation) };
-    }
-    return qualified;
+export function qualifyAgentEvent(descriptor: ChatAgentDescriptor, event: ChatEvent): ChatEvent {
+  const qualified: ChatEvent = { ...event, conversationId: qualifyConversationId(descriptor.id, event.conversationId) };
+  if (qualified.type === "item.upsert") {
+    return { ...qualified, item: qualifyAgentItem(descriptor, qualified.item) };
   }
+  if (qualified.type === "conversation.updated") {
+    return { ...qualified, conversation: qualifyAgentSummary(descriptor, qualified.conversation) };
+  }
+  return qualified;
 }
 
 class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
