@@ -268,9 +268,11 @@ const TITLE_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000];
 // own follow-up turn within a fraction of a second (D9). A session whose set
 // emptied and that shows no follow-up inside this window is idle for good.
 const BACKGROUND_FOLLOW_UP_GRACE_MS = 5_000;
-// Shutdown's budget must fit inside the Hub's: it sends SIGKILL
+// Shutdown's budget is sized to the Hub's: it sends SIGKILL
 // `SIGTERM_GRACE_MS` (hub/backend.ts) after SIGTERM, and a test holds the
-// three numbers below to it.
+// sum of the three numbers below to it. Only the grace and the SDK's close
+// are bounds; the drain has no deadline, and one that overruns is cut off
+// by that SIGKILL.
 // Admitted work in flight (a history mutation and its rewind, a release)
 // gets this long to finish before closing every query settles what is
 // still stuck. Interrupts and control requests have no deadline of their
@@ -282,7 +284,8 @@ export const SHUTDOWN_GRACE_MS = 500;
 // 2000 ms timer; shutdown closes every query in parallel, so this is spent
 // once, not per query.
 export const SDK_CLOSE_BUDGET_MS = 2_000;
-// Left for the drain of corrective writes and the final flush.
+// An estimate of what the drain of corrective writes and the final flush
+// take, not a deadline on them.
 export const SHUTDOWN_FLUSH_MARGIN_MS = 500;
 const TITLE_LIMIT = 80;
 
