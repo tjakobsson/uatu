@@ -6829,6 +6829,32 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a cancelled wakeup the SDK names as a wakeup is blocked in the grace even while a typed prompt is pending", async () => {
+    const { provider, stop, query, session } = await scheduled([oneShot, recurring]);
+    // A typed prompt, delivered and not yet ended.
+    await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
+    await settledWrites(provider);
+    // The cancel's write is in flight, so its session stays out of the
+    // sweep and the grace waits for it.
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      // Without a source, the same words may be the person's: they pass.
+      expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "typed-3" })).toEqual({ continue: true });
+      // With the SDK's wakeup source, it is the cancelled wakeup: blocked.
+      for (const source of ["schedule_wakeup", "loop_wakeup"]) {
+        expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: `fired-${source}`, source })).toEqual({ decision: "block", reason: "Cancelled in uatu: this scheduled wakeup no longer fires." });
+      }
+      hold.finish(false);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();

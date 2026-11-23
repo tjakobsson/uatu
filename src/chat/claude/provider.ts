@@ -3316,38 +3316,43 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   /**
-   * A fire of a wakeup the user cancelled (D12): the prompt of a cancelled
-   * wakeup, submitted while no accepted prompt is outstanding (a person who
-   * types the same words is still a person). The hook blocks it — no model
-   * call — and the frames it produces are swallowed.
-   */
-  /**
    * A wakeup shutdown has already reported lost or paused does not fire in
    * a query the grace keeps open: its turn is blocked, as a cancelled one's
-   * is, by the same prompt match. A hook the SDK names as a wakeup's is
-   * blocked even while a prompt is outstanding; one without a source only
-   * while none is, since the person may have typed the same words.
+   * is, by the same rule and prompt match.
    */
   private blocksSettledFire(session: LiveSession, input: Record<string, unknown>): boolean {
     if (!this.disposed || !session.settledAtShutdown?.size) return false;
-    if (typeof input.agent_id === "string" && input.agent_id) return false;
-    const source = typeof input.source === "string" ? input.source : undefined;
-    if (source !== undefined) {
-      if (source !== "loop_wakeup" && source !== "schedule_wakeup") return false;
-    } else if (session.pendingTurns > 0 || session.queuedTurns > 0) {
-      return false;
-    }
+    if (!this.mayBeWakeupFire(session, input)) return false;
     const prompt = typeof input.prompt === "string" ? input.prompt : "";
     if (![...session.settledAtShutdown.values()].some(settledPrompt => wakeupPromptMatches(settledPrompt, prompt))) return false;
     session.blockedFires += 1;
     return true;
   }
 
+  /**
+   * Whether a prompt hook can be a wakeup's fire, for the guards above and
+   * below to match by prompt: not a subagent's; one the SDK names as a
+   * wakeup's, even while a prompt is outstanding; one without a source only
+   * while none is, since the person may have typed the same words.
+   */
+  private mayBeWakeupFire(session: LiveSession, input: Record<string, unknown>): boolean {
+    if (typeof input.agent_id === "string" && input.agent_id) return false;
+    const source = typeof input.source === "string" ? input.source : undefined;
+    if (source !== undefined) return source === "loop_wakeup" || source === "schedule_wakeup";
+    return session.pendingTurns === 0 && session.queuedTurns === 0;
+  }
+
+  /**
+   * A fire of a wakeup the user cancelled (D12): the prompt of a cancelled
+   * wakeup in a hook that can be a wakeup's fire (mayBeWakeupFire). The
+   * hook blocks it — no model call — and the frames it produces are
+   * swallowed.
+   */
   private blocksCancelledFire(session: LiveSession, input: Record<string, unknown>): boolean {
     if (this.live.get(session.id) !== session) return false;
-    if (typeof input.agent_id === "string" && input.agent_id) return false;
+    if (!this.mayBeWakeupFire(session, input)) return false;
     const cancelled = this.cancelledWakeups.get(session.id);
-    if (!cancelled || cancelled.size === 0 || session.pendingTurns > 0 || session.queuedTurns > 0) return false;
+    if (!cancelled || cancelled.size === 0) return false;
     const prompt = typeof input.prompt === "string" ? input.prompt : "";
     if (![...cancelled.values()].some(cancelledPrompt => wakeupPromptMatches(cancelledPrompt, prompt))) return false;
     session.blockedFires += 1;

@@ -577,10 +577,12 @@ map and its rules out of the Claude Code provider:
     shutdown reports it, lost or paused, at once or, for a session left for
     (f), there. Nor does a settled wakeup fire in a query the grace keeps
     open: its turn is blocked at the prompt hook, as a cancelled wakeup's
-    is. A prompt the SDK marks as a wakeup's (source `schedule_wakeup` or
-    `loop_wakeup`) is blocked even while a typed prompt is pending; one
-    without a source is blocked only while none is, since the person may
-    have typed the same words.
+    is. For both, settled and cancelled (a cancel in flight keeps its
+    session out of the sweep, so only the cancellation guard holds its
+    wakeups back), a prompt the SDK marks as a wakeup's (source
+    `schedule_wakeup` or `loop_wakeup`) is blocked even while a typed prompt
+    is pending; one without a source is blocked only while none is, since
+    the person may have typed the same words.
   - (c) Admitted work in flight finishes within a bounded grace
     (`SHUTDOWN_GRACE_MS`, half a second, so that it, the SDK's close
     budget and a margin for the drain and flush together fit inside the
