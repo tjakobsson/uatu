@@ -590,14 +590,17 @@ map and its rules out of the Claude Code provider:
     publication; a wakeup cancel; a deferred rename's native write already
     under way; and every prompt until the provider
     accepts it or queues its rollback, so one already holding its session
-    (reading its attachments, say) is accepted. Acceptance means delivery:
-    an accepted prompt is handed to its still-open query before the close,
-    never reported accepted and then dropped. A query whose stream has
-    ended or failed is not open, even while shutdown still holds it, so a
-    prompt for it is refused. A replacement for a staged revert is
-    acknowledged, and the revert finalized, only after its input has
-    reached the open query; if it cannot be delivered it is refused and the
-    revert rolled back, so the boundary and Redo stay. A deliberate
+    (reading its attachments, say) is accepted. Acceptance means delivery,
+    and delivered means the SDK's input iterator has taken the prompt while
+    its query is open: such a prompt is acknowledged only once taken, never
+    reported accepted and then dropped, and one nothing takes before the
+    close is refused and rolled back. A query whose stream has ended or
+    failed is not open, even while shutdown still holds it, so a prompt for
+    it is refused. A replacement for a staged revert, at any time, is
+    acknowledged, and the revert finalized, only once the SDK has taken it
+    in the same way; if it is not taken it is refused and the revert rolled
+    back, so the boundary and Redo stay. A prompt acknowledged before
+    shutdown began keeps its acknowledgement. A deliberate
     difference from `main`: a cancel that lands before a staged replacement
     is delivered now rejects it and rolls the revert back, where before the
     replacement was reported accepted without being delivered. None of these waits on a

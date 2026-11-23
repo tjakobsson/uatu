@@ -1568,12 +1568,13 @@ export class ClaudeProvider implements ChatProvider {
       outcome: "handled",
       eventType: "prompt.accepted",
     });
-    // A replacement for a staged revert is acknowledged, and the revert
-    // finalized, only once its input has reached a still-open query; one
-    // that cannot be delivered is refused and the revert rolled back, so the
-    // boundary and Redo stay. Any other prompt is acknowledged here, as
-    // before.
-    if (!stagedBefore) {
+    // A replacement for a staged revert, and any prompt reaching this point
+    // during the shutdown grace, is acknowledged (and the revert finalized)
+    // only once the SDK has taken its input from the still-open query; one
+    // it never takes is refused and rolled back, so a revert's boundary and
+    // Redo stay. Any other prompt is acknowledged here, as before.
+    const awaitsDelivery = stagedBefore !== undefined || this.disposed;
+    if (!awaitsDelivery) {
       accept();
       this.retitleFromFirstPrompt(sessionId, input.text);
     }
@@ -1597,19 +1598,29 @@ export class ClaudeProvider implements ChatProvider {
     // is delivered to it, never reported accepted and then dropped.
     if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || session.ended) {
       session.pendingTurns = Math.max(0, session.pendingTurns - 1);
-      if (stagedBefore) return rollBack(new Error("Claude Code session ended before the prompt was accepted"));
+      if (awaitsDelivery) return rollBack(new Error("Claude Code session ended before the prompt was accepted"));
       if (this.live.get(sessionId) === session && session.pendingTurns === 0) await this.retireIfIdle(session);
       return { messageId: input.id };
     }
-    session.queue.push({
+    const envelope: ClaudeUserEnvelope = {
       type: "user",
       message: { role: "user", content },
       parent_tool_use_id: null,
       session_id: sessionId,
-    });
+    };
+    if (!awaitsDelivery) {
+      session.queue.push(envelope);
+      return { messageId: input.id };
+    }
+    // Delivered means taken: the queue closes when the query does (or its
+    // stream ends), withdrawing an envelope nothing took.
+    if (!await session.queue.offer(envelope)) {
+      session.pendingTurns = Math.max(0, session.pendingTurns - 1);
+      return rollBack(new Error("Claude Code session closed before it took the prompt"));
+    }
+    accept();
+    this.retitleFromFirstPrompt(sessionId, input.text);
     if (stagedBefore) {
-      accept();
-      this.retitleFromFirstPrompt(sessionId, input.text);
       // Acceptance finalizes the committed revert: the staged record and its
       // commit marker are dropped; a lost write here is healed by the
       // un-commit recovery on the next start.
@@ -2128,8 +2139,10 @@ export class ClaudeProvider implements ChatProvider {
           });
         }
       }
-      // The stream ended: nothing reads this query's input any more.
+      // The stream ended: nothing reads this query's input any more, and an
+      // envelope still waiting to be taken never will be.
       session.ended = true;
+      session.queue.close();
       // The stream ended without dispose: the session's process is gone.
       if (!this.disposed && !this.closingSessions.has(session)) this.startedSessions.delete(session);
       // A session a racing start displaced from `live` ends too: its own
@@ -2172,6 +2185,7 @@ export class ClaudeProvider implements ChatProvider {
       }
     } catch (error) {
       session.ended = true;
+      session.queue.close();
       if (this.disposed) return;
       if (!this.closingSessions.has(session)) this.startedSessions.delete(session);
       if (this.live.get(session.id) !== session) {

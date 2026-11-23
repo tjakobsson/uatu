@@ -52,6 +52,32 @@ class FakeQuery implements ClaudeQueryHandle {
 
   constructor(readonly input: ClaudeQueryInput) {}
 
+  /** What the query took from its input, each marked with whether the query was still open. */
+  readonly taken: Array<{ envelope: ClaudeUserEnvelope; open: boolean }> = [];
+
+  /** Set before the query starts reading: an SDK that never takes its input. */
+  inputUnread = false;
+
+  /** Reads the input as the SDK does: everything offered, for as long as the query is open. */
+  consumeInput(): this {
+    void (async () => {
+      await Promise.resolve();
+      if (this.inputUnread) return;
+      const reader = this.input.prompt[Symbol.asyncIterator]();
+      while (!this.returned) {
+        const next = await reader.next();
+        if (next.done) return;
+        this.taken.push({ envelope: next.value, open: !this.returned });
+      }
+    })();
+    return this;
+  }
+
+  /** The text of each envelope taken while the query was open. */
+  takenTexts(): string[][] {
+    return this.taken.filter(entry => entry.open).map(entry => entry.envelope.message.content.map(block => String(block.text ?? block.type)));
+  }
+
   push(message: unknown): void {
     const waiter = this.waiters.shift();
     if (waiter) waiter({ value: message, done: false });
@@ -231,7 +257,9 @@ function revertingProvider(prepare?: (query: FakeQuery) => void, options: Partia
     catalogProbe: false,
     configDir,
     queryFactory: input => {
-      const query = new FakeQuery(input);
+      // Each reads its input as the SDK does: a staged replacement is
+      // acknowledged only once taken.
+      const query = new FakeQuery(input).consumeInput();
       query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
       query.getContextUsage = async () => ({ categories: [], totalTokens: 1, maxTokens: 200_000 });
       query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ subscription_type: null, rate_limits_available: false });
@@ -2710,7 +2738,8 @@ describe("ClaudeProvider sessions", () => {
     const renames: string[] = [];
     const provider = new ClaudeProvider({
       workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
-      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      // Each query reads its input as the SDK does, so o2 is delivered.
+      queryFactory: input => { const query = new FakeQuery(input).consumeInput(); queries.push(query); return query; },
       renameNativeSession: async (_sessionId, title) => { renames.push(title); },
     });
     const session = await provider.createSession("x");
@@ -3577,7 +3606,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         queries.push(query);
         return query;
@@ -4490,7 +4520,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         queries.push(query);
         return query;
@@ -4552,7 +4583,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         queries.push(query);
         return query;
@@ -4987,7 +5019,7 @@ describe("ClaudeProvider sessions", () => {
     return { started, release: () => release!(), restore: () => { fsPromises.writeFile = writeFile; } };
   }
 
-  const stateOnDisk = (workspace: string) => JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")) as { staged: Record<string, unknown> };
+  const stateOnDisk = (workspace: string) => JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")) as { staged: Record<string, unknown>; activeNative?: Record<string, unknown> };
 
   test("a redo restoring files when disposal starts is drained: its cleared boundary is on disk when dispose returns", async () => {
     const { forking, storedId, workspace } = revertingProvider(query => {
@@ -5172,16 +5204,52 @@ describe("ClaudeProvider sessions", () => {
       release!();
       await disposing;
       const outcome = await prompting;
-      // Accepted means delivered: the replacement's input reached its query.
+      // Accepted means delivered: the SDK took the replacement's input
+      // while its query was open.
       expect(outcome).toEqual({ messageId: "r-new" });
-      const delivered: Array<{ message: { content: Array<{ text?: string }> } }> = [];
-      const input = replacement.input.prompt[Symbol.asyncIterator]();
-      for (let next = await input.next(); !next.done; next = await input.next()) delivered.push(next.value as never);
-      expect(delivered.map(envelope => envelope.message.content.map(block => block.text))).toEqual([["a different direction"]]);
+      expect(replacement.taken.map(entry => entry.open)).toEqual([true]);
+      expect(replacement.takenTexts()).toEqual([["a different direction"]]);
       await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new")));
     } finally {
       fsPromises.writeFile = writeFile;
     }
+  });
+
+  test("a staged replacement nothing takes before the close is refused, and its boundary and Redo stay", async () => {
+    let unread = false;
+    const { forking, queries, storedId, workspace } = revertingProvider(query => { query.inputUnread = unread; });
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    unread = true;
+    const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    // The replacement's input is offered to its query, which never takes it.
+    const offered = (query: FakeQuery) => (query.input.prompt as unknown as { values: unknown[] }).values.length > 0;
+    await waitFor(() => queries.length === 2 && offered(queries[1]!));
+    await forking.dispose();
+    expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+    expect(queries[1]!.taken).toEqual([]);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new"))).toBe(false);
+    // The revert rolled back: its staged boundary, and with it Redo, stay.
+    expect(stateOnDisk(workspace).staged).toEqual({ [storedId]: { boundaryIndex: 1, tipSnapshot: {} } });
+    expect(stateOnDisk(workspace).activeNative).toEqual({});
+    stop();
+  });
+
+  test("a staged replacement whose stream ends before it takes the input is refused, keeping Redo", async () => {
+    let unread = false;
+    const { forking, queries, storedId } = revertingProvider(query => { query.inputUnread = unread; });
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    unread = true;
+    const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    const offered = (query: FakeQuery) => (query.input.prompt as unknown as { values: unknown[] }).values.length > 0;
+    await waitFor(() => queries.length === 2 && offered(queries[1]!));
+    // The replacement's process exits without reading its input.
+    await queries[1]!.return();
+    expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+    expect(await forking.getReversibleHistoryState!(storedId)).toEqual(expect.objectContaining({ staged: true, canRedo: true }));
+    await forking.dispose();
   });
 
   test("a history mutation started after disposal is refused before any side effect", async () => {
@@ -5221,7 +5289,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         return query;
       },
@@ -5266,7 +5335,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         return query;
       },
@@ -5794,7 +5864,8 @@ describe("plan usage on demand", () => {
   });
 
   test("a prompt reading its attachment when shutdown begins is accepted and delivered within the grace", async () => {
-    const { provider, queries, workspace } = fixture();
+    // The grace outlasts the test: the prompt finishes once its input is taken.
+    const { provider, queries, workspace } = fixture(query => query.consumeInput(), { shutdownGraceMs: 60_000 });
     const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
@@ -5823,14 +5894,45 @@ describe("plan usage on demand", () => {
     }
     expect(queries[0]!.returned).toBe(true);
     await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2")));
-    // Accepted means delivered: the prompt reached the SDK's input stream.
-    const delivered: Array<{ message: { content: Array<{ type: string; text?: string }> } }> = [];
-    const input = queries[0]!.input.prompt[Symbol.asyncIterator]();
-    for (let next = await input.next(); !next.done; next = await input.next()) delivered.push(next.value as never);
-    expect(delivered.map(envelope => envelope.message.content.map(block => block.type === "text" ? block.text : block.type))).toEqual([
+    // Accepted means delivered: the SDK took the prompt while the query was open.
+    expect(queries[0]!.takenTexts()).toEqual([
       ["first"],
       ["image", "with a picture"],
     ]);
+    stop();
+  });
+
+  test("a prompt in the grace that the SDK never takes before the close is refused, not reported accepted", async () => {
+    // Short: nothing takes the input, so the grace runs out.
+    const { provider, queries, workspace } = fixture(undefined, { shutdownGraceMs: 20 });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      release!();
+      await expect(prompting).rejects.toThrow("closed before it took the prompt");
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    expect(queries[0]!.returned).toBe(true);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2"))).toBe(false);
     stop();
   });
 
@@ -6484,6 +6586,8 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
 
   test("a Stop during the shutdown grace never republishes settled wakeups as pending; one first seen then is reported as shutdown would", async () => {
     const { provider, events, stop, session, query, workspace } = await scheduled([oneShot, recurring]);
+    // It reads its input as the SDK does, so the prompt below is delivered.
+    query.consumeInput();
     // An accepted prompt reading its attachment keeps the grace open.
     const image = path.join(workspace, "shot.png");
     writeFileSync(image, "png-bytes");
@@ -6525,10 +6629,12 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
   });
 
   test("a wakeup shutdown has reported does not fire in a query the grace keeps open", async () => {
-    const { provider, events, stop, query, workspace } = await scheduled([oneShot]);
+    const { provider, events, stop, query, queries, workspace } = await scheduled([oneShot]);
     // Another conversation's prompt, reading its attachment, keeps the grace open.
     const other = await provider.createSession("y");
     await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    // Its query reads its input as the SDK does, so o2 is delivered.
+    queries.at(-1)!.consumeInput();
     const image = path.join(workspace, "shot.png");
     writeFileSync(image, "png-bytes");
     const readFile = fsPromises.readFile;
@@ -6559,12 +6665,14 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
   });
 
   test("a settled wakeup the SDK names as a wakeup is blocked in the grace even while a typed prompt is pending", async () => {
-    const { provider, events, stop, query, session, workspace } = await scheduled([oneShot]);
+    const { provider, events, stop, query, queries, session, workspace } = await scheduled([oneShot]);
     // A typed prompt for the same conversation, delivered and not yet ended.
     await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
     // Another conversation's prompt, reading its attachment, keeps the grace open.
     const other = await provider.createSession("y");
     await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    // Its query reads its input as the SDK does, so o2 is delivered.
+    queries.at(-1)!.consumeInput();
     const image = path.join(workspace, "shot.png");
     writeFileSync(image, "png-bytes");
     const readFile = fsPromises.readFile;

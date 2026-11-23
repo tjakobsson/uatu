@@ -35,6 +35,31 @@ describe("PushQueue", () => {
     expect(await banked.take()).toEqual({ value: undefined, done: true });
   });
 
+  test("an offer reports true once a read takes it, false when close comes first, and a withdrawn offer is never read", async () => {
+    const waiting = new PushQueue<string>();
+    const read = waiting.take();
+    expect(await waiting.offer("a")).toBe(true);
+    expect(await read).toEqual({ value: "a", done: false });
+
+    const banked = new PushQueue<string>();
+    let settled: boolean | undefined;
+    const taken = banked.offer("b").then(value => { settled = value; return value; });
+    await Promise.resolve();
+    expect(settled).toBeUndefined();
+    expect(await banked.take()).toEqual({ value: "b", done: false });
+    expect(await taken).toBe(true);
+
+    const closing = new PushQueue<string>();
+    closing.push("plain");
+    const refused = closing.offer("offered");
+    closing.close();
+    expect(await refused).toBe(false);
+    // A plain push stays readable after close; the withdrawn offer does not.
+    expect(await closing.take()).toEqual({ value: "plain", done: false });
+    expect(await closing.take()).toEqual({ value: undefined, done: true });
+    expect(await closing.offer("late")).toBe(false);
+  });
+
   test("detachWaiters ends only the reads in progress: banked values and later pushes stay for the next reader", async () => {
     const queue = new PushQueue<number>();
     const first = queue.take();

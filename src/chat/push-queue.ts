@@ -8,9 +8,13 @@
  * read, then every read ends. `detachWaiters()` ends only the reads in
  * progress, so an aborted subscriber's replacement keeps the banked values
  * and every later push.
+ *
+ * `offer()` is a push that reports whether a reader took the value: true
+ * once a read returns it, false if `close()` comes first, which withdraws
+ * it, so it is never read after it was reported untaken.
  */
 export class PushQueue<T> implements AsyncIterable<T> {
-  private readonly values: T[] = [];
+  private values: Array<{ value: T; taken?: (taken: boolean) => void }> = [];
   private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
   private closed = false;
 
@@ -18,12 +22,24 @@ export class PushQueue<T> implements AsyncIterable<T> {
     if (this.closed) return;
     const waiter = this.waiters.shift();
     if (waiter) waiter({ value, done: false });
-    else this.values.push(value);
+    else this.values.push({ value });
+  }
+
+  offer(value: T): Promise<boolean> {
+    if (this.closed) return Promise.resolve(false);
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter({ value, done: false });
+      return Promise.resolve(true);
+    }
+    return new Promise(taken => this.values.push({ value, taken }));
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    for (const entry of this.values) entry.taken?.(false);
+    this.values = this.values.filter(entry => entry.taken === undefined);
     for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
   }
 
@@ -42,8 +58,12 @@ export class PushQueue<T> implements AsyncIterable<T> {
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: (): Promise<IteratorResult<T>> => {
-        // By length, not by the value: a pushed `undefined` is a value too.
-        if (this.values.length > 0) return Promise.resolve({ value: this.values.shift() as T, done: false });
+        // By entry, not by the value: a pushed `undefined` is a value too.
+        const entry = this.values.shift();
+        if (entry) {
+          entry.taken?.(true);
+          return Promise.resolve({ value: entry.value, done: false });
+        }
         if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
         return new Promise(resolve => this.waiters.push(resolve));
       },
