@@ -6099,6 +6099,17 @@ describe("plan usage on demand", () => {
   });
 });
 
+test("a usage read whose probe would start after shutdown began starts no query and writes nothing", async () => {
+  const { provider, queries, workspace } = fixture();
+  const stateFile = path.join(workspace, ".uatu-test-state.json");
+  // The read is still finding its target when shutdown starts.
+  const reading = provider.readUsage("start");
+  await provider.dispose();
+  expect(await reading).toEqual({ report: null, reason: "unavailable" });
+  expect(queries).toHaveLength(0);
+  expect(existsSync(stateFile)).toBe(false);
+});
+
 test("disposing the provider mid-probe ends the probe query instead of leaving it to its timeout", async () => {
   const { provider, queries } = fixture(query => {
     query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(() => undefined);

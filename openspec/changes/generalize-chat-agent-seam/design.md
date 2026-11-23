@@ -611,7 +611,9 @@ map and its rules out of the Claude Code provider:
     its child to exit (`SDK_CLOSE_BUDGET_MS`, from the SDK's own close):
     its interrupt is sent but not waited on (it has no deadline), and
     closing the transport fails whatever is still out (an interrupt, a
-    rewind), including one a closing session's own teardown waits on.
+    rewind), including one a closing session's own teardown waits on. A
+    usage read still finding its target when shutdown began starts no
+    probe afterwards and writes nothing, so no query outlives this step.
   - (e) What remains drains: an operation the close cut short writes its
     correction or rollback (a rejected rewind rolls its staged boundary
     back, a prompt its configuration or staged revert).

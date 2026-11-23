@@ -3995,6 +3995,10 @@ export class ClaudeProvider implements ChatProvider {
    * conversation to report into.
    */
   private async readUsageThroughProbe(): Promise<UsageReadResult> {
+    // A read still finding its target when shutdown began starts nothing:
+    // neither the hidden id's state write nor the query (which shutdown has
+    // already passed and would never close).
+    if (this.disposed) return { report: null, reason: "unavailable" };
     const nativeId = randomUUID();
     this.hiddenNative.add(nativeId);
     this.persistDurableState();
