@@ -6,7 +6,7 @@ import { frontmatter, frontmatterHtml } from "micromark-extension-frontmatter";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
 
 import { markExternalAnchors } from "../render/external-links";
-import { highlightCodeBlocks, isMermaidPre, markdownSanitizeSchema } from "../render/markdown";
+import { highlightCodeBlocks, markdownSanitizeSchema } from "../render/markdown";
 import { MARKDOWN_CODE_ATTRIBUTE } from "../shared/code-copy";
 import { measureChatWork } from "./performance";
 import type { ChatVisualInput } from "./visual-types";
@@ -132,7 +132,7 @@ function prepareUncached(source: string, key: string, presentation: boolean): Ca
           const code = node.children.length === 1 && node.children[0]?.type === "element" && node.children[0].tagName === "code"
             ? node.children[0] : node;
           code.children = [{ type: "text", value: code.children.map(child => child.type === "text" ? child.value : toHtml(child)).join("") }];
-          if (origin?.codeBlock && !isMermaidPre(node)) node.properties[MARKDOWN_CODE_ATTRIBUTE] = true;
+          if (origin?.codeBlock) node.properties[MARKDOWN_CODE_ATTRIBUTE] = true;
           return node;
         }
         visit(node);

@@ -76,19 +76,6 @@ export type RenderedMarkdown = {
   metadata: DocumentMetadata | undefined;
 };
 
-const RAW_TEXT_CONTAINERS = new Set([
-  "script",
-  "style",
-  "textarea",
-  "title",
-  "xmp",
-  "iframe",
-  "noembed",
-  "noframes",
-  "plaintext",
-  "noscript",
-]);
-
 export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   const metadata = extractMarkdownMetadata(source);
 
@@ -98,26 +85,10 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   // pass the original source through so micromark sees the leading delimiter
   // it knows how to consume; downstream we only surface metadata when our own
   // parser succeeded.
-  const { html: rawHtml, attribute } = compileMarkedMarkdown(source);
+  const { html: rawHtml, preOffsets } = compileMarkedMarkdown(source);
 
-  let tree = fromHtml(rawHtml, { fragment: true });
-  const inertAnnotation = new RegExp(` ${attribute}="1"`, "g");
-  const inertInsertions: { start: number; end: number }[] = [];
-  extractMarkdownCodeMarkers(tree, attribute, rawHtml, inertAnnotation, inertInsertions);
-  if (inertInsertions.length) {
-    // Raw-text spans do not overlap. One bounded reparse restores their exact
-    // literal/decoded text without temporary markers, including inside <noscript>.
-    const segments: string[] = [];
-    let previous = 0;
-    for (const insertion of inertInsertions.sort((a, b) => a.start - b.start)) {
-      if (insertion.start < previous) continue;
-      segments.push(rawHtml.slice(previous, insertion.start));
-      previous = insertion.end;
-    }
-    segments.push(rawHtml.slice(previous));
-    tree = fromHtml(segments.join(""), { fragment: true });
-    extractMarkdownCodeMarkers(tree, attribute, rawHtml, inertAnnotation);
-  }
+  const tree = fromHtml(rawHtml, { fragment: true });
+  markMarkdownCodeBlocks(tree, preOffsets);
   const safe = sanitize(tree, markdownSanitizeSchema);
   if (safe.type === "root") applyMarkdownCodeAttribute(safe);
   markExternalAnchors(safe);
@@ -127,23 +98,23 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
 type HtmlNode = ReturnType<typeof fromHtml>["children"][number];
 type MarkdownEvent = ReturnType<typeof postprocess>[number];
 
-function compileMarkedMarkdown(source: string): { html: string; attribute: string } {
+function compileMarkedMarkdown(source: string): { html: string; preOffsets: Set<number> } {
   const events = postprocess(
     parse({ extensions: [gfm(), frontmatter(["yaml", "toml"])] })
       .document()
       .write(preprocess()(source, undefined, true)),
   );
-  // Pick a temporary attribute absent from `source` so raw HTML `<pre>` blocks
-  // cannot forge a Markdown code-block marker before sanitization.
-  const prefix = "uatu-md-code-";
-  const width = String(source.length).length;
-  const used = new Set<number>();
-  for (const match of source.matchAll(new RegExp(`${prefix}([0-9]{${width}})`, "gi"))) {
-    used.add(Number(match[1]));
-  }
+  // Lone UTF-16 surrogates cannot be produced by Markdown entity decoding
+  // (which replaces surrogate code points with U+FFFD), and scanning `source`
+  // guarantees the sentinel never collides with literal input. Stripping it
+  // before `fromHtml` records exact `<pre>` offsets (including across reordered
+  // GFM footnote buffers) without ever passing a marker to the HTML parser.
   let suffix = 0;
-  while (used.has(suffix)) suffix += 1;
-  const attribute = prefix + String(suffix).padStart(width, "0");
+  let sentinel = `\uD800uatu-pre-${suffix}\uD801`;
+  while (source.includes(sentinel)) {
+    suffix += 1;
+    sentinel = `\uD800uatu-pre-${suffix}\uD801`;
+  }
 
   const wrapped: MarkdownEvent[] = [];
   const wrappers = new Map<MarkdownEvent[1], MarkdownEvent[1]>();
@@ -158,7 +129,7 @@ function compileMarkedMarkdown(source: string): { html: string; attribute: strin
       wrapped.push(["exit", wrappers.get(token)!, context]);
     }
   }
-  const html = compile({
+  const markedHtml = compile({
     allowDangerousHtml: true,
     htmlExtensions: [gfmHtml(), frontmatterHtml(["yaml", "toml"]), {
       enter: {
@@ -172,7 +143,7 @@ function compileMarkedMarkdown(source: string): { html: string; attribute: strin
           let chunk = this.resume();
           const position = chunk.indexOf("<pre");
           if (position !== -1) {
-            chunk = `${chunk.slice(0, position + 4)} ${attribute}="1"${chunk.slice(position + 4)}`;
+            chunk = `${chunk.slice(0, position)}${sentinel}${chunk.slice(position)}`;
           }
           const lastWasTag = this.getData("lastWasTag");
           this.raw(chunk);
@@ -181,38 +152,39 @@ function compileMarkedMarkdown(source: string): { html: string; attribute: strin
       },
     }],
   })(wrapped);
-  return { html, attribute };
+
+  const preOffsets = new Set<number>();
+  if (!markedHtml.includes(sentinel)) return { html: markedHtml, preOffsets };
+  const parts: string[] = [];
+  let cursor = 0;
+  let cleanLength = 0;
+  while (true) {
+    const index = markedHtml.indexOf(sentinel, cursor);
+    if (index === -1) break;
+    const segment = markedHtml.slice(cursor, index);
+    parts.push(segment);
+    cleanLength += segment.length;
+    preOffsets.add(cleanLength);
+    cursor = index + sentinel.length;
+  }
+  parts.push(markedHtml.slice(cursor));
+  return { html: parts.join(""), preOffsets };
 }
 
-function extractMarkdownCodeMarkers(
-  parent: { children: HtmlNode[]; tagName?: string },
-  attribute: string,
-  rawHtml: string,
-  inertAnnotation: RegExp,
-  inertInsertions?: { start: number; end: number }[],
-): void {
+function markMarkdownCodeBlocks(parent: { children: HtmlNode[] }, preOffsets: ReadonlySet<number>): void {
+  if (preOffsets.size === 0) return;
   for (const node of parent.children) {
-    // Separate HTML tokens can land inside a raw-text container such as
-    // <noscript>. Remove temporary markers from raw source spans, not decoded
-    // text, so authored character references remain untouched.
-    if (inertInsertions && node.type === "text" && RAW_TEXT_CONTAINERS.has(parent.tagName ?? "")
-      && node.position?.start.offset !== undefined && node.position.end.offset !== undefined) {
-      const start = node.position.start.offset;
-      for (const match of rawHtml.slice(start, node.position.end.offset).matchAll(inertAnnotation)) {
-        inertInsertions.push({ start: start + match.index!, end: start + match.index! + match[0].length });
-      }
-    }
     if (node.type !== "element") continue;
-    if (node.tagName === "pre" && node.properties[attribute] !== undefined) {
+    const offset = node.position?.start.offset;
+    if (node.tagName === "pre" && offset !== undefined && preOffsets.has(offset)) {
       node.data ??= { position: {} };
       node.data.markdownCodeBlock = true;
     }
-    delete node.properties[attribute];
-    extractMarkdownCodeMarkers(node, attribute, rawHtml, inertAnnotation, inertInsertions);
+    markMarkdownCodeBlocks(node, preOffsets);
   }
 }
 
-export function isMermaidPre(node: HtmlNode): boolean {
+function isMermaidPre(node: HtmlNode): boolean {
   if (node.type !== "element" || node.tagName !== "pre") return false;
   const code = node.children.find(child => child.type === "element" && child.tagName === "code");
   return code?.type === "element"

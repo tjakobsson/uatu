@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { fromHtml } from "hast-util-from-html";
+import { sanitize } from "hast-util-sanitize";
+import { toHtml } from "hast-util-to-html";
+import { micromark } from "micromark";
+import { gfm, gfmHtml } from "micromark-extension-gfm";
 
 import {
+  highlightCodeBlocks,
+  markdownSanitizeSchema,
   renderCodeAsHtml,
   renderMarkdownToHtml,
   SYNTAX_HIGHLIGHT_BYTES_LIMIT,
@@ -56,10 +63,39 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(rawHtml).not.toContain("data-uatu-markdown-code");
   });
 
-  test("strips temporary code-block markers inside raw-text HTML spans like <noscript>", () => {
-    const { html } = renderMarkdownToHtml("<noscript>\n\n```js\nconst x = 1;\n```\n\n</noscript>\n\n```js\nconst y = 2;\n```\n");
-    expect(html).not.toContain("uatu-md-code-");
-    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
+  test("does not leak markers into raw-text HTML spans or quoted HTML attributes, and still marks real code blocks", () => {
+    const baseline = (source: string) => highlightCodeBlocks(
+      toHtml(
+        sanitize(
+          fromHtml(
+            micromark(source, { allowDangerousHtml: true, extensions: [gfm()], htmlExtensions: [gfmHtml()] }),
+            { fragment: true },
+          ),
+          markdownSanitizeSchema,
+        ),
+      ),
+    );
+
+    const noscript = renderMarkdownToHtml("<noscript>\n\n```js\nconst x = 1;\n```\n\n</noscript>\n\n```js\nconst y = 2;\n```\n").html;
+    expect(noscript).not.toContain("uatu-pre-");
+    expect(noscript).not.toContain("uatu-md-code-");
+    expect(noscript).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
+
+    const doubleQuotedSource = '<div title="note\n\n```\nhello\n```\n\nend">shown</div>';
+    const doubleQuoted = renderMarkdownToHtml(doubleQuotedSource).html;
+    expect(doubleQuoted).toBe(baseline(doubleQuotedSource));
+    expect(doubleQuoted).not.toContain("uatu-pre-");
+    expect(doubleQuoted).not.toContain("data-uatu-markdown-code");
+
+    const singleQuotedSource = "<div title='note\n\n```\nhello\n```\n\nend'>shown</div>";
+    const singleQuoted = renderMarkdownToHtml(singleQuotedSource).html;
+    expect(singleQuoted).toBe(baseline(singleQuotedSource));
+    expect(singleQuoted).not.toContain("uatu-pre-");
+    expect(singleQuoted).not.toContain("data-uatu-markdown-code");
+
+    // Reordered GFM footnote buffers and CRLF raw HTML prefixes still match exact `<pre>` offsets.
+    const footnoteAndCrlf = renderMarkdownToHtml('<div title="a\r\nb">x</div>\r\n\r\nRef[^1]\r\n\r\n[^1]:\r\n    ```js\r\n    const f = 1;\r\n    ```\r\n').html;
+    expect(footnoteAndCrlf).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
   });
 
   test("passes through GitHub-style inline HTML blocks (e.g. centered README hero)", () => {
