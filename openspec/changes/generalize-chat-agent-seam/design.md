@@ -584,7 +584,8 @@ map and its rules out of the Claude Code provider:
     Hub's three-second SIGTERM-to-SIGKILL deadline): undo, redo, revert
     and restore,
     a rewind's reply included; a release, from its write to its
-    publication; a wakeup cancel; and every prompt until the provider
+    publication; a wakeup cancel; a deferred rename's native write already
+    under way; and every prompt until the provider
     accepts it or queues its rollback, so one already holding its session
     (reading its attachments, say) is accepted. Acceptance means delivery:
     an accepted prompt is handed to its still-open query before the close,
@@ -622,10 +623,12 @@ map and its rules out of the Claude Code provider:
   - (g) Persistence flushes. No write lands after `dispose()` returns, a
     durable write never reports success without writing, and a failed
     prompt that changed nothing durable writes nothing. A deferred rename
-    (one asked for before the transcript existed) is not written once
-    shutdown has started, even when a turn ends in the grace: it is
-    durable, so the next start writes it after that conversation's next
-    turn.
+    (one asked for before the transcript existed) stays recorded until its
+    native write succeeds, so a write made meanwhile, or a failure, leaves
+    it for the next start. One already being written when shutdown starts
+    finishes in (c); one not started is not written once shutdown has
+    started, even when a turn ends in the grace: it is durable, so the next
+    start writes it after that conversation's next turn.
 
   A known limitation, which already exists on `main` and is outside this
   change: a rewind still unanswered when the grace ends is cut off by the

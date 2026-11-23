@@ -4056,14 +4056,20 @@ export class ClaudeProvider implements ChatProvider {
       // A newer rename during the existence check supersedes this one: the
       // native write must not land after it and overwrite it.
       if (deferred !== undefined && await fileExists(file) && !this.disposed && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred) {
-        this.deferredRenames.delete(sessionId);
-        await this.renameNativeSession(this.nativeId(sessionId), deferred, { dir: this.workspacePath }).catch(() => {
-          if (!this.deferredRenames.has(sessionId)) this.deferredRenames.set(sessionId, deferred);
+        // Admitted work, which shutdown waits for and drains. The record
+        // stays, in memory and on disk, until the native write has
+        // succeeded, so a snapshot written meanwhile still names it and a
+        // failure leaves it for the next start.
+        await this.admit(async () => {
+          try {
+            await this.renameNativeSession(this.nativeId(sessionId), deferred, { dir: this.workspacePath });
+          } catch {
+            return;
+          }
+          if (this.deferredRenames.get(sessionId) !== deferred) return;
+          this.deferredRenames.delete(sessionId);
+          await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
         });
-        // A rename that finished as shutdown began is applied once more on
-        // the next start (the stored record still names it); writing now
-        // could land after the final flush.
-        if (!this.disposed) this.persistDurableState();
       }
       const titles = await readTranscriptTitles(file);
       if ((this.renameGenerations.get(sessionId) ?? 0) !== generation || this.disposed) return;
