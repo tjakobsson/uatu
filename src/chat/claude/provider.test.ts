@@ -4960,7 +4960,10 @@ describe("ClaudeProvider sessions", () => {
   });
 
   test("disposal waits for a revert's close already under way, then leaves the query closed and its requests settled", async () => {
-    const { forking, queries, storedId } = revertingProvider();
+    // The grace ends when the test says, so the order of grace and close
+    // can be seen.
+    const grace = Promise.withResolvers<void>();
+    const { forking, queries, storedId } = revertingProvider(undefined, { shutdownGrace: () => grace.promise });
     const { events } = collect(forking);
     await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
     await forking.undo!(storedId);
@@ -4977,15 +4980,22 @@ describe("ClaudeProvider sessions", () => {
     await waitFor(() => requestedIds(events).includes("q1"));
     const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
     await interruptStarted;
+    const order: string[] = [];
+    const close = queries[0]!.return.bind(queries[0]!);
+    queries[0]!.return = async () => { order.push("return"); return close(); };
     let disposed = false;
     const disposing = forking.dispose().then(() => { disposed = true; });
-    // Shutdown has swept the closing session. A macrotask boundary comes only
-    // once every microtask has run, so a disposal that did not wait for the
-    // blocked close would have finished by then.
+    // Shutdown has swept the closing session; while the grace lasts, nothing
+    // closes its query.
     expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
-    await new Promise(resolve => setImmediate(resolve));
+    expect(order).toEqual([]);
+    order.push("grace ended");
+    grace.resolve();
+    // Only then does shutdown close it, and it still waits for the
+    // revert's blocked teardown.
+    await waitFor(() => order.includes("return"));
+    expect(order[0]).toBe("grace ended");
     expect(disposed).toBe(false);
-    // Shutdown gives the revert's teardown its grace before closing.
     release!();
     await disposing;
     expect(queries[0]!.returned).toBe(true);
