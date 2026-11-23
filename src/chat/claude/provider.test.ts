@@ -2832,6 +2832,42 @@ describe("ClaudeProvider sessions", () => {
     expect(started).toEqual(["Planned work", "Newer"]);
   });
 
+  test("a manual rename drops a failed deferred rename's record from disk too", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-stale-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    const started: string[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      // The deferred write fails; the manual one succeeds.
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") throw new Error("disk full");
+      },
+    });
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => started.length === 1);
+    await settledWrites(provider);
+    // The failed write left its record on disk, for the next start.
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    await provider.renameSession(session.id, "Newer");
+    // Dropped with the rename: a restart must not apply the stale title.
+    expect(recorded()).toEqual({});
+    expect(started).toEqual(["Planned work", "Newer"]);
+    await provider.dispose();
+  });
+
   test("a turn ending during the shutdown grace leaves its deferred rename for the next start, writing nothing after shutdown", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-shutdown-")));
     const workspace = path.join(root, "workspace");

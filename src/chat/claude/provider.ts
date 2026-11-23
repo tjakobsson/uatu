@@ -4178,7 +4178,9 @@ export class ClaudeProvider implements ChatProvider {
       // is the one the transcript ends with.
       await this.deferredRenameWrites.get(sessionId);
       await this.renameNativeSession(this.nativeId(sessionId), trimmed, { dir: this.workspacePath });
-      this.deferredRenames.delete(sessionId);
+      // A deferred title still recorded (its own write failed) is dropped on
+      // disk too, so a restart cannot apply it over this one.
+      if (this.deferredRenames.delete(sessionId)) await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
     } else {
       this.deferredRenames.set(sessionId, trimmed);
       this.persistDurableState();
