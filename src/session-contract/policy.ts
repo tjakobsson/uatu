@@ -2,7 +2,7 @@
 // workspace credentials nor browser-selected identity participate in key
 // generation or verification.
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { classifySessionRequest } from "./paths";
+import { classifySessionRequest, sessionBasePath } from "./paths";
 
 export const CHILD_POLICY_HEADER = "x-uatu-hub-chat-policy";
 export const CHAT_ACTION_BODY_BYTES = 128 * 1024;
@@ -68,7 +68,7 @@ export function readChildPolicyBootstrap(text: string) {
   if (text.length > POLICY_ENVELOPE_MAX_BYTES) throw new Error("invalid policy bootstrap");
   const value = JSON.parse(text);
   if (!value || value.version !== 1 || typeof value.workspaceId !== "string" || !/^[a-z0-9-]+$/.test(value.workspaceId)
-    || value.basePath !== `/s/${value.workspaceId}/` || typeof value.instanceId !== "string"
+    || value.basePath !== sessionBasePath(value.workspaceId) || typeof value.instanceId !== "string"
     || !/^[0-9a-f-]{36}$/.test(value.instanceId) || typeof value.secret !== "string"
     || !/^[A-Za-z0-9_-]{43}$/.test(value.secret)
     || Object.keys(value).some(key => !["version", "workspaceId", "basePath", "instanceId", "secret"].includes(key))) throw new Error("invalid policy bootstrap");

@@ -2226,6 +2226,15 @@ function bindWorkerDismissals(store: WorkerDismissalsStore, live: LiveEndpoint):
 
 // Starts the public HTTP/TLS media boundary around the private Bun router
 // and its existing WebSocket bridge handlers.
+// Which requests the Hub's media boundary streams: a session's media path,
+// under any workspace prefix, as the session contract classifies it. The
+// classification is method-independent; the boundary admits only GET and
+// HEAD itself.
+export function isHubMediaRequest(request: Request): boolean {
+  const session = parseSessionPath(new URL(request.url).pathname);
+  return session !== null && classifySessionPath(request.method, session.suffix) === "media";
+}
+
 export function startHubServer(deps: HubDeps) {
   const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
     processFactory: new CloneProcessAdapter({ gitCommand: deps.gitCommand }),
@@ -2260,7 +2269,7 @@ export function startHubServer(deps: HubDeps) {
     },
   });
   boundary = startMediaHttpBoundary({ server: inner, hostname: deps.config.host, port: deps.config.port, tls,
-    isMediaRequest: request => /^\/s\/[^/]+\/api\/media$/.test(new URL(request.url).pathname),
+    isMediaRequest: isHubMediaRequest,
     fetch: (request, server) => handler(request, server),
   });
   return Object.assign(boundary.server, { ready: boundary.ready, cloneJobs, live, liveBroker, worktreeReconciler });
