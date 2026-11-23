@@ -311,6 +311,9 @@ type LiveSession = {
   // wakeup cancels under way (see cancelWakeup).
   releasing?: boolean;
   cancelling?: number;
+  // Wakeups whose cancel is being written: each is that cancel's until it
+  // settles, so reconciliation neither settles nor drops it.
+  pendingCancels?: Map<string, number>;
   released?: boolean;
   // Left by shutdown's sweep for its end, because its own release or cancel
   // was under way then: set for the rest of shutdown, after that operation
@@ -3095,6 +3098,8 @@ export class ClaudeProvider implements ChatProvider {
       if (!value || typeof value !== "object") continue;
       const cron = value as Record<string, unknown>;
       if (typeof cron.id !== "string" || !cron.id || typeof cron.schedule !== "string" || !cron.schedule) continue;
+      // Being cancelled: carried over below, as it stands.
+      if (session.pendingCancels?.has(cron.id)) continue;
       // Cancelled by the user: the CLI still holds it, uatu does not (D12).
       if (this.cancelledWakeups.get(session.id)?.has(cron.id)) continue;
       const known = session.wakeups.get(cron.id);
@@ -3110,6 +3115,14 @@ export class ClaudeProvider implements ChatProvider {
       if (known && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt) continue;
       // During shutdown's grace nothing is republished as pending.
       if (!this.disposed) updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
+    }
+    // A wakeup whose cancel is being written stays the cancel's: kept as it
+    // stands, whatever this Stop lists, and neither settled nor dropped. The
+    // cancel reports it cancelled once its write has succeeded; if the write
+    // fails, it is settled as any other wakeup.
+    for (const wakeupId of session.pendingCancels?.keys() ?? []) {
+      const wakeup = session.wakeups.get(wakeupId);
+      if (wakeup) next.set(wakeupId, wakeup);
     }
     // A session shutdown has swept: a wakeup it has reported stays settled,
     // and one first seen now is reported the way shutdown reports it, lost
@@ -3223,6 +3236,8 @@ export class ClaudeProvider implements ChatProvider {
       // One admitted operation, which shutdown waits for: the cancel owns
       // its wakeup's outcome, so shutdown never reports it paused or lost.
       session.cancelling = (session.cancelling ?? 0) + 1;
+      const pendingCancels = (session.pendingCancels ??= new Map());
+      pendingCancels.set(wakeupId, (pendingCancels.get(wakeupId) ?? 0) + 1);
       try {
         await this.admit(async () => {
           await this.recordCancelled(sessionId, [[wakeupId, live.prompt]]);
@@ -3236,6 +3251,9 @@ export class ClaudeProvider implements ChatProvider {
         });
       } finally {
         session.cancelling -= 1;
+        const remaining = (pendingCancels.get(wakeupId) ?? 1) - 1;
+        if (remaining > 0) pendingCancels.set(wakeupId, remaining);
+        else pendingCancels.delete(wakeupId);
       }
       return;
     }

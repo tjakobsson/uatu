@@ -647,6 +647,11 @@ map and its rules out of the Claude Code provider:
     in flight at shutdown: that session's `wakeups.lost` comes after every
     other conversation's abandonments, because requests must be settled
     first, in (b), to avoid the callback deadlock.
+    A wakeup whose cancel is still being written stays that cancel's: a
+    Stop, in the grace or before it, neither settles nor drops it. The
+    cancel reports it `wakeup.cancelled` once its write has succeeded; if
+    the write fails, the wakeup stays in the session and is settled as any
+    other, here by shutdown.
   - (g) Persistence flushes. No write lands after `dispose()` returns, a
     durable write never reports success without writing, and a failed
     prompt that changed nothing durable writes nothing. A deferred rename

@@ -7177,6 +7177,49 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a Stop while a wakeup's cancel is being written leaves it to the cancel, which reports it cancelled once", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      // The CLI's Stop still lists the cron the cancel has not yet recorded.
+      await stopHook(query, { session_crons: [oneShot, recurring] });
+      hold.finish(false);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    const c1Rows = events.flatMap(event => event.updates.filter(update => update.kind === "upsert" && update.item.id === "wakeup:c1").map(update => [event.eventType, (update as { item: { status: string } }).item.status]));
+    expect(c1Rows.filter(([, status]) => status === "cancelled")).toEqual([["wakeup.cancelled", "cancelled"]]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a wakeup whose cancel write fails during the grace is reported by shutdown as it would be, never cancelled", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    let cancelError: unknown;
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1").catch(error => { cancelError = error; });
+      await hold.started;
+      const disposing = provider.dispose();
+      // A Stop in the grace, while the cancel's write is still out.
+      await stopHook(query, { session_crons: [oneShot, recurring] });
+      hold.finish(true);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    expect(cancelError).toEqual(expect.objectContaining({ message: "disk full" }));
+    const c1Statuses = events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === "wakeup:c1")
+      .map(update => (update as { item: { status: string } }).item.status);
+    expect(c1Statuses).not.toContain("cancelled");
+    expect(c1Statuses.at(-1)).toBe("paused");
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();
