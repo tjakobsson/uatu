@@ -744,7 +744,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "stats":
       // Through controlJson like every other response, so the usage outcome's
       // conversationId goes out qualified with the selected agent.
-      return controlJson({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: targetFake.usageReadOutcome, usageReport: targetFake.usageReport,
+      return controlJson({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: targetFake.usageReadOutcome,
         // Usage reads stay one list across every fake.
         usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":
@@ -787,7 +787,8 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.declareOnly(body.capabilities ?? []);
       return Response.json({ ok: true });
     case "usageReport":
-      targetFake.setUsageReport(body.report ? { ...body.report, ...(body.report.conversationId ? { conversationId: stripAgentQualifier(body.report.conversationId) } : {}) } : null);
+      // Stored exactly as supplied: the report's id only selected the agent.
+      targetFake.setUsageReport(body.report ?? null);
       return Response.json({ ok: true });
     case "usageRead":
       targetFake.setUsageReadOutcome({ ...(body.outcome ?? { outcome: "no-live-session" }), ...(body.outcome?.conversationId ? { conversationId: stripAgentQualifier(body.outcome.conversationId) } : {}) });

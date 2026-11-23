@@ -74,12 +74,13 @@ test.describe("multi-agent chat", () => {
     await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
     expect(await outcomeOf("claude")).toEqual({ outcome: "fail", conversationId: "claude:conversation-1" });
     expect((await outcomeOf("opencode")).outcome).toBe("no-live-session");
-    // usageReport's report.conversationId routes and strips the same way.
-    const reportOf = async (agent: string) => (await control(request, { action: "stats", agent }) as { usageReport: { conversationId?: string } | null }).usageReport;
+    // usageReport's report.conversationId selects the agent the same way (the
+    // OpenCode fake declares no usage), and the report is served exactly as
+    // supplied.
+    const reportOf = async (agent: string) => ((await request.get(`/api/chat/usage?agent=${agent}&t=${encodeURIComponent(token)}`).then(response => response.json())) as { report: { conversationId?: string } | null }).report;
     const report = { plan: { fiveHour: { utilization: 9 } }, readAt: 1, conversationId: "claude:conversation-1" };
     await control(request, { action: "usageReport", report });
-    expect((await reportOf("claude"))?.conversationId).toBe("claude:conversation-1");
-    expect(await reportOf("opencode")).toBeNull();
+    expect(await reportOf("claude")).toEqual(report);
     expect((await request.post("/__e2e/chat", { data: { action: "usageReport", agent: "opencode", report } })).status()).toBe(400);
     // A qualifier that names no registered agent is rejected, not sent to the first fake.
     for (const data of [
