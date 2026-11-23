@@ -5112,7 +5112,6 @@ describe("login guidance and agent-named copy", () => {
         const notice = document.querySelector<HTMLElement>("#chat-login-notice")!;
         await waitUntil(() => statusReads > before && notice.hidden === true, () => `status reads ${statusReads}, notice hidden ${notice.hidden}`);
       }
-      await Bun.sleep(20);
       window.dispatchEvent(new Event("pagehide"));
       for (const tag of document.head.querySelectorAll('meta[name="uatu-base-path"], meta[name="uatu-hub"]')) tag.remove();
       resetAppBasePathForTests();
