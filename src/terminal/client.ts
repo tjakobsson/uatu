@@ -378,7 +378,7 @@ const defaultClock: RecoveryClock = {
 // into the recovery's vocabulary here; a network failure is a `failed` read,
 // which proves nothing about any PTY. Same-origin GETs carry no Origin
 // header, so the page's address goes in the page-origin header (the literal
-// mirrors PAGE_ORIGIN_HEADER in terminal/auth.ts): it is what lets the
+// mirrors PAGE_ORIGIN_HEADER in session-contract/headers.ts): it is what lets the
 // inventory answer 403 for an address the origin gate refuses — the verdict
 // `origin-rejected` is built on, and the reason a refused attach behind a
 // Host-rewriting proxy ends in the origin diagnostic rather than in retries.
