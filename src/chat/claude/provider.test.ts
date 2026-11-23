@@ -5551,7 +5551,40 @@ describe("plan usage on demand", () => {
     await provider.dispose();
   });
 
-  test("disposal while a start waits on its transcript check leaves no query, no process, no request and no later write behind", async () => {
+  test("a prompt reading its attachment when shutdown begins is accepted within the grace", async () => {
+    const { provider, queries, workspace } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      release!();
+      expect(await prompting).toEqual({ messageId: "r2" });
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    expect(queries[0]!.returned).toBe(true);
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2")));
+    stop();
+  });
+
+  test("a start still at its transcript check when shutdown begins starts no query and leaves no request or later write behind", async () => {
     const { provider, queries, configDir, workspace } = fixture();
     const writeFile = fsPromises.writeFile;
     let disposedAt: number | undefined;
@@ -5576,9 +5609,11 @@ describe("plan usage on demand", () => {
     try {
       const started = provider.prompt("idle-session", { id: "r1", text: "now", delivery: "queue", mode: "plan" });
       await waiting;
-      await provider.dispose();
-      disposedAt = Date.now();
+      // Shutdown waits for the prompt; its start resumes after shutdown began.
+      const disposing = provider.dispose();
       release!();
+      await disposing;
+      disposedAt = Date.now();
       await expect(started).rejects.toThrow("Claude provider is disposed");
     } finally {
       fsPromises.access = access;

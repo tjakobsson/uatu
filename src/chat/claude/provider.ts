@@ -647,9 +647,8 @@ export class ClaudeProvider implements ChatProvider {
   private readonly closingSessions = new Map<LiveSession, Promise<void>>();
   // History mutations admitted and not yet ended (see admit).
   private readonly mutations = new Set<Promise<void>>();
-  // Replacement prompts committing a staged revert, until accepted or
-  // rolled back (see prompt).
-  private readonly stagedPrompts = new Set<Promise<void>>();
+  // Prompts under way, until accepted or rolled back (see prompt).
+  private readonly prompts = new Set<Promise<void>>();
   // Sessions created but never prompted: they exist only here until the SDK
   // writes their first transcript entry.
   private readonly pending = new Map<string, ProviderSession>();
@@ -1386,18 +1385,16 @@ export class ClaudeProvider implements ChatProvider {
   async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     await this.restoreDurableState();
     if (this.disposed) throw new Error("Claude provider is disposed");
-    // A replacement prompt that commits a staged revert changes durable
-    // state until it is accepted or its rollback is written: shutdown waits
-    // for it (after its sweep, since the commit closes a live session), so
-    // no write of this provider's lands after dispose() returns.
-    if (!this.staged.has(sessionId)) return this.promptAdmitted(sessionId, input);
+    // An accepted prompt is admitted work until the provider accepts it or
+    // queues its rollback: shutdown lets it finish within its grace, and
+    // drains its rollback (a staged revert's included) before it returns.
     const running = this.promptAdmitted(sessionId, input);
     const tracked = running.then(() => undefined, () => undefined);
-    this.stagedPrompts.add(tracked);
+    this.prompts.add(tracked);
     try {
       return await running;
     } finally {
-      this.stagedPrompts.delete(tracked);
+      this.prompts.delete(tracked);
     }
   }
 
@@ -1763,10 +1760,10 @@ export class ClaudeProvider implements ChatProvider {
       endConversation(orphans.filter(session => session.id === conversationId));
     }
     // (c) Admitted work in flight (history mutations and their rewinds,
-    // releases, wakeup cancels, replacement prompts committing a revert)
+    // releases, wakeup cancels, prompts not yet accepted or rolled back)
     // finishes as it would have, within the grace; new work is refused (see
     // admit).
-    const admitted = () => Promise.all([...this.mutations, ...this.stagedPrompts]);
+    const admitted = () => Promise.all([...this.mutations, ...this.prompts]);
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([admitted(), new Promise<void>(resolve => { graceTimer = setTimeout(resolve, this.shutdownGraceMs); })]);
     clearTimeout(graceTimer);

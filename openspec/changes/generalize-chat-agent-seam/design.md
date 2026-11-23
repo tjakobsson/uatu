@@ -592,17 +592,16 @@ map and its rules out of the Claude Code provider:
   Code had already applied, the boundary is still rolled back and Redo is
   lost. One that has changed state must finish or roll back, and
   `dispose()` waits for it: admitted undo, redo, revert and restore operations (their
-  write-ahead and corrective writes complete normally), and a replacement
-  prompt that committed a staged revert, tracked until it is accepted or its
-  rollback is written. For those two, no write lands after `dispose()`
-  returns, and a durable write never reports success without writing. A
-  start still waiting when the workspace shuts down (on its transcript
-  check, its last wait) starts no query and fails its caller as a disposed
-  provider does, and a failed prompt that changed nothing durable writes
-  nothing. A known limitation, which already exists on `main` and is outside
-  this change: an ordinary prompt (no staged revert) that changed the
-  conversation's configuration and then fails after shutdown has started
-  can still write its configuration rollback after `dispose()` returns;
+  write-ahead and corrective writes complete normally), and every prompt
+  under way, tracked until the provider accepts it or its rollback is
+  queued: one already holding its session (reading its attachments, say) is
+  accepted within the grace, and one that cannot be has its rollback,
+  configuration or staged revert, drained before `dispose()` returns. No
+  write lands after `dispose()` returns, and a durable write never reports
+  success without writing. A start still waiting when the workspace shuts
+  down (on its transcript check, its last wait) starts no query and fails
+  its caller as a disposed provider does, and a failed prompt that changed
+  nothing durable writes nothing;
 - the Claude Code provider's replies keep their timing. A reply the adapter
   makes runs at once, so the provider learns the holder's own outcome
   synchronously through `tryAnswer` (settled, refused with its error, or
