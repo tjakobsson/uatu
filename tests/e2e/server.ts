@@ -147,7 +147,8 @@ const E2E_FAKE_AGENTS: readonly { descriptor: ChatAgentDescriptor; service: Fake
 ];
 const E2E_FAKES_BY_ID = new Map(E2E_FAKE_AGENTS.map(fake => [fake.descriptor.id, fake]));
 const E2E_DEFAULT_AGENT_ID = E2E_FAKE_AGENTS[0]!.descriptor.id;
-// The registered agent a qualified id names, or undefined for a bare id.
+// The registered agent a qualified id names, or undefined for a bare id or
+// one whose qualifier is not registered (which the control boundary rejects).
 function qualifyingAgent(value: string): string | undefined {
   const agentId = parseQualifiedConversationId(value)?.agentId;
   return agentId !== undefined && E2E_FAKES_BY_ID.has(agentId) ? agentId : undefined;
@@ -635,8 +636,15 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // conversationId, else (usageRead only) outcome.conversationId. Remember it
   // before stripping so conversation-scoped controls reach the right fake
   // without every spec spelling `agent:` explicitly.
+  // Ids qualify by the production wire rule (the first colon); a qualifier
+  // that names no registered fake is rejected rather than routed to the first.
   for (const id of [body.conversationId, body.action === "usageRead" ? body.outcome?.conversationId : undefined]) {
-    if (typeof id === "string") body.agent ??= qualifyingAgent(id);
+    if (typeof id !== "string") continue;
+    const qualifier = parseQualifiedConversationId(id)?.agentId;
+    if (qualifier !== undefined && !E2E_FAKES_BY_ID.has(qualifier)) {
+      return Response.json({ error: `no e2e agent registered as ${qualifier}` }, { status: 400 });
+    }
+    body.agent ??= qualifier;
   }
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
   if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
@@ -713,7 +721,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices,
+      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices, usageReadOutcome: targetFake.usageReadOutcome,
         // Usage reads stay one list across every fake.
         usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":
