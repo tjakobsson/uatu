@@ -662,7 +662,16 @@ map and its rules out of the Claude Code provider:
   A known limitation, which already exists on `main` and is outside this
   change: a rewind still unanswered when the grace ends is cut off by the
   close and rolls its boundary back, even if Claude Code had already
-  applied it, so Redo is lost;
+  applied it, so Redo is lost.
+
+  A second known limitation, of what delivery can observe: the SDK's input
+  iterator taking the envelope is the last point the provider sees, and
+  delivery stays defined there. The SDK then writes the prompt to the
+  CLI's stdin; if the CLI exits after that write and before it reads its
+  own input, the prompt is lost, and for a staged replacement that is after
+  the revert has been finalized. It needs the CLI to exit in that window;
+  nothing the provider can observe tells it apart from a prompt the CLI
+  read;
 - the Claude Code provider's replies keep their timing. A reply the adapter
   makes runs at once, so the provider learns the holder's own outcome
   synchronously through `tryAnswer` (settled, refused with its error, or
