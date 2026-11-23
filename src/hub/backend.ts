@@ -110,6 +110,11 @@ export class LocalProcessBackend implements SessionBackend {
     }
 
     const stderrTail = collectTail(child.stderr);
+    // Observed from here on: a session that exits before or while its
+    // readiness proof is verified must not yield a link that can sign.
+    let exitObserved = false;
+    const exited = child.exited.then(code => code ?? null).catch(() => null);
+    void child.exited.then(() => { exitObserved = true; }, () => { exitObserved = true; });
 
     let ready: ReadyLine;
     try {
@@ -126,8 +131,9 @@ export class LocalProcessBackend implements SessionBackend {
     }
 
     // Policy trust needs both halves: the session consumed the bootstrap,
-    // and it then proved so on its own listener.
-    const trusted = bootstrapped && await verifyPolicyReadiness(ready.url.origin, basePath, authority);
+    // and it then proved so on its own listener. A session seen to exit by
+    // then gets no trust at all.
+    const trusted = bootstrapped && await verifyPolicyReadiness(ready.url.origin, basePath, authority) && !exitObserved;
     if (!trusted) authority.dispose();
     const link = createSessionLink({
       workspaceId: workspace.id,
@@ -139,7 +145,7 @@ export class LocalProcessBackend implements SessionBackend {
     });
     const session: RunningSession = {
       link,
-      exited: child.exited.then(code => code ?? null).catch(() => null),
+      exited,
       stop: async () => {
         link.withdraw();
         await terminate(child, this.terminationGraceMs);

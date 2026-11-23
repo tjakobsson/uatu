@@ -71,6 +71,58 @@ describe("LocalProcessBackend", () => {
     running = await backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
     expect(running.link.policyTrust).toBe("unavailable");
   }, 60_000);
+  test("a session that exits while its readiness proof is verified never yields a trusted link", async () => {
+    // The session answers a valid proof, but the backend observes its exit
+    // before the answer arrives. The exit is the test's to signal: the
+    // child's proof handler asks the test first, and the test resolves the
+    // exit the backend watches before letting the child answer.
+    const exit = Promise.withResolvers<number>();
+    const notify = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+      exit.resolve(0);
+      return new Response(null, { status: 204 });
+    } });
+    let actual: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+    try {
+      const workspace = await makeWorkspace();
+      const fixturePath = path.join(workspace, "exiting-child.ts");
+      const bootstrapModule = new URL("../session-contract/bootstrap.ts", import.meta.url).pathname;
+      await writeFile(fixturePath, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
+        const policy = await consumeChildPolicyDescriptor();
+        const server = Bun.serve({hostname:'127.0.0.1', port:0, async fetch(request) {
+          const {challenge} = await request.json();
+          await fetch(${JSON.stringify(`http://127.0.0.1:${notify.port}/`)});
+          return Response.json({proof: policy?.proof(challenge)});
+        }});
+        console.log('http://127.0.0.1:'+server.port+'/');
+        process.stdin.resume(); process.on('SIGTERM',()=>process.exit(0));`);
+      const backend = new LocalProcessBackend({
+        uatuArgv: [process.execPath, fixturePath],
+        terminationGraceMs: 10,
+        spawn: ((argv: string[], options: Parameters<typeof Bun.spawn>[1]) => {
+          actual = Bun.spawn(argv, options) as Bun.Subprocess<"pipe", "pipe", "pipe">;
+          return new Proxy(actual, {
+            get(target, property) {
+              if (property === "exited") return exit.promise;
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        }) as unknown as typeof Bun.spawn,
+      });
+      const entry = { id: "exits-during-proof", path: workspace, backend: "local" as const, displayName: "exits-during-proof" };
+      const session = await backend.start(entry, "/s/exits-during-proof/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+      expect(session.link.policyTrust).not.toBe("ready");
+      expect(session.link.sign(
+        { method: "POST", pathname: "/s/exits-during-proof/api/chat/conversations/x/prompts", body: "{}" },
+        { principal: "alice", revision: 0, autoBackgroundOnSteer: true },
+      )).toBeNull();
+      expect(await session.exited).toBe(0);
+    } finally {
+      actual?.kill("SIGKILL");
+      await actual?.exited;
+      await notify.stop(true);
+    }
+  }, 30_000);
   for (const [flavor, argv] of [
     ["source", [process.execPath, "run", CLI_PATH]],
     ...(process.env.UATU_TEST_COMPILED_BINARY ? [["compiled", [process.env.UATU_TEST_COMPILED_BINARY]]] : []),
