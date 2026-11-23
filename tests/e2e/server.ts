@@ -435,6 +435,14 @@ async function handleE2EPersonalState(request: Request): Promise<Response> {
   return Response.json(personalState);
 }
 
+// The item fields each control reads; any other control ignores them.
+type ItemField = "items" | "older" | "item";
+const ITEM_FIELDS_BY_ACTION: Partial<Record<string, readonly ItemField[]>> = {
+  seed: ["items", "older"],
+  item: ["item"],
+  recoverItems: ["items"],
+};
+
 async function handleE2EChat(request: Request): Promise<Response> {
   const body = await request.json() as {
     action?: string;
@@ -669,18 +677,21 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // Items are checked only on the actions that consume them; any other
   // control ignores an unused payload, as before. There, `items` and `older`
   // must be lists and every entry an object with a string `type`.
-  const consumesItems = body.action === "seed" || body.action === "item" || body.action === "recoverItems";
+  // Each item-consuming control names the fields it reads; only those are
+  // checked, and they must be lists of (or one) object with a string `type`.
+  const consumed = typeof body.action === "string" && Object.hasOwn(ITEM_FIELDS_BY_ACTION, body.action) ? ITEM_FIELDS_BY_ACTION[body.action]! : [];
   const isItem = (entry: unknown): boolean => typeof entry === "object" && entry !== null && !Array.isArray(entry) && typeof (entry as { type?: unknown }).type === "string";
-  const wellFormed = [body.items, body.older].every(list => list === undefined || (Array.isArray(list) && list.every(isItem)))
-    && (body.item === undefined || isItem(body.item));
-  if (consumesItems && !wellFormed) {
-    return Response.json({ error: "items must be objects with a string type" }, { status: 400 });
-  }
-  if (consumesItems) for (const entry of [...(body.items ?? []), ...(body.older ?? []), ...(body.item ? [body.item] : [])]) checkItemIdTypes(entry);
+  const wellFormed = consumed.every(field => {
+    const value = body[field];
+    return value === undefined || (field === "item" ? isItem(value) : Array.isArray(value) && value.every(isItem));
+  });
+  if (!wellFormed) return Response.json({ error: `${consumed.join(" and ")} must hold objects with a string type` }, { status: 400 });
+  const entriesOf = (field: ItemField): ConversationItem[] => field === "item" ? (body.item ? [body.item] : []) : body[field] ?? [];
+  for (const field of consumed) for (const entry of entriesOf(field)) checkItemIdTypes(entry);
   if (nonStringId !== undefined) return Response.json({ error: `conversation ids must be strings, not ${JSON.stringify(nonStringId.value)}` }, { status: 400 });
-  const items = consumesItems ? body.items?.map(ownItemIds) : body.items;
-  const older = consumesItems ? body.older?.map(ownItemIds) : body.older;
-  const item = consumesItems ? body.item && ownItemIds(body.item) : body.item;
+  const items = consumed.includes("items") ? body.items?.map(ownItemIds) : body.items;
+  const older = consumed.includes("older") ? body.older?.map(ownItemIds) : body.older;
+  const item = consumed.includes("item") ? body.item && ownItemIds(body.item) : body.item;
   if (malformedId !== undefined) return Response.json({ error: `malformed conversation id ${JSON.stringify(malformedId)}` }, { status: 400 });
   if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);

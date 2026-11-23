@@ -111,6 +111,12 @@ test.describe("multi-agent chat", () => {
     // seed, and an unused payload on another control is ignored.
     expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Null item", items: [null] } })).status()).toBe(400);
     expect((await request.post("/__e2e/chat", { data: { action: "stats", agent: "claude", items: [null] } })).status()).toBe(200);
+    // ...and a control checks only the item fields it reads.
+    const host = await control(request, { action: "seed", agent: "claude", title: "Item host", items: [] }) as { conversation: { id: string } };
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "item", conversationId: host.conversation.id, older: [null],
+      item: { id: "message:unused-older", type: "assistant_message", createdAt: 1, markdown: "fine" },
+    } })).status()).toBe(200);
     // So is a nested reserved prefix with nothing after it.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Malformed child",
