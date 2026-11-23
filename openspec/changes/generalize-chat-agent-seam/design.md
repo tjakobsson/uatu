@@ -585,7 +585,12 @@ map and its rules out of the Claude Code provider:
     accepts it or queues its rollback, so one already holding its session
     (reading its attachments, say) is accepted. Acceptance means delivery:
     an accepted prompt is handed to its still-open query before the close,
-    never reported accepted and then dropped. None of these waits on a
+    never reported accepted and then dropped. A query whose stream has
+    ended or failed is not open, even while shutdown still holds it, so a
+    prompt for it is refused. A replacement for a staged revert is
+    acknowledged, and the revert finalized, only after its input has
+    reached the open query; if it cannot be delivered it is refused and the
+    revert rolled back, so the boundary and Redo stay. None of these waits on a
     callback, which (b) has settled, or on a close once shutdown has
     started, so waiting cannot deadlock.
   - (d) Every query closes: its interrupt is sent but not waited on (it has

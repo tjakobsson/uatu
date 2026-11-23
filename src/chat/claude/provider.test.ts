@@ -4960,6 +4960,84 @@ describe("ClaudeProvider sessions", () => {
     expect(stateOnDisk(workspace).staged[storedId]).toEqual(stagedBefore);
   });
 
+  test("a prompt whose query's stream ends during the shutdown grace is refused, never accepted into a query nothing reads", async () => {
+    const { provider, queries, workspace } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] }).catch(error => error as Error);
+      await readStarted;
+      const disposing = provider.dispose();
+      // The CLI's stream ends during the grace.
+      const exited = readerExit(provider, queries[0]!);
+      await queries[0]!.return();
+      await exited;
+      release!();
+      expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session ended before the prompt was accepted" }));
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2"))).toBe(false);
+    stop();
+  });
+
+  test("a staged replacement is acknowledged only once its input has reached a still-open query", async () => {
+    const { forking, queries, storedId, workspace } = revertingProvider();
+    const { events } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    const writeFile = fsPromises.writeFile;
+    let finalizing: (() => void) | undefined;
+    const finalizeStarted = new Promise<void>(resolve => { finalizing = resolve; });
+    let release: (() => void) | undefined;
+    // Hold the write that drops the staged record (the revert's
+    // finalization) until shutdown has closed every query.
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      const [file, data] = args;
+      if (String(file).includes(".uatu-test-state.json") && !String(data).includes(`"${storedId}":{"boundaryIndex"`)) {
+        fsPromises.writeFile = writeFile;
+        finalizing!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+      await finalizeStarted;
+      const replacement = queries.at(-1)!;
+      const disposing = forking.dispose();
+      await waitFor(() => replacement.returned);
+      release!();
+      await disposing;
+      const outcome = await prompting;
+      // Accepted means delivered: the replacement's input reached its query.
+      expect(outcome).toEqual({ messageId: "r-new" });
+      const delivered: Array<{ message: { content: Array<{ text?: string }> } }> = [];
+      const input = replacement.input.prompt[Symbol.asyncIterator]();
+      for (let next = await input.next(); !next.done; next = await input.next()) delivered.push(next.value as never);
+      expect(delivered.map(envelope => envelope.message.content.map(block => block.text))).toEqual([["a different direction"]]);
+      await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new")));
+    } finally {
+      fsPromises.writeFile = writeFile;
+    }
+  });
+
   test("a history mutation started after disposal is refused before any side effect", async () => {
     const { forking, queries, storedId, workspace } = revertingProvider();
     await forking.dispose();

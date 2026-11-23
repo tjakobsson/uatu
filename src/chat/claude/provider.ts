@@ -298,6 +298,9 @@ type LiveSession = {
   released?: boolean;
   // Wakeups shutdown has reported lost or paused: they stay settled.
   settledAtShutdown?: Set<string>;
+  // The query's stream has ended or failed: input pushed now would never
+  // be read, even while shutdown still holds the session in the live map.
+  ended?: boolean;
   id: string;
   notificationLifecycle: ClaudeNotificationLifecycle;
   queue: PushQueue<ClaudeUserEnvelope>;
@@ -1432,47 +1435,7 @@ export class ClaudeProvider implements ChatProvider {
     // Everything before the queue push can fail; the rollback must cover it
     // all — an attachment that vanished after admission is as much a
     // pre-acceptance failure as a spawn that never came up.
-    try {
-      const alreadyLive = this.live.get(sessionId);
-      session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
-      reachedConfiguration = true;
-      if (!alreadyLive) started = session;
-      if (input.model) await this.switchModel(sessionId, input.model, input.variant);
-      if (input.mode !== undefined) {
-        const previousMode = this.configurations.get(sessionId)?.mode;
-        if (input.mode === "plan" && previousMode !== "plan") {
-          this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
-          this.persistDurableState();
-        }
-        const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
-        this.configurations.set(sessionId, configuration);
-        // Awaited: an accepted turn must not run under a mode the restarted
-        // provider would deny ever was selected.
-        await this.queuePersist(this.durableSnapshot());
-        // A session that already existed switches live; a fresh one was
-        // created with the mode in its options. An install that rejects
-        // the mode value (an older CLI) keeps the turn alive; the
-        // configuration event still reflects the request and the session
-        // keeps its previous mode.
-        if (alreadyLive) await alreadyLive.query.setPermissionMode?.(input.mode).catch(() => undefined);
-      }
-      // Images ride the prompt as base64 blocks read from the workspace's
-      // attachment store; the store, bounds, and upload routes are shared
-      // across agents (D5) — only this delivery is Claude-shaped.
-      for (const attachment of input.attachments ?? []) {
-        const bytes = await fs.readFile(attachment.absolutePath);
-        content.push({
-          type: "image",
-          source: { type: "base64", media_type: attachment.mimeType, data: bytes.toString("base64") },
-        });
-      }
-      // The stream can die during any of the awaits above; accepting into
-      // a dead session's queue would strand the turn with no reader left
-      // to end it. Everything after this check is synchronous.
-      if (this.live.get(sessionId) !== session) {
-        throw new Error("Claude Code session ended before the prompt was accepted");
-      }
-    } catch (error) {
+    const rollBack = async (error: unknown): Promise<never> => {
       // A session this failed prompt started holds no accepted turn — and
       // after a rollback it is bound to the fork the routing just left.
       // Retire it: keeping it would send the next prompt into the wrong
@@ -1528,13 +1491,56 @@ export class ClaudeProvider implements ChatProvider {
         throw new Error(`${error instanceof Error ? error.message : "prompt failed"}; additionally the rollback could not be recorded: ${persistError instanceof Error ? persistError.message : "write failed"}`);
       }
       throw error;
+    };
+    try {
+      const alreadyLive = this.live.get(sessionId);
+      session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
+      reachedConfiguration = true;
+      if (!alreadyLive) started = session;
+      if (input.model) await this.switchModel(sessionId, input.model, input.variant);
+      if (input.mode !== undefined) {
+        const previousMode = this.configurations.get(sessionId)?.mode;
+        if (input.mode === "plan" && previousMode !== "plan") {
+          this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
+          this.persistDurableState();
+        }
+        const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
+        this.configurations.set(sessionId, configuration);
+        // Awaited: an accepted turn must not run under a mode the restarted
+        // provider would deny ever was selected.
+        await this.queuePersist(this.durableSnapshot());
+        // A session that already existed switches live; a fresh one was
+        // created with the mode in its options. An install that rejects
+        // the mode value (an older CLI) keeps the turn alive; the
+        // configuration event still reflects the request and the session
+        // keeps its previous mode.
+        if (alreadyLive) await alreadyLive.query.setPermissionMode?.(input.mode).catch(() => undefined);
+      }
+      // Images ride the prompt as base64 blocks read from the workspace's
+      // attachment store; the store, bounds, and upload routes are shared
+      // across agents (D5) — only this delivery is Claude-shaped.
+      for (const attachment of input.attachments ?? []) {
+        const bytes = await fs.readFile(attachment.absolutePath);
+        content.push({
+          type: "image",
+          source: { type: "base64", media_type: attachment.mimeType, data: bytes.toString("base64") },
+        });
+      }
+      // The stream can die during any of the awaits above; accepting into
+      // a dead session's queue would strand the turn with no reader left
+      // to end it. Everything after this check is synchronous.
+      if (this.live.get(sessionId) !== session || session.ended) {
+        throw new Error("Claude Code session ended before the prompt was accepted");
+      }
+    } catch (error) {
+      return rollBack(error);
     }
     if (input.text) content.push({ type: "text", text: input.text });
     if (content.length === 0) content.push({ type: "text", text: "" });
     const acceptedAt = this.now();
     // The provider mints the user's timeline item at accept time; the SDK's
     // own echo is skipped by the live normalizer.
-    this.emit(sessionId, {
+    const accept = () => this.emit(sessionId, {
       notificationTurns: session.notificationLifecycle.accept(input.id, acceptedAt),
       updates: [
         { kind: "upsert", item: {
@@ -1552,13 +1558,14 @@ export class ClaudeProvider implements ChatProvider {
       outcome: "handled",
       eventType: "prompt.accepted",
     });
-    this.retitleFromFirstPrompt(sessionId, input.text);
-    // Acceptance finalizes a committed revert: the staged record and its
-    // commit marker are dropped; a lost write here is healed by the
-    // un-commit recovery on the next start.
-    if (stagedBefore && this.staged.get(sessionId) === stagedBefore) {
-      this.staged.delete(sessionId);
-      await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
+    // A replacement for a staged revert is acknowledged, and the revert
+    // finalized, only once its input has reached a still-open query; one
+    // that cannot be delivered is refused and the revert rolled back, so the
+    // boundary and Redo stay. Any other prompt is acknowledged here, as
+    // before.
+    if (!stagedBefore) {
+      accept();
+      this.retitleFromFirstPrompt(sessionId, input.text);
     }
     session.pendingTurns += 1;
     const cancelSequence = session.cancelSequence;
@@ -1578,8 +1585,9 @@ export class ClaudeProvider implements ChatProvider {
     } while (session.windowAccountEpoch !== this.accountEpoch || waitedFor !== session.windowReady);
     // During the shutdown grace the query is still open: an accepted prompt
     // is delivered to it, never reported accepted and then dropped.
-    if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session) {
+    if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || session.ended) {
       session.pendingTurns = Math.max(0, session.pendingTurns - 1);
+      if (stagedBefore) return rollBack(new Error("Claude Code session ended before the prompt was accepted"));
       if (this.live.get(sessionId) === session && session.pendingTurns === 0) await this.retireIfIdle(session);
       return { messageId: input.id };
     }
@@ -1589,6 +1597,17 @@ export class ClaudeProvider implements ChatProvider {
       parent_tool_use_id: null,
       session_id: sessionId,
     });
+    if (stagedBefore) {
+      accept();
+      this.retitleFromFirstPrompt(sessionId, input.text);
+      // Acceptance finalizes the committed revert: the staged record and its
+      // commit marker are dropped; a lost write here is healed by the
+      // un-commit recovery on the next start.
+      if (this.staged.get(sessionId) === stagedBefore) {
+        this.staged.delete(sessionId);
+        await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
+      }
+    }
     return { messageId: input.id };
   }
 
@@ -2095,6 +2114,8 @@ export class ClaudeProvider implements ChatProvider {
           });
         }
       }
+      // The stream ended: nothing reads this query's input any more.
+      session.ended = true;
       // The stream ended without dispose: the session's process is gone.
       if (!this.disposed && !this.closingSessions.has(session)) this.startedSessions.delete(session);
       // A session a racing start displaced from `live` ends too: its own
@@ -2136,6 +2157,7 @@ export class ClaudeProvider implements ChatProvider {
         }
       }
     } catch (error) {
+      session.ended = true;
       if (this.disposed) return;
       if (!this.closingSessions.has(session)) this.startedSessions.delete(session);
       if (this.live.get(session.id) !== session) {
