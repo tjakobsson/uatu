@@ -605,9 +605,12 @@ map and its rules out of the Claude Code provider:
     shutdown began keeps its acknowledgement. A deliberate
     difference from `main`: a cancel that lands before a staged replacement
     is delivered now rejects it and rolls the revert back, where before the
-    replacement was reported accepted without being delivered. None of these waits on a
-    callback, which (b) has settled, or on a close once shutdown has
-    started, so waiting cannot deadlock.
+    replacement was reported accepted without being delivered. None of
+    these waits on a callback, which (b) has settled. An admitted release
+    can still reach `retireSession()` in the grace and await the SDK's
+    close of its query; the grace bounds shutdown's initial wait for it,
+    and (d) waits for that close as it does for any closing session's,
+    within the SDK's close budget, so waiting cannot deadlock.
   - (d) Every query closes, all at once (the usage and catalog probes'
     included), since one SDK close may take up to two seconds waiting for
     its child to exit (`SDK_CLOSE_BUDGET_MS`, from the SDK's own close):
