@@ -5,6 +5,8 @@ import {
   classifySessionRequest,
   INTERNAL_SESSION_PATHS,
   parseSessionPath,
+  SESSION_CONVERSATION_EVENTS_ROUTE,
+  SESSION_WORKER_EVIDENCE_ROUTE,
   sessionBasePath,
   sessionConversationEventsPath,
   sessionPath,
@@ -43,6 +45,22 @@ describe("session base path", () => {
   test("conversation ids are encoded into their internal paths", () => {
     expect(sessionConversationEventsPath("opencode:a/b")).toBe("/api/chat/conversations/opencode%3Aa%2Fb/events");
     expect(sessionWorkerEvidencePath("opencode:a/b")).toBe("/api/chat/conversations/opencode%3Aa%2Fb/worker-evidence");
+  });
+
+  test("each conversation-scoped path is its route template with the encoded id, byte for byte", () => {
+    const cases: [id: string, encoded: string][] = [
+      ["sample", "sample"],
+      ["opencode:parent", "opencode%3Aparent"],
+      ["claude:with space", "claude%3Awith%20space"],
+      ["opencode:a/b", "opencode%3Aa%2Fb"],
+      ["opencode:$&%?#", "opencode%3A%24%26%25%3F%23"],
+    ];
+    for (const [id, encoded] of cases) {
+      expect(sessionConversationEventsPath(id)).toBe(`/api/chat/conversations/${encoded}/events`);
+      expect(sessionWorkerEvidencePath(id)).toBe(`/api/chat/conversations/${encoded}/worker-evidence`);
+      expect(sessionConversationEventsPath(id)).toBe(SESSION_CONVERSATION_EVENTS_ROUTE.replace(":conversationId", encoded));
+      expect(sessionWorkerEvidencePath(id)).toBe(SESSION_WORKER_EVIDENCE_ROUTE.replace(":conversationId", encoded));
+    }
   });
 });
 

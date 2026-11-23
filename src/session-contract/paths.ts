@@ -48,11 +48,18 @@ export function sessionSuffix(pathname: string, basePath: string): string | null
 // Hub too: the Hub reaches them on the session's own listener, and no page
 // has a use for either.
 
+// A conversation-scoped path: the registered route template with the
+// encoded conversation id in place of its parameter, so each path is
+// declared once.
+function conversationPath(route: string, conversationId: string): string {
+  return route.replace(":conversationId", () => encodeURIComponent(conversationId));
+}
+
 export const SESSION_DOCUMENT_EVENTS_PATH = "/api/events";
 export const SESSION_INVENTORY_EVENTS_PATH = "/api/chat/conversations/events";
 export const SESSION_CONVERSATION_EVENTS_ROUTE = "/api/chat/conversations/:conversationId/events";
 export function sessionConversationEventsPath(conversationId: string): string {
-  return `/api/chat/conversations/${encodeURIComponent(conversationId)}/events`;
+  return conversationPath(SESSION_CONVERSATION_EVENTS_ROUTE, conversationId);
 }
 // Workspace activity summary stream: opening comment, then
 // `event: activity` with internal data {working, awaiting, unresolved} on
@@ -65,7 +72,7 @@ export const SESSION_NOTIFICATIONS_PATH = "/api/chat/notifications/events";
 export const SESSION_TERMINAL_SESSIONS_PATH = "/api/terminal/sessions";
 export const SESSION_WORKER_EVIDENCE_ROUTE = "/api/chat/conversations/:conversationId/worker-evidence";
 export function sessionWorkerEvidencePath(conversationId: string): string {
-  return `/api/chat/conversations/${encodeURIComponent(conversationId)}/worker-evidence`;
+  return conversationPath(SESSION_WORKER_EVIDENCE_ROUTE, conversationId);
 }
 export const SESSION_ACCOUNTS_CHANGED_PATH = "/api/chat/accounts-changed";
 export const SESSION_POLICY_PROOF_PATH = "/api/internal/hub-policy-proof";
