@@ -658,12 +658,17 @@ async function handleE2EChat(request: Request): Promise<Response> {
   const controlJson = (value: unknown) => Response.json(qualifyControlValue(value, targetAgentId));
   switch (body.action) {
     case "agents": {
+      // The only stack is "opencode-v2"; any other value, null included, is
+      // rejected. It offers one agent, so a count beside it may only be 1.
       // Only an omitted count means one agent; an explicit null is rejected.
-      const agentCount = body.stack !== undefined || body.count === undefined ? 1 : body.count;
-      if (!Number.isInteger(agentCount) || agentCount < 1 || agentCount > fakeRouters.length) {
-        return Response.json({ error: `count must be an integer from 1 to ${fakeRouters.length}` }, { status: 400 });
+      const stacked = body.stack !== undefined;
+      if (stacked && body.stack !== "opencode-v2") return Response.json({ error: `unknown stack ${JSON.stringify(body.stack)}` }, { status: 400 });
+      const maxCount = stacked ? 1 : fakeRouters.length;
+      const agentCount = body.count === undefined ? 1 : body.count;
+      if (!Number.isInteger(agentCount) || agentCount < 1 || agentCount > maxCount) {
+        return Response.json({ error: `count must be an integer from 1 to ${maxCount}` }, { status: 400 });
       }
-      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : fakeRouters[agentCount - 1]!;
+      const next = stacked ? openCodeV2Stack(body.backgroundPreview) : fakeRouters[agentCount - 1]!;
       if (next !== activeChatRouter) {
         // Existing SSE subscriptions are bound to their original router;
         // changing the delegating proxy only affects new requests.

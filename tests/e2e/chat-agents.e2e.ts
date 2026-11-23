@@ -52,6 +52,11 @@ test.describe("multi-agent chat", () => {
     expect(await offered()).toBe(2);
     expect((await request.post("/__e2e/chat", { data: { action: "agents", count: null } })).status()).toBe(400);
     expect(await offered()).toBe(2);
+    // Only the opencode-v2 stack exists, and it offers one agent.
+    for (const data of [{ stack: "opencode-v3" }, { stack: null }, { stack: "opencode-v2", count: 2 }, { stack: "opencode-v2", count: null }]) {
+      expect((await request.post("/__e2e/chat", { data: { action: "agents", ...data } })).status()).toBe(400);
+    }
+    expect(await offered()).toBe(2);
     // A bare provider id may contain colons; it still goes out in the wire form.
     const seeded = await control(request, {
       action: "seed", agent: "claude", title: "Colon child",
