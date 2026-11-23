@@ -896,12 +896,16 @@ export function qualifyAgentSummary(descriptor: ChatAgentDescriptor, summary: Co
  * row — and names it first, from the start edge, which is what makes a
  * still-running run openable — so it is qualified alike.
  */
+type AddressableItemIdFieldTable = {
+  // Each kind may list only fields its own item variant declares.
+  readonly [Kind in ConversationItem["type"]]?: readonly (keyof Extract<ConversationItem, { type: Kind }> & string)[];
+};
 export const ADDRESSABLE_ITEM_ID_FIELDS = {
   permission: ["conversationId"],
   question: ["conversationId"],
   tool: ["childConversationId"],
   background_task: ["childConversationId"],
-} as const satisfies Partial<Record<ConversationItem["type"], readonly string[]>>;
+} as const satisfies AddressableItemIdFieldTable;
 
 /** The addressable id fields of an item's kind; none for any other kind. */
 export function addressableItemIdFields(type: unknown): readonly string[] {
