@@ -216,11 +216,16 @@ class HarnessBackend implements SessionBackend {
         CHILD_START_TIMEOUT_MS,
       );
       // The harness announces with the contract's ready line, here without
-      // a token (see below).
+      // a token (see below). The listener keeps draining stdout for the
+      // child's whole life, but scans only until the ready line: after it,
+      // the scanner no longer trims its buffer.
       const scanner = createReadyLineScanner();
+      let announced = false;
       child.stdout!.on("data", (chunk: Buffer) => {
+        if (announced) return;
         const ready = scanner.push(chunk.toString());
         if (!ready) return;
+        announced = true;
         clearTimeout(timeout);
         if (ready.endpoint.port === port) resolve();
         else reject(new Error(`harness child for '${workspace.id}' announced ${ready.text}, expected port ${port}`));
