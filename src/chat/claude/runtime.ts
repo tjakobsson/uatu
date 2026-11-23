@@ -1,4 +1,5 @@
 import { PathAgentRuntime, type PathAgentConfiguration, type PathAgentRuntimeOptions, type VersionProbeResult } from "../path-agent-runtime";
+import { CLAUDE_CODE_AGENT } from "./descriptor";
 
 export type ClaudeProbeResult = VersionProbeResult;
 export type ClaudeRuntimeOptions = PathAgentRuntimeOptions;
@@ -11,7 +12,7 @@ function parseVersion(stdout: string): string | null {
 
 const CLAUDE_CODE_PATH_AGENT: PathAgentConfiguration = {
   binary: "claude",
-  displayName: "Claude Code",
+  displayName: CLAUDE_CODE_AGENT.name,
   parseVersion,
 };
 
