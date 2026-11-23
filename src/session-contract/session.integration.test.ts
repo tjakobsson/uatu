@@ -316,14 +316,15 @@ describe("session contract against a real workspace session", () => {
       expect(published.has(`/s/sample${item.path}`)).toBe(false);
       expect(published.has(item.path)).toBe(false);
     }
-    // A refused internal route is named by its own entry, which states the
-    // refusal, rather than only falling under the session API's prefix
-    // pattern.
-    const template = (suffix: string) => `/s/{workspaceId}${suffix}`;
-    const named = INTERNAL_SESSION_PATHS
-      .filter(item => classifySessionPath(item.method, item.path) === "refused-internal")
-      .filter(item => !excluded.exclusions.some(exclusion => exclusion.path === template(item.path) && /not proxied/.test(exclusion.reason ?? "")));
-    expect(named.map(item => item.path)).toEqual([]);
+    // Every path the Hub refuses, per-stream source or internal route, is
+    // named by its own entry, which states the refusal, rather than only
+    // falling under the session API's prefix pattern.
+    const template = (suffix: string) => `/s/{workspaceId}${suffix.replace("/sample/", "/{conversationId}/")}`;
+    const refused = INTERNAL_SESSION_PATHS.filter(item => classifySessionPath(item.method, item.path).startsWith("refused-"));
+    expect(refused).toHaveLength(7);
+    const unnamed = refused
+      .filter(item => !excluded.exclusions.some(exclusion => exclusion.path === template(item.path) && /^not proxied\./.test(exclusion.reason ?? "")));
+    expect(unnamed.map(item => item.path)).toEqual([]);
   });
 
   // Last: it ends the session the tests above share.
