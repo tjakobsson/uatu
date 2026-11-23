@@ -7106,6 +7106,18 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("outside shutdown, a cancelled wakeup's guard is main's: any source while nothing is outstanding, none while a prompt is", async () => {
+    const { provider, stop, query, session } = await scheduled([oneShot, recurring]);
+    await provider.cancelWakeup(session.id, "c1");
+    // Nothing outstanding: blocked, whatever the hook's source says.
+    expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "other-source", source: "user" })).toEqual({ decision: "block", reason: "Cancelled in uatu: this scheduled wakeup no longer fires." });
+    // A typed prompt outstanding: not blocked, even with a wakeup source.
+    await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
+    expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "sourced", source: "schedule_wakeup" })).toEqual({ continue: true });
+    stop();
+    await provider.dispose();
+  });
+
   test("a cancelled wakeup the SDK names as a wakeup is blocked in the grace even while a typed prompt is pending", async () => {
     const { provider, stop, query, session } = await scheduled([oneShot, recurring]);
     // A typed prompt, delivered and not yet ended.

@@ -3425,9 +3425,10 @@ export class ClaudeProvider implements ChatProvider {
 
   /**
    * Whether a prompt hook can be a wakeup's fire, for the guards above and
-   * below to match by prompt: not a subagent's; one the SDK names as a
-   * wakeup's, even while a prompt is outstanding; one without a source only
-   * while none is, since the person may have typed the same words.
+   * below to match by prompt during shutdown: not a subagent's; one the SDK
+   * names as a wakeup's, even while a prompt is outstanding; one without a
+   * source only while none is, since the person may have typed the same
+   * words.
    */
   private mayBeWakeupFire(session: LiveSession, input: Record<string, unknown>): boolean {
     if (typeof input.agent_id === "string" && input.agent_id) return false;
@@ -3438,13 +3439,18 @@ export class ClaudeProvider implements ChatProvider {
 
   /**
    * A fire of a wakeup the user cancelled (D12): the prompt of a cancelled
-   * wakeup in a hook that can be a wakeup's fire (mayBeWakeupFire). The
-   * hook blocks it — no model call — and the frames it produces are
-   * swallowed.
+   * wakeup, in a hook that can be a wakeup's fire (below). The hook blocks
+   * it — no model call — and the frames it produces are swallowed.
    */
   private blocksCancelledFire(session: LiveSession, input: Record<string, unknown>): boolean {
     if (this.live.get(session.id) !== session) return false;
-    if (!this.mayBeWakeupFire(session, input)) return false;
+    // During shutdown the sourced rule holds (mayBeWakeupFire); otherwise
+    // the guard is as it has always been: not a subagent's hook, and only
+    // while no prompt is outstanding, whatever the hook's source.
+    const firable = this.disposed
+      ? this.mayBeWakeupFire(session, input)
+      : !(typeof input.agent_id === "string" && input.agent_id) && session.pendingTurns === 0 && session.queuedTurns === 0;
+    if (!firable) return false;
     const cancelled = this.cancelledWakeups.get(session.id);
     if (!cancelled || cancelled.size === 0) return false;
     const prompt = typeof input.prompt === "string" ? input.prompt : "";

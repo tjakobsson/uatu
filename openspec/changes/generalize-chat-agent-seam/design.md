@@ -581,12 +581,14 @@ map and its rules out of the Claude Code provider:
     or cancel has finished), so a wakeup that fired then keeps its fired
     row and (f) settles only those still pending. Nor does a settled wakeup fire in a query the grace keeps
     open: its turn is blocked at the prompt hook, as a cancelled wakeup's
-    is. For both, settled and cancelled (a cancel in flight keeps its
-    session out of the sweep, so only the cancellation guard holds its
-    wakeups back), a prompt the SDK marks as a wakeup's (source
-    `schedule_wakeup` or `loop_wakeup`) is blocked even while a typed prompt
-    is pending; one without a source is blocked only while none is, since
-    the person may have typed the same words.
+    is. During shutdown, for both, settled and cancelled (a cancel in
+    flight keeps its session out of the sweep, so only the cancellation
+    guard holds its wakeups back), a prompt the SDK marks as a wakeup's
+    (source `schedule_wakeup` or `loop_wakeup`) is blocked even while a
+    typed prompt is pending; one without a source is blocked only while
+    none is, since the person may have typed the same words. Outside
+    shutdown the cancelled-wakeup guard is unchanged: it blocks a matching
+    prompt only while no prompt is outstanding, whatever its source.
   - (c) Admitted work in flight gets a bounded grace to finish: the grace
     (`SHUTDOWN_GRACE_MS`, half a second) bounds shutdown's first wait for
     it, and is sized so that it, the SDK's close budget and an estimated
