@@ -323,9 +323,10 @@ existing "Run `<command>` where UatuCode runs." markup. `usageReadFailureLabel`
 takes the registered name of the agent it asked ("<name> could not answer").
 Once the runtime has described itself, every `ui.ts` model-chooser surface
 names the agent by the name its runtime declares. Before that, only the model
-summary's fallback uses the conversation's registered agent name ("Let <name>
-choose"), instead of a fixed "OpenCode"; the picker row and the trigger's
-accessible label keep main's generic "the agent" wording. Both read the same
+summary's fallback, which shows in the summary and the inline/touch chip, uses
+the conversation's registered agent name ("Let <name> choose") instead of a
+fixed "OpenCode"; the picker row and the trigger's accessible label keep main's
+generic "the agent" wording. Both read the same
 for Claude Code and OpenCode today.
 
 **API revision.** `ChatAgentDescriptor` is a closed object

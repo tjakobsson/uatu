@@ -525,16 +525,115 @@ async function handleE2EChat(request: Request): Promise<Response> {
     }
     return value;
   };
+  // The scripted fake OpenCode 2.0.28 behind the real stack. Its controls go
+  // straight to that server and ignore `agent`; conversation ids arrive
+  // qualified or bare, and the fake works in bare session ids.
+  if (body.action === "opencode") {
+    if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
+    switch (body.op) {
+      case "losePromptResponse":
+        openCodeV2Fake.loseNextPromptResponse(); return Response.json({ ok: true });
+      case "unknownPromptBeforeAdmission":
+        openCodeV2Fake.unknownNextPromptBeforeAdmission(); return Response.json({ ok: true });
+      case "loseResumeResponse":
+        openCodeV2Fake.loseNextResumeResponse(); return Response.json({ ok: true });
+      case "refuseBackground":
+        openCodeV2Fake.refuseNextBackground(); return Response.json({ ok: true });
+      case "launchShellOnNextSteer":
+        if (body.conversationId) { openCodeV2Fake.launchShellOnNextSteer(body.conversationId); return Response.json({ ok: true }); }
+        break;
+      case "wakeParent":
+        if (body.conversationId) { openCodeV2Fake.wakeParent(body.conversationId); return Response.json({ ok: true }); }
+        break;
+      case "launchShell":
+        if (body.conversationId) return Response.json(openCodeV2Fake.launchShell(body.conversationId, body.background !== false));
+        break;
+      case "shellPhase":
+        if (body.shellId && body.shellPhase) { openCodeV2Fake.shellPhase(body.shellId, body.shellPhase); return Response.json({ ok: true }); }
+        break;
+      case "launchWorker":
+        if (body.conversationId) return Response.json(openCodeV2Fake.launchWorker(body.conversationId, body.background !== false, body.childId));
+        break;
+      case "launchRequestWorker":
+        if (body.conversationId) return Response.json(openCodeV2Fake.launchRequestWorker(body.conversationId));
+        break;
+      case "workerObservation":
+        if (body.childId && typeof body.observed === "boolean") { openCodeV2Fake.workerObservation(body.childId, body.observed); return Response.json({ ok: true }); }
+        break;
+      case "workerRequest":
+        if (body.childId && (body.requestKind === "permission" || body.requestKind === "question")) return Response.json(openCodeV2Fake.workerRequest(body.childId, body.requestKind));
+        break;
+      case "settleWorker":
+        if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }
+        break;
+      case "settleWorkerWithoutReport":
+        if (body.childId && body.idleOutcome) { openCodeV2Fake.settleWorkerWithoutReport(body.childId, body.idleOutcome, body.text ?? "Native child finished."); return Response.json({ ok: true }); }
+        break;
+      case "workerReport":
+        if (body.childId) { openCodeV2Fake.workerReport(body.childId, body.usedModel ?? "Fixture Model", body.usedEffort, body.costUsd); return Response.json({ ok: true }); }
+        break;
+      case "disconnect":
+        openCodeV2Fake.disconnect(); return Response.json({ ok: true });
+      case "pauseEvents":
+        openCodeV2Fake.pauseEvents(true); return Response.json({ ok: true });
+      case "reconnectEvents":
+        openCodeV2Fake.pauseEvents(false); return Response.json({ ok: true });
+      case "externalRevert":
+        if (body.conversationId && body.revertMessageId !== undefined) {
+          openCodeV2Fake.externalRevert(body.conversationId, body.revertMessageId);
+          return Response.json({ ok: true });
+        }
+        break;
+      case "appendHistory":
+        if (body.conversationId) { openCodeV2Fake.appendHistory(body.conversationId, body.count ?? 60); return Response.json({ ok: true }); }
+        break;
+      case "holdNextMessageRead":
+        if (body.conversationId) { openCodeV2Fake.holdNextMessageRead(body.conversationId); return Response.json({ ok: true }); }
+        break;
+      case "releaseMessageRead":
+        openCodeV2Fake.releaseMessageRead(); return Response.json({ ok: true });
+      case "resync":
+        if (body.conversationId && openCodeV2Adapter) {
+          openCodeV2Adapter.projectionForTests(body.conversationId).replay.publish({ type: "resync", reason: "retention-gap" });
+          return Response.json({ ok: true });
+        }
+        break;
+      case "loseBackgroundResponse":
+        openCodeV2Fake.loseNextBackgroundResponse(); return Response.json({ ok: true });
+      case "loseWorkerResponse":
+        openCodeV2Fake.loseNextWorkerResponse(); return Response.json({ ok: true });
+      case "step":
+        if (body.conversationId) return Response.json(openCodeV2Fake.step(body.conversationId));
+        break;
+      case "finish":
+        if (body.conversationId) {
+          const finished = openCodeV2Fake.finish(body.conversationId, body.text);
+          return finished ? Response.json(finished) : Response.json({ error: "no turn is running" }, { status: 409 });
+        }
+        break;
+      case "raceDeliverOnCancel":
+        if (body.inboxId) {
+          openCodeV2Fake.raceDeliverOnCancel(body.inboxId);
+          return Response.json({ ok: true });
+        }
+        break;
+      case "state":
+        return Response.json({ ...openCodeV2Fake.state(), ...(body.conversationId && openCodeV2Adapter ? {
+          workerModels: openCodeV2Adapter.projectionForTests(body.conversationId).filter(item => item.type === "background_task").map(item => item.type === "background_task" ? item.workerSession?.model : undefined),
+        } : {}) });
+    }
+    return Response.json({ error: "invalid chat control" }, { status: 400 });
+  }
   // `agent` names a registered id when present; null or any other non-string
   // is rejected below like an unregistered id, never read as "omitted".
   if (body.agent !== undefined && typeof body.agent !== "string") {
     return Response.json({ error: `no e2e agent registered as ${JSON.stringify(body.agent)}` }, { status: 400 });
   }
   // Without `agent`, a qualified id names the owning agent: the top-level
-  // conversationId, else usageRead's outcome.conversationId. Remember it
+  // conversationId, else (usageRead only) outcome.conversationId. Remember it
   // before stripping so conversation-scoped controls reach the right fake
   // without every spec spelling `agent:` explicitly.
-  for (const id of [body.conversationId, body.outcome?.conversationId]) {
+  for (const id of [body.conversationId, body.action === "usageRead" ? body.outcome?.conversationId : undefined]) {
     if (typeof id === "string") body.agent ??= qualifyingAgent(id);
   }
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
@@ -550,8 +649,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
   switch (body.action) {
     case "agents": {
       const agentCount = body.stack === undefined ? body.count ?? 1 : 1;
-      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : fakeRouters[agentCount - 1];
-      if (!next) return Response.json({ error: `the harness has no router for ${agentCount} fake agents` }, { status: 400 });
+      if (!Number.isInteger(agentCount) || agentCount < 1 || agentCount > fakeRouters.length) {
+        return Response.json({ error: `count must be an integer from 1 to ${fakeRouters.length}` }, { status: 400 });
+      }
+      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : fakeRouters[agentCount - 1]!;
       if (next !== activeChatRouter) {
         // Existing SSE subscriptions are bound to their original router;
         // changing the delegating proxy only affects new requests.
@@ -561,102 +662,6 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       return Response.json({ agents: agentCount, ...(body.stack ? { stack: body.stack } : {}) });
     }
-    // The scripted fake OpenCode 2.0.28 behind the real stack. Conversation
-    // ids arrive qualified or bare; the fake works in bare session ids.
-    case "opencode":
-      switch (body.op) {
-        case "losePromptResponse":
-          openCodeV2Fake.loseNextPromptResponse(); return Response.json({ ok: true });
-        case "unknownPromptBeforeAdmission":
-          openCodeV2Fake.unknownNextPromptBeforeAdmission(); return Response.json({ ok: true });
-        case "loseResumeResponse":
-          openCodeV2Fake.loseNextResumeResponse(); return Response.json({ ok: true });
-        case "refuseBackground":
-          openCodeV2Fake.refuseNextBackground(); return Response.json({ ok: true });
-        case "launchShellOnNextSteer":
-          if (body.conversationId) { openCodeV2Fake.launchShellOnNextSteer(body.conversationId); return Response.json({ ok: true }); }
-          break;
-        case "wakeParent":
-          if (body.conversationId) { openCodeV2Fake.wakeParent(body.conversationId); return Response.json({ ok: true }); }
-          break;
-        case "launchShell":
-          if (body.conversationId) return Response.json(openCodeV2Fake.launchShell(body.conversationId, body.background !== false));
-          break;
-        case "shellPhase":
-          if (body.shellId && body.shellPhase) { openCodeV2Fake.shellPhase(body.shellId, body.shellPhase); return Response.json({ ok: true }); }
-          break;
-        case "launchWorker":
-          if (body.conversationId) return Response.json(openCodeV2Fake.launchWorker(body.conversationId, body.background !== false, body.childId));
-          break;
-        case "launchRequestWorker":
-          if (body.conversationId) return Response.json(openCodeV2Fake.launchRequestWorker(body.conversationId));
-          break;
-        case "workerObservation":
-          if (body.childId && typeof body.observed === "boolean") { openCodeV2Fake.workerObservation(body.childId, body.observed); return Response.json({ ok: true }); }
-          break;
-        case "workerRequest":
-          if (body.childId && (body.requestKind === "permission" || body.requestKind === "question")) return Response.json(openCodeV2Fake.workerRequest(body.childId, body.requestKind));
-          break;
-        case "settleWorker":
-          if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }
-          break;
-        case "settleWorkerWithoutReport":
-          if (body.childId && body.idleOutcome) { openCodeV2Fake.settleWorkerWithoutReport(body.childId, body.idleOutcome, body.text ?? "Native child finished."); return Response.json({ ok: true }); }
-          break;
-        case "workerReport":
-          if (body.childId) { openCodeV2Fake.workerReport(body.childId, body.usedModel ?? "Fixture Model", body.usedEffort, body.costUsd); return Response.json({ ok: true }); }
-          break;
-        case "disconnect":
-          openCodeV2Fake.disconnect(); return Response.json({ ok: true });
-        case "pauseEvents":
-          openCodeV2Fake.pauseEvents(true); return Response.json({ ok: true });
-        case "reconnectEvents":
-          openCodeV2Fake.pauseEvents(false); return Response.json({ ok: true });
-        case "externalRevert":
-          if (body.conversationId && body.revertMessageId !== undefined) {
-            openCodeV2Fake.externalRevert(body.conversationId, body.revertMessageId);
-            return Response.json({ ok: true });
-          }
-          break;
-        case "appendHistory":
-          if (body.conversationId) { openCodeV2Fake.appendHistory(body.conversationId, body.count ?? 60); return Response.json({ ok: true }); }
-          break;
-        case "holdNextMessageRead":
-          if (body.conversationId) { openCodeV2Fake.holdNextMessageRead(body.conversationId); return Response.json({ ok: true }); }
-          break;
-        case "releaseMessageRead":
-          openCodeV2Fake.releaseMessageRead(); return Response.json({ ok: true });
-        case "resync":
-          if (body.conversationId && openCodeV2Adapter) {
-            openCodeV2Adapter.projectionForTests(body.conversationId).replay.publish({ type: "resync", reason: "retention-gap" });
-            return Response.json({ ok: true });
-          }
-          break;
-        case "loseBackgroundResponse":
-          openCodeV2Fake.loseNextBackgroundResponse(); return Response.json({ ok: true });
-        case "loseWorkerResponse":
-          openCodeV2Fake.loseNextWorkerResponse(); return Response.json({ ok: true });
-        case "step":
-          if (body.conversationId) return Response.json(openCodeV2Fake.step(body.conversationId));
-          break;
-        case "finish":
-          if (body.conversationId) {
-            const finished = openCodeV2Fake.finish(body.conversationId, body.text);
-            return finished ? Response.json(finished) : Response.json({ error: "no turn is running" }, { status: 409 });
-          }
-          break;
-        case "raceDeliverOnCancel":
-          if (body.inboxId) {
-            openCodeV2Fake.raceDeliverOnCancel(body.inboxId);
-            return Response.json({ ok: true });
-          }
-          break;
-        case "state":
-          return Response.json({ ...openCodeV2Fake.state(), ...(body.conversationId && openCodeV2Adapter ? {
-            workerModels: openCodeV2Adapter.projectionForTests(body.conversationId).filter(item => item.type === "background_task").map(item => item.type === "background_task" ? item.workerSession?.model : undefined),
-          } : {}) });
-      }
-      break;
     case "seed":
       return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt));
     case "externalCreate":

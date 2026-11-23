@@ -5201,9 +5201,10 @@ describe("login guidance and agent-named copy", () => {
     });
   }
 
-  // Before its runtime describes itself, only the model summary names the
-  // conversation's registered agent rather than a fixed one. The picker row
-  // and the trigger's accessible label keep the generic "the agent" wording.
+  // Before its runtime describes itself, only the model summary fallback
+  // (shown in the summary and the inline/touch chip) names the conversation's
+  // registered agent rather than a fixed one. The picker row and the trigger's
+  // accessible label keep the generic "the agent" wording.
   test(`a runtime that has not described itself yet reads "Let Claude Code choose"`, async () => {
     const models: ChatModel[] = [{ selection: { providerId: "groq", modelId: "llama" }, provider: "Groq", name: "Llama" }];
     const { document, finish, modelReads } = await boot(CLAUDE, { hubServed: false, login: "ok", undescribed: true, models });

@@ -42,6 +42,10 @@ test.describe("multi-agent chat", () => {
     expect((await request.post("/__e2e/chat", { data: { action: "inventoryResume", agent: null } })).status()).toBe(400);
     await control(request, { action: "inventoryResume", agent: "claude" });
     expect(await interrupted("claude")).toBe(false);
+    // Scripted OpenCode controls bypass agent selection, and an agent count
+    // must be an integer the harness has fakes for.
+    await control(request, { action: "opencode", op: "state", agent: null });
+    expect((await request.post("/__e2e/chat", { data: { action: "agents", count: "2" } })).status()).toBe(400);
   });
 
   test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {
