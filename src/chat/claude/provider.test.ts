@@ -13,7 +13,7 @@ import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage,
 import { CHAT_TEXT_SEAL, CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
 import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE } from "../visual-identity";
 import { SIGTERM_GRACE_MS } from "../../hub/backend";
-import { ClaudeProvider, SHUTDOWN_GRACE_MS, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { ClaudeProvider, SDK_CLOSE_BUDGET_MS, SHUTDOWN_FLUSH_MARGIN_MS, SHUTDOWN_GRACE_MS, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
@@ -4662,11 +4662,34 @@ describe("ClaudeProvider sessions", () => {
     expect(abandonedIds(events)).toEqual(["A", "B"]);
   });
 
-  test("the shutdown grace fits well inside the Hub's kill deadline", () => {
-    // The Hub sends SIGKILL SIGTERM_GRACE_MS after SIGTERM; the grace must
-    // leave most of that for the close, the drain, the flush and the rest of
-    // the workspace's teardown, or a rollback could be killed unwritten.
-    expect(SHUTDOWN_GRACE_MS * 3).toBeLessThanOrEqual(SIGTERM_GRACE_MS);
+  test("the whole shutdown budget fits inside the Hub's kill deadline", () => {
+    // The Hub sends SIGKILL SIGTERM_GRACE_MS after SIGTERM: the grace, the
+    // SDK's close (spent once, since queries close in parallel) and the
+    // drain and flush must all fit, or a rollback could be killed unwritten.
+    expect(SHUTDOWN_GRACE_MS + SDK_CLOSE_BUDGET_MS + SHUTDOWN_FLUSH_MARGIN_MS).toBeLessThanOrEqual(SIGTERM_GRACE_MS);
+  });
+
+  test("shutdown closes every query at once, a usage probe's included", async () => {
+    const closing: FakeQuery[] = [];
+    let releaseCloses: (() => void) | undefined;
+    const closesHeld = new Promise<void>(resolve => { releaseCloses = resolve; });
+    // Each close takes as long as the SDK's may, until released.
+    const { provider, queries } = fixture(query => {
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(() => undefined);
+      query.getContextUsage = () => new Promise(() => undefined);
+      const close = query.return.bind(query);
+      query.return = async () => { closing.push(query); await closesHeld; return close(); };
+    });
+    void provider.readUsage("start").catch(() => undefined);
+    await waitFor(() => queries.length === 1);
+    const probe = queries[0]!;
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const live = queries[1]!;
+    const disposing = provider.dispose();
+    await waitFor(() => closing.includes(probe) && closing.includes(live));
+    releaseCloses!();
+    await disposing;
   });
 
   test("a rewind still unanswered when the shutdown grace ends is cut off by the close and rolls its boundary back", async () => {

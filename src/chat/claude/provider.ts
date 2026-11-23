@@ -263,14 +263,22 @@ const TITLE_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000];
 // own follow-up turn within a fraction of a second (D9). A session whose set
 // emptied and that shows no follow-up inside this window is idle for good.
 const BACKGROUND_FOLLOW_UP_GRACE_MS = 5_000;
-// Shutdown lets admitted work in flight (a history mutation and its rewind,
-// a release) finish for this long before closing every query settles what
-// is still stuck. Interrupts and control requests have no deadline of their
-// own, so the wait needs one. The Hub sends SIGKILL a few seconds after
-// SIGTERM (`SIGTERM_GRACE_MS` in hub/backend.ts); this grace stays at most a
-// third of that, leaving the rest for the close, the drain, the flush and
-// the workspace's other teardown. A test holds the two together.
-export const SHUTDOWN_GRACE_MS = 1_000;
+// Shutdown's budget must fit inside the Hub's: it sends SIGKILL
+// `SIGTERM_GRACE_MS` (hub/backend.ts) after SIGTERM, and a test holds the
+// three numbers below to it.
+// Admitted work in flight (a history mutation and its rewind, a release)
+// gets this long to finish before closing every query settles what is
+// still stuck. Interrupts and control requests have no deadline of their
+// own, so the wait needs one.
+export const SHUTDOWN_GRACE_MS = 500;
+// What one SDK close may take. In @anthropic-ai/claude-agent-sdk 0.3.330,
+// `Query.return()` runs `performCleanup`, which closes the transport and
+// then waits for the child to exit, racing `waitForExit()` against a fixed
+// 2000 ms timer; shutdown closes every query in parallel, so this is spent
+// once, not per query.
+export const SDK_CLOSE_BUDGET_MS = 2_000;
+// Left for the drain of corrective writes and the final flush.
+export const SHUTDOWN_FLUSH_MARGIN_MS = 500;
 const TITLE_LIMIT = 80;
 
 /**
@@ -1795,14 +1803,18 @@ export class ClaudeProvider implements ChatProvider {
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([admitted(), new Promise<void>(resolve => { graceTimer = setTimeout(resolve, this.shutdownGraceMs); })]);
     clearTimeout(graceTimer);
-    // (d) Every query closes. The interrupt is sent but not waited on (it
-    // has no deadline); closing the transport is what fails a control
-    // request still out (an interrupt, a rewind), including one a closing
-    // session's own teardown waits on.
+    // (d) Every query closes, all at once: each close may take the SDK's
+    // whole close budget, so one after another would overrun the Hub's
+    // deadline. The interrupt is sent but not waited on (it has no
+    // deadline); closing the transport is what fails a control request still
+    // out (an interrupt, a rewind), including one a closing session's own
+    // teardown waits on.
     const closing = new Map(this.closingSessions);
     const open = [...new Set([...this.live.values(), ...this.startedSessions])].filter(session => !closing.has(session));
     this.startedSessions.clear();
     this.live.clear();
+    const usageProbe = this.usageProbe;
+    this.usageProbe = null;
     await Promise.all([
       ...open.map(async session => {
         void session.query.interrupt().catch(() => undefined);
@@ -1814,15 +1826,14 @@ export class ClaudeProvider implements ChatProvider {
         await session.query.return?.().catch(() => undefined);
         await closed.catch(() => undefined);
       }),
+      (async () => { await this.probeQuery?.return?.().catch(() => undefined); })(),
+      (async () => {
+        if (!usageProbe) return;
+        usageProbe.queue.close();
+        await usageProbe.query.return?.().catch(() => undefined);
+      })(),
     ]);
-    await this.probeQuery?.return?.().catch(() => undefined);
     await this.windowWalk?.catch(() => undefined);
-    const usageProbe = this.usageProbe;
-    if (usageProbe) {
-      this.usageProbe = null;
-      usageProbe.queue.close();
-      await usageProbe.query.return?.().catch(() => undefined);
-    }
     await this.hydration?.catch(() => undefined);
     // (e) What remains drains: an operation the close cut short writes its
     // correction or rollback.

@@ -579,9 +579,10 @@ map and its rules out of the Claude Code provider:
     open: its turn is blocked at the prompt hook, as a cancelled wakeup's
     is.
   - (c) Admitted work in flight finishes within a bounded grace
-    (`SHUTDOWN_GRACE_MS`, one second: at most a third of the Hub's
-    SIGTERM-to-SIGKILL deadline, so the close, drain and flush still fit
-    inside it): undo, redo, revert and restore,
+    (`SHUTDOWN_GRACE_MS`, half a second, so that it, the SDK's close
+    budget and a margin for the drain and flush together fit inside the
+    Hub's three-second SIGTERM-to-SIGKILL deadline): undo, redo, revert
+    and restore,
     a rewind's reply included; a release, from its write to its
     publication; a wakeup cancel; and every prompt until the provider
     accepts it or queues its rollback, so one already holding its session
@@ -598,10 +599,12 @@ map and its rules out of the Claude Code provider:
     replacement was reported accepted without being delivered. None of these waits on a
     callback, which (b) has settled, or on a close once shutdown has
     started, so waiting cannot deadlock.
-  - (d) Every query closes: its interrupt is sent but not waited on (it has
-    no deadline), and closing the transport fails whatever is still out (an
-    interrupt, a rewind), including one a closing session's own teardown
-    waits on.
+  - (d) Every query closes, all at once (the usage and catalog probes'
+    included), since one SDK close may take up to two seconds waiting for
+    its child to exit (`SDK_CLOSE_BUDGET_MS`, from the SDK's own close):
+    its interrupt is sent but not waited on (it has no deadline), and
+    closing the transport fails whatever is still out (an interrupt, a
+    rewind), including one a closing session's own teardown waits on.
   - (e) What remains drains: an operation the close cut short writes its
     correction or rollback (a rejected rewind rolls its staged boundary
     back, a prompt its configuration or staged revert).
