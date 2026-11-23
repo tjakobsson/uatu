@@ -18,7 +18,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { revealRange } from "./highlight";
+import { revealRange, revealRangeDelta } from "./highlight";
 
 const PADDING_TOP = 144; // 9rem at a 16px root — the sticky-header reservation.
 const VIEWPORT_HEIGHT = 800;
@@ -120,5 +120,15 @@ describe("revealRange", () => {
     const collapsed = { getBoundingClientRect: () => ({ top: 0, bottom: 0, height: 0, width: 0 }) } as unknown as Range;
     revealRange(collapsed, container);
     expect(container.scrollTop).toBe(0);
+    expect(revealRangeDelta(collapsed, container)).toBeNull();
+  });
+
+  test("revealRangeDelta distinguishes already-visible ranges from collapsed ones", () => {
+    const container = viewportContainer();
+    expect(revealRangeDelta(rangeAt(300), container)).toBe(0);
+    expect(revealRangeDelta(rangeAt(1200), container)).toBeCloseTo(
+      1200 - PADDING_TOP - (VIEWPORT_HEIGHT - PADDING_TOP - 20) * 0.4,
+      5,
+    );
   });
 });
