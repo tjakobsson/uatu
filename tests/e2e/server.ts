@@ -482,6 +482,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
     childId?: string;
     inboxId?: string;
   };
+  // A top-level conversationId, when present, must be a string.
+  if (body.conversationId !== undefined && typeof body.conversationId !== "string") {
+    return Response.json({ error: `conversationId must be a string, not ${JSON.stringify(body.conversationId)}` }, { status: 400 });
+  }
   // The scripted fake OpenCode 2.0.28 behind the real stack. Its controls go
   // straight to that server and ignore `agent`; conversation ids arrive
   // qualified or bare, and the fake works in bare session ids.

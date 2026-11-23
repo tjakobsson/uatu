@@ -111,7 +111,8 @@ test.describe("multi-agent chat", () => {
       { action: "usageRead", outcome: { outcome: "fail", conversationId: "claud:conversation-1" } },
       // A qualifier without a provider id is malformed.
       { action: "status", conversationId: "claude:", status: "idle" },
-      // A usage id must be a string.
+      // A top-level or usage id must be a string.
+      { action: "status", conversationId: 42, status: "idle" },
       { action: "usageReport", report: { plan: { fiveHour: { utilization: 9 } }, readAt: 1, conversationId: 42 } },
     ]) expect((await request.post("/__e2e/chat", { data })).status()).toBe(400);
     // An explicit agent that disagrees with the id's owner is rejected too.
