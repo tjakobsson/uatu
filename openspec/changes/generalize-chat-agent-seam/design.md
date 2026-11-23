@@ -586,17 +586,17 @@ map and its rules out of the Claude Code provider:
     `schedule_wakeup` or `loop_wakeup`) is blocked even while a typed prompt
     is pending; one without a source is blocked only while none is, since
     the person may have typed the same words.
-  - (c) Admitted work in flight finishes within a bounded grace
-    (`SHUTDOWN_GRACE_MS`, half a second, so that it, the SDK's close
-    budget and a margin for the drain and flush together fit inside the
-    Hub's three-second SIGTERM-to-SIGKILL deadline): undo, redo, revert
-    and restore,
-    a rewind's reply included; a release, from its write to its
-    publication; a wakeup cancel; a deferred rename's native write already
-    under way; a manual rename, its wait behind that write included (one
-    asked after shutdown began is refused, as other new work is); and every
-    prompt until the provider
-    accepts it or queues its rollback, so one already holding its session
+  - (c) Admitted work in flight gets a bounded grace to finish: the grace
+    (`SHUTDOWN_GRACE_MS`, half a second) bounds shutdown's first wait for
+    it, and is sized so that it, the SDK's close budget and an estimated
+    margin for the drain and flush (`SHUTDOWN_FLUSH_MARGIN_MS`) sum to no
+    more than the Hub's three-second SIGTERM-to-SIGKILL deadline. It
+    waits for undo, redo, revert and restore, a rewind's reply included; a
+    release, from its write to its publication; a wakeup cancel; a deferred
+    rename's native write already under way; a manual rename, its wait
+    behind that write included (one asked after shutdown began is refused,
+    as other new work is); and every prompt until the provider accepts it
+    or queues its rollback, so one already holding its session
     (reading its attachments, say) is accepted. Acceptance means delivery,
     and delivered means the SDK's input iterator has taken the prompt while
     its query is open: such a prompt is acknowledged only once taken, never
@@ -630,7 +630,11 @@ map and its rules out of the Claude Code provider:
     way.
   - (e) What remains drains: an operation the close cut short writes its
     correction or rollback (a rejected rewind rolls its staged boundary
-    back, a prompt its configuration or staged revert).
+    back, a prompt its configuration or staged revert). The drain waits
+    for admitted work again with no deadline, including work the close
+    does not unblock (a redo restoring files, say), so the margin is an
+    estimate, not a bound. A drain that runs past the Hub's deadline is
+    cut off by SIGKILL, the same exposure `main` has.
   - (f) A session left for this step gets shutdown's outcome for what its
     own operation did not settle. A release that released the session has
     emitted `session.released` with the rows cancelled, and shutdown adds
