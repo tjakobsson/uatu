@@ -4189,13 +4189,23 @@ export class ClaudeProvider implements ChatProvider {
     // (the SDK's rename throws on one): the title is kept here and written
     // to the transcript once the first turn has created it.
     if (await fileExists(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))) {
-      // A deferred write still under way lands first, so this newer title
+      // This rename takes the deferred title over before anything else, so
+      // a turn ending meanwhile starts no write of it; a failed write gives
+      // it back.
+      const superseded = this.deferredRenames.get(sessionId);
+      this.deferredRenames.delete(sessionId);
+      // A deferred write already under way lands first, so this newer title
       // is the one the transcript ends with.
       await this.deferredRenameWrites.get(sessionId);
-      await this.renameNativeSession(this.nativeId(sessionId), trimmed, { dir: this.workspacePath });
-      // A deferred title still recorded (its own write failed) is dropped on
-      // disk too, so a restart cannot apply it over this one.
-      if (this.deferredRenames.delete(sessionId)) await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
+      try {
+        await this.renameNativeSession(this.nativeId(sessionId), trimmed, { dir: this.workspacePath });
+      } catch (error) {
+        if (superseded !== undefined && !this.deferredRenames.has(sessionId)) this.deferredRenames.set(sessionId, superseded);
+        throw error;
+      }
+      // The dropped record goes from disk too, so a restart cannot apply
+      // the stale title over this one.
+      if (superseded !== undefined) await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
     } else {
       this.deferredRenames.set(sessionId, trimmed);
       this.persistDurableState();

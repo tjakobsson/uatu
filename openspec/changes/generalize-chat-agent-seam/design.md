@@ -654,7 +654,9 @@ map and its rules out of the Claude Code provider:
     native write succeeds, so a write made meanwhile, or a failure, leaves
     it for the next start. Only one native write of it runs at a time, and a
     newer rename writes only once that one has landed, so the newer title
-    is the one that stands. That newer rename drops the record on disk too, so a
+    is the one that stands. A manual rename takes the record over before
+    its own native write, so a turn ending meanwhile starts no write of the
+    stale title, and gives it back if that write fails. That newer rename drops the record on disk too, so a
     restart cannot apply the stale title over it. One already being written when shutdown starts
     finishes in (c); one not started is not written once shutdown has
     started, even when a turn ends in the grace: it is durable, so the next

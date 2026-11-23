@@ -2868,6 +2868,62 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a manual rename takes over the deferred title before writing, and gives it back if its write fails", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-takeover-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    // Each native write as it starts; the manual ones are held, and the
+    // test says whether each succeeds.
+    const started: string[] = [];
+    const finish = new Map<string, (fail: boolean) => void>();
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // No title retries: each turn's refresh runs once.
+      titleRefreshDelaysMs: [],
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") return;
+        if (await new Promise<boolean>(resolve => { finish.set(title, resolve); })) throw new Error("disk full");
+      },
+    });
+    // Counts each turn-end title refresh once it has finished.
+    const state = provider as unknown as { refreshGeneratedTitle: (sessionId: string, attempt?: number) => Promise<void> };
+    const refresh = state.refreshGeneratedTitle.bind(provider);
+    let refreshed = 0;
+    state.refreshGeneratedTitle = async (sessionId, attempt) => { await refresh(sessionId, attempt); refreshed += 1; };
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    // The transcript exists and no deferred write is out: the manual rename
+    // starts its append, then the turn's result arrives.
+    const renaming = provider.renameSession(session.id, "Newer").catch(error => error as Error);
+    await waitFor(() => started.includes("Newer"));
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => refreshed === 1);
+    // The refresh starts no write of the superseded title.
+    expect(started).toEqual(["Newer"]);
+    // The write fails: the deferred title is the conversation's again, so
+    // the next turn's refresh writes it.
+    finish.get("Newer")!(true);
+    expect(await renaming).toEqual(expect.objectContaining({ message: "disk full" }));
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    await provider.prompt(session.id, { id: "r2", text: "more", delivery: "queue" });
+    queries.at(-1)!.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:04.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => refreshed === 2);
+    expect(started).toEqual(["Newer", "Planned work"]);
+    await settledWrites(provider);
+    expect(recorded()).toEqual({});
+    await provider.dispose();
+  });
+
   test("a turn ending during the shutdown grace leaves its deferred rename for the next start, writing nothing after shutdown", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-shutdown-")));
     const workspace = path.join(root, "workspace");
