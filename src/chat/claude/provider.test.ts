@@ -7281,6 +7281,29 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.dispose();
   });
 
+  test("a failed cancel that leaves no wakeup idles the conversation and retires its session", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot]);
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1").catch(() => undefined);
+      await hold.started;
+      // The Stop drops the only wakeup: it fired.
+      await stopHook(query, { session_crons: [] });
+      hold.finish(true);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    // Its fired outcome applies; with nothing left, the conversation is
+    // idle again and its session retires.
+    await waitFor(() => query.returned);
+    expect(statuses(events).at(-1)).toBe("idle");
+    expect(provider.liveSessionCount()).toBe(0);
+    stop();
+    await provider.dispose();
+  });
+
   test("a fire recorded while a wakeup's cancel is out survives a later Stop that still omits it", async () => {
     const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
     await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });

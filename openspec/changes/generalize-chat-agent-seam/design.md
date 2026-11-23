@@ -667,7 +667,10 @@ map and its rules out of the Claude Code provider:
     `wakeup.cancelled` once its write has succeeded; if the write fails, the
     wakeup takes that kept outcome (fired, with its turn, or reconciled as
     listed), and one still scheduled is settled as any other, here by
-    shutdown.
+    shutdown. Outside shutdown, a failed cancel whose wakeup the CLI had
+    dropped rechecks the session as a successful cancel does: with nothing
+    left holding it, the conversation is idle again and its session
+    retires.
   - (g) Persistence flushes. No write lands after `dispose()` returns, a
     durable write never reports success without writing, and a failed
     prompt that changed nothing durable writes nothing. A deferred rename

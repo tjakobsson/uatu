@@ -3296,7 +3296,7 @@ export class ClaudeProvider implements ChatProvider {
           // succeeded (cancelled wins), applied when it failed.
           const outcome = session.cancelStopOutcomes?.get(wakeupId);
           session.cancelStopOutcomes?.delete(wakeupId);
-          if (failed && outcome && session.wakeups.has(wakeupId)) this.applyStopOutcome(session, wakeupId, outcome);
+          if (failed && outcome && session.wakeups.has(wakeupId)) await this.applyStopOutcome(session, wakeupId, outcome);
         }
       }
       return;
@@ -3317,12 +3317,19 @@ export class ClaudeProvider implements ChatProvider {
   /**
    * A failed cancel's wakeup takes the outcome the last Stop gave it while
    * the cancel was out: the wakeup as listed, or the fired or cancelled row
-   * of one the CLI dropped, so a fire it saw is not lost.
+   * of one the CLI dropped, so a fire it saw is not lost. A dropped wakeup
+   * that was the last thing holding the session leaves it idle, as a
+   * successful cancel does: the conversation is idle again and the session
+   * retires. Not once shutdown has started: closing is its own step.
    */
-  private applyStopOutcome(session: LiveSession, wakeupId: string, outcome: CancelStopOutcome): void {
+  private async applyStopOutcome(session: LiveSession, wakeupId: string, outcome: CancelStopOutcome): Promise<void> {
     if (outcome.keep) session.wakeups.set(wakeupId, outcome.keep);
     else session.wakeups.delete(wakeupId);
-    if (outcome.update) this.emit(session.id, { updates: [outcome.update], outcome: "handled", eventType: "wakeups.reconciled" });
+    const updates: NormalizedProviderUpdate[] = outcome.update ? [outcome.update] : [];
+    const idle = !outcome.keep && !this.disposed && this.idleExceptReads(session) && session.idleTimer === undefined;
+    if (idle) updates.push({ kind: "status", status: "idle" });
+    if (updates.length > 0) this.emit(session.id, { updates, outcome: "handled", eventType: "wakeups.reconciled" });
+    if (idle) await this.retireIfIdle(session);
   }
 
   /**
