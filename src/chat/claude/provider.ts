@@ -203,6 +203,11 @@ export type ClaudeProviderOptions = {
    * every query. Tests shorten it.
    */
   shutdownGraceMs?: number;
+  /**
+   * Replaces the grace's timer: the grace ends when this resolves (or when
+   * the work it waits for is done). Tests end it on an event.
+   */
+  shutdownGrace?: () => Promise<void>;
   /** Bound on an on-demand usage read, cold start included. Tests shorten it. */
   usageReadTimeoutMs?: number;
   /**
@@ -704,6 +709,7 @@ export class ClaudeProvider implements ChatProvider {
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly backgroundGraceMs: number;
   private readonly shutdownGraceMs: number;
+  private readonly shutdownGrace?: () => Promise<void>;
   private readonly usageReadTimeoutMs: number;
   private readonly titleRefreshDelaysMs: number[];
   // Conversations whose last rate-limit signal was a standing (warning or
@@ -766,6 +772,7 @@ export class ClaudeProvider implements ChatProvider {
     this.now = options.now ?? (() => Date.now());
     this.backgroundGraceMs = options.backgroundGraceMs ?? BACKGROUND_FOLLOW_UP_GRACE_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
+    this.shutdownGrace = options.shutdownGrace;
     this.usageReadTimeoutMs = options.usageReadTimeoutMs ?? USAGE_READ_TIMEOUT_MS;
     this.titleRefreshDelaysMs = options.titleRefreshDelaysMs ?? TITLE_REFRESH_DELAYS_MS;
   }
@@ -1815,7 +1822,8 @@ export class ClaudeProvider implements ChatProvider {
     // admit).
     const admitted = () => Promise.all([...this.mutations, ...this.prompts]);
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([admitted(), new Promise<void>(resolve => { graceTimer = setTimeout(resolve, this.shutdownGraceMs); })]);
+    const graceEnds = this.shutdownGrace?.() ?? new Promise<void>(resolve => { graceTimer = setTimeout(resolve, this.shutdownGraceMs); });
+    await Promise.race([admitted(), graceEnds]);
     clearTimeout(graceTimer);
     // (d) Every query closes, all at once: each close may take the SDK's
     // whole close budget, so one after another would overrun the Hub's

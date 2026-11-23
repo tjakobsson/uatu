@@ -5970,8 +5970,9 @@ describe("plan usage on demand", () => {
   });
 
   test("a prompt in the grace that the SDK never takes before the close is refused, not reported accepted", async () => {
-    // Short: nothing takes the input, so the grace runs out.
-    const { provider, queries, workspace } = fixture(undefined, { shutdownGraceMs: 20 });
+    // The grace ends when the test says: once the prompt is waiting in the queue.
+    const grace = Promise.withResolvers<void>();
+    const { provider, queries, workspace } = fixture(undefined, { shutdownGrace: () => grace.promise });
     const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
@@ -5988,12 +5989,20 @@ describe("plan usage on demand", () => {
       }
       return readFile(...args);
     }) as typeof readFile;
+    // r1, pushed and never read, is already there; r2 is offered after it.
+    const waiting = () => (queries[0]!.input.prompt as unknown as { values: unknown[] }).values.length;
     try {
-      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] }).catch(error => error as Error);
       await readStarted;
       const disposing = provider.dispose();
+      expect(waiting()).toBe(1);
       release!();
-      await expect(prompting).rejects.toThrow("closed before it took the prompt");
+      await waitFor(() => waiting() === 2);
+      // The query is still open with r2 offered; only now does the grace end.
+      expect(queries[0]!.returned).toBe(false);
+      expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2"))).toBe(false);
+      grace.resolve();
+      expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
       await disposing;
     } finally {
       fsPromises.readFile = readFile;
