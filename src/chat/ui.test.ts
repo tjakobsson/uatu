@@ -5174,25 +5174,29 @@ describe("login guidance and agent-named copy", () => {
     } finally { await finish(); }
   });
 
-  for (const descriptor of [OPENCODE, CLAUDE, UNMANAGED]) {
-    test(`a model list without a default reads "Let ${descriptor.name} choose"`, async () => {
+  // Once the runtime has described itself, the chooser names the agent as the
+  // runtime declares it; the stub's runtime reports a name of its own.
+  for (const [descriptor, runtimeName] of [[OPENCODE, undefined], [CLAUDE, undefined], [UNMANAGED, "Stub CLI"]] as const) {
+    const name = runtimeName ?? descriptor.name;
+    test(`a model list without a default reads "Let ${name} choose"`, async () => {
       const models: ChatModel[] = [{ selection: { providerId: "groq", modelId: "llama" }, provider: "Groq", name: "Llama" }];
-      const { document, finish, modelReads } = await boot(descriptor, { hubServed: false, login: "ok", models });
+      const { document, finish, modelReads } = await boot(descriptor, { hubServed: false, login: "ok", models, ...(runtimeName ? { runtimeName } : {}) });
       try {
         const summary = document.querySelector<HTMLElement>("#chat-configuration-summary")!;
-        await waitUntil(() => modelReads() > 0 && summary.textContent === `Let ${descriptor.name} choose`, () => `summary ${summary.textContent}`);
+        await waitUntil(() => modelReads() > 0 && summary.textContent === `Let ${name} choose`, () => `summary ${summary.textContent}`);
         // The picker, the inline chip and the accessible label name it the same way.
         const picker = document.querySelector<HTMLElement>("#chat-configuration-models")!;
-        await waitUntil(() => (picker.textContent ?? "").includes(`Let ${descriptor.name} choose`), () => `picker ${picker.textContent}`);
-        expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe(`Chat configuration. Model: chosen by ${descriptor.name}`);
+        await waitUntil(() => (picker.textContent ?? "").includes(`Let ${name} choose`), () => `picker ${picker.textContent}`);
+        if (runtimeName) expect(picker.textContent).not.toContain(descriptor.name);
+        expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe(`Chat configuration. Model: chosen by ${name}`);
         const inline = document.querySelector<HTMLElement>("#chat-inline-configuration")!;
-        expect(inline.textContent).toBe(`${descriptor.name} · Let ${descriptor.name} choose`);
-        expect(inline.title).toBe(`${descriptor.name} · ${descriptor.name} · Let ${descriptor.name} choose`);
+        expect(inline.textContent).toBe(`${name} · Let ${name} choose`);
+        expect(inline.title).toBe(`${name} · ${name} · Let ${name} choose`);
         // So does the announcement of a new conversation.
         const state = document.querySelector<HTMLElement>("#chat-state")!;
         document.querySelector<HTMLButtonElement>("#chat-new-conversation")!.click();
         await waitUntil(() => (state.textContent ?? "").startsWith("Started new conversation"), () => `state ${state.textContent}`);
-        expect(state.textContent).toBe(`Started new conversation with ${descriptor.name}. Model: chosen by ${descriptor.name}.`);
+        expect(state.textContent).toBe(`Started new conversation with ${name}. Model: chosen by ${name}.`);
       } finally { await finish(); }
     });
   }

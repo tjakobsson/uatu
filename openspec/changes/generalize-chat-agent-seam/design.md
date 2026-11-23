@@ -320,9 +320,11 @@ commands `opencode auth login` and `claude auth login`.
 takes the descriptor. It links to `/settings#agent-accounts/<id>` only when
 the page is Hub-served and the login is Hub-managed; otherwise it renders the
 existing "Run `<command>` where UatuCode runs." markup. `usageReadFailureLabel`
-takes the agent name ("<name> could not answer"), and the `ui.ts` fallback
-uses the conversation's agent name. Both read the same for Claude Code and
-OpenCode today.
+takes the registered name of the agent it asked ("<name> could not answer").
+The `ui.ts` model-chooser copy names the conversation's agent by the name its
+runtime declares once the runtime has described itself, and by its registered
+name before that, instead of a fixed "OpenCode". Both read the same for Claude
+Code and OpenCode today.
 
 **API revision.** `ChatAgentDescriptor` is a closed object
 (`additionalProperties: false` in `api/openapi.yaml`, and `expectKeys` in

@@ -156,7 +156,7 @@ function stripAgentQualifier(value: string): string {
   const agentId = qualifyingAgent(value);
   return agentId === undefined ? value : value.slice(agentId.length + 1);
 }
-function qualifyControlValue<T>(value: T, agentId = E2E_DEFAULT_AGENT_ID): T {
+function qualifyControlValue<T>(value: T, agentId: string): T {
   const walk = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(walk);
     if (node && typeof node === "object") {
@@ -182,7 +182,6 @@ function qualifyControlValue<T>(value: T, agentId = E2E_DEFAULT_AGENT_ID): T {
   };
   return walk(value) as T;
 }
-const controlJson = (value: unknown, agentId = E2E_DEFAULT_AGENT_ID) => Response.json(qualifyControlValue(value, agentId));
 
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a
@@ -539,6 +538,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
   const targetAgentId = body.agent ?? E2E_DEFAULT_AGENT_ID;
   const targetFake = E2E_FAKES_BY_ID.get(targetAgentId)?.service;
   if (!targetFake) return Response.json({ error: `no e2e agent registered as ${targetAgentId}` }, { status: 400 });
+  // Every conversation a control returns is qualified with the agent it
+  // targeted, so request and response name the same owner.
+  const controlJson = (value: unknown) => Response.json(qualifyControlValue(value, targetAgentId));
   switch (body.action) {
     case "agents": {
       const agentCount = body.stack === undefined ? body.count ?? 1 : 1;
@@ -650,9 +652,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       break;
     case "seed":
-      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt), targetAgentId);
+      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt));
     case "externalCreate":
-      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }), targetAgentId);
+      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }));
     case "externalRename":
       if (body.conversationId) return controlJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
       break;
@@ -691,24 +693,26 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       break;
     case "nextConversationConfiguration":
-      fakeChatAgent.configureNextConversation(body.configuration ?? {});
+      targetFake.configureNextConversation(body.configuration ?? {});
       return Response.json({ ok: true });
     case "disconnect":
-      fakeChatAgent.disconnect();
+      targetFake.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
+      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts, permissionChoices: targetFake.permissionChoices,
+        // Usage reads stay one list across every fake.
+        usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":
-      fakeChatAgent.invalidateInventory();
+      targetFake.invalidateInventory();
       return Response.json({ ok: true });
     case "inventoryInterrupt":
-      fakeChatAgent.interruptInventoryTransport();
+      targetFake.interruptInventoryTransport();
       return Response.json({ ok: true });
     case "inventoryResume":
-      fakeChatAgent.resumeInventoryTransport();
+      targetFake.resumeInventoryTransport();
       return Response.json({ ok: true });
     case "providerPumpRestart":
-      fakeChatAgent.restartProviderPump();
+      targetFake.restartProviderPump();
       return Response.json({ ok: true });
     case "delayNextInventoryList":
       targetFake.delayNextInventoryList();
@@ -770,10 +774,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.recoverItems(body.conversationId!, body.items ?? []);
       return Response.json({ ok: true });
     case "resync":
-      fakeChatAgent.rotateGeneration();
+      targetFake.rotateGeneration();
       return Response.json({ ok: true });
     case "restart":
-      fakeChatAgent.restart();
+      targetFake.restart();
       return Response.json({ ok: true });
   }
   return Response.json({ error: "invalid chat control" }, { status: 400 });
