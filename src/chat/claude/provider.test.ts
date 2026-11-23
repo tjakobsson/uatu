@@ -2786,6 +2786,52 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a rename queued behind a deferred write is drained by shutdown, and one asked after shutdown began is refused", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-drain-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const queries: FakeQuery[] = [];
+    // Every native write is held until the test releases it by title.
+    const order: string[] = [];
+    const started: string[] = [];
+    const finish = new Map<string, () => void>();
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // Far longer than the test: shutdown waits for the writes themselves.
+      shutdownGraceMs: 60_000,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        await new Promise<void>(resolve => { finish.set(title, resolve); });
+        order.push(`landed ${title}`);
+      },
+    });
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => started.length === 1);
+    // The user renames behind the deferred write, then shutdown starts.
+    const renaming = provider.renameSession(session.id, "Newer");
+    const disposing = provider.dispose().then(() => { order.push("disposed"); });
+    finish.get("Planned work")!();
+    await waitFor(() => started.includes("Newer"));
+    // The rename is admitted work: shutdown is waiting for it.
+    expect((provider as unknown as { mutations: Set<unknown> }).mutations.size).toBe(1);
+    expect(order).toEqual(["landed Planned work"]);
+    finish.get("Newer")!();
+    await renaming;
+    await disposing;
+    expect(order).toEqual(["landed Planned work", "landed Newer", "disposed"]);
+    // A rename asked once shutdown has begun is refused, writing nothing.
+    await expect(provider.renameSession(session.id, "Late")).rejects.toThrow("Claude provider is disposed");
+    expect(started).toEqual(["Planned work", "Newer"]);
+  });
+
   test("a turn ending during the shutdown grace leaves its deferred rename for the next start, writing nothing after shutdown", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-shutdown-")));
     const workspace = path.join(root, "workspace");

@@ -590,7 +590,9 @@ map and its rules out of the Claude Code provider:
     and restore,
     a rewind's reply included; a release, from its write to its
     publication; a wakeup cancel; a deferred rename's native write already
-    under way; and every prompt until the provider
+    under way; a manual rename, its wait behind that write included (one
+    asked after shutdown began is refused, as other new work is); and every
+    prompt until the provider
     accepts it or queues its rollback, so one already holding its session
     (reading its attachments, say) is accepted. Acceptance means delivery,
     and delivered means the SDK's input iterator has taken the prompt while

@@ -4154,8 +4154,15 @@ export class ClaudeProvider implements ChatProvider {
   /**
    * A UatuCode rename: recorded in the native session as a custom title, so
    * it outlives the workspace and outranks Claude Code's generated one.
+   * Admitted work: shutdown waits for and drains a rename under way (one
+   * queued behind a deferred write included) and refuses one asked after
+   * it began.
    */
   async renameSession(sessionId: string, title: string): Promise<ProviderSession> {
+    return this.admit(() => this.renameSessionAdmitted(sessionId, title));
+  }
+
+  private async renameSessionAdmitted(sessionId: string, title: string): Promise<ProviderSession> {
     await this.restoreDurableState();
     const session = await this.getSession(sessionId);
     if (!session) throw new Error(`unknown Claude conversation: ${sessionId}`);
