@@ -34,6 +34,7 @@ import {
   INTERNAL_SESSION_PATHS,
   SESSION_ACCOUNTS_CHANGED_PATH,
   SESSION_POLICY_PROOF_PATH,
+  SESSION_TERMINAL_SESSIONS_PATH,
   sessionBasePath,
   sessionConversationEventsPath,
   sessionPath,
@@ -239,6 +240,31 @@ describe("session contract against a real workspace session", () => {
       expect(answer.contentType).toContain("text/event-stream");
     }
   }, 30_000);
+
+  test("the dashboard's terminal inventory call gets the session's answer, and only with the Hub-held token", async () => {
+    // The dashboard's request, as the Hub's state endpoint sends it: the
+    // link's URL and no headers of its own.
+    const answer = await fetch(session.link.url(SESSION_TERMINAL_SESSIONS_PATH));
+    // Which answer is right depends on whether this session has a terminal,
+    // which it reports in its state.
+    const state = (await (await fetch(session.link.url("/api/state"), { headers: session.link.requestHeaders("application/json") })).json()) as { terminal: unknown };
+    if (state.terminal === "enabled") {
+      expect(answer.status).toBe(200);
+      expect(answer.headers.get("cache-control")).toBe("no-store");
+      expect(await answer.json()).toEqual({ sessions: [] });
+      // The control: the same request without the token is refused, so the
+      // answer above depended on the link applying it.
+      const untokened = session.link.url(SESSION_TERMINAL_SESSIONS_PATH);
+      untokened.searchParams.delete("t");
+      const refused = await fetch(untokened);
+      expect(refused.status).toBe(401);
+      await refused.body?.cancel();
+    } else {
+      expect(state.terminal).toBe("disabled");
+      expect(answer.status).toBe(503);
+      expect(await answer.text()).toBe("terminal disabled");
+    }
+  });
 
   test("the conversation stream and worker evidence answer from their own handlers for the ids the Hub sends", async () => {
     // A conversation exists only behind a running agent runtime (an OpenCode
