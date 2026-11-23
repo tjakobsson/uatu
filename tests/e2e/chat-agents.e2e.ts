@@ -52,6 +52,13 @@ test.describe("multi-agent chat", () => {
     expect(await offered()).toBe(2);
     expect((await request.post("/__e2e/chat", { data: { action: "agents", count: null } })).status()).toBe(400);
     expect(await offered()).toBe(2);
+    // A bare provider id may contain colons; it still goes out in the wire form.
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Colon child",
+      items: [{ id: "tool:worker", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "sub:s1:worker" }],
+    }) as { conversation: { id: string }; items: Array<{ childConversationId?: string }> };
+    expect(seeded.conversation.id.startsWith("claude:")).toBe(true);
+    expect(seeded.items[0]!.childConversationId).toBe("claude:sub:s1:worker");
   });
 
   test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {

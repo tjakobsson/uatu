@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
 import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
-import { MultiAgentChatService, parseQualifiedConversationId } from "../../src/chat/agents";
+import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { VisualStore } from "../../src/chat/visual-store";
@@ -153,9 +153,10 @@ function qualifyingAgent(value: string): string | undefined {
   return agentId !== undefined && E2E_FAKES_BY_ID.has(agentId) ? agentId : undefined;
 }
 function stripAgentQualifier(value: string): string {
-  const agentId = qualifyingAgent(value);
-  return agentId === undefined ? value : value.slice(agentId.length + 1);
+  return qualifyingAgent(value) === undefined ? value : parseQualifiedConversationId(value)!.conversationId;
 }
+// The fakes return bare provider ids, which may contain colons themselves
+// (`sub:s1:worker`); every one goes out in the production wire form.
 function qualifyControlValue<T>(value: T, agentId: string): T {
   const walk = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(walk);
@@ -163,15 +164,16 @@ function qualifyControlValue<T>(value: T, agentId: string): T {
       const record = node as Record<string, unknown>;
       const next: Record<string, unknown> = {};
       for (const [key, entry] of Object.entries(record)) {
-        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string" && !entry.includes(":")) {
-          next[key] = `${agentId}:${entry}`;
+        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string") {
+          next[key] = qualifyConversationId(agentId, entry);
           continue;
         }
         next[key] = walk(entry);
       }
-      // A conversation summary is recognizable by its shape; stamp the wire form.
-      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next && !(next.id as string).includes(":")) {
-        next.id = `${agentId}:${next.id as string}`;
+      // A conversation summary is recognizable by its shape (timeline items
+      // carry no updatedAt); stamp the wire form.
+      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next) {
+        next.id = qualifyConversationId(agentId, next.id as string);
         const fake = E2E_FAKES_BY_ID.get(agentId);
         if (!fake) throw new Error(`no e2e agent registered as ${agentId}`);
         next.agent = fake.descriptor;
