@@ -401,9 +401,8 @@ map and its rules out of the Claude Code provider:
   off waits behind it. A Claude Code session's claims (its tokens and its
   swept mark) exist before its query is built, so a callback the query
   factory fires at once is owned too. Shutdown sweeps every tracked session
-  of a conversation (live, displaced, closing) in one call, conversation by
-  conversation, each followed by its lost wakeups, so a conversation's
-  requests end in the holder's order whichever session asked them.
+  (live, displaced, closing) in one call, so all requests end in the
+  holder's order whichever session asked them.
   Claude Code sweeps by session, never by conversation: each session records
   the tokens of the registrations it made, and every session-scoped cleanup
   (retire, stream end, failure, a revert's survivors, dispose) ends only
@@ -416,8 +415,10 @@ map and its rules out of the Claude Code provider:
   are keyed by all three, where the Claude Code provider keyed them by request
   id alone: there, a second conversation's request, or a question, with the
   same id overwrote the first, which then could not be answered, listed or
-  abandoned. Now they stay independent. Claude Code's ids are unique, so this
-  changes nothing for it;
+  abandoned. Now they stay independent. Claude Code's ids are unique, with
+  one exception: a tool request may carry an empty id. Two conversations
+  that both asked under the empty id used to collide, one card replacing the
+  other; now both cards stay answerable;
 - operations are serialized. Registration, an answer, an abandonment, a sweep
   and a cancel each run as one operation. Settlement is claimed before any
   agent code (a mapper, an unsubscribe, a subscribe function) runs, so the
@@ -554,27 +555,34 @@ map and its rules out of the Claude Code provider:
   emits no `plan.approved` and leaves the conversation's mode unchanged.
   Once shutdown has started, no session-scoped cleanup sweeps on its own (a
   revert closing its session, a retirement, a stream's end or failure): the
-  session stays reachable for shutdown's single ordered sweep, which
-  includes closing sessions, so their requests end with the shutdown reason
-  and in the holder's order. Shutdown settles the lost wakeups of every
-  session it closes, displaced and closing ones included, after its
-  conversation's sweep: the live session first, then the others in the
-  order they were tracked. History mutations are fenced and drained, in two
-  cases. One that has not changed anything yet may be refused safely: a new
-  undo, redo, revert, restore or revert commit once shutdown has started,
-  or a cold undo whose start is refused at its transcript check, fails with
-  the disposed error before any side effect. One that has changed state must
-  finish or roll back, and `dispose()` waits for it: admitted undo, redo,
-  revert and restore operations (their write-ahead and corrective writes
-  complete normally), and a replacement prompt that committed a staged
-  revert, tracked until it is accepted or its rollback is written (shutdown
-  waits for it after its sweep, since the commit closes a live session).
-  No write of the provider lands after `dispose()` returns, and a durable
-  write never reports success without writing. A failed prompt that changed
-  nothing durable (a start refused by shutdown, say) writes nothing, so a
-  retired provider never overwrites a replacement's newer state. A start still waiting when the workspace shuts
-  down (on its transcript check, its last wait) starts no query and fails
-  its caller as a disposed provider does;
+  session stays reachable for shutdown's single sweep. Shutdown runs in a
+  fixed order, so no wait can hold up what releases it: (a) the provider is
+  marked disposed; (b) every pending request of every tracked session (live,
+  displaced, closing) ends once, in the holder's order, with the shutdown
+  reason, and an abort delivered later for one of them finds it settled;
+  the lost wakeups of every session it closes are then settled, the live
+  ones first, then the others in the order they were started; (c) every
+  session closes, so a control request still out on one (a rewind) fails
+  with its transport rather than being waited on, and a close waiting on a
+  callback finds it answered; (d) admitted history mutations and staged-
+  revert rollbacks drain; (e) persistence flushes. History mutations are
+  fenced and drained, in two cases. One that has not changed anything yet
+  may be refused safely: a new undo, redo, revert, restore or revert commit
+  once shutdown has started, or a cold undo whose start is refused at its
+  transcript check, fails with the disposed error before any side effect.
+  One that has changed state must finish or roll back, and `dispose()` waits
+  for it: admitted undo, redo, revert and restore operations (their
+  write-ahead and corrective writes complete normally), and a replacement
+  prompt that committed a staged revert, tracked until it is accepted or its
+  rollback is written. For those two, no write lands after `dispose()`
+  returns, and a durable write never reports success without writing. A
+  start still waiting when the workspace shuts down (on its transcript
+  check, its last wait) starts no query and fails its caller as a disposed
+  provider does, and a failed prompt that changed nothing durable writes
+  nothing. A known limitation, which already exists on `main` and is outside
+  this change: an ordinary prompt (no staged revert) that changed the
+  conversation's configuration and then fails after shutdown has started
+  can still write its configuration rollback after `dispose()` returns;
 - the Claude Code provider's replies keep their timing. A reply the adapter
   makes runs at once, so the provider learns the holder's own outcome
   synchronously through `tryAnswer` (settled, refused with its error, or

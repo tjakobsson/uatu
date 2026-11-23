@@ -1706,11 +1706,42 @@ export class ClaudeProvider implements ChatProvider {
     if (this.windowRetryTimer) clearTimeout(this.windowRetryTimer);
     for (const timer of this.titleRefreshTimers.values()) clearTimeout(timer);
     this.titleRefreshTimers.clear();
-    // History mutations already admitted finish, their writes included;
-    // new ones are refused from here on (see admit).
-    await Promise.all([...this.mutations]);
-    // Nothing durable may still be in flight when the workspace stops.
-    await this.persistChain.catch(() => undefined);
+    // Shutdown runs in this order, so no wait can hold up what releases it:
+    // every pending request ends first, then every session closes, and only
+    // then do admitted history mutations drain and persistence flush.
+    const shutdown = "The workspace shut down before the user answered.";
+    const sessions = [...this.live.values()];
+    // Every session started and not yet fully torn down, in the order it
+    // was started: displaced queries and closing ones (a retire's, a
+    // revert's) alike.
+    const others = [...this.startedSessions].filter(session => !sessions.includes(session));
+    const closing = new Map(this.closingSessions);
+    this.startedSessions.clear();
+    this.live.clear();
+    // (b) Every pending request ends once, in the holder's order, with the
+    // shutdown reason; a later abort for one of them finds it settled.
+    for (const session of [...sessions, ...others]) session.claims.swept = true;
+    this.interactions.abandonRegistrations([...sessions, ...others].flatMap(session => [...session.claims.requests]), shutdown);
+    // Shutdown is the process exit a schedule cannot survive (D6): every
+    // session it closes has its wakeups settled, the live ones first, then
+    // the others in the order they were started.
+    for (const session of [...sessions, ...others]) {
+      this.cancelSessionWindowRead(session);
+      this.clearIdleTimer(session);
+      const lost = this.settleWakeups(session, "ended");
+      if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+    }
+    // (c) Every session closes; a control request still out on one (a
+    // rewind) fails with its transport rather than being waited on.
+    await Promise.all([
+      ...[...sessions, ...others.filter(session => !closing.has(session))].map(async session => {
+        await session.query.interrupt().catch(() => undefined);
+        session.queue.close();
+        await session.query.return?.().catch(() => undefined);
+        await session.reader.catch(() => undefined);
+      }),
+      ...[...closing.values()].map(closed => closed.catch(() => undefined)),
+    ]);
     await this.probeQuery?.return?.().catch(() => undefined);
     await this.windowWalk?.catch(() => undefined);
     const usageProbe = this.usageProbe;
@@ -1720,57 +1751,11 @@ export class ClaudeProvider implements ChatProvider {
       await usageProbe.query.return?.().catch(() => undefined);
     }
     await this.hydration?.catch(() => undefined);
-    const sessions = [...this.live.values()];
-    // Sessions a racing start displaced from `live` still run: they are
-    // swept and closed too, so no agent process outlives the workspace.
-    const displaced = [...this.startedSessions].filter(session => !sessions.includes(session));
-    // A teardown already under way (a retire, a revert's close) is swept
-    // now and awaited before shutdown finishes.
-    const closing = [...this.closingSessions];
-    this.startedSessions.clear();
-    this.live.clear();
-    // Every tracked session of a conversation is swept in one call, so its
-    // requests end in the holder's order whichever session asked them, and
-    // conversations end one at a time, each followed by its lost wakeups.
-    const shutdown = "The workspace shut down before the user answered.";
-    const others = [...displaced, ...closing.map(([session]) => session)];
-    const sweepConversation = (owners: LiveSession[]) => {
-      for (const session of owners) session.claims.swept = true;
-      this.interactions.abandonRegistrations(owners.flatMap(session => [...session.claims.requests]), shutdown);
-    };
-    // Shutdown is the process exit a schedule cannot survive (D6): every
-    // session it closes, displaced and closing ones included, has its
-    // wakeups settled after its conversation's sweep, the live session
-    // first, then the others in the order they were tracked.
-    const loseWakeups = (session: LiveSession) => {
-      const lost = this.settleWakeups(session, "ended");
-      if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
-    };
-    for (const session of sessions) {
-      this.cancelSessionWindowRead(session);
-      this.clearIdleTimer(session);
-      const group = [session, ...others.filter(other => other.id === session.id)];
-      sweepConversation(group);
-      for (const member of group) loseWakeups(member);
-    }
-    const orphans = others.filter(other => !sessions.some(session => session.id === other.id));
-    for (const conversationId of new Set(orphans.map(session => session.id))) {
-      const group = orphans.filter(session => session.id === conversationId);
-      sweepConversation(group);
-      for (const member of group) loseWakeups(member);
-    }
-    await Promise.all([
-      ...[...sessions, ...displaced].map(async session => {
-        await session.query.interrupt().catch(() => undefined);
-        session.queue.close();
-        await session.query.return?.().catch(() => undefined);
-        await session.reader.catch(() => undefined);
-      }),
-      ...closing.map(([, closed]) => closed.catch(() => undefined)),
-    ]);
-    // A replacement prompt still committing a revert finishes or rolls back,
-    // and its write lands, before shutdown returns.
-    await Promise.all([...this.stagedPrompts]);
+    // (d) History mutations already admitted, and replacement prompts still
+    // committing a revert, finish or roll back; new ones are refused (see
+    // admit and prompt).
+    await Promise.all([...this.mutations, ...this.stagedPrompts]);
+    // (e) Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     this.events_.close();
   }
@@ -2058,7 +2043,7 @@ export class ClaudeProvider implements ChatProvider {
         }
       }
       // The stream ended without dispose: the session's process is gone.
-      if (!this.disposed) this.startedSessions.delete(session);
+      if (!this.disposed && !this.closingSessions.has(session)) this.startedSessions.delete(session);
       // A session a racing start displaced from `live` ends too: its own
       // requests go with it, the live session's stay.
       // One closing for a retire or a revert is swept by that teardown, with
@@ -2099,7 +2084,7 @@ export class ClaudeProvider implements ChatProvider {
       }
     } catch (error) {
       if (this.disposed) return;
-      this.startedSessions.delete(session);
+      if (!this.closingSessions.has(session)) this.startedSessions.delete(session);
       if (this.live.get(session.id) !== session) {
         if (!this.closingSessions.has(session)) this.sweepSession(session, "The session failed before the user answered.");
         return;
@@ -2339,7 +2324,6 @@ export class ClaudeProvider implements ChatProvider {
     const live = this.live.get(sessionId);
     if (live) {
       this.live.delete(sessionId);
-      this.startedSessions.delete(live);
       // Its requests go with it: once it leaves the live map its stream's
       // end no longer sweeps them, and a card it asked while the fork was
       // persisted would outlive the replacement. Marked first, so nothing
@@ -2759,7 +2743,10 @@ export class ClaudeProvider implements ChatProvider {
     } finally {
       // Once shutdown has started it owns the sweep: the session stays
       // reachable for it even after its own close has finished.
-      if (!this.disposed) this.closingSessions.delete(session);
+      if (!this.disposed) {
+        this.closingSessions.delete(session);
+        this.startedSessions.delete(session);
+      }
       finished();
     }
   }
@@ -4196,7 +4183,6 @@ export class ClaudeProvider implements ChatProvider {
     // child's status is the last thing this query says about it.
     this.settleChildren(session, "interrupted");
     this.live.delete(session.id);
-    this.startedSessions.delete(session);
     this.foldSessionTotals(session);
     // Once shutdown has started, its single ordered sweep takes the
     // session's requests; closeSession keeps it reachable for that.

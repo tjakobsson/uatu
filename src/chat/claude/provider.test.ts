@@ -209,7 +209,7 @@ async function raceStarts(provider: ClaudeProvider, queries: FakeQuery[], conver
 
 // A conversation with two stored turns, on a provider that can rewind and
 // fork, so a staged revert can be committed by a replacement prompt.
-function revertingProvider() {
+function revertingProvider(prepare?: (query: FakeQuery) => void) {
   const { queries, configDir, workspace } = fixture();
   const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
   const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
@@ -234,6 +234,7 @@ function revertingProvider() {
       query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
       query.getContextUsage = async () => ({ categories: [], totalTokens: 1, maxTokens: 200_000 });
       query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ subscription_type: null, rate_limits_available: false });
+      prepare?.(query);
       queries.push(query);
       return query;
     },
@@ -4564,7 +4565,7 @@ describe("ClaudeProvider sessions", () => {
     return { release: () => release!(), restore: () => { fsPromises.writeFile = writeFile; } };
   }
 
-  test("survivors are left to shutdown's sweep when the revert's interrupt returns while disposal is still busy", async () => {
+  test("a revert closing during shutdown leaves its survivors to shutdown's sweep, which ends them before the revert's interrupt returns", async () => {
     const { forking, queries, storedId } = revertingProvider();
     const { events } = collect(forking);
     await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
@@ -4589,11 +4590,12 @@ describe("ClaudeProvider sessions", () => {
     const hold = await holdDisposalOnWrite(forking);
     try {
       const disposing = forking.dispose();
-      // The interrupt returns while disposal still waits on the write; the
-      // revert closes its query without sweeping.
+      // Shutdown has ended the survivor already; the interrupt then returns
+      // while disposal still waits on the write, and the revert closes its
+      // query without a sweep of its own.
+      expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
       releaseInterrupt!();
       await revertClosed;
-      expect(abandonedIds(events)).toEqual([]);
       hold.release();
       await disposing;
     } finally {
@@ -4663,6 +4665,95 @@ describe("ClaudeProvider sessions", () => {
     expect([await first, await second]).toEqual([shutdown, shutdown]);
     await waitFor(() => abandonedIds(events).length === 2);
     expect(abandonedIds(events)).toEqual(["A", "B"]);
+  });
+
+  test("a rewind that never settles until its query closes does not hold up shutdown", async () => {
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    let failRewind: ((error: Error) => void) | undefined;
+    // The control request stays out until the transport closes.
+    const { forking, queries, storedId } = revertingProvider(query => {
+      query.rewindFiles = () => {
+        rewinding!();
+        return new Promise((_resolve, reject) => { failRewind = reject; });
+      };
+      const close = query.return.bind(query);
+      query.return = async () => { failRewind?.(new Error("transport closed")); return close(); };
+    });
+    const undoing = forking.undo!(storedId).catch(error => error as Error);
+    await rewindStarted;
+    const query = queries[0]!;
+    await forking.dispose();
+    expect(query.returned).toBe(true);
+    expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
+  });
+
+  test("an undo retiring its session during shutdown cannot deadlock on a callback the sweep settles", async () => {
+    let releaseRewind: (() => void) | undefined;
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    const { forking, queries, storedId } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => {
+        if (!options?.dryRun) {
+          rewinding!();
+          await new Promise<void>(resolve => { releaseRewind = resolve; });
+        }
+        return rewind(uuid, options);
+      };
+    });
+    const undoing = forking.undo!(storedId);
+    await rewindStarted;
+    const query = queries[0]!;
+    // A permission is pending, and the query's close waits for it to be
+    // answered, as the SDK's does for an open control request.
+    const permission = query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const close = query.return.bind(query);
+    query.return = async () => { await permission; return close(); };
+    const disposing = forking.dispose();
+    releaseRewind!();
+    await disposing;
+    expect(await permission).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect((await undoing).outcome).toBe("changed");
+  });
+
+  test("shutdown ends a displaced request and a reverting session's in the holder's order before the revert's interrupt aborts the second", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    await forking.undo!(storedId);
+    const turn = new AbortController();
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    const second = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: turn.signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    let releaseInterrupt: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    // The SDK's interrupt aborts the turn's request signals when it returns.
+    live.interrupt = async () => {
+      live.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { releaseInterrupt = resolve; });
+      turn.abort();
+      return {};
+    };
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      releaseInterrupt!();
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    expect(await second).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+    await committing;
   });
 
   // Gates the next durable write: resolves `started` when it begins and
