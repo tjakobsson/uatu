@@ -79,6 +79,15 @@ test.describe("multi-agent chat", () => {
     const served = await request.get(`/api/chat/conversations/${encodeURIComponent(parent.conversation.id)}?t=${encodeURIComponent(token)}`).then(response => response.json()) as Descended;
     expect(parent.items[0]!.descendants![0]!.conversationId).toBe(served.items[0]!.descendants![0]!.conversationId);
     expect(parent.items[0]!.descendants![0]!.conversationId).toBe("sub:s1:worker");
+    // Exactly one qualifier is stripped: Claude's child `claude:opencode:worker`
+    // is stored as the raw `opencode:worker` and qualified once on the way out.
+    const nested = await control(request, {
+      action: "seed", agent: "claude", title: "Strip once",
+      items: [{ id: "tool:strip-once", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "claude:opencode:worker" }],
+    }) as { conversation: { id: string }; items: Array<{ childConversationId?: string }> };
+    expect(nested.items[0]!.childConversationId).toBe("claude:opencode:worker");
+    const nestedServed = await request.get(`/api/chat/conversations/${encodeURIComponent(nested.conversation.id)}?t=${encodeURIComponent(token)}`).then(response => response.json()) as { items: Array<{ childConversationId?: string }> };
+    expect(nestedServed.items[0]!.childConversationId).toBe("claude:opencode:worker");
     // A nested id owned by another registered agent is rejected, not restamped.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Foreign child",
