@@ -68,6 +68,15 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   /** The login in effect: account, plan, and where the credential comes from. */
   accountInfo?(): Promise<unknown>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
+  /**
+   * The SDK's own flag, set as its cleanup starts and closes the transport
+   * (in 0.3.330 a public field of its `Query`, not in its published types):
+   * read structurally, and a handle without it reads as open. A test in
+   * provider.test.ts ("the installed SDK still sets and checks the
+   * cleanupPerformed flag…") reads the installed SDK and fails if a bump
+   * renames it.
+   */
+  readonly cleanupPerformed?: boolean;
 };
 
 /** The SDK's PermissionResult, structurally. */
@@ -1643,7 +1652,10 @@ export class ClaudeProvider implements ChatProvider {
     }
     // Delivered means taken: the queue closes when the query does (or its
     // stream ends), withdrawing an envelope nothing took.
-    if (!await session.queue.offer(envelope)) {
+    // Taken counts only while the SDK's transport is open: its cleanup can
+    // close it before the output reader sees the stream end, and its input
+    // loop then still takes an envelope it can no longer write.
+    if (!await session.queue.offer(envelope) || session.query.cleanupPerformed === true) {
       session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       return rollBack(new Error("Claude Code session closed before it took the prompt"));
     }

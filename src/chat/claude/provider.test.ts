@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFile
 import { promises as fsPromises } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
 import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.json";
@@ -57,6 +58,9 @@ class FakeQuery implements ClaudeQueryHandle {
 
   /** Set before the query starts reading: an SDK that never takes its input. */
   inputUnread = false;
+
+  /** The SDK's own flag, set once its cleanup has closed the transport. */
+  cleanupPerformed = false;
 
   /** Reads the input as the SDK does: everything offered, for as long as the query is open. */
   consumeInput(): this {
@@ -5536,6 +5540,35 @@ describe("ClaudeProvider sessions", () => {
     expect(stateOnDisk(workspace).staged).toEqual({ [storedId]: { boundaryIndex: 1, tipSnapshot: {} } });
     expect(stateOnDisk(workspace).activeNative).toEqual({});
     stop();
+  });
+
+  test("the installed SDK still sets and checks the cleanupPerformed flag the provider reads", () => {
+    // ClaudeQueryHandle.cleanupPerformed is an SDK internal: a bump that
+    // renames it would make every closed transport read as open, silently.
+    const source = readFileSync(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk")), "utf8");
+    // Set as the query's cleanup starts, before the transport closes...
+    expect(source).toMatch(/cleanup\(\w*\)\{[^}]{0,200}this\.cleanupPerformed\s*=\s*(?:!0|true)/);
+    // ...and checked by its input loop, the one that takes the prompts.
+    expect(source).toMatch(/async streamInput\([\s\S]{0,600}this\.cleanupPerformed/);
+  });
+
+  test("a staged replacement taken after the SDK closed its transport is refused, keeping Redo", async () => {
+    let closedFirst = false;
+    const { forking, queries, storedId } = revertingProvider(query => { query.cleanupPerformed = closedFirst; });
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    // The replacement's query has closed its transport (the CLI exited)
+    // before the provider's reader has seen its stream end; its input
+    // iterator still takes what is offered, and never writes it.
+    closedFirst = true;
+    const outcome = await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    expect(outcome).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+    expect(queries.at(-1)!.takenTexts()).toEqual([["a different direction"]]);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new"))).toBe(false);
+    expect(await forking.getReversibleHistoryState!(storedId)).toEqual(expect.objectContaining({ staged: true, canRedo: true }));
+    stop();
+    await forking.dispose();
   });
 
   test("a staged replacement whose stream ends before it takes the input is refused, keeping Redo", async () => {

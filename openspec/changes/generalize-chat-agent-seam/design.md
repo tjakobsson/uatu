@@ -604,7 +604,10 @@ map and its rules out of the Claude Code provider:
     reported accepted and then dropped, and one nothing takes before the
     close is refused and rolled back. A query whose stream has ended or
     failed is not open, even while shutdown still holds it, so a prompt for
-    it is refused. A replacement for a staged revert, at any time, is
+    it is refused. Nor is one whose SDK cleanup has closed the transport
+    before the provider has seen its stream end: the SDK's input loop can
+    still take an envelope then and never write it, so a prompt taken after
+    that close is refused and rolled back too. A replacement for a staged revert, at any time, is
     acknowledged, and the revert finalized, only once the SDK has taken it
     in the same way; if it is not taken it is refused and the revert rolled
     back, so the boundary and Redo stay. A prompt acknowledged before
