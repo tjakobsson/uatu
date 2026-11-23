@@ -78,6 +78,8 @@ test.describe("multi-agent chat", () => {
     for (const data of [
       { action: "status", conversationId: "claud:conversation-1", status: "idle" },
       { action: "usageRead", outcome: { outcome: "fail", conversationId: "claud:conversation-1" } },
+      // A qualifier without a provider id is malformed.
+      { action: "status", conversationId: "claude:", status: "idle" },
     ]) expect((await request.post("/__e2e/chat", { data })).status()).toBe(400);
     // An explicit agent that disagrees with the id's owner is rejected too.
     for (const data of [

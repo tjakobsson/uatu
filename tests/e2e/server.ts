@@ -623,6 +623,11 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // that names no registered fake is rejected rather than routed to the first.
   for (const id of [body.conversationId, body.action === "usageRead" ? body.outcome?.conversationId : undefined]) {
     if (typeof id !== "string") continue;
+    // A colon makes an id qualified; one the wire rule cannot parse (an
+    // empty agent or provider id, `claude:`) is malformed, not raw.
+    if (id.includes(":") && !parseQualifiedConversationId(id)) {
+      return Response.json({ error: `malformed conversation id ${JSON.stringify(id)}` }, { status: 400 });
+    }
     const qualifier = parseQualifiedConversationId(id)?.agentId;
     if (qualifier !== undefined && !E2E_FAKES_BY_ID.has(qualifier)) {
       return Response.json({ error: `no e2e agent registered as ${qualifier}` }, { status: 400 });
