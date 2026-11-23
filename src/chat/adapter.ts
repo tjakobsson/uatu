@@ -1031,8 +1031,8 @@ export class ChatAdapter {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    const previousListed = new Map<string, number>();
-    for (const id of this.listedSessions.keys()) previousListed.set(id, this.presenceSequence(id));
+    const started = ++this.presenceClock;
+    const previousListed = [...this.listedSessions.keys()];
     const sessions = await this.provider.listSessions();
     const accepted: ConversationSummary[] = [];
     const inWorkspaceIds = new Set<string>();
@@ -1040,7 +1040,7 @@ export class ChatAdapter {
     for (let session of sessions) {
       const metadata = await this.classifyInventorySession(session);
       if (!metadata.inWorkspace) continue;
-      this.bumpPresenceSequence(session.id);
+      this.bumpPresenceSequence(session.id, started);
       inWorkspaceIds.add(session.id);
       // Subagent children stay out of the picker: they are reached from the
       // parent's subagent rows, and listing them as peers buries the real
@@ -1075,9 +1075,9 @@ export class ChatAdapter {
       accepted.push(this.summary(session));
     }
     let droppedListed = false;
-    for (const [id, baseline] of previousListed) {
+    for (const id of previousListed) {
       if (listedTopLevel.has(id)) continue;
-      if (this.presenceSequence(id) !== baseline) continue;
+      if (this.presenceSequence(id) > started) continue;
       const wasListed = this.listedSessions.delete(id);
       const cached = this.inventorySessions.get(id);
       const wasVisible = inventoryVisible(cached);
@@ -2560,8 +2560,8 @@ export class ChatAdapter {
     return this.presenceSequences.get(conversationId) ?? this.presenceEvictedFloor;
   }
 
-  private bumpPresenceSequence(conversationId: string): void {
-    const next = ++this.presenceClock;
+  private bumpPresenceSequence(conversationId: string, tick = ++this.presenceClock): void {
+    if (tick <= this.presenceSequence(conversationId)) return;
     if (this.presenceSequences.has(conversationId)) {
       this.presenceSequences.delete(conversationId);
     } else if (this.presenceSequences.size >= INVENTORY_SESSION_LIMIT) {
@@ -2571,7 +2571,7 @@ export class ChatAdapter {
         this.presenceSequences.delete(oldest[0]);
       }
     }
-    this.presenceSequences.set(conversationId, next);
+    this.presenceSequences.set(conversationId, tick);
   }
 
   private trackedActivityIds(): string[] {
@@ -2608,16 +2608,16 @@ export class ChatAdapter {
   private async verifyTrackedSessions(ids: readonly string[], signal?: AbortSignal): Promise<void> {
     for (const id of ids) {
       if (this.disposed || signal?.aborted) return;
-      const baseline = this.presenceSequence(id);
+      const started = ++this.presenceClock;
       try {
         const session = await this.provider.getSession(id);
         if (this.disposed || signal?.aborted) return;
         const missingOrForeign = !session || !await this.isInWorkspace(session, false);
         if (this.disposed || signal?.aborted) return;
         if (missingOrForeign) {
-          if (this.presenceSequence(id) === baseline) this.forgetMissingSession(id);
+          if (this.presenceSequence(id) <= started) this.forgetMissingSession(id);
         } else {
-          this.bumpPresenceSequence(id);
+          this.bumpPresenceSequence(id, started);
         }
       } catch {
         // Keep tracked activity when a transient provider error prevents verification.
@@ -7146,13 +7146,13 @@ export class ChatAdapter {
     // A provider failure propagates as itself: the pump treats not-found as
     // "skip this frame" but must restart on transport errors, and the API
     // routes should answer 500, not 404, when the provider is unreachable.
-    const baseline = this.presenceSequence(id);
+    const started = ++this.presenceClock;
     const session = await this.provider.getSession(id);
     if (!session || !await this.isInWorkspace(session, false)) {
-      if (this.presenceSequence(id) === baseline) this.forgetMissingSession(id);
+      if (this.presenceSequence(id) <= started) this.forgetMissingSession(id);
       throw new ConversationNotFoundError();
     }
-    this.bumpPresenceSequence(session.id);
+    this.bumpPresenceSequence(session.id, started);
     boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
     return session;
   }

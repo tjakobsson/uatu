@@ -14083,6 +14083,36 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("an older local getConversation response does not prevent a newer overlapping foreign lookup from clearing activity", async () => {
+    const { adapter, provider } = activityAdapter();
+    const local = fixtureSession("overlap-move");
+    const foreign = fixtureSession("overlap-move", `${process.cwd()}-elsewhere`);
+    const resolvers: Array<(session: ProviderSession | null) => void> = [];
+    provider.getSession = () => new Promise<ProviderSession | null>(resolve => { resolvers.push(resolve); });
+
+    adapter.projectionForTests("overlap-move").apply({ kind: "status", status: "running" });
+    expect(adapter.activity().working).toBe(true);
+
+    // Pre-move lookup starts first; post-move lookup starts second.
+    const olderLocal = adapter.getConversation("overlap-move");
+    await waitUntil(() => resolvers.length === 1);
+    const newerForeign = adapter.getConversation("overlap-move").catch(() => undefined);
+    await waitUntil(() => resolvers.length === 2);
+
+    // Older local lookup finishes first while newer foreign lookup is still pending.
+    resolvers[0]!(local);
+    await olderLocal;
+    expect(adapter.activity().working).toBe(true);
+
+    // Newer foreign lookup finishes second and must still clear stale working activity.
+    resolvers[1]!(foreign);
+    await newerForeign;
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("overlap-move").status).toBe("idle");
+
+    await adapter.dispose();
+  });
 });
 
 describe("plan usage on demand", () => {
