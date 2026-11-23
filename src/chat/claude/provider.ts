@@ -3307,12 +3307,19 @@ export class ClaudeProvider implements ChatProvider {
   /**
    * A wakeup shutdown has already reported lost or paused does not fire in
    * a query the grace keeps open: its turn is blocked, as a cancelled one's
-   * is, by the same prompt match and only while no prompt is outstanding.
+   * is, by the same prompt match. A hook the SDK names as a wakeup's is
+   * blocked even while a prompt is outstanding; one without a source only
+   * while none is, since the person may have typed the same words.
    */
   private blocksSettledFire(session: LiveSession, input: Record<string, unknown>): boolean {
     if (!this.disposed || !session.settledAtShutdown?.size) return false;
     if (typeof input.agent_id === "string" && input.agent_id) return false;
-    if (session.pendingTurns > 0 || session.queuedTurns > 0) return false;
+    const source = typeof input.source === "string" ? input.source : undefined;
+    if (source !== undefined) {
+      if (source !== "loop_wakeup" && source !== "schedule_wakeup") return false;
+    } else if (session.pendingTurns > 0 || session.queuedTurns > 0) {
+      return false;
+    }
     const prompt = typeof input.prompt === "string" ? input.prompt : "";
     if (![...session.settledAtShutdown.values()].some(settledPrompt => wakeupPromptMatches(settledPrompt, prompt))) return false;
     session.blockedFires += 1;

@@ -6558,6 +6558,46 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a settled wakeup the SDK names as a wakeup is blocked in the grace even while a typed prompt is pending", async () => {
+    const { provider, events, stop, query, session, workspace } = await scheduled([oneShot]);
+    // A typed prompt for the same conversation, delivered and not yet ended.
+    await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
+    // Another conversation's prompt, reading its attachment, keeps the grace open.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      // Without a source, the same words may be the person's: they pass.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "typed-2" })).toEqual({ continue: true });
+      // With the SDK's wakeup source, it is the settled wakeup: blocked.
+      for (const source of ["schedule_wakeup", "loop_wakeup"]) {
+        expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: `fired-${source}`, source })).toEqual({ decision: "block", reason: "The workspace is shutting down: this scheduled wakeup no longer fires here." });
+      }
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();
