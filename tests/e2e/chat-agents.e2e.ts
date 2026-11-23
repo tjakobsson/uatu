@@ -74,6 +74,7 @@ test.describe("multi-agent chat", () => {
     }) as Descended & { conversation: { id: string } };
     const served = await request.get(`/api/chat/conversations/${encodeURIComponent(parent.conversation.id)}?t=${encodeURIComponent(token)}`).then(response => response.json()) as Descended;
     expect(parent.items[0]!.descendants![0]!.conversationId).toBe(served.items[0]!.descendants![0]!.conversationId);
+    expect(parent.items[0]!.descendants![0]!.conversationId).toBe("sub:s1:worker");
     // A nested id owned by another registered agent is rejected, not restamped.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Foreign child",
