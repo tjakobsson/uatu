@@ -661,7 +661,9 @@ map and its rules out of the Claude Code provider:
     first, in (b), to avoid the callback deadlock.
     A wakeup whose cancel is still being written stays that cancel's: a
     Stop, in the grace or before it, neither settles nor drops it, but its
-    word on the wakeup is kept (the latest Stop's). The cancel reports it
+    word on the wakeup is kept (the latest Stop's, except that a recorded
+    fire stands against a later Stop that only finds the wakeup still gone).
+    The cancel reports it
     `wakeup.cancelled` once its write has succeeded; if the write fails, the
     wakeup takes that kept outcome (fired, with its turn, or reconciled as
     listed), and one still scheduled is settled as any other, here by

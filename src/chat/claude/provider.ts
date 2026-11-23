@@ -314,6 +314,11 @@ type SessionClaims = {
   query?: ClaudeQueryHandle;
 };
 
+// A Stop's word on a wakeup whose cancel is being written (see
+// LiveSession.cancelStopOutcomes): the wakeup as listed, or the row of one
+// the CLI dropped, marked when that row records a fire.
+type CancelStopOutcome = { keep?: SessionWakeup; update?: NormalizedProviderUpdate; fired?: boolean };
+
 type LiveSession = {
   claims: SessionClaims;
   // A release under way, and one that released the session (see release);
@@ -327,7 +332,7 @@ type LiveSession = {
   // for the cancel to apply if its write fails: the wakeup as listed (and
   // its pending row, if that changed), or, once the CLI dropped it, its
   // fired or cancelled row.
-  cancelStopOutcomes?: Map<string, { keep?: SessionWakeup; update?: NormalizedProviderUpdate }>;
+  cancelStopOutcomes?: Map<string, CancelStopOutcome>;
   released?: boolean;
   // Left by shutdown's sweep for its end, because its own release or cancel
   // was under way then: set for the rest of shutdown, after that operation
@@ -3177,10 +3182,14 @@ export class ClaudeProvider implements ChatProvider {
         ? wakeupRow(wakeupId, wakeup, "fired", { firedTurnId })
         : wakeupRow(wakeupId, wakeup, "cancelled") };
       // Dropped by the CLI while its cancel is being written: still the
-      // cancel's, and the row is kept for a cancel whose write fails.
+      // cancel's, and the row is kept for a cancel whose write fails. A fire
+      // already recorded stands: a later Stop that only finds the wakeup
+      // still gone says nothing new about it.
       if (session.pendingCancels?.has(wakeupId)) {
         next.set(wakeupId, wakeup);
-        (session.cancelStopOutcomes ??= new Map()).set(wakeupId, { update });
+        const outcomes = (session.cancelStopOutcomes ??= new Map());
+        if (firedTurnId !== undefined) outcomes.set(wakeupId, { update, fired: true });
+        else if (!outcomes.get(wakeupId)?.fired) outcomes.set(wakeupId, { update });
         continue;
       }
       updates.push(update);
@@ -3310,7 +3319,7 @@ export class ClaudeProvider implements ChatProvider {
    * the cancel was out: the wakeup as listed, or the fired or cancelled row
    * of one the CLI dropped, so a fire it saw is not lost.
    */
-  private applyStopOutcome(session: LiveSession, wakeupId: string, outcome: { keep?: SessionWakeup; update?: NormalizedProviderUpdate }): void {
+  private applyStopOutcome(session: LiveSession, wakeupId: string, outcome: CancelStopOutcome): void {
     if (outcome.keep) session.wakeups.set(wakeupId, outcome.keep);
     else session.wakeups.delete(wakeupId);
     if (outcome.update) this.emit(session.id, { updates: [outcome.update], outcome: "handled", eventType: "wakeups.reconciled" });
