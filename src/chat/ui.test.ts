@@ -5215,6 +5215,8 @@ describe("login guidance and agent-named copy", () => {
       await waitUntil(() => (picker.textContent ?? "").includes("Let the agent choose"), () => `picker ${picker.textContent}`);
       expect(picker.textContent).not.toContain("Claude Code");
       expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe("Chat configuration. Model: chosen by the agent");
+      // The inline/touch chip shows the same summary fallback.
+      expect(document.querySelector<HTMLElement>("#chat-inline-configuration")!.textContent).toBe("Let Claude Code choose");
     } finally { await finish(); }
   });
 
