@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
 import { consumeChildPolicyDescriptor } from "../../src/session-contract/bootstrap";
+import { createSessionLink } from "../../src/session-contract/link";
 import { formatReadyLine, POLICY_BOOTSTRAP_FLAG } from "../../src/session-contract/spawn";
 import { mintSessionToken } from "../../src/session-contract/token";
 import { MultiAgentChatService } from "../../src/chat/agents";
@@ -294,12 +295,17 @@ const liveUpstreamSource: LiveUpstreamSource = {
   },
   async open({ path: childPath, signal }) {
     await liveUpstreamsReady;
-    const target = new URL(childPath, `http://127.0.0.1:${server.port}`);
-    target.searchParams.set("t", sessionToken);
-    return fetch(target, {
-      headers: { accept: "text/event-stream", origin: `http://127.0.0.1:${server.port}` },
-      signal,
+    // Addressed and shaped by a session link, as the hub's upstream source
+    // does, so the E2E live tests also cover the link's token and headers.
+    // Built per open from the current token, which a reset rotates.
+    const link = createSessionLink({
+      workspaceId: E2E_WORKSPACE_ID,
+      instanceId: E2E_WORKSPACE_ID,
+      basePath: E2E_BASE_PATH,
+      endpoint: { hostname: "127.0.0.1", port: server.port! },
+      token: sessionToken,
     });
+    return fetch(link.url(childPath), { headers: link.requestHeaders(), signal });
   },
 };
 const liveBroker = new LiveBroker(liveUpstreamSource, {
