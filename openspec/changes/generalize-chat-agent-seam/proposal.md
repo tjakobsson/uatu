@@ -52,9 +52,12 @@ become observable; the refactors themselves are described in `design.md` and
   its login declaration. The workspace API revision and the bundled web
   revision are bumped.
 
-OpenCode and Claude Code behave as they do today. The only visible differences
-are startup messages that name the agent that failed and corrected agent names
-in two pieces of copy.
+OpenCode behaves as it does today. Claude Code does too, apart from the approved
+differences listed above and the deliberate differences design D4 records for
+workspace shutdown and prompt delivery (such as a revert's replacement being
+acknowledged only once Claude Code has taken it). Beyond those, the only visible
+differences are startup messages that name the agent that failed and corrected
+agent names in two pieces of copy.
 
 ## Capabilities
 
