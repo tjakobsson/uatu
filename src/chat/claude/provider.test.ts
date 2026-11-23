@@ -6946,6 +6946,33 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a wakeup that fires in the grace on a session left for a cancel in flight keeps its fired row, never reported lost", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    // The cancel's write is in flight, so shutdown leaves the session's
+    // wakeups to the end, and the grace waits for the cancel.
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      // The other wakeup fires in the grace: its turn runs, and the CLI's
+      // Stop no longer lists it.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ continue: true });
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(false);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    const statuses = (wakeupId: string) => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === `wakeup:${wakeupId}`)
+      .map(update => (update as { item: { status: string } }).item.status);
+    await waitFor(() => statuses("c1").includes("cancelled"));
+    expect(statuses("w1").at(-1)).toBe("fired");
+    expect(statuses("w1")).not.toContain("lost");
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();

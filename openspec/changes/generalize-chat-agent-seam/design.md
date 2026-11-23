@@ -575,7 +575,10 @@ map and its rules out of the Claude Code provider:
     wakeup shutdown has reported stays settled: a Stop during the grace
     never republishes it as pending, and one first seen then is reported as
     shutdown reports it, lost or paused, at once or, for a session left for
-    (f), there. Nor does a settled wakeup fire in a query the grace keeps
+    (f), there. A session left for (f) is still reconciled as usual by a
+    Stop in the grace, without republishing anything as pending, so a
+    wakeup that fired then keeps its fired row and (f) settles only those
+    still pending. Nor does a settled wakeup fire in a query the grace keeps
     open: its turn is blocked at the prompt hook, as a cancelled wakeup's
     is. For both, settled and cancelled (a cancel in flight keeps its
     session out of the sweep, so only the cancellation guard holds its

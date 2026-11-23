@@ -3090,19 +3090,22 @@ export class ClaudeProvider implements ChatProvider {
       if (nextFireAt !== undefined) wakeup.nextFireAt = nextFireAt;
       next.set(cron.id, wakeup);
       if (known && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt) continue;
-      updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
+      // During shutdown's grace nothing is republished as pending.
+      if (!this.disposed) updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
     }
-    // During shutdown's grace nothing is republished as pending: a wakeup
-    // shutdown has already reported stays settled, and one first seen now
-    // is reported the way shutdown reports it, lost or paused (at once, or
-    // at the end of shutdown for a session its own release or cancel owns).
-    if (this.disposed) {
+    // A session shutdown has swept: a wakeup it has reported stays settled,
+    // and one first seen now is reported the way shutdown reports it, lost
+    // or paused, at once.
+    if (this.disposed && !session.releasing && !session.cancelling) {
       for (const [wakeupId, wakeup] of next) {
         if (!session.settledAtShutdown?.has(wakeupId) && !session.wakeups.has(wakeupId)) session.wakeups.set(wakeupId, wakeup);
       }
-      if (!session.releasing && !session.cancelling) this.emitLostWakeups(session);
+      this.emitLostWakeups(session);
       return;
     }
+    // A session its own release or cancel owns is reconciled as usual, so
+    // shutdown settles at the end only the wakeups still pending: one that
+    // fired in the grace keeps its fired row.
     // A fire attributed to a one-shot this Stop still lists went to a
     // same-prompt sibling that is gone: the disappearance is the CLI's word
     // on which one fired, so the fire moves there and its header follows.
