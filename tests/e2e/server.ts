@@ -653,13 +653,18 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // qualified with another registered agent is rejected before anything is
   // stripped, and any other id (`sub:s1:worker`) stays a raw provider id.
   let foreignId: string | undefined;
+  let malformedId: string | undefined;
   const ownNestedIds = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(ownNestedIds);
     if (!value || typeof value !== "object") return value;
     const record: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      const owner = (key === "conversationId" || key === "childConversationId") && typeof entry === "string" ? qualifyingAgent(entry) : undefined;
-      if (owner !== undefined && owner !== targetAgentId) foreignId ??= entry as string;
+      const id = (key === "conversationId" || key === "childConversationId") && typeof entry === "string" ? entry : undefined;
+      // A reserved agent prefix with no provider id after it (`opencode:`)
+      // is malformed, never a raw provider id.
+      if (id !== undefined && E2E_FAKES_BY_ID.has(id.split(":")[0]!) && id.includes(":") && !parseQualifiedConversationId(id)) malformedId ??= id;
+      const owner = id === undefined ? undefined : qualifyingAgent(id);
+      if (owner !== undefined && owner !== targetAgentId) foreignId ??= id;
       record[key] = owner === targetAgentId ? stripAgentQualifier(entry as string) : ownNestedIds(entry);
     }
     return record;
@@ -667,6 +672,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
   const items = body.items && ownNestedIds(body.items) as typeof body.items;
   const older = body.older && ownNestedIds(body.older) as typeof body.older;
   const item = body.item && ownNestedIds(body.item) as typeof body.item;
+  if (malformedId !== undefined) return Response.json({ error: `malformed conversation id ${JSON.stringify(malformedId)}` }, { status: 400 });
   if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
   body.items = items;

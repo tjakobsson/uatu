@@ -69,6 +69,11 @@ test.describe("multi-agent chat", () => {
       action: "seed", agent: "claude", title: "Foreign child",
       items: [{ id: "tool:foreign", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "opencode:conversation-7" }],
     } })).status()).toBe(400);
+    // So is a nested reserved prefix with nothing after it.
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "seed", agent: "claude", title: "Malformed child",
+      items: [{ id: "tool:malformed", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "opencode:" }],
+    } })).status()).toBe(400);
     // Without `agent`, usageRead's qualified outcome.conversationId picks the fake.
     const outcomeOf = async (agent: string) => (await control(request, { action: "stats", agent }) as { usageReadOutcome: { outcome: string; conversationId?: string } }).usageReadOutcome;
     await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
