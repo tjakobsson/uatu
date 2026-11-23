@@ -296,6 +296,8 @@ type LiveSession = {
   releasing?: boolean;
   cancelling?: number;
   released?: boolean;
+  // Wakeups shutdown has reported lost or paused: they stay settled.
+  settledAtShutdown?: Set<string>;
   id: string;
   notificationLifecycle: ClaudeNotificationLifecycle;
   queue: PushQueue<ClaudeUserEnvelope>;
@@ -3029,6 +3031,17 @@ export class ClaudeProvider implements ChatProvider {
       if (known && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt) continue;
       updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
     }
+    // During shutdown's grace nothing is republished as pending: a wakeup
+    // shutdown has already reported stays settled, and one first seen now
+    // is reported the way shutdown reports it, lost or paused (at once, or
+    // at the end of shutdown for a session its own release or cancel owns).
+    if (this.disposed) {
+      for (const [wakeupId, wakeup] of next) {
+        if (!session.settledAtShutdown?.has(wakeupId) && !session.wakeups.has(wakeupId)) session.wakeups.set(wakeupId, wakeup);
+      }
+      if (!session.releasing && !session.cancelling) this.emitLostWakeups(session);
+      return;
+    }
     // A fire attributed to a one-shot this Stop still lists went to a
     // same-prompt sibling that is gone: the disappearance is the CLI's word
     // on which one fired, so the fire moves there and its header follows.
@@ -3301,6 +3314,8 @@ export class ClaudeProvider implements ChatProvider {
 
   /** Shutdown's report of a session's wakeups: lost, or paused for a cron. */
   private emitLostWakeups(session: LiveSession): void {
+    session.settledAtShutdown ??= new Set();
+    for (const wakeupId of session.wakeups.keys()) session.settledAtShutdown.add(wakeupId);
     const lost = this.settleWakeups(session, "ended");
     if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
   }

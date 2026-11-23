@@ -571,7 +571,11 @@ map and its rules out of the Claude Code provider:
     left with only displaced or closing sessions, in the order they were
     started. With one session per conversation, requests A1, B1, A2 end as
     A1, A2, A's lost wakeups, B1. A session whose own operation decides its
-    wakeups (a release or wakeup cancel under way) is left for (f).
+    wakeups (a release or wakeup cancel under way) is left for (f). A
+    wakeup shutdown has reported stays settled: a Stop during the grace
+    never republishes it as pending, and one first seen then is reported as
+    shutdown reports it, lost or paused, at once or, for a session left for
+    (f), there.
   - (c) Admitted work in flight finishes within a bounded grace
     (`SHUTDOWN_GRACE_MS`, one second: at most a third of the Hub's
     SIGTERM-to-SIGKILL deadline, so the close, drain and flush still fit

@@ -6255,6 +6255,48 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a Stop during the shutdown grace never republishes settled wakeups as pending; one first seen then is reported as shutdown would", async () => {
+    const { provider, events, stop, session, query, workspace } = await scheduled([oneShot, recurring]);
+    // An accepted prompt reading its attachment keeps the grace open.
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    const later = { id: "c2", schedule: "*/7 * * * *", recurring: true, prompt: "CRON check again" };
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      // The CLI's Stop during the grace still lists the settled cron and a new one.
+      await stopHook(query, { session_crons: [recurring, later] });
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    const settled = events.findIndex(event => event.eventType === "wakeups.lost");
+    const after = events.slice(settled).filter(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "scheduled_wakeup"));
+    expect(after.map(event => [event.eventType, event.updates.filter(update => update.kind === "upsert").map(update => {
+      const item = (update as { item: { id: string; status: string } }).item;
+      return `${item.id} ${item.status}`;
+    })])).toEqual([
+      ["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]],
+      ["wakeups.lost", ["wakeup:c2 paused"]],
+    ]);
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();
