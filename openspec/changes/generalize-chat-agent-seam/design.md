@@ -572,7 +572,9 @@ map and its rules out of the Claude Code provider:
     A1, A2, A's lost wakeups, B1. A session whose own operation decides its
     wakeups (a release or wakeup cancel under way) is left for (f).
   - (c) Admitted work in flight finishes within a bounded grace
-    (`SHUTDOWN_GRACE_MS`, a few seconds): undo, redo, revert and restore,
+    (`SHUTDOWN_GRACE_MS`, one second: at most a third of the Hub's
+    SIGTERM-to-SIGKILL deadline, so the close, drain and flush still fit
+    inside it): undo, redo, revert and restore,
     a rewind's reply included; a release, from its write to its
     publication; a wakeup cancel; and every prompt until the provider
     accepts it or queues its rollback, so one already holding its session

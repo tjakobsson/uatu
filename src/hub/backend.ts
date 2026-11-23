@@ -62,7 +62,9 @@ export interface SessionBackend {
 // exiting stops re-arming this timer and is reaped one inactivity window
 // after that cap.
 const STARTUP_INACTIVITY_TIMEOUT_MS = 30_000;
-const SIGTERM_GRACE_MS = 3_000;
+// Exported for the session's own shutdown budget (the Claude provider's
+// SHUTDOWN_GRACE_MS must fit well inside it); the value is the Hub's.
+export const SIGTERM_GRACE_MS = 3_000;
 
 export type LocalBackendOptions = {
   // How to invoke the uatu CLI. In a compiled binary this is

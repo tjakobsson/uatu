@@ -12,7 +12,8 @@ import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
 import { CHAT_TEXT_SEAL, CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
 import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE } from "../visual-identity";
-import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { SIGTERM_GRACE_MS } from "../../hub/backend";
+import { ClaudeProvider, SHUTDOWN_GRACE_MS, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
@@ -4659,6 +4660,13 @@ describe("ClaudeProvider sessions", () => {
     expect([await first, await second]).toEqual([shutdown, shutdown]);
     await waitFor(() => abandonedIds(events).length === 2);
     expect(abandonedIds(events)).toEqual(["A", "B"]);
+  });
+
+  test("the shutdown grace fits well inside the Hub's kill deadline", () => {
+    // The Hub sends SIGKILL SIGTERM_GRACE_MS after SIGTERM; the grace must
+    // leave most of that for the close, the drain, the flush and the rest of
+    // the workspace's teardown, or a rollback could be killed unwritten.
+    expect(SHUTDOWN_GRACE_MS * 3).toBeLessThanOrEqual(SIGTERM_GRACE_MS);
   });
 
   test("a rewind still unanswered when the shutdown grace ends is cut off by the close and rolls its boundary back", async () => {

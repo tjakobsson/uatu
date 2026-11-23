@@ -266,8 +266,11 @@ const BACKGROUND_FOLLOW_UP_GRACE_MS = 5_000;
 // Shutdown lets admitted work in flight (a history mutation and its rewind,
 // a release) finish for this long before closing every query settles what
 // is still stuck. Interrupts and control requests have no deadline of their
-// own, so the wait needs one.
-const SHUTDOWN_GRACE_MS = 3_000;
+// own, so the wait needs one. The Hub sends SIGKILL a few seconds after
+// SIGTERM (`SIGTERM_GRACE_MS` in hub/backend.ts); this grace stays at most a
+// third of that, leaving the rest for the close, the drain, the flush and
+// the workspace's other teardown. A test holds the two together.
+export const SHUTDOWN_GRACE_MS = 1_000;
 const TITLE_LIMIT = 80;
 
 /**
