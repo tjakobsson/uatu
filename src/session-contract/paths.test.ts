@@ -84,9 +84,16 @@ const TABLE: [method: string, suffix: string, expected: SessionPathClass][] = [
   ["GET", "/api/media", "media"],
   ["HEAD", "/api/media", "media"],
   ["GET", "/api/media/x", "forward"],
-  // Internal routes the Hub calls directly and, today, also forwards.
-  ["POST", "/api/internal/hub-policy-proof", "forward"],
-  ["POST", "/api/chat/accounts-changed", "forward"],
+  // Internal routes the Hub calls directly: refused to browsers, on any
+  // method.
+  ["POST", "/api/internal/hub-policy-proof", "refused-internal"],
+  ["GET", "/api/internal/hub-policy-proof", "refused-internal"],
+  ["POST", "/api/chat/accounts-changed", "refused-internal"],
+  ["DELETE", "/api/chat/accounts-changed", "refused-internal"],
+  ["POST", "/api/internal/hub-policy-proof/", "forward"],
+  ["POST", "/api/chat/accounts-changedx", "forward"],
+  // The terminal-session inventory is internal to the dashboard's summary
+  // but browsers reach it too, through the proxy.
   ["GET", "/api/terminal/sessions", "forward"],
   // Ordinary traffic.
   ["GET", "/api/state", "forward"],
@@ -118,6 +125,11 @@ describe("classifySessionPath", () => {
   test("a snapshot suffix yields its still-encoded conversation segment", () => {
     expect(snapshotConversationSegment("/api/chat/conversations/opencode%3Aparent")).toBe("opencode%3Aparent");
     expect(snapshotConversationSegment("/api/chat/conversations/c/prompts")).toBeNull();
+  });
+
+  test("the internal list's routes without a replacement are refused as internal", () => {
+    const refused = INTERNAL_SESSION_PATHS.filter(item => classifySessionPath(item.method, item.path) === "refused-internal").map(item => item.path);
+    expect(refused).toEqual(["/api/chat/accounts-changed", "/api/internal/hub-policy-proof"]);
   });
 
   test("every per-stream source in the internal list is refused", () => {

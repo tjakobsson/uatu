@@ -1709,7 +1709,8 @@ export function createHubFetchHandler(deps: HubDeps) {
       // The session's per-stream SSE routes, and its activity summary, are
       // internal sources the live broker subscribes to; the session contract
       // names them and through the hub they are refused, never proxied.
-      if (classifySessionPath(request.method, suffix) === "refused-stream") {
+      const refusal = classifySessionPath(request.method, suffix);
+      if (refusal === "refused-stream") {
         // Gone, not proxied: no request reaches the session for these. The
         // body names the replacement so an old client or integration knows
         // where to go.
@@ -1717,6 +1718,13 @@ export function createHubFetchHandler(deps: HubDeps) {
           error: `${suffix} is not served through the hub; live updates are delivered by the brokered stream at ${LIVE_STREAM_PATH}`,
           replacement: LIVE_STREAM_PATH,
         }, NO_STORE_HEADERS);
+      }
+      // Routes only the Hub calls, on the session's own listener: the
+      // readiness proof and the account-change notice. No page uses them and
+      // nothing replaces them, so through the hub they do not exist. Answered
+      // before the running-session check, so no request reaches the session.
+      if (refusal === "refused-internal") {
+        return json(404, { error: "not found" }, NO_STORE_HEADERS);
       }
       const running = sessions.get(workspaceId);
       if (!running) {

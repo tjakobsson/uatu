@@ -3,9 +3,10 @@
 // (so the spawn shape, the fd-3 bootstrap and the readiness proof are the
 // product's), with an in-process Hub in front of it. Every expectation the
 // Hub has of a session is then checked: the ready line, policy trust, that
-// each internal path exists, that each refused path is refused without
-// reaching the session, that all of them stay out of the public contract,
-// and that closing stdin ends the session.
+// each internal path exists, that each refused path is refused (410 for a
+// per-stream source, 404 for an internal route) without reaching the
+// session, that all of them stay out of the public contract, and that
+// closing stdin ends the session.
 //
 // Waits are events only: the backend's start (ready line and proof), each
 // HTTP answer, and the process exit.
@@ -35,7 +36,7 @@ const UATU_ARGV = ["bun", "run", CLI_PATH];
 // A source-run session bundles the page before it is ready.
 const START_BUDGET_MS = 90_000;
 
-type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string };
+type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string; reason?: string };
 
 let directory: string;
 let workspaceId: string;
@@ -233,6 +234,24 @@ describe("session contract against a real workspace session", () => {
     }
   });
 
+  test("every internal route answers a non-cached 404 through the Hub, on any method, and never reaches the session", async () => {
+    const refused = INTERNAL_SESSION_PATHS.filter(item => classifySessionPath(item.method, item.path) === "refused-internal");
+    expect(refused.map(item => item.path).sort()).toEqual(["/api/chat/accounts-changed", "/api/internal/hub-policy-proof"]);
+    for (const item of refused) {
+      for (const method of ["GET", "POST", "PATCH", "DELETE"]) {
+        const before = reached.length;
+        const response = await throughHub(item.path, method);
+        expect(response.status).toBe(404);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        await response.body?.cancel();
+        expect(reached.slice(before)).toEqual([]);
+      }
+      // The Hub itself still reaches the route on the session's own listener.
+      const answer = await direct(item);
+      expect(answer.status === 404 && !answer.contentType.includes("application/json")).toBe(false);
+    }
+  });
+
   test("every internal path is an explicit exclusion, never a public operation", async () => {
     const [excluded, inventory, openapi] = await Promise.all([
       readYaml<{ exclusions: Exclusion[] }>("api/exclusions.yaml"),
@@ -255,6 +274,14 @@ describe("session contract against a real workspace session", () => {
       expect(published.has(`/s/sample${item.path}`)).toBe(false);
       expect(published.has(item.path)).toBe(false);
     }
+    // A refused internal route is named by its own entry, which states the
+    // refusal, rather than only falling under the session API's prefix
+    // pattern.
+    const template = (suffix: string) => `/s/{workspaceId}${suffix}`;
+    const named = INTERNAL_SESSION_PATHS
+      .filter(item => classifySessionPath(item.method, item.path) === "refused-internal")
+      .filter(item => !excluded.exclusions.some(exclusion => exclusion.path === template(item.path) && /not proxied/.test(exclusion.reason ?? "")));
+    expect(named.map(item => item.path)).toEqual([]);
   });
 
   // Last: it ends the session the tests above share.

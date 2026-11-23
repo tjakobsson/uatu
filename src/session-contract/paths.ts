@@ -44,6 +44,9 @@ export function sessionSuffix(pathname: string, basePath: string): string | null
 // Internal session paths: only the Hub calls these. The first five are the
 // per-stream sources the Hub's live broker subscribes to; a browser asking
 // for one through the Hub is refused and pointed at the brokered stream.
+// The account-change notice and the policy proof are refused through the
+// Hub too: the Hub reaches them on the session's own listener, and no page
+// has a use for either.
 
 export const SESSION_DOCUMENT_EVENTS_PATH = "/api/events";
 export const SESSION_INVENTORY_EVENTS_PATH = "/api/chat/conversations/events";
@@ -113,9 +116,14 @@ const REFUSED_STREAMS = new RegExp(`^(?:${[
   SESSION_CONVERSATION_EVENTS_ROUTE,
 ].map(routePattern).join("|")})$`);
 
+// Internal routes with no browser-facing replacement.
+const REFUSED_INTERNAL: ReadonlySet<string> = new Set([SESSION_ACCOUNTS_CHANGED_PATH, SESSION_POLICY_PROOF_PATH]);
+
 export type SessionPathClass =
   // Internal per-stream source: answered 410, naming the brokered stream.
   | "refused-stream"
+  // Internal route with no replacement: answered 404, on any method.
+  | "refused-internal"
   // Discard of an unconfirmed queued message: forwarded with a Hub-scoped
   // operation id and no policy.
   | "local-discard"
@@ -131,6 +139,7 @@ export type SessionPathClass =
 // method and the session-relative suffix, never on a particular session.
 export function classifySessionPath(method: string, suffix: string): SessionPathClass {
   if (REFUSED_STREAMS.test(suffix)) return "refused-stream";
+  if (REFUSED_INTERNAL.has(suffix)) return "refused-internal";
   if (method === "POST" && LOCAL_DISCARD.test(suffix)) return "local-discard";
   if ((method === "POST" && POLICY_POST.test(suffix)) || (method === "PATCH" && POLICY_PATCH.test(suffix))) return "policy-action";
   if (method === "GET" && CONVERSATION_SNAPSHOT.test(suffix)) return "conversation-snapshot";
