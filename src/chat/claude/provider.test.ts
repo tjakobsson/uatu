@@ -6375,6 +6375,40 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a wakeup shutdown has reported does not fire in a query the grace keeps open", async () => {
+    const { provider, events, stop, query, workspace } = await scheduled([oneShot]);
+    // Another conversation's prompt, reading its attachment, keeps the grace open.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      // The settled one-shot reaches its hook during the grace: it is blocked.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ decision: "block", reason: "The workspace is shutting down: this scheduled wakeup no longer fires here." });
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();

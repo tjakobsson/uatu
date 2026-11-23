@@ -575,7 +575,9 @@ map and its rules out of the Claude Code provider:
     wakeup shutdown has reported stays settled: a Stop during the grace
     never republishes it as pending, and one first seen then is reported as
     shutdown reports it, lost or paused, at once or, for a session left for
-    (f), there.
+    (f), there. Nor does a settled wakeup fire in a query the grace keeps
+    open: its turn is blocked at the prompt hook, as a cancelled wakeup's
+    is.
   - (c) Admitted work in flight finishes within a bounded grace
     (`SHUTDOWN_GRACE_MS`, one second: at most a third of the Hub's
     SIGTERM-to-SIGKILL deadline, so the close, drain and flush still fit
@@ -590,7 +592,10 @@ map and its rules out of the Claude Code provider:
     prompt for it is refused. A replacement for a staged revert is
     acknowledged, and the revert finalized, only after its input has
     reached the open query; if it cannot be delivered it is refused and the
-    revert rolled back, so the boundary and Redo stay. None of these waits on a
+    revert rolled back, so the boundary and Redo stay. A deliberate
+    difference from `main`: a cancel that lands before a staged replacement
+    is delivered now rejects it and rolls the revert back, where before the
+    replacement was reported accepted without being delivered. None of these waits on a
     callback, which (b) has settled, or on a close once shutdown has
     started, so waiting cannot deadlock.
   - (d) Every query closes: its interrupt is sent but not waited on (it has

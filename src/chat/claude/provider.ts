@@ -296,8 +296,9 @@ type LiveSession = {
   releasing?: boolean;
   cancelling?: number;
   released?: boolean;
-  // Wakeups shutdown has reported lost or paused: they stay settled.
-  settledAtShutdown?: Set<string>;
+  // Wakeups shutdown has reported lost or paused, by id with their prompt:
+  // they stay settled, and none of them fires during the grace.
+  settledAtShutdown?: Map<string, string>;
   // The query's stream has ended or failed: input pushed now would never
   // be read, even while shutdown still holds the session in the live map.
   ended?: boolean;
@@ -434,6 +435,7 @@ const WAKEUP_LOST_MESSAGE = "The agent's schedule did not survive its session: C
 // What the CLI records in the transcript when the hook blocks a cancelled
 // wakeup's fire.
 const CANCELLED_FIRE_REASON = "Cancelled in uatu: this scheduled wakeup no longer fires.";
+const SHUTDOWN_FIRE_REASON = "The workspace is shutting down: this scheduled wakeup no longer fires here.";
 export const WAKEUP_PAUSED_MESSAGE = "Paused: the agent's session ended. Claude Code restores this schedule when the conversation runs again.";
 const WAKEUP_NOT_RESTORED_MESSAGE = "Claude Code did not restore this schedule when the conversation ran again.";
 export const WAKEUP_PAUSED_ONCE_MESSAGE = "Paused: the agent's session ended. It fires only if the conversation is running again by its time.";
@@ -1909,6 +1911,7 @@ export class ClaudeProvider implements ChatProvider {
           UserPromptSubmit: [{ hooks: [async (input: Record<string, unknown>) => {
             try {
               if (owner) await owner.revivedReady;
+              if (owner && this.blocksSettledFire(owner, input)) return { decision: "block" as const, reason: SHUTDOWN_FIRE_REASON };
               if (owner && this.blocksCancelledFire(owner, input)) return { decision: "block" as const, reason: CANCELLED_FIRE_REASON };
               if (owner) this.attributeWakeupTurn(owner, input);
             } catch { /* observation is best-effort */ }
@@ -3290,6 +3293,21 @@ export class ClaudeProvider implements ChatProvider {
    * types the same words is still a person). The hook blocks it — no model
    * call — and the frames it produces are swallowed.
    */
+  /**
+   * A wakeup shutdown has already reported lost or paused does not fire in
+   * a query the grace keeps open: its turn is blocked, as a cancelled one's
+   * is, by the same prompt match and only while no prompt is outstanding.
+   */
+  private blocksSettledFire(session: LiveSession, input: Record<string, unknown>): boolean {
+    if (!this.disposed || !session.settledAtShutdown?.size) return false;
+    if (typeof input.agent_id === "string" && input.agent_id) return false;
+    if (session.pendingTurns > 0 || session.queuedTurns > 0) return false;
+    const prompt = typeof input.prompt === "string" ? input.prompt : "";
+    if (![...session.settledAtShutdown.values()].some(settledPrompt => wakeupPromptMatches(settledPrompt, prompt))) return false;
+    session.blockedFires += 1;
+    return true;
+  }
+
   private blocksCancelledFire(session: LiveSession, input: Record<string, unknown>): boolean {
     if (this.live.get(session.id) !== session) return false;
     if (typeof input.agent_id === "string" && input.agent_id) return false;
@@ -3336,8 +3354,8 @@ export class ClaudeProvider implements ChatProvider {
 
   /** Shutdown's report of a session's wakeups: lost, or paused for a cron. */
   private emitLostWakeups(session: LiveSession): void {
-    session.settledAtShutdown ??= new Set();
-    for (const wakeupId of session.wakeups.keys()) session.settledAtShutdown.add(wakeupId);
+    session.settledAtShutdown ??= new Map();
+    for (const [wakeupId, wakeup] of session.wakeups) session.settledAtShutdown.set(wakeupId, wakeup.prompt);
     const lost = this.settleWakeups(session, "ended");
     if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
   }
