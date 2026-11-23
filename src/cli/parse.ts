@@ -4,7 +4,7 @@
 
 import { DEFAULT_HUB_PORT, defaultHubConfigPath } from "../hub/config";
 import { DEFAULT_RESPECT_GITIGNORE } from "../server/roots";
-import { isSourceRun } from "../session-contract/spawn";
+import { EXIT_ON_STDIN_CLOSE_FLAG, isSourceRun } from "../session-contract/spawn";
 import { normalizeBasePath } from "../shared/base-path";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "../shared/version";
 
@@ -209,12 +209,12 @@ export function parseCommand(
 
   // `serve` is no longer a user command. It survives as the session child
   // the hub spawns (`serve <folder> --no-open --exit-on-stdin-close …`, see
-  // hub/backend.ts; --exit-on-stdin-close is the supervisor contract) and as
+  // session-contract/spawn.ts, which declares the flag) and as
   // the repository's source-run harness. Everything else that used to reach
   // serve (`uatu serve`, the removed `watch` alias, a bare `uatu` or
   // `uatu <path>`) gets the hub bootstrap steps, whatever flags follow, so
   // an old habit ends in instructions rather than a flag-parsing error.
-  const internal = argv[0] === "serve" && (context.sourceRun || argv.includes("--exit-on-stdin-close"));
+  const internal = argv[0] === "serve" && (context.sourceRun || argv.includes(EXIT_ON_STDIN_CLOSE_FLAG));
   if (!internal) {
     return { kind: "serve-removed" };
   }
@@ -293,7 +293,7 @@ export function parseCommand(
       continue;
     }
 
-    if (arg === "--exit-on-stdin-close") {
+    if (arg === EXIT_ON_STDIN_CLOSE_FLAG) {
       exitOnStdinClose = true;
       continue;
     }

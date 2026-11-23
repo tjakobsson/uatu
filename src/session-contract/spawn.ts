@@ -27,6 +27,9 @@ export const SESSION_STARTUP_INACTIVITY_MS = 30_000;
 export const SESSION_STDIO = ["pipe", "pipe", "pipe", "socket-fd"] as const;
 
 export const POLICY_BOOTSTRAP_FLAG = "--hub-policy-bootstrap";
+// Marks a session the Hub supervises: it exits when its stdin reaches EOF,
+// and it is what admits `serve` outside a source run.
+export const EXIT_ON_STDIN_CLOSE_FLAG = "--exit-on-stdin-close";
 
 // How the process was started. A source run (`bun run src/cli.ts …`: the dev
 // Hub's sessions, the stdin-close test, the base-path e2e) has the script
@@ -49,7 +52,7 @@ export function sessionServeArgv(uatuArgv: readonly string[], folder: string, ba
     "serve",
     folder,
     "--no-open",
-    "--exit-on-stdin-close",
+    EXIT_ON_STDIN_CLOSE_FLAG,
     POLICY_BOOTSTRAP_FLAG,
     "--port",
     "0",
