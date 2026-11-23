@@ -153,6 +153,12 @@ function qualifyingAgent(value: string): string | undefined {
   const agentId = parseQualifiedConversationId(value)?.agentId;
   return agentId !== undefined && E2E_FAKES_BY_ID.has(agentId) ? agentId : undefined;
 }
+// A registered agent prefix with no provider id after it (`opencode:`) is
+// malformed, never a raw provider id.
+function hasEmptyReservedQualifier(value: string): boolean {
+  const colon = value.indexOf(":");
+  return colon >= 0 && E2E_FAKES_BY_ID.has(value.slice(0, colon)) && !parseQualifiedConversationId(value);
+}
 function stripAgentQualifier(value: string): string {
   return qualifyingAgent(value) === undefined ? value : parseQualifiedConversationId(value)!.conversationId;
 }
@@ -490,6 +496,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // straight to that server and ignore `agent`; conversation ids arrive
   // qualified or bare, and the fake works in bare session ids.
   if (body.action === "opencode") {
+    if (typeof body.conversationId === "string" && hasEmptyReservedQualifier(body.conversationId)) {
+      return Response.json({ error: `malformed conversation id ${JSON.stringify(body.conversationId)}` }, { status: 400 });
+    }
     if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
     switch (body.op) {
       case "losePromptResponse":
@@ -639,9 +648,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       nonStringId ??= id;
       return id;
     }
-    // A reserved agent prefix with no provider id after it (`opencode:`)
-    // is malformed, never a raw provider id.
-    if (E2E_FAKES_BY_ID.has(id.split(":")[0]!) && id.includes(":") && !parseQualifiedConversationId(id)) malformedId ??= id;
+    if (hasEmptyReservedQualifier(id)) malformedId ??= id;
     const owner = qualifyingAgent(id);
     if (owner !== undefined && owner !== targetAgentId) foreignId ??= id;
     return owner === targetAgentId ? stripAgentQualifier(id) : id;

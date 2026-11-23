@@ -45,6 +45,8 @@ test.describe("multi-agent chat", () => {
     // Scripted OpenCode controls bypass agent selection, and an agent count
     // must be an integer the harness has fakes for.
     await control(request, { action: "opencode", op: "state", agent: null });
+    // They still reject a malformed id before dispatch.
+    expect((await request.post("/__e2e/chat", { data: { action: "opencode", op: "launchShell", conversationId: "opencode:" } })).status()).toBe(400);
     expect((await request.post("/__e2e/chat", { data: { action: "agents", count: "2" } })).status()).toBe(400);
     // An explicit null count is rejected too, and leaves both agents offered.
     const token = (await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string }).token;
