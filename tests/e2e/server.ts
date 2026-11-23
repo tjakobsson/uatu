@@ -511,23 +511,6 @@ async function handleE2EChat(request: Request): Promise<Response> {
     childId?: string;
     inboxId?: string;
   };
-  // The chat wire is agent-qualified ("<agentId>:<id>") while the fakes work
-  // in bare provider ids. The control boundary translates both directions so
-  // specs keep using the ids they see in the UI.
-  const stripQualifier = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(stripQualifier);
-    if (value && typeof value === "object") {
-      const record = { ...(value as Record<string, unknown>) };
-      for (const key of ["conversationId", "childConversationId"]) {
-        if (typeof record[key] === "string") record[key] = stripAgentQualifier(record[key] as string);
-      }
-      for (const [key, entry] of Object.entries(record)) {
-        if (key !== "conversationId" && key !== "childConversationId") record[key] = stripQualifier(entry);
-      }
-      return record;
-    }
-    return value;
-  };
   // The scripted fake OpenCode 2.0.28 behind the real stack. Its controls go
   // straight to that server and ignore `agent`; conversation ids arrive
   // qualified or bare, and the fake works in bare session ids.
@@ -651,13 +634,34 @@ async function handleE2EChat(request: Request): Promise<Response> {
     }
     body.agent ??= qualifier;
   }
-  if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
-  if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
-  if (body.older) body.older = stripQualifier(body.older) as typeof body.older;
-  if (body.item) body.item = stripQualifier(body.item) as typeof body.item;
   const targetAgentId = body.agent ?? E2E_DEFAULT_AGENT_ID;
   const targetFake = E2E_FAKES_BY_ID.get(targetAgentId)?.service;
   if (!targetFake) return Response.json({ error: `no e2e agent registered as ${targetAgentId}` }, { status: 400 });
+  // The chat wire is agent-qualified ("<agentId>:<id>") while the fakes work
+  // in bare provider ids, so specs can use the ids they see in the UI. Nested
+  // ids in items: one qualified with the selected agent is stripped, one
+  // qualified with another registered agent is rejected before anything is
+  // stripped, and any other id (`sub:s1:worker`) stays a raw provider id.
+  let foreignId: string | undefined;
+  const ownNestedIds = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(ownNestedIds);
+    if (!value || typeof value !== "object") return value;
+    const record: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const owner = (key === "conversationId" || key === "childConversationId") && typeof entry === "string" ? qualifyingAgent(entry) : undefined;
+      if (owner !== undefined && owner !== targetAgentId) foreignId ??= entry as string;
+      record[key] = owner === targetAgentId ? stripAgentQualifier(entry as string) : ownNestedIds(entry);
+    }
+    return record;
+  };
+  const items = body.items && ownNestedIds(body.items) as typeof body.items;
+  const older = body.older && ownNestedIds(body.older) as typeof body.older;
+  const item = body.item && ownNestedIds(body.item) as typeof body.item;
+  if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
+  if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
+  body.items = items;
+  body.older = older;
+  body.item = item;
   // Every conversation a control returns is qualified with the agent it
   // targeted, so request and response name the same owner.
   const controlJson = (value: unknown) => Response.json(qualifyControlValue(value, targetAgentId));

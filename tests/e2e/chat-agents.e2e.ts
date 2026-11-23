@@ -64,6 +64,11 @@ test.describe("multi-agent chat", () => {
     }) as { conversation: { id: string }; items: Array<{ childConversationId?: string }> };
     expect(seeded.conversation.id.startsWith("claude:")).toBe(true);
     expect(seeded.items[0]!.childConversationId).toBe("claude:sub:s1:worker");
+    // A nested id owned by another registered agent is rejected, not restamped.
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "seed", agent: "claude", title: "Foreign child",
+      items: [{ id: "tool:foreign", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "opencode:conversation-7" }],
+    } })).status()).toBe(400);
     // Without `agent`, usageRead's qualified outcome.conversationId picks the fake.
     const outcomeOf = async (agent: string) => (await control(request, { action: "stats", agent }) as { usageReadOutcome: { outcome: string; conversationId?: string } }).usageReadOutcome;
     await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
