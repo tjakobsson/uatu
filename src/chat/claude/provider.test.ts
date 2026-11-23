@@ -7281,6 +7281,29 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.dispose();
   });
 
+  test("a wakeup that fired keeps its fired row when its cancel then succeeds", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1");
+      await hold.started;
+      // The Stop while the cancel's write is out reports the fire.
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(false);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    const w1Rows = () => events.flatMap(event => event.updates.filter(update => update.kind === "upsert" && update.item.id === "wakeup:w1").map(update => ({ eventType: event.eventType, ...(update as { item: { status: string; firedTurnId?: string } }).item })));
+    await waitFor(() => w1Rows().some(row => row.status !== "pending"));
+    // As before: the fire is what happened, and it is not relabelled.
+    expect(w1Rows().filter(row => row.status !== "pending")).toEqual([expect.objectContaining({ status: "fired", firedTurnId: "message:wakeup:fired-1" })]);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["c1"]);
+    stop();
+    await provider.dispose();
+  });
+
   test("a failed cancel that leaves no wakeup idles the conversation and retires its session", async () => {
     const { provider, events, stop, query, session } = await scheduled([oneShot]);
     await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });

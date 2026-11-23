@@ -3276,6 +3276,14 @@ export class ClaudeProvider implements ChatProvider {
         await this.admit(async () => {
           await this.recordCancelled(sessionId, [[wakeupId, live.prompt]]);
           if ((this.live.get(sessionId) !== session && !this.disposed) || !session.wakeups.has(wakeupId)) return;
+          // A fire a Stop reported while the write was out is what happened:
+          // it stands, published as fired, and is not relabelled cancelled.
+          const recorded = session.cancelStopOutcomes?.get(wakeupId);
+          if (recorded?.fired) {
+            session.cancelStopOutcomes!.delete(wakeupId);
+            await this.applyStopOutcome(session, wakeupId, recorded);
+            return;
+          }
           session.wakeups.delete(wakeupId);
           const updates: NormalizedProviderUpdate[] = [{ kind: "upsert", item: wakeupRow(wakeupId, live, "cancelled") }];
           const idle = this.idleExceptReads(session) && session.idleTimer === undefined;
@@ -3293,7 +3301,8 @@ export class ClaudeProvider implements ChatProvider {
         else {
           pendingCancels.delete(wakeupId);
           // The last Stop's word while the cancel was out: discarded when it
-          // succeeded (cancelled wins), applied when it failed.
+          // succeeded (cancelled wins, unless that word was a fire, applied
+          // above), applied when it failed.
           const outcome = session.cancelStopOutcomes?.get(wakeupId);
           session.cancelStopOutcomes?.delete(wakeupId);
           if (failed && outcome && session.wakeups.has(wakeupId)) await this.applyStopOutcome(session, wakeupId, outcome);
@@ -3317,7 +3326,8 @@ export class ClaudeProvider implements ChatProvider {
   /**
    * A failed cancel's wakeup takes the outcome the last Stop gave it while
    * the cancel was out: the wakeup as listed, or the fired or cancelled row
-   * of one the CLI dropped, so a fire it saw is not lost. A dropped wakeup
+   * of one the CLI dropped, so a fire it saw is not lost (a recorded fire
+   * stands when the cancel succeeds, too). A dropped wakeup
    * that was the last thing holding the session leaves it idle, as a
    * successful cancel does: the conversation is idle again and the session
    * retires. Not once shutdown has started: closing is its own step.
