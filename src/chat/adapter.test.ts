@@ -13407,10 +13407,13 @@ describe("workspace activity summary", () => {
       eventWaiters.set(eventType, list);
     });
     const activeTimers = new Map<ReturnType<typeof setTimeout>, { name: string; work: () => void }>();
+    const flushes: Promise<unknown>[] = [];
     let nextTimer = 1;
     const taskScheduler: import("./task-scheduler").ChatTaskScheduler = {
       run: async (name, work) => {
-        try { return await work(); }
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("coalescer.flush:")) flushes.push(result);
+        try { return await result; }
         finally {
           if (name.startsWith("stream.event:")) {
             const eventType = name.slice("stream.event:".length);
@@ -13483,11 +13486,15 @@ describe("workspace activity summary", () => {
     expect((await nextSignal).done).toBe(false);
     // Moved-out session.moved must short-circuit without calling requireSession() again.
     expect(lookups).toBe(lookupsBeforeMove);
-    // Fire any remaining coalescer timers; buffered pre-move updates were discarded so nothing flushes.
+    // Discard cancels the coalescer window timer; fire any remaining timers and await
+    // every scheduled coalescer flush before asserting nothing leaked into projection.
+    expect([...activeTimers.values()].some(timer => timer.name === "coalescer.window")).toBe(false);
     for (const [handle, timer] of [...activeTimers]) {
       activeTimers.delete(handle);
       timer.work();
     }
+    await Promise.resolve();
+    await Promise.all(flushes);
     expect(adapter.projectionForTests("a").has("task:buffered")).toBe(false);
     expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests("a").status).toBe("idle");
@@ -14192,6 +14199,81 @@ describe("workspace activity summary", () => {
     expect(reconnectAdapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
 
     await reconnectAdapter.dispose();
+    await pump;
+  });
+
+  test("refused Stop restores live-turn tracking even if the projection was evicted after move-out following a resumed status", async () => {
+    const probeTasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("active.probe:")) probeTasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            const eventType = name.slice("stream.event:".length);
+            eventWaiters.get(eventType)?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ maxProjections: 1, taskScheduler });
+    const target = fixtureSession("rehydrate-stop");
+    const other = fixtureSession("rehydrate-other");
+    provider.sessions = [target, other];
+    let resolveProbe!: (ids: string[]) => void;
+    provider.listActiveSessions = () => new Promise<string[]>(resolve => { resolveProbe = resolve; });
+    let rejectInterrupt!: (error: Error) => void;
+    provider.interrupt = () => new Promise<void>((_resolve, reject) => { rejectInterrupt = reject; });
+    const pump = adapter.startEventPump();
+
+    adapter.projectionForTests("rehydrate-stop").apply({ kind: "status", status: "running" });
+    const stop = adapter.abort("rehydrate-stop", "stop-rehydrate");
+    await waitUntil(() => rejectInterrupt !== undefined);
+
+    // A live status arrives during Stop (setting stop.resumed = true and stop.status = "running").
+    adapter.projectionForTests("rehydrate-stop").apply({ kind: "status", status: "running" });
+
+    // Move out (forgets activity), evict the unsubscribed projection, then move back in.
+    const moveOutDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "rehydrate-stop",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "rehydrate-stop", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await moveOutDone;
+    adapter.projectionForTests("rehydrate-other");
+
+    const moveInDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "rehydrate-stop",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "rehydrate-stop", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await moveInDone;
+    await waitUntil(() => resolveProbe !== undefined);
+
+    resolveProbe(["rehydrate-stop"]);
+    await probeTasks.get("active.probe:rehydrate-stop");
+
+    rejectInterrupt(new InterruptNotAppliedError("interrupt refused"));
+    await expect(stop).rejects.toThrow(InterruptNotAppliedError);
+    expect(adapter.projectionForTests("rehydrate-stop").status).toBe("running");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    await adapter.dispose();
     await pump;
   });
 });

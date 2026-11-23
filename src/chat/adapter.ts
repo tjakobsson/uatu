@@ -2641,7 +2641,13 @@ export class ChatAdapter {
     const metadata = this.inventorySessions.get(id);
     if (metadata && (!metadata.inWorkspace || metadata.deleted)) return;
     const projection = this.projection(id);
-    if (!isLiveConversationStatus(projection.status)) projection.statusUpdate("running", undefined, false);
+    if (!isLiveConversationStatus(projection.status)) {
+      projection.statusUpdate("running", undefined, false);
+    } else if (!this.liveTurns.has(id)) {
+      this.liveTurns.set(id, projection.status);
+      this.settledTurns.delete(id);
+      this.activityMayHaveChanged();
+    }
   }
 
   private async syncActiveSessions(candidateIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
@@ -2703,6 +2709,10 @@ export class ChatAdapter {
     const projection = this.projections.get(conversationId);
     if (projection && (isLiveConversationStatus(projection.status) || projection.status === "background")) {
       projection.status = "idle";
+    }
+    const stop = this.stoppingTurns.get(conversationId);
+    if (stop?.status && (isLiveConversationStatus(stop.status) || stop.status === "background")) {
+      stop.status = "idle";
     }
     const recovery = this.backgroundRecoveries.get(conversationId);
     recovery?.checking?.finish();
