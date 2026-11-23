@@ -2516,10 +2516,10 @@ export class ChatAdapter {
     this.onActivityChange?.();
   }
 
-  private trackInteraction(conversationId: string, itemId: string, pending: boolean): void {
+  private trackInteraction(conversationId: string, itemId: string, pending: boolean, live = false): void {
     const ids = this.pendingInteractions.get(conversationId);
     if (pending) {
-      this.bumpPresenceSequence(conversationId);
+      if (live) this.bumpPresenceSequence(conversationId);
       if (ids) ids.add(itemId);
       else this.pendingInteractions.set(conversationId, new Set([itemId]));
     } else if (ids) {
@@ -6126,19 +6126,23 @@ export class ChatAdapter {
           this.drainBackgroundRecoveries();
           // Only an initialized, connected provider is read. Activity itself
           // remains memory-only and cannot start a runtime.
-          void this.runTask("stream.discovery", () => this.provider.listSessions().then(async sessions => {
-            const inWorkspaceIds = new Set<string>();
-            for (const session of sessions) {
-              if (signal.aborted || this.disposed) break;
-              if (await this.isInWorkspace(session)) {
-                inWorkspaceIds.add(session.id);
-                boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
-                if (!session.parentId) this.scheduleBackgroundRecovery(session.id);
+          void this.runTask("stream.discovery", () => {
+            const discoveryStarted = ++this.presenceClock;
+            return this.provider.listSessions().then(async sessions => {
+              const inWorkspaceIds = new Set<string>();
+              for (const session of sessions) {
+                if (signal.aborted || this.disposed) break;
+                if (await this.isInWorkspace(session)) {
+                  this.bumpPresenceSequence(session.id, discoveryStarted);
+                  inWorkspaceIds.add(session.id);
+                  boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
+                  if (!session.parentId) this.scheduleBackgroundRecovery(session.id);
+                }
               }
-            }
-            if (signal.aborted || this.disposed) return;
-            await this.reconcileTrackedActivity(inWorkspaceIds, signal);
-          }).catch(() => undefined));
+              if (signal.aborted || this.disposed) return;
+              await this.reconcileTrackedActivity(inWorkspaceIds, signal);
+            }).catch(() => undefined);
+          });
         }
         if (this.provider.waitForEventStream && normalized.eventType === "server.connected") reconcileInboxes();
         const interactionUpdate = normalized.updates.some(update => update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question")
@@ -6452,10 +6456,8 @@ export class ChatAdapter {
     // Providers without independent observations retain their authoritative
     // background-status behavior; uncertainty must not turn it off globally.
     legacy ||= status === "background" && !hasActivity;
-    const hadBackground = this.backgroundWork.has(id) || this.unresolvedBackgroundWork.has(id);
     if (legacy || verified) this.backgroundWork.set(id, { legacy, verified }); else this.backgroundWork.delete(id);
     if (unresolved) this.unresolvedBackgroundWork.add(id); else this.unresolvedBackgroundWork.delete(id);
-    if ((legacy || verified || unresolved) && !hadBackground) this.bumpPresenceSequence(id);
   }
 
   private drainBackgroundRecoveries(): void {
@@ -7326,7 +7328,7 @@ export class ChatAdapter {
       this.publishPausedChanges(id);
       this.activityMayHaveChanged();
     }, {
-      pending: itemId => this.trackInteraction(id, itemId, true),
+      pending: (itemId, live) => this.trackInteraction(id, itemId, true, live),
       settled: itemId => {
         this.trackInteraction(id, itemId, false);
         this.permissionQueueOrder.forget(itemId);
@@ -7433,7 +7435,7 @@ function workerRepresentsFallback(item: ConversationItem, { resultId, childConve
 // How a projection reports its interaction requests (permissions, questions)
 // becoming pending or settling, and its timeline being rebuilt wholesale.
 export type ProjectionInteractionHooks = {
-  pending(itemId: string): void;
+  pending(itemId: string, live?: boolean): void;
   settled(itemId: string): void;
   cleared(): void;
   permission?(item: PermissionRequest): PermissionRequest;
@@ -7673,7 +7675,7 @@ export class ConversationProjection {
       this.beforePublish?.(merged, current, item);
       this.timeline.set(item.id, merged);
       if (merged.type === "permission" || merged.type === "question") {
-        if (merged.status === "pending") this.interactions?.pending(merged.id);
+        if (merged.status === "pending") this.interactions?.pending(merged.id, false);
         else this.interactions?.settled(merged.id);
       }
       if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
@@ -7751,7 +7753,7 @@ export class ConversationProjection {
     for (const id of settled) this.interactions?.settled(id);
     for (const id of touched) {
       const item = staged.get(id);
-      if ((item?.type === "permission" || item?.type === "question") && item.status === "pending") this.interactions?.pending(id);
+      if ((item?.type === "permission" || item?.type === "question") && item.status === "pending") this.interactions?.pending(id, false);
     }
     return true;
   }
@@ -7793,7 +7795,7 @@ export class ConversationProjection {
     this.interactions?.cleared();
     for (const item of notifications) {
       if (item.type === "permission" || item.type === "question") {
-        if (item.status === "pending") this.interactions?.pending(item.id);
+        if (item.status === "pending") this.interactions?.pending(item.id, false);
         else this.interactions?.settled(item.id);
       }
     }
@@ -7910,7 +7912,7 @@ export class ConversationProjection {
     this.historyChanged(item.id);
     this.beforePublish?.(merged, current, item);
     this.timeline.set(item.id, merged);
-    if ((merged.type === "permission" || merged.type === "question") && merged.status === "pending") this.interactions?.pending(merged.id);
+    if ((merged.type === "permission" || merged.type === "question") && merged.status === "pending") this.interactions?.pending(merged.id, true);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
     return this.replay.publish({ type: "item.upsert", item: merged });

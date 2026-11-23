@@ -14113,6 +14113,87 @@ describe("workspace activity summary", () => {
 
     await adapter.dispose();
   });
+
+  test("an older history() permission seed does not fence a newer foreign lookup, and reconnect discovery fences older evicted-child misses", async () => {
+    // 1. Older history() recovers a pending permission after a newer foreign lookup started; foreign lookup still clears both working & awaiting.
+    const { adapter, provider } = activityAdapter();
+    const local = fixtureSession("stale-seed");
+    const foreign = fixtureSession("stale-seed", `${process.cwd()}-elsewhere`);
+    let resolvePerms!: (items: Array<{ requestId: string; conversationId: string; action: string; resources: string[] }>) => void;
+    let resolveForeignLookup!: (session: ProviderSession | null) => void;
+    let lookupCalls = 0;
+    provider.sessions = [local];
+    provider.listPermissions = () => new Promise(resolve => { resolvePerms = resolve; });
+    provider.getSession = async id => {
+      if (id !== "stale-seed") return null;
+      lookupCalls += 1;
+      if (lookupCalls === 1) return local;
+      return new Promise<ProviderSession | null>(resolve => { resolveForeignLookup = resolve; });
+    };
+    adapter.projectionForTests("stale-seed").apply({ kind: "status", status: "running" });
+
+    const olderHistory = adapter.history("stale-seed");
+    await waitUntil(() => resolvePerms !== undefined);
+
+    const newerForeign = adapter.getConversation("stale-seed").catch(() => undefined);
+    await waitUntil(() => resolveForeignLookup !== undefined);
+
+    // Older history finishes and seeds a pending permission card while newer foreign lookup is still in flight.
+    resolvePerms([{ requestId: "p-stale-seed", conversationId: "stale-seed", action: "edit", resources: ["README.md"] }]);
+    await olderHistory;
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+
+    // Newer foreign lookup finishes and must clear both working and awaiting.
+    resolveForeignLookup(foreign);
+    await newerForeign;
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("stale-seed").status).toBe("idle");
+    await adapter.dispose();
+
+    // 2. Reconnect stream.discovery confirms a running evicted child is local, fencing an older pending null lookup.
+    const tasks = new Map<string, Promise<unknown>>();
+    const taskScheduler: ChatTaskScheduler = {
+      run(name, work) {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        return result;
+      },
+      setTimeout(_name, work, delay) { return setTimeout(work, delay); },
+      clearTimeout(timer) { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter: reconnectAdapter, provider: reconnectProvider } = activityAdapter({ maxProjections: 1, taskScheduler });
+    reconnectProvider.waitForEventStream = async () => {};
+    const parent = fixtureSession("disc-parent");
+    const child = { ...fixtureSession("disc-child"), parentId: "disc-parent" };
+    const evictor = fixtureSession("disc-evictor");
+    reconnectProvider.sessions = [parent, child];
+    let resolveStaleChildMiss!: (session: ProviderSession | null) => void;
+    reconnectProvider.getSession = async id => {
+      if (id === "disc-child") return new Promise<ProviderSession | null>(resolve => { resolveStaleChildMiss = resolve; });
+      return id === "disc-parent" ? parent : id === "disc-evictor" ? evictor : null;
+    };
+
+    // Start running on child, then evict child's projection by touching another conversation.
+    reconnectAdapter.projectionForTests("disc-child").apply({ kind: "status", status: "running" });
+    reconnectAdapter.projectionForTests("disc-evictor");
+    expect(reconnectAdapter.activity().working).toBe(true);
+
+    const staleMiss = reconnectAdapter.getConversation("disc-child").catch(() => undefined);
+    await waitUntil(() => resolveStaleChildMiss !== undefined);
+
+    const pump = reconnectAdapter.startEventPump();
+    reconnectProvider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has("stream.discovery"));
+    await tasks.get("stream.discovery");
+
+    // Older null lookup finishes after reconnect discovery confirmed disc-child is in workspace; live turn survives.
+    resolveStaleChildMiss(null);
+    await staleMiss;
+    expect(reconnectAdapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    await reconnectAdapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
