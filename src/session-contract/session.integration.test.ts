@@ -5,7 +5,8 @@
 // Hub has of a session is then checked: the ready line, policy trust, that
 // each internal path exists, that each refused path is refused (410 for a
 // per-stream source, 404 for an internal route) without reaching the
-// session, that all of them stay out of the public contract, and that
+// session, that the Hub's own proof and account-change calls still reach it
+// directly, that all of them stay out of the public contract, and that
 // closing stdin ends the session.
 //
 // Waits are events only: the backend's start (ready line and proof), each
@@ -18,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readYaml } from "../../scripts/validate-api";
+import { createAccountChangeNotifier } from "../hub/agent-account-propagation";
 import { HubSessionStore } from "../hub/auth";
 import { LocalProcessBackend, type RunningSession } from "../hub/backend";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "../hub/credential-context";
@@ -27,7 +29,14 @@ import { startHubServer } from "../hub/server";
 import { SessionManager } from "../hub/sessions";
 import { LIVE_STREAM_PATH } from "../shared/live-protocol";
 import { createSessionLink } from "./link";
-import { classifySessionPath, INTERNAL_SESSION_PATHS, sessionBasePath, sessionPath } from "./paths";
+import {
+  classifySessionPath,
+  INTERNAL_SESSION_PATHS,
+  SESSION_ACCOUNTS_CHANGED_PATH,
+  SESSION_POLICY_PROOF_PATH,
+  sessionBasePath,
+  sessionPath,
+} from "./paths";
 import { formatReadyLine, parseReadyLine, sessionServeArgv } from "./spawn";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
@@ -246,10 +255,43 @@ describe("session contract against a real workspace session", () => {
         await response.body?.cancel();
         expect(reached.slice(before)).toEqual([]);
       }
-      // The Hub itself still reaches the route on the session's own listener.
-      const answer = await direct(item);
-      expect(answer.status === 404 && !answer.contentType.includes("application/json")).toBe(false);
     }
+  });
+
+  test("the Hub's own readiness proof still reaches the session directly", async () => {
+    // The backend proved readiness against the session's own listener before
+    // the Hub held the link: trust is ready only for a proof the policy
+    // authority verified.
+    expect(session.link.policyTrust).toBe("ready");
+    // The same route, called the way the backend calls it, answers a proof.
+    const before = reached.length;
+    const response = await fetch(new URL(sessionPath(basePath, SESSION_POLICY_PROOF_PATH), session.link.origin), {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: session.link.origin },
+      body: JSON.stringify({ challenge: "contract-challenge" }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(((await response.json()) as { proof: unknown }).proof).toBeString();
+    expect(reached.slice(before)).toEqual([]);
+  });
+
+  test("the Hub's account-change notification still reaches the session directly", async () => {
+    // The production notifier, aimed at the session's own listener; only the
+    // answer is recorded on its way back.
+    const answers: { pathname: string; status: number; body: unknown }[] = [];
+    const notify = createAccountChangeNotifier({
+      sessions: { runningIds: () => [workspaceId], get: id => (id === workspaceId ? session : undefined) },
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        answers.push({ pathname: input.pathname, status: response.status, body: await response.clone().json() });
+        return response;
+      },
+    });
+    const before = reached.length;
+    await notify("opencode", { kind: "added" });
+    expect(answers).toEqual([{ pathname: sessionPath(basePath, SESSION_ACCOUNTS_CHANGED_PATH), status: 200, body: { ok: true } }]);
+    expect(reached.slice(before)).toEqual([]);
   });
 
   test("every internal path is an explicit exclusion, never a public operation", async () => {
