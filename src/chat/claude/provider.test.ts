@@ -4538,10 +4538,11 @@ describe("ClaudeProvider sessions", () => {
     expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
     await new Promise(resolve => setImmediate(resolve));
     expect(disposed).toBe(false);
-    expect(queries[0]!.returned).toBe(false);
+    // Shutdown closed the transport without waiting on the interrupt; it
+    // still joins the revert's own teardown before it returns.
+    expect(queries[0]!.returned).toBe(true);
     release!();
     await disposing;
-    expect(queries[0]!.returned).toBe(true);
     expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
     expect(await forking.listQuestions()).toEqual([]);
     expect(await committing).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
@@ -4678,6 +4679,55 @@ describe("ClaudeProvider sessions", () => {
     expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
   });
 
+  test("an interrupt that never answers until its query closes does not hold up shutdown, live or mid-revert", async () => {
+    // The SDK's interrupt has no deadline: only closing the transport ends it.
+    const hanging = (query: FakeQuery) => {
+      let fail: ((error: Error) => void) | undefined;
+      query.interrupt = () => { query.interrupts += 1; return new Promise((_resolve, reject) => { fail = reject; }); };
+      const close = query.return.bind(query);
+      query.return = async () => { fail?.(new Error("transport closed")); return close(); };
+    };
+    {
+      const { provider, queries } = fixture(hanging);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await provider.dispose();
+      expect([queries[0]!.interrupts, queries[0]!.returned]).toEqual([1, true]);
+    }
+    {
+      const { forking, queries, storedId } = revertingProvider();
+      await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+      await forking.undo!(storedId);
+      hanging(queries[0]!);
+      const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+      await waitFor(() => queries[0]!.interrupts === 1);
+      await forking.dispose();
+      expect(queries[0]!.returned).toBe(true);
+      await committing;
+    }
+  });
+
+  test("a rewind cut off by shutdown keeps its recorded boundary, so Redo survives a restart", async () => {
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    const { forking, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      let fail: ((error: Error) => void) | undefined;
+      query.rewindFiles = (uuid, options) => {
+        if (options?.dryRun) return rewind(uuid, options);
+        rewinding!();
+        return new Promise((_resolve, reject) => { fail = reject; });
+      };
+      const close = query.return.bind(query);
+      query.return = async () => { fail?.(new Error("transport closed")); return close(); };
+    });
+    const undoing = forking.undo!(storedId).catch(error => error as Error);
+    await rewindStarted;
+    await forking.dispose();
+    expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+  });
+
   test("an undo retiring its session during shutdown cannot deadlock on a callback the sweep settles", async () => {
     let releaseRewind: (() => void) | undefined;
     let rewinding: (() => void) | undefined;
@@ -4764,25 +4814,38 @@ describe("ClaudeProvider sessions", () => {
 
   const stateOnDisk = (workspace: string) => JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")) as { staged: Record<string, unknown> };
 
-  test("a redo in flight when disposal starts finishes its write before disposal returns: never changed without the write", async () => {
-    const { forking, storedId, workspace } = revertingProvider();
+  test("a redo restoring files when disposal starts is drained: its cleared boundary is on disk when dispose returns", async () => {
+    const { forking, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => ({ ...(await rewind(uuid, options)), filesChanged: ["notes.txt"] });
+    });
+    writeFileSync(path.join(workspace, "notes.txt"), "tip");
     await forking.undo!(storedId);
     expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
-    const gate = gateNextWrite();
+    const writeFile = fsPromises.writeFile;
+    let restoring: (() => void) | undefined;
+    const restoreStarted = new Promise<void>(resolve => { restoring = resolve; });
+    let release: (() => void) | undefined;
+    // Held while redo restores the captured file, before its record is queued.
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (String(args[0]).endsWith("notes.txt")) {
+        restoring!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return writeFile(...args);
+    }) as typeof writeFile;
     try {
       const redoing = forking.redo!(storedId);
-      await gate.started;
-      let disposed = false;
-      const disposing = forking.dispose().then(() => { disposed = true; });
-      await new Promise(resolve => setImmediate(resolve));
-      expect(disposed).toBe(false);
-      gate.release();
-      expect((await redoing).outcome).toBe("changed");
+      await restoreStarted;
+      const disposing = forking.dispose();
+      release!();
       await disposing;
+      // When dispose returns, the redo's record is on disk.
+      expect(stateOnDisk(workspace).staged).toEqual({});
+      expect((await redoing).outcome).toBe("changed");
     } finally {
-      gate.restore();
+      fsPromises.writeFile = writeFile;
     }
-    expect(stateOnDisk(workspace).staged).toEqual({});
   });
 
   test("an undo in flight when disposal starts records its recovery state before its rewind, and disposal waits for it", async () => {
@@ -6050,6 +6113,35 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
       { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused", message: WAKEUP_PAUSED_MESSAGE }) },
       { kind: "status", status: "idle" },
     ]);
+    stop();
+  });
+
+  test("a release whose cancellations are still being written when shutdown starts is never reported lost", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const writeFile = fsPromises.writeFile;
+    let writing: (() => void) | undefined;
+    const writeStarted = new Promise<void>(resolve => { writing = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      writing!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const releasing = provider.release(session.id);
+      await writeStarted;
+      const disposing = provider.dispose();
+      release!();
+      await Promise.all([releasing, disposing]);
+    } finally {
+      fsPromises.writeFile = writeFile;
+    }
+    // The stream has closed; a macrotask boundary lets the reader take
+    // everything it banked.
+    await new Promise(resolve => setImmediate(resolve));
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.some(event => event.eventType === "wakeups.lost")).toBe(false);
     stop();
   });
 

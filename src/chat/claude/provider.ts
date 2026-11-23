@@ -278,6 +278,8 @@ type SessionClaims = {
 
 type LiveSession = {
   claims: SessionClaims;
+  // A release under way (it owns the session's wakeups; see release).
+  releasing?: boolean;
   id: string;
   notificationLifecycle: ClaudeNotificationLifecycle;
   queue: PushQueue<ClaudeUserEnvelope>;
@@ -1732,6 +1734,7 @@ export class ClaudeProvider implements ChatProvider {
       for (const session of group) {
         this.cancelSessionWindowRead(session);
         this.clearIdleTimer(session);
+        if (session.releasing) continue;
         const lost = this.settleWakeups(session, "ended");
         if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
       }
@@ -1741,16 +1744,21 @@ export class ClaudeProvider implements ChatProvider {
     for (const conversationId of new Set(orphans.map(session => session.id))) {
       endConversation(orphans.filter(session => session.id === conversationId));
     }
-    // (c) Every session closes; a control request still out on one (a
-    // rewind) fails with its transport rather than being waited on.
+    // (c) Every session closes. The interrupt is sent but not waited on (it
+    // has no deadline); closing the transport is what fails a control
+    // request still out (an interrupt, a rewind), including one a closing
+    // session's own teardown waits on.
     await Promise.all([
       ...[...sessions, ...others.filter(session => !closing.has(session))].map(async session => {
-        await session.query.interrupt().catch(() => undefined);
+        void session.query.interrupt().catch(() => undefined);
         session.queue.close();
         await session.query.return?.().catch(() => undefined);
         await session.reader.catch(() => undefined);
       }),
-      ...[...closing.values()].map(closed => closed.catch(() => undefined)),
+      ...[...closing].map(async ([session, closed]) => {
+        await session.query.return?.().catch(() => undefined);
+        await closed.catch(() => undefined);
+      }),
     ]);
     await this.probeQuery?.return?.().catch(() => undefined);
     await this.windowWalk?.catch(() => undefined);
@@ -2259,6 +2267,9 @@ export class ClaudeProvider implements ChatProvider {
     try {
       result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     } catch (error) {
+      // Shutdown closed the transport: the rewind may have been applied, so
+      // the boundary recorded ahead of it stays, and Redo with it.
+      if (this.disposed) throw error;
       try {
         await stagedRollback();
       } catch (persistError) {
@@ -3262,14 +3273,23 @@ export class ClaudeProvider implements ChatProvider {
       throw new ReleaseUnavailableError("background work is running; stop it before releasing the session");
     }
     // Recorded before the process goes: the next resume rebuilds every
-    // cron, and each must already be blocked when it does (D12).
-    const undo = await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
+    // cron, and each must already be blocked when it does (D12). A release
+    // under way owns its wakeups: shutdown does not report them lost.
+    session.releasing = true;
+    let undo: () => void;
+    try {
+      undo = await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
+    } catch (error) {
+      session.releasing = false;
+      throw error;
+    }
     if (this.live.get(sessionId) !== session) return;
     // A wakeup that passed its hook while the write ran has started a turn:
     // retiring now would kill it under its own header. The release is
     // refused as it would have been a moment later, and nothing it recorded
     // stays cancelled.
     if (turning() || session.backgroundTasks.size > 0) {
+      session.releasing = false;
       undo();
       await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
       throw new ReleaseUnavailableError(session.backgroundTasks.size > 0
