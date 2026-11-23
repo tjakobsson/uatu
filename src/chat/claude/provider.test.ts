@@ -2727,6 +2727,65 @@ describe("ClaudeProvider sessions", () => {
     expect(recorded()).toEqual({});
   });
 
+  test("a deferred rename is written once at a time, and a newer rename lands after it", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-once-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const queries: FakeQuery[] = [];
+    // Each native write as it starts and as it lands; the deferred one is held.
+    const started: string[] = [];
+    const landed: string[] = [];
+    let finishDeferred: (() => void) | undefined;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") await new Promise<void>(resolve => { finishDeferred = resolve; });
+        landed.push(title);
+      },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const transcript = path.join(projectDir, `${session.id}.jsonl`);
+    writeFileSync(transcript, `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    const completed = () => events.filter(event => event.conversationId === session.id && event.updates.some(update => update.kind === "status" && update.status === "completed")).length;
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => started.length === 1);
+    // A second turn ends while the first write is out.
+    await provider.prompt(session.id, { id: "r2", text: "more", delivery: "queue" });
+    queries.at(-1)!.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:04.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => completed() === 2);
+    // The user renames while it is still out. Its transcript check marks the
+    // point where the rename would write.
+    const stat = fsPromises.stat;
+    let checked = false;
+    fsPromises.stat = (async (...args: Parameters<typeof stat>) => {
+      const result = await stat(...args);
+      if (String(args[0]) === transcript) checked = true;
+      return result;
+    }) as typeof stat;
+    try {
+      const renaming = provider.renameSession(session.id, "Newer");
+      await waitFor(() => checked);
+      finishDeferred!();
+      await renaming;
+    } finally {
+      fsPromises.stat = stat;
+    }
+    await settledWrites(provider);
+    // One write of the deferred title, and the newer one stands.
+    expect(started).toEqual(["Planned work", "Newer"]);
+    expect(landed).toEqual(["Planned work", "Newer"]);
+    stop();
+    await provider.dispose();
+  });
+
   test("a turn ending during the shutdown grace leaves its deferred rename for the next start, writing nothing after shutdown", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-shutdown-")));
     const workspace = path.join(root, "workspace");

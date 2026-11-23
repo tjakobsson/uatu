@@ -718,6 +718,9 @@ export class ClaudeProvider implements ChatProvider {
   // A rename asked for before the native transcript existed: written to it
   // once the first turn has created it.
   private readonly deferredRenames = new Map<string, string>();
+  // A deferred rename's native write under way, by conversation: one at a
+  // time, and a newer rename writes only after it has landed.
+  private readonly deferredRenameWrites = new Map<string, Promise<void>>();
   // Wakeups the user cancelled, by conversation: id → the prompt it fires.
   // The CLI rebuilds a cron when its session resumes, so a cancel is
   // enforced here, durably: a cancelled wakeup never holds a session and
@@ -4084,11 +4087,14 @@ export class ClaudeProvider implements ChatProvider {
       // A newer rename during the existence check supersedes this one: the
       // native write must not land after it and overwrite it.
       if (deferred !== undefined && await fileExists(file) && !this.disposed && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred) {
+        // A write already under way is the one: it reads the titles once
+        // it has landed.
+        if (this.deferredRenameWrites.has(sessionId)) return;
         // Admitted work, which shutdown waits for and drains. The record
         // stays, in memory and on disk, until the native write has
         // succeeded, so a snapshot written meanwhile still names it and a
         // failure leaves it for the next start.
-        await this.admit(async () => {
+        const writing = this.admit(async () => {
           try {
             await this.renameNativeSession(this.nativeId(sessionId), deferred, { dir: this.workspacePath });
           } catch {
@@ -4098,6 +4104,13 @@ export class ClaudeProvider implements ChatProvider {
           this.deferredRenames.delete(sessionId);
           await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
         });
+        const tracked = writing.then(() => undefined, () => undefined);
+        this.deferredRenameWrites.set(sessionId, tracked);
+        try {
+          await writing;
+        } finally {
+          if (this.deferredRenameWrites.get(sessionId) === tracked) this.deferredRenameWrites.delete(sessionId);
+        }
       }
       const titles = await readTranscriptTitles(file);
       if ((this.renameGenerations.get(sessionId) ?? 0) !== generation || this.disposed) return;
@@ -4141,6 +4154,9 @@ export class ClaudeProvider implements ChatProvider {
     // (the SDK's rename throws on one): the title is kept here and written
     // to the transcript once the first turn has created it.
     if (await fileExists(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))) {
+      // A deferred write still under way lands first, so this newer title
+      // is the one the transcript ends with.
+      await this.deferredRenameWrites.get(sessionId);
       await this.renameNativeSession(this.nativeId(sessionId), trimmed, { dir: this.workspacePath });
       this.deferredRenames.delete(sessionId);
     } else {
