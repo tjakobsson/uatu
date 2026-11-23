@@ -845,7 +845,7 @@ export class ChatAdapter {
   // parent wake can overtake an interrupt response (even across projection
   // eviction); its live status makes that old response stale. Only in-flight
   // Stops retain an observer, and the admission lane permits one per session.
-  private readonly stoppingTurns = new Map<string, { resumed: boolean; status?: ConversationStatus }>();
+  private readonly stoppingTurns = new Map<string, { resumed: boolean; status?: ConversationStatus; activeProbeBaseline?: number }>();
   // Conversations holding live background work (`background` status) with no
   // turn in flight. Kept apart from liveTurns on purpose: liveTurns gates the
   // composer's Cancel and held prompts, and a background conversation must
@@ -2635,6 +2635,15 @@ export class ChatAdapter {
     await this.verifyTrackedSessions(descendants, signal);
   }
 
+  private seedProbedRunning(id: string, baseline: number): void {
+    if (this.disposed) return;
+    if (this.statusSequence(id) !== baseline) return;
+    const metadata = this.inventorySessions.get(id);
+    if (metadata && (!metadata.inWorkspace || metadata.deleted)) return;
+    const projection = this.projection(id);
+    if (!isLiveConversationStatus(projection.status)) projection.statusUpdate("running", undefined, false);
+  }
+
   private async syncActiveSessions(candidateIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
     if (!this.provider.listActiveSessions || candidateIds.size === 0 || this.disposed || signal?.aborted) return;
     const baselines = new Map<string, number>();
@@ -2653,12 +2662,14 @@ export class ChatAdapter {
       const active = new Set(activeIds);
       for (const id of candidateIds) {
         if (!active.has(id)) continue;
-        if (this.statusSequence(id) !== baselines.get(id)) continue;
-        if (this.stoppingTurns.has(id)) continue;
-        const metadata = this.inventorySessions.get(id);
-        if (metadata && (!metadata.inWorkspace || metadata.deleted)) continue;
-        const projection = this.projection(id);
-        if (!isLiveConversationStatus(projection.status)) projection.statusUpdate("running", undefined, false);
+        const baseline = baselines.get(id)!;
+        if (this.statusSequence(id) !== baseline) continue;
+        const stop = this.stoppingTurns.get(id);
+        if (stop) {
+          stop.activeProbeBaseline = baseline;
+          continue;
+        }
+        this.seedProbedRunning(id, baseline);
       }
     } finally {
       for (const id of candidateIds) {
@@ -4060,8 +4071,9 @@ export class ChatAdapter {
       // native steer to Queue later is not a new submission or a resume.
       const paused = !this.dormantQueues.has(conversationId);
       this.dormantQueues.add(conversationId);
-      const stop: { resumed: boolean; status?: ConversationStatus } = { resumed: false };
+      const stop: { resumed: boolean; status?: ConversationStatus; activeProbeBaseline?: number } = { resumed: false };
       const settledBeforeStop = this.settledTurns.get(conversationId);
+      let interruptRefused = false;
       this.stoppingTurns.set(conversationId, stop);
       try {
         // Without resume: pending steers stay with the agent, unwoken, and
@@ -4074,7 +4086,8 @@ export class ChatAdapter {
         // A failed response cannot establish non-application, even without a
         // terminal stream event. Keep Stop's queue intent without inventing
         // an interruption or retrying the native request.
-        if (error instanceof InterruptNotAppliedError && paused && !stop.resumed && this.settledTurns.get(conversationId) === settledBeforeStop) this.dormantQueues.delete(conversationId);
+        interruptRefused = error instanceof InterruptNotAppliedError;
+        if (interruptRefused && paused && !stop.resumed && this.settledTurns.get(conversationId) === settledBeforeStop) this.dormantQueues.delete(conversationId);
         this.publishPausedChanges(conversationId);
         throw error;
       } finally {
@@ -4082,6 +4095,11 @@ export class ChatAdapter {
         // including a newer run's completion after an uncertain old response.
         if (stop.resumed) this.projection(conversationId);
         this.stoppingTurns.delete(conversationId);
+        // If Stop was refused, restore any still-valid active-session probe
+        // observation that arrived while the interrupt was in flight.
+        if (interruptRefused && stop.activeProbeBaseline !== undefined) {
+          this.seedProbedRunning(conversationId, stop.activeProbeBaseline);
+        }
       }
     }));
   }

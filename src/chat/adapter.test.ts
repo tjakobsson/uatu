@@ -13499,7 +13499,26 @@ describe("workspace activity summary", () => {
   });
 
   test("moving a parent out re-verifies known active children (including those learned via requireSession), forgetting moved ones and keeping local ones", async () => {
-    const { adapter, provider } = activityAdapter();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        try { return await work(); }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            const eventType = name.slice("stream.event:".length);
+            eventWaiters.get(eventType)?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
     const parent = fixtureSession("parent");
     const movedChild = { ...fixtureSession("child-moved"), parentId: "parent" };
     const stayedChild = { ...fixtureSession("child-stayed"), parentId: "parent" };
@@ -13515,7 +13534,13 @@ describe("workspace activity summary", () => {
       && adapter.projectionForTests("child-stayed").status === "running");
 
     // Parent and child-moved relocate (getSession returns null for directory-scoped providers); child-stayed remains.
-    provider.sessions = [stayedChild];
+    // Defer child-stayed's verification lookup so we assert only after full descendant reconciliation finishes.
+    let releaseStayedLookup!: (session: ProviderSession | null) => void;
+    provider.getSession = async id => {
+      if (id === "child-stayed") return new Promise<ProviderSession | null>(resolve => { releaseStayedLookup = resolve; });
+      return null;
+    };
+    const moveDone = waitForEvent("session.moved");
     provider.eventQueue.push({ normalized: {
       conversationId: "parent",
       updates: [],
@@ -13523,7 +13548,9 @@ describe("workspace activity summary", () => {
       eventType: "session.moved",
       sessionLifecycle: { kind: "moved", id: "parent", directory: `${process.cwd()}-moved`, title: "", sparse: true },
     } });
-    await waitUntil(() => adapter.projectionForTests("child-moved").status === "idle");
+    await waitUntil(() => adapter.projectionForTests("child-moved").status === "idle" && releaseStayedLookup !== undefined);
+    releaseStayedLookup(stayedChild);
+    await moveDone;
     expect(adapter.projectionForTests("parent").status).toBe("idle");
     expect(adapter.projectionForTests("child-stayed").status).toBe("running");
     expect(adapter.activity().working).toBe(true);
@@ -13975,6 +14002,83 @@ describe("workspace activity summary", () => {
     await staleLookup;
     expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests("evicted-arrived").status).toBe("running");
+
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("refused Stop restores a positive move-in active-session probe that resolved while interrupt was in flight", async () => {
+    const probeTasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("active.probe:")) probeTasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            const eventType = name.slice("stream.event:".length);
+            eventWaiters.get(eventType)?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const session = fixtureSession("refused-stop");
+    provider.sessions = [session];
+    let resolveProbe!: (ids: string[]) => void;
+    provider.listActiveSessions = () => new Promise<string[]>(resolve => { resolveProbe = resolve; });
+    let rejectInterrupt!: (error: Error) => void;
+    provider.interrupt = () => new Promise<void>((_resolve, reject) => { rejectInterrupt = reject; });
+    const pump = adapter.startEventPump();
+
+    adapter.projectionForTests("refused-stop").apply({ kind: "status", status: "running" });
+    expect(adapter.activity().working).toBe(true);
+
+    const stop = adapter.abort("refused-stop", "stop-refused");
+    await waitUntil(() => rejectInterrupt !== undefined);
+
+    // Move out (forgets activity -> idle), then move back in while Stop is still pending.
+    const moveOutDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "refused-stop",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "refused-stop", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await moveOutDone;
+    expect(adapter.activity().working).toBe(false);
+    expect(adapter.projectionForTests("refused-stop").status).toBe("idle");
+
+    const moveInDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "refused-stop",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "refused-stop", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await moveInDone;
+    await waitUntil(() => resolveProbe !== undefined);
+
+    // Positive probe arrives before interrupt rejects; it stays deferred while Stop is in flight.
+    resolveProbe(["refused-stop"]);
+    await probeTasks.get("active.probe:refused-stop");
+    expect(adapter.activity().working).toBe(false);
+
+    // When Stop is refused with InterruptNotAppliedError, the deferred probe restores running/working.
+    rejectInterrupt(new InterruptNotAppliedError("interrupt refused"));
+    await expect(stop).rejects.toThrow(InterruptNotAppliedError);
+    expect(adapter.projectionForTests("refused-stop").status).toBe("running");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
 
     await adapter.dispose();
     await pump;
