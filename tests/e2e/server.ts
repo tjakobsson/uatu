@@ -637,25 +637,34 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // stripped, and any other id (`sub:s1:worker`) stays a raw provider id.
   let foreignId: string | undefined;
   let malformedId: string | undefined;
-  let nonStringId: unknown;
+  // Boxed, so a rejected null is still recorded.
+  let nonStringId: { value: unknown } | undefined;
   // Only the fields production's wire mappers address are checked and
   // stripped (mapAddressableItemIds); an opaque payload such as a question's
   // schema passes through untouched.
-  const ownItemIds = (value: ConversationItem): ConversationItem => mapAddressableItemIds(value, id => {
-    // The wire types say string; a fixture can still send anything.
-    if (typeof (id as unknown) !== "string") {
-      nonStringId ??= id;
-      return id;
+  // The wire types say string; a fixture can still send anything, and the
+  // mapper skips a falsy value (`false`, `0`, `null`). So every present field
+  // that is not a string is probed with a string in its place: if
+  // production's mapper would address that field, the value is rejected.
+  const checkItemIdTypes = (value: ConversationItem): void => {
+    for (const [key, entry] of Object.entries(value)) {
+      if (typeof entry === "string") continue;
+      const probe = { ...value, [key]: "probe" } as ConversationItem;
+      const mapped = mapAddressableItemIds(probe, id => `${id}:mapped`) as unknown as Record<string, unknown>;
+      if (mapped[key] === "probe:mapped") nonStringId ??= { value: entry };
     }
+  };
+  const ownItemIds = (value: ConversationItem): ConversationItem => mapAddressableItemIds(value, id => {
     if (hasEmptyReservedQualifier(id)) malformedId ??= id;
     const owner = qualifyingAgent(id);
     if (owner !== undefined && owner !== targetAgentId) foreignId ??= id;
     return owner === targetAgentId ? stripAgentQualifier(id) : id;
   });
+  for (const entry of [...(body.items ?? []), ...(body.older ?? []), ...(body.item ? [body.item] : [])]) checkItemIdTypes(entry);
+  if (nonStringId !== undefined) return Response.json({ error: `conversation ids must be strings, not ${JSON.stringify(nonStringId.value)}` }, { status: 400 });
   const items = body.items?.map(ownItemIds);
   const older = body.older?.map(ownItemIds);
   const item = body.item && ownItemIds(body.item);
-  if (nonStringId !== undefined) return Response.json({ error: `conversation ids must be strings, not ${JSON.stringify(nonStringId)}` }, { status: 400 });
   if (malformedId !== undefined) return Response.json({ error: `malformed conversation id ${JSON.stringify(malformedId)}` }, { status: 400 });
   if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);

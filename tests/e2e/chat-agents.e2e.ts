@@ -90,11 +90,18 @@ test.describe("multi-agent chat", () => {
       items: [{ id: "question:1", type: "question", createdAt: 1, requestId: "q1", questions: [], status: "pending", source: "elicitation", schema }],
     }) as { items: Array<{ schema?: unknown }> };
     expect(question.items[0]!.schema).toEqual(schema);
-    // A non-string addressable id is rejected too.
-    expect((await request.post("/__e2e/chat", { data: {
-      action: "seed", agent: "claude", title: "Numeric child",
-      items: [{ id: "tool:numeric", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: 42 }],
-    } })).status()).toBe(400);
+    // A non-string addressable id is rejected too, falsy ones included; an
+    // omitted one is fine.
+    for (const childConversationId of [42, false, 0, null]) {
+      expect((await request.post("/__e2e/chat", { data: {
+        action: "seed", agent: "claude", title: "Non-string child",
+        items: [{ id: "tool:non-string", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId }],
+      } })).status()).toBe(400);
+    }
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Question without owner",
+      items: [{ id: "question:2", type: "question", createdAt: 1, requestId: "q2", questions: [], status: "pending", conversationId: null }] } })).status()).toBe(400);
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "No child",
+      items: [{ id: "tool:no-child", type: "tool", createdAt: 1, name: "task", status: "completed" }] } })).status()).toBe(200);
     // So is a nested reserved prefix with nothing after it.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Malformed child",
