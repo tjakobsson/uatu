@@ -2741,7 +2741,10 @@ describe("ClaudeProvider sessions", () => {
       // Each query reads its input as the SDK does, so o2 is delivered.
       queryFactory: input => { const query = new FakeQuery(input).consumeInput(); queries.push(query); return query; },
       renameNativeSession: async (_sessionId, title) => { renames.push(title); },
+      // Far longer than the test: the grace ends when o2 does, never by expiry.
+      shutdownGraceMs: 60_000,
     });
+    const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
     await provider.renameSession(session.id, "Planned work");
     await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
@@ -2775,15 +2778,18 @@ describe("ClaudeProvider sessions", () => {
       const disposing = provider.dispose().then(() => { disposeReturned = true; });
       // The renamed conversation's turn ends during the grace.
       queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
-      await new Promise(resolve => setImmediate(resolve));
+      // Handled: its completed status is out, and the title refresh it
+      // starts in the same step has run.
+      await waitFor(() => events.some(event => event.conversationId === session.id && event.updates.some(update => update.kind === "status" && update.status === "completed")));
       release!();
       await prompting;
       await disposing;
-      await new Promise(resolve => setImmediate(resolve));
+      await settledWrites(provider);
     } finally {
       fsPromises.readFile = readFile;
       fsPromises.writeFile = writeFile;
     }
+    stop();
     expect(renames).toEqual([]);
     expect(writesAfterDispose).toEqual([]);
     // The rename is still recorded, for the next start to write.
@@ -4878,7 +4884,7 @@ describe("ClaudeProvider sessions", () => {
       };
       const close = query.return.bind(query);
       query.return = async () => { fail?.(new Error("transport closed")); return close(); };
-    }, { shutdownGraceMs: 4_000 });
+    }, { shutdownGraceMs: 60_000 });
     const undoing = forking.undo!(storedId);
     await rewindStarted;
     const disposing = forking.dispose();
@@ -4899,7 +4905,8 @@ describe("ClaudeProvider sessions", () => {
       query.return = async () => { fail?.(new Error("transport closed")); return close(); };
     };
     {
-      const { provider, queries } = fixture(hanging);
+      // Short: only the grace's expiry ends the wait for the interrupt.
+      const { provider, queries } = fixture(hanging, { shutdownGraceMs: 20 });
       const session = await provider.createSession("x");
       await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
       await provider.dispose();
@@ -5139,7 +5146,8 @@ describe("ClaudeProvider sessions", () => {
   });
 
   test("a prompt whose query's stream ends during the shutdown grace is refused, never accepted into a query nothing reads", async () => {
-    const { provider, queries, workspace } = fixture();
+    // The grace never expires here: the stream's end, not the close, refuses r2.
+    const { provider, queries, workspace } = fixture(undefined, { shutdownGraceMs: 60_000 });
     const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
@@ -6139,7 +6147,9 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
   // The spike's sequence for the turn that schedules: tool call, Stop (with
   // the crons), then the result.
   async function scheduled(crons: unknown[], options: { background?: boolean } = {}) {
-    const context = fixture();
+    // A grace that cannot expire: the shutdown tests here finish their work
+    // inside it, and none of them covers its expiry.
+    const context = fixture(undefined, { shutdownGraceMs: 60_000 });
     const { events, stop } = collect(context.provider);
     const session = await context.provider.createSession("x");
     await context.provider.prompt(session.id, { id: "r1", text: "wake me in a minute", delivery: "queue" });
