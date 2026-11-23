@@ -1,3 +1,4 @@
+import { SESSION_NOTIFICATIONS_PATH } from "../session-contract/paths";
 import { describe, expect, spyOn, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -7,7 +8,7 @@ import { buildFetchFallback, buildRoutes } from "./routes";
 import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
 import { scanRoots } from "./roots";
 import * as markdownRenderer from "../render/markdown";
-import { NotificationFeed, CHILD_NOTIFICATIONS_PATH } from "../chat/notification-feed";
+import { NotificationFeed } from "../chat/notification-feed";
 import { createWatchSession, FolderListingError } from "./watch-session";
 
 // Minimal stub: the asset routes never touch the session, so a thrown
@@ -67,9 +68,9 @@ describe("buildRoutes — bundled font asset routes", () => {
   test("the internal notification stream authenticates, prefixes, and opens before an event", async () => {
     const feed = new NotificationFeed();
     const routes = buildFontTestRoutes("/s/test/", stubSession, "origin", feed);
-    const handler = (routes[`/s/test${CHILD_NOTIFICATIONS_PATH}`] as { GET: (request: Request) => Response }).GET;
-    expect(handler(new Request(`http://localhost/s/test${CHILD_NOTIFICATIONS_PATH}`)).status).toBe(401);
-    const response = handler(new Request(`http://localhost/s/test${CHILD_NOTIFICATIONS_PATH}?t=test-credential`));
+    const handler = (routes[`/s/test${SESSION_NOTIFICATIONS_PATH}`] as { GET: (request: Request) => Response }).GET;
+    expect(handler(new Request(`http://localhost/s/test${SESSION_NOTIFICATIONS_PATH}`)).status).toBe(401);
+    const response = handler(new Request(`http://localhost/s/test${SESSION_NOTIFICATIONS_PATH}?t=test-credential`));
     expect(response.status).toBe(200);
     const reader = response.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain(": open");

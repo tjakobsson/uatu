@@ -33,7 +33,9 @@ lifetime stdin/stdout) first requires the child's non-secret readiness marker;
 old/non-consuming children receive no secret. Early CLI initialization consumes
 and closes it before runtime/tool startup. The listening child answers a bounded,
 domain-separated challenge at its base-path internal proof endpoint. Only a
-verified proof installs signing authority in a backend-private WeakMap. Missing,
+verified proof gives the session link its signing authority, held in the link's
+closure (`session-contract/link.ts`); Hub code can ask the link to sign but
+cannot read the key. Missing,
 invalid or timed-out bootstrap/proof leaves explicit unavailable trust, including
 with a null terminal token; workspace credentials never seed this authority.
 Stop/exit/replacement withdraws trust and clears key buffers. Source and compiled
@@ -341,6 +343,14 @@ src/
 │                         cookie, rate limit, CSRF), dashboard pages, server
 │                         assembly, process wiring, Agent accounts
 │                         (agent-account-*.ts: the machine's agent logins)
+├── session-contract/     The private agreement between the Hub and a
+│                         workspace session, imported by both and never by
+│                         the browser: spawn shape and ready line (spawn.ts),
+│                         fd-3 policy bootstrap and readiness proof
+│                         (bootstrap.ts), chat-policy signing (policy.ts),
+│                         base path, internal paths and path classification
+│                         (paths.ts), hop headers (headers.ts), the session
+│                         token (token.ts), and the session link (link.ts)
 ├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
 │                         subprocess + forensic dump bundle
 ├── debug/                Observability — XDG-cache path resolution +
@@ -413,7 +423,8 @@ server-side directory browser or the API — there is no workspaces root;
 `backend` field reserved for a future container/VM backend), starts one
 loopback-bound session child per workspace through
 the `SessionBackend` interface (`hub/backend.ts`: URL on stdout, held stdin
-as orphan backstop, SIGTERM), and
+as orphan backstop, SIGTERM), which yields a **session link** for each
+running session, and
 reverse-proxies HTTP and WebSockets under `/s/<id>/` from a single
 TLS-terminating, login-gated port (`hub/proxy.ts`, `hub/auth.ts`,
 `hub/server.ts`). Authentication is a server-side session store in the hub's
@@ -437,6 +448,28 @@ than about the workspace, so the hub answers them itself, behind the same
 Origin check as any other session-path write. Live
 updates do not go through the proxy; [Live delivery](#live-delivery) covers
 them.
+
+What the Hub and a workspace session agree on privately is the **session
+contract**, declared once in `src/session-contract/` and imported by both
+sides (never by the browser bundle; session code does not import `src/hub/`
+for it). It covers the spawn shape (`sessionServeArgv`, stdin/stdout/stderr
+as pipes, descriptor 3 as a private socket), the ready line
+(`http://127.0.0.1:<port><basePath>?t=<token>`, one formatter and one
+parser), exit when stdin closes, the fd-3 policy bootstrap and readiness
+proof, chat-policy signing, the headers that cross the hop (the
+`x-uatu-hub-*` strip rule, operation receipt, replay resync, page origin),
+the `/s/<id>/` base path, and every internal session path. The session
+mints its token in the serve assembly (`mintSessionToken`), not in the
+document watcher. A backend start yields a **session link**
+(`session-contract/link.ts`), and Hub code addresses and trusts a running
+session only through it: `link.url()` builds the session URL with the
+Hub-held token applied as `t`, `link.requestHeaders()` and
+`link.forwardHeaders()` shape the loopback `Host` and `Origin`, and
+`link.sign()` signs chat policy while policy trust is ready.
+`classifySessionPath(method, suffix)` decides what the Hub does with a
+session path from the method and path alone: refuse a per-stream source
+with 410, forward a discard with a Hub-scoped operation id, sign a policy
+action, tap a conversation snapshot, pass media untransformed, or forward.
 
 The hub also owns Git worktrees: a linked checkout is a child workspace of
 the main one it forks from, sharing its Git objects and repository
@@ -2021,6 +2054,7 @@ being where the searched text always exists.
 1. Add the route to `src/server/routes.ts` inside the `buildRoutes(deps)` function. Use `deps` for anything the handler needs (the watch session, the metrics snapshot, e2e helpers, etc.) — do not reach into module-level state from inside the handler.
 2. If the route is prod-only or e2e-only, place it inside the appropriate `mode === "prod"` / `mode === "e2e"` branch and add the required dep to the corresponding `ProdRouteDeps` / `E2ERouteDeps` shape.
 3. Both `src/cli.ts` and `tests/e2e/server.ts` will pick up the new route automatically — they each `Bun.serve({ routes: buildRoutes(...) })`.
+4. If only the Hub calls the route (an internal path), declare its path as a constant in `src/session-contract/paths.ts`, add it to `INTERNAL_SESSION_PATHS`, key the route with `p(THAT_CONSTANT)` instead of a literal, and have the Hub reach it through the session link (`link.url(THAT_CONSTANT)`). If browsers must not reach it through the Hub, give it a refused class in `classifySessionPath`. `api/route-coverage.test.ts` fails a contract-keyed route that the contract's list or `api/exclusions.yaml` does not cover.
 
 ### Break the client/server API contract
 

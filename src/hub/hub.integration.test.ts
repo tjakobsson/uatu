@@ -7,6 +7,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createECDH, randomBytes } from "node:crypto";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import { NotificationStore } from "./notification-store";
 import { HubNotifications } from "./notifications";
 import { promises as nodeFs } from "node:fs";
@@ -1818,15 +1819,11 @@ describe("hub end to end", () => {
     const backend: SessionBackend = {
       async start(entry): Promise<RunningSession> {
         spawned.push(entry.id);
-        return {
+        return testRunningSession({
           workspaceId: entry.id,
-          instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-          basePath: `/s/${entry.id}/`,
-          endpoint: { hostname: "127.0.0.1", port: 1 },
+          port: 1,
           token: null,
-          exited: new Promise<number | null>(() => undefined),
-          stop: async () => undefined,
-        };
+        });
       },
     };
     const localSessions = new SessionManager(localRegistry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
@@ -3416,10 +3413,11 @@ describe("hub end to end", () => {
         entries: [{ executionId: "contract-execution", signature: "contract-terminal", active: false, dismissible: true }],
       });
     } });
-    const manager = new SessionManager(ownRegistry, { local: { start: async () => ({
-      workspaceId: "contract-workers", instanceId: "contract", policyTrust: "unavailable", basePath: "/s/contract-workers/",
-      endpoint: { hostname: "127.0.0.1", port: child.port! }, token: "contract-token",
-      exited: new Promise<number | null>(() => {}), stop: async () => {},
+    const manager = new SessionManager(ownRegistry, { local: { start: async () => testRunningSession({
+      workspaceId: "contract-workers",
+      basePath: "/s/contract-workers/",
+      port: child.port!,
+      token: "contract-token",
     }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
     let hub: ReturnType<typeof startHubServer> | undefined;
     try {

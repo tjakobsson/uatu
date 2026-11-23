@@ -6,7 +6,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 
-import { LocalProcessBackend, resolveUatuArgv } from "./backend";
+import { resolveUatuArgv } from "../session-contract/spawn";
+import { LocalProcessBackend } from "./backend";
 import { ManagedSshAgent } from "./credential-ssh-agent";
 import { SshCredentialService, type SshCredentialOperations } from "./credential-ssh";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";

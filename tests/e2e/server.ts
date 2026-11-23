@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
-import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
+import { consumeChildPolicyDescriptor } from "../../src/session-contract/bootstrap";
+import { formatReadyLine, POLICY_BOOTSTRAP_FLAG } from "../../src/session-contract/spawn";
+import { mintSessionToken } from "../../src/session-contract/token";
 import { MultiAgentChatService } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
@@ -39,7 +41,7 @@ const E2E_PORT = e2ePort();
 // process's child routes through it. Unset, nothing below changes.
 const E2E_BASE_PATH = normalizeBasePath(process.env.UATU_E2E_BASE_PATH ?? "/");
 const E2E_HUB_CHILD = E2E_BASE_PATH !== "/";
-const privateBootstrap = Bun.argv.includes("--hub-policy-bootstrap");
+const privateBootstrap = Bun.argv.includes(POLICY_BOOTSTRAP_FLAG);
 const childPolicy = privateBootstrap ? await consumeChildPolicyDescriptor() : null;
 import { safeGit } from "../../src/document/git-base-ref";
 import { normalizeBasePath, stripBasePath } from "../../src/shared/base-path";
@@ -242,6 +244,10 @@ const chatService = new Proxy({} as MultiAgentChatService, {
   },
 });
 const terminalEnabled = await terminalBackendAvailable();
+// Minted through the session contract, as cli.ts does, but once per watch
+// session rather than once per process: a `/__e2e/reset` replaces the watch
+// session and tests rely on that rotating the workspace credential.
+let sessionToken!: string;
 let watchSession = await createSession({ resetWorkspace: process.env.UATU_E2E_PRESERVE_WORKSPACE !== "1" });
 
 // The brokered live stream, exactly as a hub would mount it, over this one
@@ -287,7 +293,7 @@ const liveUpstreamSource: LiveUpstreamSource = {
   async open({ path: childPath, signal }) {
     await liveUpstreamsReady;
     const target = new URL(childPath, `http://127.0.0.1:${server.port}`);
-    target.searchParams.set("t", watchSession.getTerminalToken());
+    target.searchParams.set("t", sessionToken);
     return fetch(target, {
       headers: { accept: "text/event-stream", origin: `http://127.0.0.1:${server.port}` },
       signal,
@@ -812,7 +818,7 @@ const inner = Bun.serve({
       },
       getSession: () => watchSession,
       chatService,
-      getWorkspaceCredential: () => watchSession.getTerminalToken(),
+      getWorkspaceCredential: () => sessionToken,
       basePath: E2E_BASE_PATH,
       childPolicy: childPolicy?.basePath === E2E_BASE_PATH ? childPolicy : undefined,
       // A hub owns its origin root, as production's child invocation declares.
@@ -933,14 +939,16 @@ const navigationFetch = createNavigationFetchHandler({
 
 const fetchFallback = buildFetchFallback({
   getTerminalServer: () => terminalServer,
-  getTerminalToken: () => watchSession.getTerminalToken(),
+  getTerminalToken: () => sessionToken,
   navigationFetch,
   basePath: E2E_BASE_PATH,
 });
 
 // The readiness line the spawning fixture waits for. A hub child announces
 // its prefixed session URL, the shape the hub's backend contract expects.
-console.log(E2E_HUB_CHILD ? `http://127.0.0.1:${server.port}${E2E_BASE_PATH}${privateBootstrap ? `?t=${encodeURIComponent(watchSession.getTerminalToken())}` : ""}` : `http://127.0.0.1:${server.port}`);
+console.log(E2E_HUB_CHILD
+  ? formatReadyLine(server.port!, E2E_BASE_PATH, privateBootstrap ? sessionToken : undefined)
+  : formatReadyLine(server.port!, "/"));
 
 let shuttingDown = false;
 const shutdown = async () => {
@@ -973,6 +981,7 @@ if (process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1") {
 }
 
 async function createSession(options: { resetWorkspace: boolean }) {
+  sessionToken = mintSessionToken();
   if (options.resetWorkspace) {
     activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
     await resetE2EWorkspace();

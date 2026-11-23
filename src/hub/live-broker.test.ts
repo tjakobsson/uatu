@@ -1,9 +1,10 @@
+import { SESSION_REPLAY_RESYNC_HEADER } from "../session-contract/headers";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { encodeReplayCursor } from "../chat/replay";
 import { MetricsRegistry } from "../debug/metrics";
 import { upstreamActiveGauge, upstreamCounter } from "../debug/stream-metrics";
-import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, documentContextKey, type LiveEnvelope } from "../shared/live-protocol";
+import { documentContextKey, type LiveEnvelope } from "../shared/live-protocol";
 import type { DocumentSnapshot, DocumentPatch } from "../shared/document-updates";
 import { BUILD_SUMMARY, createWatchSession } from "../server/watch-session";
 import {
@@ -163,7 +164,7 @@ async function visualCatchUp(hintedCursor: string | null = cursorOf("g1", 5), re
   const before = cursorOf("g1", 2), boundary = cursorOf("g1", 5);
   const replayPath = `?cursor=${encodeURIComponent(before)}`;
   const child = fakeSource({ headers: (pathname): Record<string, string> => pathname.includes(replayPath) && hintedCursor !== null
-    ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: hintedCursor } : {} });
+    ? { [SESSION_REPLAY_RESYNC_HEADER]: hintedCursor } : {} });
   const clock = trailerClock();
   const live = broker(child.source, { catchUpTrailerClock: clock.clock });
   const opener = sink();
@@ -424,7 +425,7 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
 
   test.each(["linger", "stop", "forget", "dispose"] as const)("private hinted trailers survive upstream linger, but retire with their %s owner", async lifecycle => {
     const workspaces = ["ws"], head = cursorOf("g1", 5);
-    const child = fakeSource({ workspaces, headers: () => ({ [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: head }) });
+    const child = fakeSource({ workspaces, headers: () => ({ [SESSION_REPLAY_RESYNC_HEADER]: head }) });
     let live = broker(child.source, { lingerMs: 0 });
     const first = sink();
     live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: head }, { reconnect: true });

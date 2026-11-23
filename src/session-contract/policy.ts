@@ -1,20 +1,22 @@
-// Private Hub -> child policy authority. Neither workspace credentials nor
-// browser-selected identity participate in key generation or verification.
+// Session contract: the private Hub -> session policy authority. Neither
+// workspace credentials nor browser-selected identity participate in key
+// generation or verification.
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { classifySessionRequest } from "./paths";
 
 export const CHILD_POLICY_HEADER = "x-uatu-hub-chat-policy";
 export const CHAT_ACTION_BODY_BYTES = 128 * 1024;
 export type ChildPolicyRequest = { method: string; pathname: string; body: string };
 export type VerifiedChatPolicy = { principal: string; revision: number; autoBackgroundOnSteer: boolean; unavailable?: true };
 type Binding = { workspaceId: string; basePath: string; instanceId: string };
-const MAX_ENVELOPE_BYTES = 8192;
+// The one size cap for the bootstrap line and for a signed policy envelope.
+export const POLICY_ENVELOPE_MAX_BYTES = 8192;
 const MAX_AGE_MS = 60_000;
 
+// The chat actions the Hub signs with the caller's personal chat policy. The
+// shapes are declared once, in the contract's path classification.
 export function isChildPolicyAction(method: string, pathname: string, basePath: string): boolean {
-  if (!pathname.startsWith(basePath)) return false;
-  const suffix = pathname.slice(basePath.length);
-  return (method === "POST" && /^api\/chat\/conversations\/[^/]+\/(prompts|queue\/[^/]+\/send-now)$/.test(suffix))
-    || (method === "PATCH" && /^api\/chat\/conversations\/[^/]+\/queue\/[^/]+$/.test(suffix));
+  return classifySessionRequest(method, pathname, basePath) === "policy-action";
 }
 
 function mac(secret: Buffer, domain: string, text: string): string {
@@ -35,9 +37,13 @@ function policyValid(value: VerifiedChatPolicy): boolean {
     && (value.unavailable === undefined || value.unavailable === true);
 }
 
-export function createChildPolicyAuthority(workspaceId: string, basePath: string) {
-  const binding: Binding = { workspaceId, basePath, instanceId: randomUUID() };
-  const secret = randomBytes(32);
+// `fixed` exists for the test adapter, which needs a verifier that matches a
+// known key. Production never passes it: every authority gets a fresh
+// instance id and secret.
+export function createChildPolicyAuthority(workspaceId: string, basePath: string, fixed: { secret?: Buffer; instanceId?: string } = {}) {
+  const binding: Binding = { workspaceId, basePath, instanceId: fixed.instanceId ?? randomUUID() };
+  // Copied, because dispose() zeroes it.
+  const secret = fixed.secret ? Buffer.from(fixed.secret) : randomBytes(32);
   let active = true;
   const assertActive = () => { if (!active) throw new Error("child policy authority unavailable"); };
   return {
@@ -56,8 +62,10 @@ export function createChildPolicyAuthority(workspaceId: string, basePath: string
   };
 }
 
+export type PolicyAuthority = ReturnType<typeof createChildPolicyAuthority>;
+
 export function readChildPolicyBootstrap(text: string) {
-  if (text.length > MAX_ENVELOPE_BYTES) throw new Error("invalid policy bootstrap");
+  if (text.length > POLICY_ENVELOPE_MAX_BYTES) throw new Error("invalid policy bootstrap");
   const value = JSON.parse(text);
   if (!value || value.version !== 1 || typeof value.workspaceId !== "string" || !/^[a-z0-9-]+$/.test(value.workspaceId)
     || value.basePath !== `/s/${value.workspaceId}/` || typeof value.instanceId !== "string"
@@ -75,7 +83,7 @@ export function readChildPolicyBootstrap(text: string) {
     verify(request: ChildPolicyRequest, envelope: string): VerifiedChatPolicy {
       assertActive();
       const reject = () => { throw new Error("invalid Hub chat policy"); };
-      if (envelope.length > MAX_ENVELOPE_BYTES || !isChildPolicyAction(request.method, request.pathname, binding.basePath)) return reject();
+      if (envelope.length > POLICY_ENVELOPE_MAX_BYTES || !isChildPolicyAction(request.method, request.pathname, binding.basePath)) return reject();
       const parts = envelope.split(".");
       if (parts.length !== 2 || !equal(mac(secret, "uatu-chat-policy-v1", parts[0]!), parts[1]!)) return reject();
       const policy = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));

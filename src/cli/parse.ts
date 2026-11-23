@@ -4,6 +4,7 @@
 
 import { DEFAULT_HUB_PORT, defaultHubConfigPath } from "../hub/config";
 import { DEFAULT_RESPECT_GITIGNORE } from "../server/roots";
+import { isSourceRun } from "../session-contract/spawn";
 import { normalizeBasePath } from "../shared/base-path";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "../shared/version";
 
@@ -32,10 +33,9 @@ export type WatchOptions = {
   // UATU_HEARTBEAT_TIMEOUT_MS is set to in the env"; a number forces that
   // value over the env.
   watchdogTimeoutMs?: number;
-  // Exit cleanly when stdin reaches EOF. For supervising wrapper processes
-  // (e.g. the desktop app) holding our stdin pipe: if the supervisor dies —
-  // even by crash — the pipe closes and the server shuts itself down instead
-  // of running orphaned.
+  // Exit cleanly when stdin reaches EOF. The Hub holds a session's stdin
+  // pipe (session contract): if the Hub dies — even by crash — the pipe
+  // closes and the server shuts itself down instead of running orphaned.
   exitOnStdinClose: boolean;
   // Absolute path prefix the whole session is served under. Always normalized
   // to lead and trail with "/" ("/" itself for the default). Non-default
@@ -186,16 +186,10 @@ function parseHubCommand(rest: string[]): ParsedCommand {
 }
 
 // How the process was started, which tells the repository's own harness
-// apart from a user. A source run (`bun run src/cli.ts …`: the dev hub's
-// children, the stdin-close test, the base-path e2e) has the script path in
-// Bun.argv[1]; a compiled binary has its extensionless virtual entry
-// (`/$bunfs/root/uatu`) there. The watchdog re-exec and the hub backend's
-// resolveUatuArgv detect source runs the same way.
+// apart from a user. The session contract's isSourceRun is the one detection:
+// a source run (`bun run src/cli.ts …`: the dev hub's sessions, the
+// stdin-close test, the base-path e2e) has the script path in Bun.argv[1].
 export type ParseContext = { sourceRun: boolean };
-
-export function isSourceRun(scriptPath: string | null = Bun.argv[1] ?? null): boolean {
-  return scriptPath !== null && /\.(ts|js)$/.test(scriptPath);
-}
 
 export function parseCommand(
   argv: string[],

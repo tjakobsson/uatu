@@ -37,9 +37,10 @@ All HTTP routes SHALL be declared once in `src/server/routes.ts` through `buildR
 - **AND** `tests/e2e/server.ts` does not redeclare these route literals as `Bun.serve` route keys
 
 #### Scenario: Internal Hub-facing paths come from the session contract
-- **WHEN** `src/server/routes.ts` registers a path that the Hub calls, refuses or intercepts, such as `/api/events`, `/api/activity`, `/api/chat/accounts-changed` or `/api/internal/hub-policy-proof`
+- **WHEN** `src/server/routes.ts` registers a path that only the Hub calls, such as `/api/events`, `/api/activity`, `/api/chat/accounts-changed` or `/api/internal/hub-policy-proof`
 - **THEN** the route key is built from a constant exported by `src/session-contract/`, not from a string literal
 - **AND** the route-coverage test reads the same constants to check that each internal path is an explicit non-public exclusion
+- **AND** browser routes the Hub intercepts while proxying, such as `/api/media`, stay literal, with a test that the contract's path classification still matches the registered shapes
 
 #### Scenario: Fetch-fallback handlers are not duplicated across server entry points
 - **WHEN** the codebase is searched for the fallback path literals `"/api/terminal"`, `"/api/auth"`, and `"/api/terminal/sessions"`

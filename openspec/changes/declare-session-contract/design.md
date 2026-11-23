@@ -40,8 +40,8 @@ See proposal.md for why. This section lists the current code the design has to r
 Proposed files (names may change during implementation; the split may not):
 
 - `spawn.ts`: the serve argv builder, stdio layout, source-run detection, ready-line formatter and parser, startup inactivity constant.
-- `bootstrap.ts`: the fd-3 readiness marker, size cap, send and consume functions (moved from `hub/child-policy-bootstrap.ts`).
-- `policy.ts`: the policy authority and verifier, `CHILD_POLICY_HEADER`, the policy-signed action matcher and `CHAT_ACTION_BODY_BYTES` (moved from `hub/child-policy.ts`).
+- `bootstrap.ts`: the fd-3 readiness marker, size cap, send and consume functions (moved from `hub/child-policy-bootstrap.ts`), and `verifyPolicyReadiness`, the Hub's challenge to the proof route. The challenge is sent before the link exists and, as today, without the session token.
+- `policy.ts`: the policy authority and verifier, `CHILD_POLICY_HEADER`, the policy-signed action matcher and `CHAT_ACTION_BODY_BYTES` (moved from `hub/child-policy.ts`). The moved functions keep their names (`createChildPolicyAuthority`, `readChildPolicyBootstrap`, `isChildPolicyAction`), so their tests change only in import paths; new contract identifiers use the glossary's "session" (`SESSION_*`).
 - `paths.ts`: `sessionBasePath(id)`, one `sessionPath(basePath, relative)` join, the internal path constants, and `classifySessionPath(method, suffix)`.
 - `headers.ts`: the `x-uatu-hub-` prefix and strip rule, the operation-receipt, replay-resync and page-origin header names.
 - `token.ts`: `mintSessionToken()` (32 random bytes, base64url).
@@ -83,7 +83,7 @@ Callers move to the link: `hub/proxy.ts` (HTTP and WebSocket bridge), `hub/live-
 - `media` (no-transform);
 - `forward`.
 
-`hub/server.ts` and `hub/proxy.ts` switch on the result. Routes the Hub serves itself under `/s/<id>/` (`api/personal-state`, `api/activity-viewed`, worker dismissals) are part of the Hub API and stay in `hub/server.ts`. The refused-stream set is derived from the same constants `server/routes.ts` registers, so the hand-copied regex cannot drift again. The internal SSE path constants, the SSE event names `activity` and `open`, and the replay-resync header move from `shared/live-protocol.ts` to the contract. Only the session and the Hub read them. `live-protocol.ts` keeps the public live stream and its payloads. The `CHILD_NOTIFICATIONS_PATH` re-export in `chat/notification-feed.ts` is removed, and its importers use the contract.
+`hub/server.ts` and `hub/proxy.ts` branch on the result. The Hub classifies the suffix it parsed off the request path for the refusal, and the path under the running session's base path (`classifySessionRequest`) for the intercepts, exactly as the two checks were scoped before. Only routes the Hub alone calls are keyed by contract constants in `server/routes.ts`; the browser routes the Hub intercepts (media, the conversation snapshot, discard and the policy actions) stay literal there, and `api/route-coverage.test.ts` pins that the classifier still matches the registered shapes. Routes the Hub serves itself under `/s/<id>/` (`api/personal-state`, `api/activity-viewed`, worker dismissals) are part of the Hub API and stay in `hub/server.ts`. The refused-stream set is derived from the same constants `server/routes.ts` registers, so the hand-copied regex cannot drift again. The internal SSE path constants, the SSE event names `activity` and `open`, and the replay-resync header move from `shared/live-protocol.ts` to the contract. Only the session and the Hub read them. `live-protocol.ts` keeps the public live stream and its payloads. The `CHILD_NOTIFICATIONS_PATH` re-export in `chat/notification-feed.ts` is removed, and its importers use the contract.
 
 ### 4. Browser code keeps its own literals for shared paths
 
@@ -91,7 +91,7 @@ The contract cannot be imported by the browser, so browser code keeps reaching `
 
 ### 5. The serve assembly mints the session token
 
-`cli.ts` (and `tests/e2e/server.ts`) call `mintSessionToken()` once, then pass the token both to `buildRoutes`/`buildFetchFallback` deps and to the ready-line formatter. `createWatchSession` loses `getTerminalToken`. `terminal/token.test.ts` becomes the contract's token test and keeps its assertions: 32 bytes, base64url, distinct per call. Route deps keep the name `getTerminalToken` so route code does not change.
+`cli.ts` calls `mintSessionToken()` once, then passes the token both to `buildRoutes`/`buildFetchFallback` deps and to the ready-line formatter. `tests/e2e/server.ts` mints through the contract too, but once per watch session: its `/__e2e/reset` replaces the watch session, and tests rely on that rotating the workspace credential, which is what `createWatchSession` minting gave it. The harness's `/__e2e/terminal-token` route reads the same value from the route deps (`getWorkspaceCredential`). `createWatchSession` loses `getTerminalToken`. `terminal/token.test.ts` becomes the contract's token test and keeps its assertions: 32 bytes, base64url, distinct per call. Route deps keep the name `getTerminalToken` so route code does not change.
 
 ### 6. The test adapter lives under `tests/`, on top of product constructors
 
