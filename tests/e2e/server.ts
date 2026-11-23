@@ -246,9 +246,11 @@ const chatService = new Proxy({} as MultiAgentChatService, {
 const terminalEnabled = await terminalBackendAvailable();
 // Minted through the session contract, as cli.ts does, but once per watch
 // session rather than once per process: a `/__e2e/reset` replaces the watch
-// session and tests rely on that rotating the workspace credential.
-let sessionToken!: string;
-let watchSession = await createSession({ resetWorkspace: process.env.UATU_E2E_PRESERVE_WORKSPACE !== "1" });
+// session and tests rely on that rotating the workspace credential. The token
+// and its session are published together, only once creation has succeeded.
+const initialSession = await createSession({ resetWorkspace: process.env.UATU_E2E_PRESERVE_WORKSPACE !== "1" });
+let watchSession = initialSession.session;
+let sessionToken = initialSession.token;
 
 // The brokered live stream, exactly as a hub would mount it, over this one
 // workspace: the SPA opens only /api/hub/live, so the harness brokers its
@@ -429,7 +431,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
     }
   }
 
-  watchSession = await createSession({ resetWorkspace: false });
+  ({ session: watchSession, token: sessionToken } = await createSession({ resetWorkspace: false }));
   releaseLiveUpstreams();
   setLiveSessionRunning(true);
   return Response.json(watchSession.getStatePayload());
@@ -981,7 +983,7 @@ if (process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1") {
 }
 
 async function createSession(options: { resetWorkspace: boolean }) {
-  sessionToken = mintSessionToken();
+  const token = mintSessionToken();
   if (options.resetWorkspace) {
     activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
     await resetE2EWorkspace();
@@ -1012,7 +1014,7 @@ async function createSession(options: { resetWorkspace: boolean }) {
   const started = session.start();
   if (heldDiscovery) void started.catch(error => console.error(error));
   else await started;
-  return session;
+  return { session, token };
 }
 
 async function initE2EGitRepository() {
