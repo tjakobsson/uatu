@@ -569,21 +569,25 @@ map and its rules out of the Claude Code provider:
   session closes: its interrupt is sent but not waited on (it has no
   deadline), and closing the transport fails any control request still out
   (an interrupt, a rewind), including one a closing session's own teardown
-  waits on, while a close waiting on a callback finds it answered. A
-  release's cancellation write is an admitted mutation that owns its
-  session's wakeups: shutdown leaves them to it, and the release reports
-  them before `dispose()` returns, as released if the write succeeded, or
-  lost or paused, as shutdown would have, if it failed; (d) admitted history mutations and staged-
-  revert rollbacks drain; (e) persistence flushes. History mutations are
+  waits on, while a close waiting on a callback finds it answered; (d)
+  admitted history mutations, staged-revert rollbacks and releases drain;
+  (e) persistence flushes. A release is one admitted operation, from start
+  to return (its write, busy check, refusal rollback and publication), and
+  it never waits on a callback, or once shutdown has started on a close, so
+  waiting for it cannot deadlock with the sweep. Shutdown leaves a releasing
+  session's wakeups to it: a release that released the session has emitted
+  `session.released` with the rows cancelled, and shutdown adds nothing;
+  one refused or failed leaves shutdown to emit that session's
+  `wakeups.lost` (lost or paused) once it ends, as for any other session. History mutations are
   fenced and drained, in two cases. One that has not changed anything yet
   may be refused safely: a new undo, redo, revert, restore or revert commit
   once shutdown has started, or a cold undo whose start is refused at its
   transcript check, fails with the disposed error before any side effect.
-  A rewind sent to a still-open query and then cut off by shutdown closing
-  its transport may already have been applied, so it keeps the boundary
-  recorded ahead of it, and Redo survives a restart; one never sent, because
-  shutdown had already closed the query, rolls its boundary back like any
-  refusal, and shutdown drains that write. One that has changed state must finish or roll back, and
+  A rejected rewind always rolls its staged boundary back, as before, and
+  shutdown drains that write. A known limitation, which already exists on
+  `main` and is outside this change: if shutdown cuts off a rewind Claude
+  Code had already applied, the boundary is still rolled back and Redo is
+  lost. One that has changed state must finish or roll back, and
   `dispose()` waits for it: admitted undo, redo, revert and restore operations (their
   write-ahead and corrective writes complete normally), and a replacement
   prompt that committed a staged revert, tracked until it is accepted or its

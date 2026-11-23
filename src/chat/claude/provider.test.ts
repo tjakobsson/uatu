@@ -4724,17 +4724,6 @@ describe("ClaudeProvider sessions", () => {
     };
   }
 
-  test("a rewind sent before shutdown closes its transport keeps its recorded boundary, so Redo survives a restart", async () => {
-    let rewinding: (() => void) | undefined;
-    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
-    const { forking, storedId, workspace } = revertingProvider(closeAwareRewind(() => rewinding!()));
-    const undoing = forking.undo!(storedId).catch(error => error as Error);
-    await rewindStarted;
-    await forking.dispose();
-    expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
-    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
-  });
-
   test("a rewind never sent because shutdown closed the query first rolls its boundary back before dispose returns", async () => {
     let sent = false;
     const { forking, storedId, workspace } = revertingProvider(closeAwareRewind(() => { sent = true; }));
@@ -6188,6 +6177,28 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     }
     await waitFor(() => shutdownReport(events).length > 0);
     expect(shutdownReport(events)).toEqual([["session.released", ["wakeup:w1 cancelled", "wakeup:c1 cancelled"]]]);
+    stop();
+  });
+
+  test("a release refused because a turn started while its write ran leaves shutdown to report its wakeups lost or paused", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    let releaseError: unknown;
+    try {
+      const releasing = provider.release(session.id).catch(error => { releaseError = error; });
+      await hold.started;
+      // The CLI starts a turn of its own while the cancellations are written.
+      query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+      await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await Promise.all([releasing, disposing]);
+    } finally {
+      hold.restore();
+    }
+    expect(releaseError).toBeInstanceOf(ReleaseUnavailableError);
+    await waitFor(() => shutdownReport(events).length > 0);
+    expect(shutdownReport(events)).toEqual([["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]]]);
     stop();
   });
 

@@ -278,11 +278,9 @@ type SessionClaims = {
 
 type LiveSession = {
   claims: SessionClaims;
-  // Set once this provider closes the query's transport: a control request
-  // sent afterwards is refused before it reaches Claude Code.
-  transportClosed?: boolean;
-  // A release under way (it owns the session's wakeups; see release).
+  // A release under way, and one that released the session (see release).
   releasing?: boolean;
+  released?: boolean;
   id: string;
   notificationLifecycle: ClaudeNotificationLifecycle;
   queue: PushQueue<ClaudeUserEnvelope>;
@@ -1732,12 +1730,16 @@ export class ClaudeProvider implements ChatProvider {
     // only displaced or closing sessions, in the order they were started.
     // Shutdown is the process exit a schedule cannot survive (D6).
     for (const session of [...sessions, ...others]) session.claims.swept = true;
+    // A session whose release is under way waits: the release decides its
+    // wakeups, and shutdown reports them only if it did not release.
+    const releasing: LiveSession[] = [];
     const endConversation = (group: LiveSession[]) => {
       this.interactions.abandonRegistrations(group.flatMap(session => [...session.claims.requests]), shutdown);
       for (const session of group) {
         this.cancelSessionWindowRead(session);
         this.clearIdleTimer(session);
-        if (!session.releasing) this.emitLostWakeups(session);
+        if (session.releasing) releasing.push(session);
+        else this.emitLostWakeups(session);
       }
     };
     for (const session of sessions) endConversation([session, ...others.filter(other => other.id === session.id)]);
@@ -1753,12 +1755,10 @@ export class ClaudeProvider implements ChatProvider {
       ...[...sessions, ...others.filter(session => !closing.has(session))].map(async session => {
         void session.query.interrupt().catch(() => undefined);
         session.queue.close();
-        session.transportClosed = true;
         await session.query.return?.().catch(() => undefined);
         await session.reader.catch(() => undefined);
       }),
       ...[...closing].map(async ([session, closed]) => {
-        session.transportClosed = true;
         await session.query.return?.().catch(() => undefined);
         await closed.catch(() => undefined);
       }),
@@ -1776,6 +1776,7 @@ export class ClaudeProvider implements ChatProvider {
     // committing a revert, finish or roll back; new ones are refused (see
     // admit and prompt).
     await Promise.all([...this.mutations, ...this.stagedPrompts]);
+    for (const session of releasing) if (!session.released) this.emitLostWakeups(session);
     // (e) Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     this.events_.close();
@@ -2267,16 +2268,9 @@ export class ClaudeProvider implements ChatProvider {
       throw new ReversibleHistoryTargetError(`the rewind could not be recorded (${error instanceof Error ? error.message : "write failed"}); nothing was changed`);
     }
     let result;
-    // Whether the rewind reached an open query: only then may a rejection
-    // mean it was applied.
-    const dispatched = !session.transportClosed;
     try {
       result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     } catch (error) {
-      // Shutdown closed the transport after the rewind was sent: it may have
-      // been applied, so the boundary recorded ahead of it stays, and Redo
-      // with it. One never sent rolls back like any refusal.
-      if (this.disposed && dispatched) throw error;
       try {
         await stagedRollback();
       } catch (persistError) {
@@ -2364,7 +2358,6 @@ export class ClaudeProvider implements ChatProvider {
         await live.query.interrupt().catch(() => undefined);
         if (!this.disposed) this.sweepSession(live, "The turn ended before the user answered.");
         live.queue.close();
-        live.transportClosed = true;
         await live.query.return?.().catch(() => undefined);
       });
     }
@@ -3263,29 +3256,6 @@ export class ClaudeProvider implements ChatProvider {
     return undo;
   }
 
-  /**
-   * Release's durable step, admitted so shutdown drains it. A release under
-   * way owns its session's wakeups: shutdown leaves them to it, and if
-   * shutdown has started by the time the write ends, the release reports
-   * them itself, as released once recorded, or as shutdown would have (lost
-   * or paused) if the write failed. Returns undefined once it has.
-   */
-  private async recordRelease(session: LiveSession): Promise<(() => void) | undefined> {
-    session.releasing = true;
-    let undo: () => void;
-    try {
-      undo = await this.recordCancelled(session.id, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
-    } catch (error) {
-      session.releasing = false;
-      if (this.disposed) this.emitLostWakeups(session);
-      throw error;
-    }
-    if (!this.disposed) return undo;
-    const cancelled = this.settleWakeups(session, "cancelled");
-    this.emit(session.id, { updates: [...cancelled, { kind: "status", status: "idle" }], outcome: "handled", eventType: "session.released" });
-    return undefined;
-  }
-
   /** Shutdown's report of a session's wakeups: lost, or paused for a cron. */
   private emitLostWakeups(session: LiveSession): void {
     const lost = this.settleWakeups(session, "ended");
@@ -3301,6 +3271,20 @@ export class ClaudeProvider implements ChatProvider {
   async release(sessionId: string): Promise<void> {
     const session = this.live.get(sessionId);
     if (!session) return;
+    // The whole release is one admitted operation, which shutdown waits for
+    // and which decides its session's wakeups: released, or (refused or
+    // failed) left to shutdown to report lost. It never waits on a callback
+    // or, once shutdown has started, on a close, so waiting cannot deadlock.
+    session.releasing = true;
+    try {
+      await this.admit(() => this.releaseAdmitted(session));
+    } finally {
+      session.releasing = false;
+    }
+  }
+
+  private async releaseAdmitted(session: LiveSession): Promise<void> {
+    const sessionId = session.id;
     // A wakeup attributed at its hook is a turn already, before its init.
     const turning = () => session.pendingTurns > 0 || session.queuedTurns > 0 || session.unpromptedTurn || session.firedSinceStop.size > 0;
     if (turning()) {
@@ -3311,15 +3295,14 @@ export class ClaudeProvider implements ChatProvider {
     }
     // Recorded before the process goes: the next resume rebuilds every
     // cron, and each must already be blocked when it does (D12).
-    const undo = await this.admit(() => this.recordRelease(session));
-    if (!undo) return;
-    if (this.live.get(sessionId) !== session) return;
+    const undo = await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
+    // Shutdown clears the live map but leaves the release its outcome.
+    if (this.live.get(sessionId) !== session && !this.disposed) return;
     // A wakeup that passed its hook while the write ran has started a turn:
     // retiring now would kill it under its own header. The release is
     // refused as it would have been a moment later, and nothing it recorded
     // stays cancelled.
     if (turning() || session.backgroundTasks.size > 0) {
-      session.releasing = false;
       undo();
       await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
       throw new ReleaseUnavailableError(session.backgroundTasks.size > 0
@@ -3327,6 +3310,7 @@ export class ClaudeProvider implements ChatProvider {
         : "a turn is running; release is possible once it ends");
     }
     const cancelled = this.settleWakeups(session, "cancelled");
+    session.released = true;
     this.emit(sessionId, { updates: [...cancelled, { kind: "status", status: "idle" }], outcome: "handled", eventType: "session.released" });
     await this.retireSession(session);
   }
@@ -4249,7 +4233,6 @@ export class ClaudeProvider implements ChatProvider {
     if (!this.disposed) this.sweepSession(session, "The turn ended before the user answered.");
     await this.closeSession(session, async () => {
       session.queue.close();
-      session.transportClosed = true;
       await session.query.return?.().catch(() => undefined);
     });
   }
