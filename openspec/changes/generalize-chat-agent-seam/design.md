@@ -676,27 +676,31 @@ map and its rules out of the Claude Code provider:
     left holding it, the conversation is idle again and its session
     retires.
   - (g) Persistence flushes. No write lands after `dispose()` returns, a
-    durable write never reports success without writing, and a failed
-    prompt that changed nothing durable writes nothing. A deferred rename
-    (one asked for before the transcript existed) stays recorded until its
-    native write succeeds, so a write made meanwhile, or a failure, leaves
-    it for the next start. Only one native write of it runs at a time, and a
-    newer rename writes only once that one has landed, so the newer title
-    is the one that stands. While a manual rename's native write is out, a
-    turn ending starts no write of the deferred title (an in-memory marker,
-    owned by that rename, holds it back), but the record itself stays, in
-    memory and in every snapshot. Only a manual rename that has landed
-    drops it, on disk too, so a restart cannot apply the stale title over
-    it; a failed one leaves the record as it was and releases the marker
-    only if it still owns it. Manual renames of one conversation write one
-    after another, in the order they claimed their turn, so the newest one
-    that succeeds is the title that stands. If the state write dropping the
-    record fails, the rename still reports success (its native write has
-    landed) and the stale title can reapply after a restart, the same
-    exposure `main` has for a failed state write. A deferred rename already being written when shutdown
-    starts finishes in (c); one not started is not written once shutdown
-    has started, even when a turn ends in the grace: it is durable, so the
-    next start writes it after that conversation's next turn.
+    durable write never reports success without writing, and a failed prompt
+    that changed nothing durable writes nothing. One exception keeps
+    `main`'s behaviour: a rename asked for before the transcript exists is
+    acknowledged at once and its state write is not awaited, so if that
+    write fails the title can be lost on restart, as on `main`. A deferred
+    rename (one asked for before the transcript existed) stays recorded
+    until its native write succeeds, so a write made meanwhile, or a
+    failure, leaves it for the next start. Only one native write of it runs
+    at a time, and a newer rename writes only once that one has landed, so
+    the newer title is the one that stands. While a manual rename's native
+    write is out, a turn ending starts no write of the deferred title (an
+    in-memory marker, owned by that rename, holds it back), but the record
+    itself stays, in memory and in every snapshot. Only a manual rename that
+    has landed drops it, on disk too, so a restart cannot apply the stale
+    title over it; a failed one leaves the record as it was and releases the
+    marker only if it still owns it. Manual renames of one conversation
+    write one after another, in the order they claimed their turn, so the
+    newest one that succeeds is the title that stands. If the state write
+    dropping the record fails, the rename still reports success (its native
+    write has landed) and the stale title can reapply after a restart, the
+    same exposure `main` has for a failed state write. A deferred rename
+    already being written when shutdown starts finishes in (c); one not
+    started is not written once shutdown has started, even when a turn ends
+    in the grace: it is durable, so the next start writes it after that
+    conversation's next turn.
 
   A known limitation, which already exists on `main` and is outside this
   change: a rewind still unanswered when the grace ends is cut off by the
