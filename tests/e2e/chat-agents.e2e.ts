@@ -107,6 +107,10 @@ test.describe("multi-agent chat", () => {
     // An id that cannot even be coerced to a string is a clean 400, not a crash.
     expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Uncoercible child",
       items: [{ id: "tool:uncoercible", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: { toString: null } }] } })).status()).toBe(400);
+    // Items are validated only where consumed: a malformed entry is a 400 on
+    // seed, and an unused payload on another control is ignored.
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Null item", items: [null] } })).status()).toBe(400);
+    expect((await request.post("/__e2e/chat", { data: { action: "stats", agent: "claude", items: [null] } })).status()).toBe(200);
     // So is a nested reserved prefix with nothing after it.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Malformed child",
