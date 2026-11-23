@@ -3143,12 +3143,17 @@ export class ClaudeProvider implements ChatProvider {
       }
       return;
     }
-    const revived = session?.revived.get(wakeupId);
-    const paused = revived ? pausedRow(revived) : (await this.listPausedWakeups(sessionId)).find(item => item.wakeupId === wakeupId);
-    if (!paused) throw new ScheduledWakeupUnavailableError("that wakeup is no longer scheduled");
-    await this.recordCancelled(sessionId, [[wakeupId, paused.prompt]]);
-    const { message: _message, ...row } = paused;
-    this.emit(sessionId, { updates: [{ kind: "upsert", item: { ...row, status: "cancelled" } }], outcome: "handled", eventType: "wakeup.cancelled" });
+    // A paused (or revived) wakeup's cancel is admitted the same way, before
+    // its lookup: refused once shutdown has started, and waited for if it
+    // was already under way.
+    await this.admit(async () => {
+      const revived = session?.revived.get(wakeupId);
+      const paused = revived ? pausedRow(revived) : (await this.listPausedWakeups(sessionId)).find(item => item.wakeupId === wakeupId);
+      if (!paused) throw new ScheduledWakeupUnavailableError("that wakeup is no longer scheduled");
+      await this.recordCancelled(sessionId, [[wakeupId, paused.prompt]]);
+      const { message: _message, ...row } = paused;
+      this.emit(sessionId, { updates: [{ kind: "upsert", item: { ...row, status: "cancelled" } }], outcome: "handled", eventType: "wakeup.cancelled" });
+    });
   }
 
   /**

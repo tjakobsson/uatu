@@ -6495,6 +6495,46 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
       await provider.dispose();
     });
 
+    test("a paused wakeup cancel still looking it up when shutdown starts is admitted: it finishes and is recorded before dispose returns", async () => {
+      const { provider } = transcriptProvider("delete", () => 0);
+      const { events, stop } = collect(provider);
+      const [paused] = await provider.listPausedWakeups("resumable");
+      const readFile = fsPromises.readFile;
+      let looking: (() => void) | undefined;
+      const lookupStarted = new Promise<void>(resolve => { looking = resolve; });
+      let release: (() => void) | undefined;
+      // The cancel's transcript lookup is held until shutdown has started.
+      fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+        if (String(args[0]).endsWith("resumable.jsonl")) {
+          fsPromises.readFile = readFile;
+          looking!();
+          await new Promise<void>(resolve => { release = resolve; });
+        }
+        return readFile(...args);
+      }) as typeof readFile;
+      const stateFile = path.join((provider as unknown as { workspacePath: string }).workspacePath, ".uatu-test-state.json");
+      let cancelling: Promise<void>;
+      let recordedByDispose = "";
+      try {
+        cancelling = provider.cancelWakeup("resumable", paused!.wakeupId);
+        await lookupStarted;
+        const disposing = provider.dispose();
+        release!();
+        await disposing;
+        // Recorded before dispose returned.
+        recordedByDispose = existsSync(stateFile) ? readFileSync(stateFile, "utf8") : "";
+      } finally {
+        fsPromises.readFile = readFile;
+      }
+      await cancelling;
+      expect(recordedByDispose).toContain(paused!.wakeupId);
+      // Reported as cancelled, on the stream shutdown closed after it.
+      await waitFor(() => events.some(event => event.eventType === "wakeup.cancelled"));
+      // A new paused cancel once shutdown has started is refused.
+      await expect(provider.cancelWakeup("resumable", paused!.wakeupId)).rejects.toThrow("Claude provider is disposed");
+      stop();
+    });
+
     test("a resumed session attributes a rebuilt cron's fire before any Stop, and the first Stop settles the rest", async () => {
       const { provider, queries } = transcriptProvider("block", () => 0);
       const { events, stop } = collect(provider);
