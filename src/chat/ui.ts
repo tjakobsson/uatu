@@ -2820,10 +2820,6 @@ export function initChat(api = new ChatApiClient()): void {
     return configuration;
   };
 
-  // How the model chooser names the agent: by its declared (registration)
-  // name, present while the runtime has described itself, as before.
-  const chooserAgentName = (): string | undefined => agent ? agentStatusFor(contextAgentId)?.agent.name ?? agent.name : undefined;
-
   const syncConfigurationScope = () => {
     // A held submission can commit conversation configuration before the
     // running turn ends. These controls describe future turns, not evidence
@@ -2841,7 +2837,7 @@ export function initChat(api = new ChatApiClient()): void {
     const inline = document.querySelector<HTMLElement>("#chat-inline-configuration");
     if (inline) {
       inline.textContent = prefix + configurationLabels.inline;
-      inline.title = [chooserAgentName(), inline.textContent].filter(Boolean).join(" · ");
+      inline.title = [agent?.name, inline.textContent].filter(Boolean).join(" · ");
     }
     configurationTrigger.setAttribute("aria-label", configurationLabels.accessible.length
       ? `Chat configuration. ${nextTurn ? "Next turn. " : ""}${configurationLabels.accessible.join(". ")}`
@@ -2869,7 +2865,6 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const renderConfiguration = () => {
-    const agentName = chooserAgentName();
     const configuration = displayedConfiguration();
     // An agent may declare its own recommended defaults; while nothing is
     // chosen they ARE the active choice, exactly as the agent presents it.
@@ -2879,7 +2874,7 @@ export function initChat(api = new ChatApiClient()): void {
       ? models.find(model => sameModel(model.selection, configuration.model!))
       : defaultModel;
     configurationLabels.summary = declares("models")
-      ? (displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : agentControlledModelLabel(agentStatusFor(contextAgentId)?.agent.name))
+      ? (displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : agentControlledModelLabel(displayAgentName()))
       : "Chat settings";
     const offersMode = declares("modes") && modes.length > 0;
     const offersReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
@@ -2887,7 +2882,7 @@ export function initChat(api = new ChatApiClient()): void {
     // Steering keeps these choices for future turns. A delegation without a
     // declared default is said once in the dialog ("Let ... choose"), not echoed here.
     const displayedMode = configuration.mode ?? defaultMode?.name;
-    configurationLabels.inline = [displayedMode ? configurationOptionLabel(displayedMode) : agentName,
+    configurationLabels.inline = [displayedMode ? configurationOptionLabel(displayedMode) : agent?.name,
       declares("models") ? configurationLabels.summary : undefined,
       configuration.variant ? configurationOptionLabel(configuration.variant) : undefined].filter(Boolean).join(" · ");
     const showMode = offersMode && Boolean(displayedMode);
@@ -2900,12 +2895,12 @@ export function initChat(api = new ChatApiClient()): void {
     configurationLabels.accessible = [
       // An unlisted selection is the user's own typed id under an agent that
       // runs them; only elsewhere is it a model that went away.
-      declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? (declares("custom-model-id") ? `${configuration.model.modelId}, typed` : `${configuration.model.providerId}/${configuration.model.modelId}, unavailable`) : `chosen by ${agentName ?? "the agent"}`}` : "",
-      offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agentName ?? "the agent"}`}` : "",
-      offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agentName ?? "the agent"}`}` : "",
+      declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? (declares("custom-model-id") ? `${configuration.model.modelId}, typed` : `${configuration.model.providerId}/${configuration.model.modelId}, unavailable`) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
     configurationPicker?.update({
-      agent: agent && agentName ? { ...agent, name: agentName } : agent,
+      agent,
       models,
       modes,
       configuration,
@@ -2923,10 +2918,9 @@ export function initChat(api = new ChatApiClient()): void {
       ? models.find(model => sameModel(model.selection, configuration.model!))
       : models.find(model => model.default);
     const displayedMode = configuration.mode ?? modes.find(mode => mode.default)?.name;
-    const agentName = chooserAgentName();
-    const chooser = agentName ?? "the agent";
+    const chooser = agent?.name ?? "the agent";
     return [
-      `Started new conversation${agentName ? ` with ${agentName}` : ""}.`,
+      `Started new conversation${agent ? ` with ${agent.name}` : ""}.`,
       declares("models")
         ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`}.`
         : "",

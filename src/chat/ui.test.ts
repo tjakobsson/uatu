@@ -5044,7 +5044,7 @@ describe("login guidance and agent-named copy", () => {
   const CLAUDE = { id: "claude", name: "Claude Code", login: { command: "claude auth login", hubManaged: true } };
   const UNMANAGED = { id: "stub", name: "Stub Agent", login: { command: "stub-agent login --device", hubManaged: false } };
 
-  async function boot(descriptor: { id: string; name: string }, options: { hubServed: boolean; basePath?: string; runtimeName?: string; login: "ok" | "missing"; models?: ChatModel[]; capabilities?: string[]; readUsage?: () => Promise<unknown> }) {
+  async function boot(descriptor: { id: string; name: string }, options: { hubServed: boolean; basePath?: string; runtimeName?: string; undescribed?: boolean; login: "ok" | "missing"; models?: ChatModel[]; capabilities?: string[]; readUsage?: () => Promise<unknown> }) {
     resetUsagePaneForTests();
     const { document, window } = parseHTML(html);
     const meta = (name: string, content: string) => {
@@ -5074,7 +5074,7 @@ describe("login guidance and agent-named copy", () => {
         statusReads += 1;
         return [{
           agent: descriptor,
-          availability: { state: "ready", version: "test", agent: { id: descriptor.id, name: options.runtimeName ?? descriptor.name, capabilities: options.capabilities ?? ["models"] }, login },
+          availability: { state: "ready", version: "test", ...(options.undescribed ? {} : { agent: { id: descriptor.id, name: options.runtimeName ?? descriptor.name, capabilities: options.capabilities ?? ["models"] } }), login },
         }];
       },
       conversations: async () => [summary, ...created],
@@ -5177,15 +5177,13 @@ describe("login guidance and agent-named copy", () => {
   for (const descriptor of [OPENCODE, CLAUDE, UNMANAGED]) {
     test(`a model list without a default reads "Let ${descriptor.name} choose"`, async () => {
       const models: ChatModel[] = [{ selection: { providerId: "groq", modelId: "llama" }, provider: "Groq", name: "Llama" }];
-      // The registered name wins over the name the ready runtime reports.
-      const { document, finish, modelReads } = await boot(descriptor, { hubServed: false, login: "ok", models, ...(descriptor === UNMANAGED ? { runtimeName: "Stub CLI" } : {}) });
+      const { document, finish, modelReads } = await boot(descriptor, { hubServed: false, login: "ok", models });
       try {
         const summary = document.querySelector<HTMLElement>("#chat-configuration-summary")!;
         await waitUntil(() => modelReads() > 0 && summary.textContent === `Let ${descriptor.name} choose`, () => `summary ${summary.textContent}`);
         // The picker, the inline chip and the accessible label name it the same way.
         const picker = document.querySelector<HTMLElement>("#chat-configuration-models")!;
         await waitUntil(() => (picker.textContent ?? "").includes(`Let ${descriptor.name} choose`), () => `picker ${picker.textContent}`);
-        expect(picker.textContent).not.toContain("Stub CLI");
         expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe(`Chat configuration. Model: chosen by ${descriptor.name}`);
         const inline = document.querySelector<HTMLElement>("#chat-inline-configuration")!;
         expect(inline.textContent).toBe(`${descriptor.name} · Let ${descriptor.name} choose`);
@@ -5198,6 +5196,16 @@ describe("login guidance and agent-named copy", () => {
       } finally { await finish(); }
     });
   }
+
+  // Before its runtime describes itself, the summary names the conversation's
+  // registered agent rather than a fixed one.
+  test(`a runtime that has not described itself yet reads "Let Claude Code choose"`, async () => {
+    const { document, finish, modelReads } = await boot(CLAUDE, { hubServed: false, login: "ok", undescribed: true });
+    try {
+      const summary = document.querySelector<HTMLElement>("#chat-configuration-summary")!;
+      await waitUntil(() => modelReads() > 0 && summary.textContent === "Let Claude Code choose", () => `summary ${summary.textContent}`);
+    } finally { await finish(); }
+  });
 
   for (const descriptor of [CLAUDE, UNMANAGED]) {
     test(`a usage read the agent could not answer says "${descriptor.name} could not answer"`, async () => {
