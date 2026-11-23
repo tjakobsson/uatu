@@ -102,6 +102,9 @@ test.describe("multi-agent chat", () => {
       items: [{ id: "question:2", type: "question", createdAt: 1, requestId: "q2", questions: [], status: "pending", conversationId: null }] } })).status()).toBe(400);
     expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "No child",
       items: [{ id: "tool:no-child", type: "tool", createdAt: 1, name: "task", status: "completed" }] } })).status()).toBe(200);
+    // An id that cannot even be coerced to a string is a clean 400, not a crash.
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Uncoercible child",
+      items: [{ id: "tool:uncoercible", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: { toString: null } }] } })).status()).toBe(400);
     // So is a nested reserved prefix with nothing after it.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Malformed child",

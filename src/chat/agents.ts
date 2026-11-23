@@ -887,21 +887,37 @@ export function qualifyAgentSummary(descriptor: ChatAgentDescriptor, summary: Co
   return { ...summary, id: qualifyConversationId(descriptor.id, summary.id), agent: descriptor };
 }
 
+/**
+ * The conversation ids each item kind carries that a client addresses, and
+ * so the only item fields the wire form qualifies. A permission or question
+ * names the conversation it waits in. A subagent child belongs to the same
+ * agent as its parent; the drill-down opens it through the same qualified
+ * addressing. A background task names the same child as its launching tool
+ * row — and names it first, from the start edge, which is what makes a
+ * still-running run openable — so it is qualified alike.
+ */
+export const ADDRESSABLE_ITEM_ID_FIELDS = {
+  permission: ["conversationId"],
+  question: ["conversationId"],
+  tool: ["childConversationId"],
+  background_task: ["childConversationId"],
+} as const satisfies Partial<Record<ConversationItem["type"], readonly string[]>>;
+
+/** The addressable id fields of an item's kind; none for any other kind. */
+export function addressableItemIdFields(type: unknown): readonly string[] {
+  return typeof type === "string" && Object.hasOwn(ADDRESSABLE_ITEM_ID_FIELDS, type)
+    ? ADDRESSABLE_ITEM_ID_FIELDS[type as keyof typeof ADDRESSABLE_ITEM_ID_FIELDS]
+    : [];
+}
+
 /** Maps an item's addressable conversation ids, and only those. */
 export function mapAddressableItemIds(item: ConversationItem, map: (id: string) => string): ConversationItem {
-  let next = item;
-  if ((next.type === "permission" || next.type === "question") && next.conversationId) {
-    next = { ...next, conversationId: map(next.conversationId) };
+  let next = item as Record<string, unknown>;
+  for (const field of addressableItemIdFields(item.type)) {
+    const id = next[field];
+    if (typeof id === "string" && id) next = { ...next, [field]: map(id) };
   }
-  if ((next.type === "tool" || next.type === "background_task") && next.childConversationId) {
-    // A subagent child belongs to the same agent as its parent; the
-    // drill-down opens it through the same qualified addressing. A
-    // background task names the same child as its launching tool row —
-    // and names it first, from the start edge, which is what makes a
-    // still-running run openable — so it must be qualified alike.
-    next = { ...next, childConversationId: map(next.childConversationId) };
-  }
-  return next;
+  return next as ConversationItem;
 }
 
 export function qualifyAgentItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {

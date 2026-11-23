@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
 import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
-import { MultiAgentChatService, mapAddressableItemIds, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
+import { MultiAgentChatService, addressableItemIdFields, mapAddressableItemIds, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { VisualStore } from "../../src/chat/visual-store";
@@ -643,15 +643,13 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // stripped (mapAddressableItemIds); an opaque payload such as a question's
   // schema passes through untouched.
   // The wire types say string; a fixture can still send anything, and the
-  // mapper skips a falsy value (`false`, `0`, `null`). So every present field
-  // that is not a string is probed with a string in its place: if
-  // production's mapper would address that field, the value is rejected.
+  // mapper skips a falsy value (`false`, `0`, `null`). So every addressable
+  // field the item carries (ADDRESSABLE_ITEM_ID_FIELDS, the mapper's own
+  // list) must be a string, whatever its value; an omitted one is fine.
   const checkItemIdTypes = (value: ConversationItem): void => {
-    for (const [key, entry] of Object.entries(value)) {
-      if (typeof entry === "string") continue;
-      const probe = { ...value, [key]: "probe" } as ConversationItem;
-      const mapped = mapAddressableItemIds(probe, id => `${id}:mapped`) as unknown as Record<string, unknown>;
-      if (mapped[key] === "probe:mapped") nonStringId ??= { value: entry };
+    const record = value as unknown as Record<string, unknown>;
+    for (const field of addressableItemIdFields(record.type)) {
+      if (Object.hasOwn(record, field) && typeof record[field] !== "string") nonStringId ??= { value: record[field] };
     }
   };
   const ownItemIds = (value: ConversationItem): ConversationItem => mapAddressableItemIds(value, id => {
