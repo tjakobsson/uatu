@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
 import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
-import { MultiAgentChatService, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
+import { MultiAgentChatService, mapAddressableItemIds, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { VisualStore } from "../../src/chat/visual-store";
@@ -625,24 +625,20 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // stripped, and any other id (`sub:s1:worker`) stays a raw provider id.
   let foreignId: string | undefined;
   let malformedId: string | undefined;
-  const ownNestedIds = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(ownNestedIds);
-    if (!value || typeof value !== "object") return value;
-    const record: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      const id = (key === "conversationId" || key === "childConversationId") && typeof entry === "string" ? entry : undefined;
-      // A reserved agent prefix with no provider id after it (`opencode:`)
-      // is malformed, never a raw provider id.
-      if (id !== undefined && E2E_FAKES_BY_ID.has(id.split(":")[0]!) && id.includes(":") && !parseQualifiedConversationId(id)) malformedId ??= id;
-      const owner = id === undefined ? undefined : qualifyingAgent(id);
-      if (owner !== undefined && owner !== targetAgentId) foreignId ??= id;
-      record[key] = owner === targetAgentId ? stripAgentQualifier(entry as string) : ownNestedIds(entry);
-    }
-    return record;
-  };
-  const items = body.items && ownNestedIds(body.items) as typeof body.items;
-  const older = body.older && ownNestedIds(body.older) as typeof body.older;
-  const item = body.item && ownNestedIds(body.item) as typeof body.item;
+  // Only the fields production's wire mappers address are checked and
+  // stripped (mapAddressableItemIds); an opaque payload such as a question's
+  // schema passes through untouched.
+  const ownItemIds = (value: ConversationItem): ConversationItem => mapAddressableItemIds(value, id => {
+    // A reserved agent prefix with no provider id after it (`opencode:`)
+    // is malformed, never a raw provider id.
+    if (E2E_FAKES_BY_ID.has(id.split(":")[0]!) && id.includes(":") && !parseQualifiedConversationId(id)) malformedId ??= id;
+    const owner = qualifyingAgent(id);
+    if (owner !== undefined && owner !== targetAgentId) foreignId ??= id;
+    return owner === targetAgentId ? stripAgentQualifier(id) : id;
+  });
+  const items = body.items?.map(ownItemIds);
+  const older = body.older?.map(ownItemIds);
+  const item = body.item && ownItemIds(body.item);
   if (malformedId !== undefined) return Response.json({ error: `malformed conversation id ${JSON.stringify(malformedId)}` }, { status: 400 });
   if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);

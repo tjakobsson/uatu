@@ -79,6 +79,14 @@ test.describe("multi-agent chat", () => {
       action: "seed", agent: "claude", title: "Foreign child",
       items: [{ id: "tool:foreign", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "opencode:conversation-7" }],
     } })).status()).toBe(400);
+    // Only addressable id fields are checked: an opaque question schema that
+    // happens to hold a foreign-looking conversationId seeds untouched.
+    const schema = { type: "object", properties: { conversationId: { const: "opencode:example" } }, conversationId: "opencode:example" };
+    const question = await control(request, {
+      action: "seed", agent: "claude", title: "Opaque schema",
+      items: [{ id: "question:1", type: "question", createdAt: 1, requestId: "q1", questions: [], status: "pending", source: "elicitation", schema }],
+    }) as { items: Array<{ schema?: unknown }> };
+    expect(question.items[0]!.schema).toEqual(schema);
     // So is a nested reserved prefix with nothing after it.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Malformed child",

@@ -887,10 +887,11 @@ export function qualifyAgentSummary(descriptor: ChatAgentDescriptor, summary: Co
   return { ...summary, id: qualifyConversationId(descriptor.id, summary.id), agent: descriptor };
 }
 
-export function qualifyAgentItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {
+/** Maps an item's addressable conversation ids, and only those. */
+export function mapAddressableItemIds(item: ConversationItem, map: (id: string) => string): ConversationItem {
   let next = item;
   if ((next.type === "permission" || next.type === "question") && next.conversationId) {
-    next = { ...next, conversationId: qualifyConversationId(descriptor.id, next.conversationId) };
+    next = { ...next, conversationId: map(next.conversationId) };
   }
   if ((next.type === "tool" || next.type === "background_task") && next.childConversationId) {
     // A subagent child belongs to the same agent as its parent; the
@@ -898,9 +899,13 @@ export function qualifyAgentItem(descriptor: ChatAgentDescriptor, item: Conversa
     // background task names the same child as its launching tool row —
     // and names it first, from the start edge, which is what makes a
     // still-running run openable — so it must be qualified alike.
-    next = { ...next, childConversationId: qualifyConversationId(descriptor.id, next.childConversationId) };
+    next = { ...next, childConversationId: map(next.childConversationId) };
   }
   return next;
+}
+
+export function qualifyAgentItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {
+  return mapAddressableItemIds(item, id => qualifyConversationId(descriptor.id, id));
 }
 
 export function qualifyAgentSnapshot(descriptor: ChatAgentDescriptor, snapshot: ConversationSnapshot): AgentConversationSnapshot {
