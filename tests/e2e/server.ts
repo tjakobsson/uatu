@@ -629,10 +629,16 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // stripped, and any other id (`sub:s1:worker`) stays a raw provider id.
   let foreignId: string | undefined;
   let malformedId: string | undefined;
+  let nonStringId: unknown;
   // Only the fields production's wire mappers address are checked and
   // stripped (mapAddressableItemIds); an opaque payload such as a question's
   // schema passes through untouched.
   const ownItemIds = (value: ConversationItem): ConversationItem => mapAddressableItemIds(value, id => {
+    // The wire types say string; a fixture can still send anything.
+    if (typeof (id as unknown) !== "string") {
+      nonStringId ??= id;
+      return id;
+    }
     // A reserved agent prefix with no provider id after it (`opencode:`)
     // is malformed, never a raw provider id.
     if (E2E_FAKES_BY_ID.has(id.split(":")[0]!) && id.includes(":") && !parseQualifiedConversationId(id)) malformedId ??= id;
@@ -643,6 +649,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
   const items = body.items?.map(ownItemIds);
   const older = body.older?.map(ownItemIds);
   const item = body.item && ownItemIds(body.item);
+  if (nonStringId !== undefined) return Response.json({ error: `conversation ids must be strings, not ${JSON.stringify(nonStringId)}` }, { status: 400 });
   if (malformedId !== undefined) return Response.json({ error: `malformed conversation id ${JSON.stringify(malformedId)}` }, { status: 400 });
   if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);

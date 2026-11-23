@@ -88,6 +88,11 @@ test.describe("multi-agent chat", () => {
       items: [{ id: "question:1", type: "question", createdAt: 1, requestId: "q1", questions: [], status: "pending", source: "elicitation", schema }],
     }) as { items: Array<{ schema?: unknown }> };
     expect(question.items[0]!.schema).toEqual(schema);
+    // A non-string addressable id is rejected too.
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "seed", agent: "claude", title: "Numeric child",
+      items: [{ id: "tool:numeric", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: 42 }],
+    } })).status()).toBe(400);
     // So is a nested reserved prefix with nothing after it.
     expect((await request.post("/__e2e/chat", { data: {
       action: "seed", agent: "claude", title: "Malformed child",
