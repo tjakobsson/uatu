@@ -534,13 +534,12 @@ map and its rules out of the Claude Code provider:
   Every started session is tracked until it ends, displaced ones included,
   and each knows its own pending requests: when a displaced session's stream
   ends or fails, its own requests are swept and it is marked, leaving the
-  live session's alone, and `dispose()` sweeps, marks and closes every
-  tracked session, so no agent process outlives the workspace. A teardown
-  already under way (a retire, a revert's close) keeps its session reachable
-  until it finishes; `dispose()` sweeps it and awaits that close before it
-  returns. A session closing for a revert is swept by the revert, with the
-  retire reason, even if its stream ends during the interrupt, unless
-  shutdown has started, which then sweeps it (see below). A query factory that
+  live session's alone; shutdown reaches every tracked session (see below),
+  so no agent process outlives the workspace. A teardown already under way
+  (a retire, a revert's close) keeps its session reachable for shutdown
+  until it finishes. A session closing for a revert is swept by the revert,
+  with the retire reason, even if its stream ends during the interrupt,
+  unless shutdown has started, which then sweeps it. A query factory that
   registers a request through a callback and then throws leaves no session
   behind, so its claims are swept with the failure reason before the caller
   hears the error. A plan approval asked by the conversation's live query
@@ -552,56 +551,60 @@ map and its rules out of the Claude Code provider:
   card was announced), not the conversation's restore intent, which the live
   query's approval may already have cleared; one whose query has ended
   switches nothing. An approved difference: a displaced query's approval
-  emits no `plan.approved` and leaves the conversation's mode unchanged.
-  Once shutdown has started, no session-scoped cleanup sweeps on its own (a
-  revert closing its session, a retirement, a stream's end or failure): the
-  session stays reachable for shutdown's single sweep. Shutdown runs in a
-  fixed order, so no wait can hold up what releases it: (a) the provider is
-  marked disposed; (b) every pending request ends once, with the shutdown
-  reason, and an abort delivered later for one of them finds it settled.
-  Conversations end one at a time, as before: for each live session in
-  order, its conversation's requests (whichever of its tracked sessions
-  asked them) in the holder's order, then the lost wakeups of each of those
-  sessions; then each conversation left with only displaced or closing
-  sessions, in the order they were started. With one session per
-  conversation, requests A1, B1, A2 end as A1, A2, A's lost wakeups, B1;
-  (c) every
-  session closes: its interrupt is sent but not waited on (it has no
-  deadline), and closing the transport fails any control request still out
-  (an interrupt, a rewind), including one a closing session's own teardown
-  waits on, while a close waiting on a callback finds it answered; (d)
-  admitted history mutations, staged-revert rollbacks and releases drain;
-  (e) persistence flushes. A release is one admitted operation, from start
-  to return (its write, busy check, refusal rollback and publication), and
-  it never waits on a callback, or once shutdown has started on a close, so
-  waiting for it cannot deadlock with the sweep. Shutdown leaves a releasing
-  session's wakeups to it: a release that released the session has emitted
-  `session.released` with the rows cancelled, and shutdown adds nothing;
-  one refused or failed leaves shutdown to emit that session's
-  `wakeups.lost` (lost or paused) once it ends, as for any other session. A
-  wakeup cancel works the same way: one admitted operation that reports
-  `wakeup.cancelled` itself, so shutdown never reports that wakeup paused or
-  lost, and reports the session's other wakeups once the cancel has ended. History mutations are
-  fenced and drained, in two cases. One that has not changed anything yet
-  may be refused safely: a new undo, redo, revert, restore or revert commit
-  once shutdown has started, or a cold undo whose start is refused at its
-  transcript check, fails with the disposed error before any side effect.
-  A rejected rewind always rolls its staged boundary back, as before, and
-  shutdown drains that write. A known limitation, which already exists on
-  `main` and is outside this change: if shutdown cuts off a rewind Claude
-  Code had already applied, the boundary is still rolled back and Redo is
-  lost. One that has changed state must finish or roll back, and
-  `dispose()` waits for it: admitted undo, redo, revert and restore operations (their
-  write-ahead and corrective writes complete normally), and every prompt
-  under way, tracked until the provider accepts it or its rollback is
-  queued: one already holding its session (reading its attachments, say) is
-  accepted within the grace, and one that cannot be has its rollback,
-  configuration or staged revert, drained before `dispose()` returns. No
-  write lands after `dispose()` returns, and a durable write never reports
-  success without writing. A start still waiting when the workspace shuts
-  down (on its transcript check, its last wait) starts no query and fails
-  its caller as a disposed provider does, and a failed prompt that changed
-  nothing durable writes nothing;
+  emits no `plan.approved` and leaves the conversation's mode unchanged;
+- Claude Code's shutdown (`dispose()`) is one ordered sequence. Once it has
+  started, no session-scoped cleanup sweeps on its own (a retirement, a
+  revert's close, a stream's end or failure): every tracked session (live,
+  displaced, closing) stays reachable for the steps below.
+  - (a) The provider is marked disposed. New admitted work is refused with
+    the disposed error before any side effect: an undo, redo, revert,
+    restore or revert commit, a release or wakeup cancel, a prompt. A start
+    still waiting on its transcript check (its last wait) starts no query
+    and fails the same way.
+  - (b) Every pending request ends once, with the shutdown reason; an abort
+    delivered later for one of them finds it settled, and a callback
+    arriving later is answered at once. Conversations end one at a time, as
+    before: for each live session in order, its conversation's requests
+    (whichever of its tracked sessions asked them) in the holder's order,
+    then the lost wakeups of each of those sessions; then each conversation
+    left with only displaced or closing sessions, in the order they were
+    started. With one session per conversation, requests A1, B1, A2 end as
+    A1, A2, A's lost wakeups, B1. A session whose own operation decides its
+    wakeups (a release or wakeup cancel under way) is left for (f).
+  - (c) Admitted work in flight finishes within a bounded grace
+    (`SHUTDOWN_GRACE_MS`, a few seconds): undo, redo, revert and restore,
+    a rewind's reply included; a release, from its write to its
+    publication; a wakeup cancel; and every prompt until the provider
+    accepts it or queues its rollback, so one already holding its session
+    (reading its attachments, say) is accepted. None of these waits on a
+    callback, which (b) has settled, or on a close once shutdown has
+    started, so waiting cannot deadlock.
+  - (d) Every query closes: its interrupt is sent but not waited on (it has
+    no deadline), and closing the transport fails whatever is still out (an
+    interrupt, a rewind), including one a closing session's own teardown
+    waits on.
+  - (e) What remains drains: an operation the close cut short writes its
+    correction or rollback (a rejected rewind rolls its staged boundary
+    back, a prompt its configuration or staged revert).
+  - (f) A session left for this step gets shutdown's outcome for what its
+    own operation did not settle. A release that released the session has
+    emitted `session.released` with the rows cancelled, and shutdown adds
+    nothing; a release refused or failed leaves shutdown to emit that
+    session's `wakeups.lost` (lost or paused). A wakeup cancel has reported
+    its wakeup `wakeup.cancelled`, never paused or lost, and shutdown
+    reports the session's other wakeups. This is the one ordering
+    difference from before, and it applies only when a release or cancel is
+    in flight at shutdown: that session's `wakeups.lost` comes after every
+    other conversation's abandonments, because requests must be settled
+    first, in (b), to avoid the callback deadlock.
+  - (g) Persistence flushes. No write lands after `dispose()` returns, a
+    durable write never reports success without writing, and a failed
+    prompt that changed nothing durable writes nothing.
+
+  A known limitation, which already exists on `main` and is outside this
+  change: a rewind still unanswered when the grace ends is cut off by the
+  close and rolls its boundary back, even if Claude Code had already
+  applied it, so Redo is lost;
 - the Claude Code provider's replies keep their timing. A reply the adapter
   makes runs at once, so the provider learns the holder's own outcome
   synchronously through `tryAnswer` (settled, refused with its error, or
