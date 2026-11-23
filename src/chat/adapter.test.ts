@@ -13932,6 +13932,53 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("stale lookup fence survives presenceSequences eviction across a 2,049-session list refresh", async () => {
+    const { adapter, provider } = activityAdapter();
+    const arrived = fixtureSession("evicted-arrived");
+    const manySessions = [
+      arrived,
+      ...Array.from({ length: 2_049 }, (_, index) => fixtureSession(`other-${index}`)),
+    ];
+    let resolveStaleLookup!: (session: ProviderSession | null) => void;
+    let firstLookup = true;
+    provider.sessions = manySessions;
+    provider.listActiveSessions = async () => ["evicted-arrived"];
+    provider.getSession = async id => {
+      if (id === "evicted-arrived" && firstLookup) {
+        firstLookup = false;
+        return new Promise<ProviderSession | null>(resolve => { resolveStaleLookup = resolve; });
+      }
+      return id === "evicted-arrived" ? arrived : null;
+    };
+    const pump = adapter.startEventPump();
+
+    // First lookup starts with baseline 0 before move-in.
+    const staleLookup = adapter.getConversation("evicted-arrived").catch(() => undefined);
+    await waitUntil(() => resolveStaleLookup !== undefined);
+
+    // Move-in records a new presence revision and seeds active execution.
+    provider.eventQueue.push({ normalized: {
+      conversationId: "evicted-arrived",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "evicted-arrived", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await waitUntil(() => adapter.activity().working);
+
+    // A 2,049-session list refresh evicts `evicted-arrived` from the bounded presenceSequences map.
+    await adapter.listConversations();
+
+    // The older null lookup resolves afterwards; the evicted watermark floor must keep it fenced.
+    resolveStaleLookup(null);
+    await staleLookup;
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("evicted-arrived").status).toBe("running");
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {

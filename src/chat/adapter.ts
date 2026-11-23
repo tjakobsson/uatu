@@ -826,13 +826,19 @@ export class ChatAdapter {
   private readonly liveTurns = new Map<string, ConversationStatus>();
   // Monotonic per-session revision bumped on every live status transition and
   // activity forget so an in-flight active-session probe cannot overwrite a
-  // newer terminal transition or move-out.
+  // newer terminal transition or move-out. `statusEvictedFloor` preserves the
+  // highest evicted revision so map eviction never collapses a bumped session
+  // back to an earlier baseline.
   private statusClock = 0;
+  private statusEvictedFloor = 0;
   private readonly statusSequences = new Map<string, number>();
   // Monotonic per-session revision bumped on newer in-workspace confinement,
   // move-in, or live activity evidence so a delayed foreign/null lookup or
   // stale list refresh cannot erase freshly accepted activity or interactions.
+  // `presenceEvictedFloor` preserves the highest evicted revision across
+  // bounded-map evictions.
   private presenceClock = 0;
+  private presenceEvictedFloor = 0;
   private readonly presenceSequences = new Map<string, number>();
   private readonly activeSessionProbes = new Map<string, number>();
   // Request-scoped execution fences, not inbox/activity revisions. A native
@@ -1026,7 +1032,7 @@ export class ChatAdapter {
 
   async listConversations(): Promise<ConversationSummary[]> {
     const previousListed = new Map<string, number>();
-    for (const id of this.listedSessions.keys()) previousListed.set(id, this.presenceSequences.get(id) ?? 0);
+    for (const id of this.listedSessions.keys()) previousListed.set(id, this.presenceSequence(id));
     const sessions = await this.provider.listSessions();
     const accepted: ConversationSummary[] = [];
     const inWorkspaceIds = new Set<string>();
@@ -1071,7 +1077,7 @@ export class ChatAdapter {
     let droppedListed = false;
     for (const [id, baseline] of previousListed) {
       if (listedTopLevel.has(id)) continue;
-      if ((this.presenceSequences.get(id) ?? 0) !== baseline) continue;
+      if (this.presenceSequence(id) !== baseline) continue;
       const wasListed = this.listedSessions.delete(id);
       const cached = this.inventorySessions.get(id);
       const wasVisible = inventoryVisible(cached);
@@ -2532,12 +2538,40 @@ export class ChatAdapter {
     this.activityMayHaveChanged();
   }
 
+  private statusSequence(conversationId: string): number {
+    return this.statusSequences.get(conversationId) ?? this.statusEvictedFloor;
+  }
+
   private bumpStatusSequence(conversationId: string): void {
-    boundedSet(this.statusSequences, conversationId, ++this.statusClock, INVENTORY_SESSION_LIMIT);
+    const next = ++this.statusClock;
+    if (this.statusSequences.has(conversationId)) {
+      this.statusSequences.delete(conversationId);
+    } else if (this.statusSequences.size >= INVENTORY_SESSION_LIMIT) {
+      const oldest = this.statusSequences.entries().next().value;
+      if (oldest) {
+        this.statusEvictedFloor = Math.max(this.statusEvictedFloor, oldest[1]);
+        this.statusSequences.delete(oldest[0]);
+      }
+    }
+    this.statusSequences.set(conversationId, next);
+  }
+
+  private presenceSequence(conversationId: string): number {
+    return this.presenceSequences.get(conversationId) ?? this.presenceEvictedFloor;
   }
 
   private bumpPresenceSequence(conversationId: string): void {
-    boundedSet(this.presenceSequences, conversationId, ++this.presenceClock, INVENTORY_SESSION_LIMIT);
+    const next = ++this.presenceClock;
+    if (this.presenceSequences.has(conversationId)) {
+      this.presenceSequences.delete(conversationId);
+    } else if (this.presenceSequences.size >= INVENTORY_SESSION_LIMIT) {
+      const oldest = this.presenceSequences.entries().next().value;
+      if (oldest) {
+        this.presenceEvictedFloor = Math.max(this.presenceEvictedFloor, oldest[1]);
+        this.presenceSequences.delete(oldest[0]);
+      }
+    }
+    this.presenceSequences.set(conversationId, next);
   }
 
   private trackedActivityIds(): string[] {
@@ -2574,14 +2608,14 @@ export class ChatAdapter {
   private async verifyTrackedSessions(ids: readonly string[], signal?: AbortSignal): Promise<void> {
     for (const id of ids) {
       if (this.disposed || signal?.aborted) return;
-      const baseline = this.presenceSequences.get(id) ?? 0;
+      const baseline = this.presenceSequence(id);
       try {
         const session = await this.provider.getSession(id);
         if (this.disposed || signal?.aborted) return;
         const missingOrForeign = !session || !await this.isInWorkspace(session, false);
         if (this.disposed || signal?.aborted) return;
         if (missingOrForeign) {
-          if ((this.presenceSequences.get(id) ?? 0) === baseline) this.forgetMissingSession(id);
+          if (this.presenceSequence(id) === baseline) this.forgetMissingSession(id);
         } else {
           this.bumpPresenceSequence(id);
         }
@@ -2605,7 +2639,7 @@ export class ChatAdapter {
     if (!this.provider.listActiveSessions || candidateIds.size === 0 || this.disposed || signal?.aborted) return;
     const baselines = new Map<string, number>();
     for (const id of candidateIds) {
-      baselines.set(id, this.statusSequences.get(id) ?? 0);
+      baselines.set(id, this.statusSequence(id));
       this.activeSessionProbes.set(id, (this.activeSessionProbes.get(id) ?? 0) + 1);
     }
     try {
@@ -2619,7 +2653,7 @@ export class ChatAdapter {
       const active = new Set(activeIds);
       for (const id of candidateIds) {
         if (!active.has(id)) continue;
-        if ((this.statusSequences.get(id) ?? 0) !== baselines.get(id)) continue;
+        if (this.statusSequence(id) !== baselines.get(id)) continue;
         if (this.stoppingTurns.has(id)) continue;
         const metadata = this.inventorySessions.get(id);
         if (metadata && (!metadata.inWorkspace || metadata.deleted)) continue;
@@ -7094,10 +7128,10 @@ export class ChatAdapter {
     // A provider failure propagates as itself: the pump treats not-found as
     // "skip this frame" but must restart on transport errors, and the API
     // routes should answer 500, not 404, when the provider is unreachable.
-    const baseline = this.presenceSequences.get(id) ?? 0;
+    const baseline = this.presenceSequence(id);
     const session = await this.provider.getSession(id);
     if (!session || !await this.isInWorkspace(session, false)) {
-      if ((this.presenceSequences.get(id) ?? 0) === baseline) this.forgetMissingSession(id);
+      if (this.presenceSequence(id) === baseline) this.forgetMissingSession(id);
       throw new ConversationNotFoundError();
     }
     this.bumpPresenceSequence(session.id);
