@@ -4707,25 +4707,60 @@ describe("ClaudeProvider sessions", () => {
     }
   });
 
-  test("a rewind cut off by shutdown keeps its recorded boundary, so Redo survives a restart", async () => {
-    let rewinding: (() => void) | undefined;
-    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
-    const { forking, storedId, workspace } = revertingProvider(query => {
+  // A rewind that, like the SDK's, is refused without being sent once its
+  // query is closed, and otherwise stays out until the transport closes.
+  function closeAwareRewind(rewinding: () => void) {
+    return (query: FakeQuery) => {
       const rewind = query.rewindFiles!.bind(query);
       let fail: ((error: Error) => void) | undefined;
       query.rewindFiles = (uuid, options) => {
+        if (query.returned) return Promise.reject(new Error("query closed"));
         if (options?.dryRun) return rewind(uuid, options);
-        rewinding!();
+        rewinding();
         return new Promise((_resolve, reject) => { fail = reject; });
       };
       const close = query.return.bind(query);
       query.return = async () => { fail?.(new Error("transport closed")); return close(); };
-    });
+    };
+  }
+
+  test("a rewind sent before shutdown closes its transport keeps its recorded boundary, so Redo survives a restart", async () => {
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    const { forking, storedId, workspace } = revertingProvider(closeAwareRewind(() => rewinding!()));
     const undoing = forking.undo!(storedId).catch(error => error as Error);
     await rewindStarted;
     await forking.dispose();
     expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
     expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+  });
+
+  test("a rewind never sent because shutdown closed the query first rolls its boundary back before dispose returns", async () => {
+    let sent = false;
+    const { forking, storedId, workspace } = revertingProvider(closeAwareRewind(() => { sent = true; }));
+    const writeFile = fsPromises.writeFile;
+    let writing: (() => void) | undefined;
+    const writeStarted = new Promise<void>(resolve => { writing = resolve; });
+    let release: (() => void) | undefined;
+    // The write-ahead record stalls until shutdown has closed the query.
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      writing!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const undoing = forking.undo!(storedId).catch(error => error as Error);
+      await writeStarted;
+      const disposing = forking.dispose();
+      release!();
+      await disposing;
+      expect(stateOnDisk(workspace).staged).toEqual({});
+      expect(await undoing).toEqual(expect.objectContaining({ message: "query closed" }));
+    } finally {
+      fsPromises.writeFile = writeFile;
+    }
+    expect(sent).toBe(false);
   });
 
   test("an undo retiring its session during shutdown cannot deadlock on a callback the sweep settles", async () => {
@@ -6116,32 +6151,62 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
-  test("a release whose cancellations are still being written when shutdown starts is never reported lost", async () => {
-    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+  // Holds the next durable write until released; `fail` makes it reject.
+  function holdNextWrite() {
     const writeFile = fsPromises.writeFile;
     let writing: (() => void) | undefined;
-    const writeStarted = new Promise<void>(resolve => { writing = resolve; });
-    let release: (() => void) | undefined;
+    const started = new Promise<void>(resolve => { writing = resolve; });
+    let finish: ((fail: boolean) => void) | undefined;
     fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
       fsPromises.writeFile = writeFile;
       writing!();
-      await new Promise<void>(resolve => { release = resolve; });
+      const fail = await new Promise<boolean>(resolve => { finish = resolve; });
+      if (fail) throw new Error("disk full");
       return writeFile(...args);
     }) as typeof writeFile;
+    return { started, finish: (fail: boolean) => finish!(fail), restore: () => { fsPromises.writeFile = writeFile; } };
+  }
+
+  const shutdownReport = (events: NormalizedProviderEvent[]) => events
+    .filter(event => event.eventType === "session.released" || event.eventType === "wakeups.lost")
+    .map(event => [event.eventType, event.updates.filter(update => update.kind === "upsert").map(update => {
+      const item = (update as { item: { id: string; status: string } }).item;
+      return `${item.id} ${item.status}`;
+    })]);
+
+  test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
     try {
       const releasing = provider.release(session.id);
-      await writeStarted;
+      await hold.started;
       const disposing = provider.dispose();
-      release!();
+      hold.finish(false);
       await Promise.all([releasing, disposing]);
     } finally {
-      fsPromises.writeFile = writeFile;
+      hold.restore();
     }
-    // The stream has closed; a macrotask boundary lets the reader take
-    // everything it banked.
-    await new Promise(resolve => setImmediate(resolve));
-    expect(events.length).toBeGreaterThan(0);
-    expect(events.some(event => event.eventType === "wakeups.lost")).toBe(false);
+    await waitFor(() => shutdownReport(events).length > 0);
+    expect(shutdownReport(events)).toEqual([["session.released", ["wakeup:w1 cancelled", "wakeup:c1 cancelled"]]]);
+    stop();
+  });
+
+  test("a release whose write fails while shutdown runs reports its wakeups as shutdown would, lost or paused", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    let releaseError: unknown;
+    try {
+      const releasing = provider.release(session.id).catch(error => { releaseError = error; });
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(true);
+      await Promise.all([releasing, disposing]);
+    } finally {
+      hold.restore();
+    }
+    expect(releaseError).toEqual(expect.objectContaining({ message: "disk full" }));
+    await waitFor(() => shutdownReport(events).length > 0);
+    expect(shutdownReport(events)).toEqual([["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]]]);
     stop();
   });
 

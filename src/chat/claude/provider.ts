@@ -278,6 +278,9 @@ type SessionClaims = {
 
 type LiveSession = {
   claims: SessionClaims;
+  // Set once this provider closes the query's transport: a control request
+  // sent afterwards is refused before it reaches Claude Code.
+  transportClosed?: boolean;
   // A release under way (it owns the session's wakeups; see release).
   releasing?: boolean;
   id: string;
@@ -1734,9 +1737,7 @@ export class ClaudeProvider implements ChatProvider {
       for (const session of group) {
         this.cancelSessionWindowRead(session);
         this.clearIdleTimer(session);
-        if (session.releasing) continue;
-        const lost = this.settleWakeups(session, "ended");
-        if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+        if (!session.releasing) this.emitLostWakeups(session);
       }
     };
     for (const session of sessions) endConversation([session, ...others.filter(other => other.id === session.id)]);
@@ -1752,10 +1753,12 @@ export class ClaudeProvider implements ChatProvider {
       ...[...sessions, ...others.filter(session => !closing.has(session))].map(async session => {
         void session.query.interrupt().catch(() => undefined);
         session.queue.close();
+        session.transportClosed = true;
         await session.query.return?.().catch(() => undefined);
         await session.reader.catch(() => undefined);
       }),
       ...[...closing].map(async ([session, closed]) => {
+        session.transportClosed = true;
         await session.query.return?.().catch(() => undefined);
         await closed.catch(() => undefined);
       }),
@@ -2264,12 +2267,16 @@ export class ClaudeProvider implements ChatProvider {
       throw new ReversibleHistoryTargetError(`the rewind could not be recorded (${error instanceof Error ? error.message : "write failed"}); nothing was changed`);
     }
     let result;
+    // Whether the rewind reached an open query: only then may a rejection
+    // mean it was applied.
+    const dispatched = !session.transportClosed;
     try {
       result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     } catch (error) {
-      // Shutdown closed the transport: the rewind may have been applied, so
-      // the boundary recorded ahead of it stays, and Redo with it.
-      if (this.disposed) throw error;
+      // Shutdown closed the transport after the rewind was sent: it may have
+      // been applied, so the boundary recorded ahead of it stays, and Redo
+      // with it. One never sent rolls back like any refusal.
+      if (this.disposed && dispatched) throw error;
       try {
         await stagedRollback();
       } catch (persistError) {
@@ -2357,6 +2364,7 @@ export class ClaudeProvider implements ChatProvider {
         await live.query.interrupt().catch(() => undefined);
         if (!this.disposed) this.sweepSession(live, "The turn ended before the user answered.");
         live.queue.close();
+        live.transportClosed = true;
         await live.query.return?.().catch(() => undefined);
       });
     }
@@ -3256,6 +3264,35 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   /**
+   * Release's durable step, admitted so shutdown drains it. A release under
+   * way owns its session's wakeups: shutdown leaves them to it, and if
+   * shutdown has started by the time the write ends, the release reports
+   * them itself, as released once recorded, or as shutdown would have (lost
+   * or paused) if the write failed. Returns undefined once it has.
+   */
+  private async recordRelease(session: LiveSession): Promise<(() => void) | undefined> {
+    session.releasing = true;
+    let undo: () => void;
+    try {
+      undo = await this.recordCancelled(session.id, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
+    } catch (error) {
+      session.releasing = false;
+      if (this.disposed) this.emitLostWakeups(session);
+      throw error;
+    }
+    if (!this.disposed) return undo;
+    const cancelled = this.settleWakeups(session, "cancelled");
+    this.emit(session.id, { updates: [...cancelled, { kind: "status", status: "idle" }], outcome: "handled", eventType: "session.released" });
+    return undefined;
+  }
+
+  /** Shutdown's report of a session's wakeups: lost, or paused for a cron. */
+  private emitLostWakeups(session: LiveSession): void {
+    const lost = this.settleWakeups(session, "ended");
+    if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+  }
+
+  /**
    * Release (D5): retire a session held only for its wakeups. The process
    * ends and its crons with it, so the rows read as cancelled — the user's
    * call, not a loss — and the conversation is idle; the next prompt resumes
@@ -3273,16 +3310,9 @@ export class ClaudeProvider implements ChatProvider {
       throw new ReleaseUnavailableError("background work is running; stop it before releasing the session");
     }
     // Recorded before the process goes: the next resume rebuilds every
-    // cron, and each must already be blocked when it does (D12). A release
-    // under way owns its wakeups: shutdown does not report them lost.
-    session.releasing = true;
-    let undo: () => void;
-    try {
-      undo = await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
-    } catch (error) {
-      session.releasing = false;
-      throw error;
-    }
+    // cron, and each must already be blocked when it does (D12).
+    const undo = await this.admit(() => this.recordRelease(session));
+    if (!undo) return;
     if (this.live.get(sessionId) !== session) return;
     // A wakeup that passed its hook while the write ran has started a turn:
     // retiring now would kill it under its own header. The release is
@@ -4219,6 +4249,7 @@ export class ClaudeProvider implements ChatProvider {
     if (!this.disposed) this.sweepSession(session, "The turn ended before the user answered.");
     await this.closeSession(session, async () => {
       session.queue.close();
+      session.transportClosed = true;
       await session.query.return?.().catch(() => undefined);
     });
   }
