@@ -2516,10 +2516,9 @@ export class ChatAdapter {
     this.onActivityChange?.();
   }
 
-  private trackInteraction(conversationId: string, itemId: string, pending: boolean, live = false): void {
+  private trackInteraction(conversationId: string, itemId: string, pending: boolean): void {
     const ids = this.pendingInteractions.get(conversationId);
     if (pending) {
-      if (live) this.bumpPresenceSequence(conversationId);
       if (ids) ids.add(itemId);
       else this.pendingInteractions.set(conversationId, new Set([itemId]));
     } else if (ids) {
@@ -4105,9 +4104,10 @@ export class ChatAdapter {
         // including a newer run's completion after an uncertain old response.
         if (stop.resumed) this.projection(conversationId);
         this.stoppingTurns.delete(conversationId);
-        // If Stop was refused, restore any still-valid active-session probe
-        // observation that arrived while the interrupt was in flight.
-        if (interruptRefused && stop.activeProbeBaseline !== undefined) {
+        // Restore any still-valid active-session probe observation when Stop
+        // did not interrupt the conversation (either refused or superseded by
+        // a newer resumed execution that moved out and back during interrupt).
+        if ((interruptRefused || stop.resumed) && stop.activeProbeBaseline !== undefined) {
           this.seedProbedRunning(conversationId, stop.activeProbeBaseline);
         }
       }
@@ -7250,6 +7250,7 @@ export class ChatAdapter {
       : lifecycle.parentId ?? null;
     // Classification forgets the activity of a session outside the workspace.
     const next = await this.classifyInventorySession({ ...lifecycle, parentId: parentId ?? undefined }, lifecycle.kind === "deleted");
+    if (!lifecycle.sparse && lifecycle.kind !== "deleted" && next.inWorkspace) this.bumpPresenceSequence(lifecycle.id);
     if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
     const wasListed = this.listedSessions.has(lifecycle.id);
@@ -7305,10 +7306,7 @@ export class ChatAdapter {
       // adapter-synthesized `background` and synthetic worker-completion
       // transitions (`sourceTransition === false`) must not suppress an
       // in-flight active-session probe for a live parent turn.
-      if (sourceTransition && status !== "background") {
-        this.bumpStatusSequence(id);
-        this.bumpPresenceSequence(id);
-      }
+      if (sourceTransition && status !== "background") this.bumpStatusSequence(id);
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);
@@ -7338,7 +7336,7 @@ export class ChatAdapter {
       this.publishPausedChanges(id);
       this.activityMayHaveChanged();
     }, {
-      pending: (itemId, live) => this.trackInteraction(id, itemId, true, live),
+      pending: itemId => this.trackInteraction(id, itemId, true),
       settled: itemId => {
         this.trackInteraction(id, itemId, false);
         this.permissionQueueOrder.forget(itemId);
@@ -7445,7 +7443,7 @@ function workerRepresentsFallback(item: ConversationItem, { resultId, childConve
 // How a projection reports its interaction requests (permissions, questions)
 // becoming pending or settling, and its timeline being rebuilt wholesale.
 export type ProjectionInteractionHooks = {
-  pending(itemId: string, live?: boolean): void;
+  pending(itemId: string): void;
   settled(itemId: string): void;
   cleared(): void;
   permission?(item: PermissionRequest): PermissionRequest;
@@ -7685,7 +7683,7 @@ export class ConversationProjection {
       this.beforePublish?.(merged, current, item);
       this.timeline.set(item.id, merged);
       if (merged.type === "permission" || merged.type === "question") {
-        if (merged.status === "pending") this.interactions?.pending(merged.id, false);
+        if (merged.status === "pending") this.interactions?.pending(merged.id);
         else this.interactions?.settled(merged.id);
       }
       if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
@@ -7763,7 +7761,7 @@ export class ConversationProjection {
     for (const id of settled) this.interactions?.settled(id);
     for (const id of touched) {
       const item = staged.get(id);
-      if ((item?.type === "permission" || item?.type === "question") && item.status === "pending") this.interactions?.pending(id, false);
+      if ((item?.type === "permission" || item?.type === "question") && item.status === "pending") this.interactions?.pending(id);
     }
     return true;
   }
@@ -7805,7 +7803,7 @@ export class ConversationProjection {
     this.interactions?.cleared();
     for (const item of notifications) {
       if (item.type === "permission" || item.type === "question") {
-        if (item.status === "pending") this.interactions?.pending(item.id, false);
+        if (item.status === "pending") this.interactions?.pending(item.id);
         else this.interactions?.settled(item.id);
       }
     }
@@ -7922,7 +7920,7 @@ export class ConversationProjection {
     this.historyChanged(item.id);
     this.beforePublish?.(merged, current, item);
     this.timeline.set(item.id, merged);
-    if ((merged.type === "permission" || merged.type === "question") && merged.status === "pending") this.interactions?.pending(merged.id, true);
+    if ((merged.type === "permission" || merged.type === "question") && merged.status === "pending") this.interactions?.pending(merged.id);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
     return this.replay.publish({ type: "item.upsert", item: merged });

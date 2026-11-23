@@ -14276,6 +14276,107 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("delayed pre-move status flush does not fence a newer foreign lookup, and a superseded Stop success restores deferred active probes", async () => {
+    // 1. Pre-move status frame blocked in requireSession resolves local after a newer foreign lookup started; foreign lookup still clears working.
+    const { adapter, provider } = activityAdapter();
+    const local = fixtureSession("delayed-status");
+    const foreign = fixtureSession("delayed-status", `${process.cwd()}-elsewhere`);
+    const lookupResolvers: Array<(session: ProviderSession | null) => void> = [];
+    provider.getSession = () => new Promise<ProviderSession | null>(resolve => { lookupResolvers.push(resolve); });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ type: "session.status", data: { sessionID: "delayed-status", status: { type: "busy" } } });
+    await waitUntil(() => lookupResolvers.length === 1);
+
+    const newerForeign = adapter.getConversation("delayed-status").catch(() => undefined);
+    await waitUntil(() => lookupResolvers.length === 2);
+
+    // Pre-move confinement lookup resolves local, flushing the status update while newer foreign lookup is still in flight.
+    lookupResolvers[0]!(local);
+    await waitUntil(() => adapter.activity().working);
+    expect(adapter.projectionForTests("delayed-status").status).toBe("running");
+
+    // Newer foreign lookup resolves; the older status flush must not have stamped a newer presence tick.
+    lookupResolvers[1]!(foreign);
+    await newerForeign;
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("delayed-status").status).toBe("idle");
+    await adapter.dispose();
+    await pump;
+
+    // 2. A superseded Stop (stop.resumed = true) that resolves successfully still restores a valid deferred active probe after move-out/move-in.
+    const probeTasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("active.probe:")) probeTasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            const eventType = name.slice("stream.event:".length);
+            eventWaiters.get(eventType)?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter: stopAdapter, provider: stopProvider } = activityAdapter({ taskScheduler });
+    const target = fixtureSession("superseded-stop");
+    stopProvider.sessions = [target];
+    let resolveProbe!: (ids: string[]) => void;
+    stopProvider.listActiveSessions = () => new Promise<string[]>(resolve => { resolveProbe = resolve; });
+    let resolveInterrupt!: () => void;
+    stopProvider.interrupt = () => new Promise<void>(resolve => { resolveInterrupt = resolve; });
+    const stopPump = stopAdapter.startEventPump();
+
+    stopAdapter.projectionForTests("superseded-stop").apply({ kind: "status", status: "running" });
+    const stop = stopAdapter.abort("superseded-stop", "stop-superseded");
+    await waitUntil(() => resolveInterrupt !== undefined);
+
+    // Newer live status marks Stop superseded (`stop.resumed = true`).
+    stopAdapter.projectionForTests("superseded-stop").apply({ kind: "status", status: "running" });
+
+    const moveOutDone = waitForEvent("session.moved");
+    stopProvider.eventQueue.push({ normalized: {
+      conversationId: "superseded-stop",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "superseded-stop", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await moveOutDone;
+    expect(stopAdapter.activity().working).toBe(false);
+
+    const moveInDone = waitForEvent("session.moved");
+    stopProvider.eventQueue.push({ normalized: {
+      conversationId: "superseded-stop",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "superseded-stop", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await moveInDone;
+    await waitUntil(() => resolveProbe !== undefined);
+
+    resolveProbe(["superseded-stop"]);
+    await probeTasks.get("active.probe:superseded-stop");
+
+    resolveInterrupt();
+    await stop;
+    expect(stopAdapter.projectionForTests("superseded-stop").status).toBe("running");
+    expect(stopAdapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    await stopAdapter.dispose();
+    await stopPump;
+  });
 });
 
 describe("plan usage on demand", () => {
