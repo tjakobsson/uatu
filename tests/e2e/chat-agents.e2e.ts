@@ -46,6 +46,12 @@ test.describe("multi-agent chat", () => {
     // must be an integer the harness has fakes for.
     await control(request, { action: "opencode", op: "state", agent: null });
     expect((await request.post("/__e2e/chat", { data: { action: "agents", count: "2" } })).status()).toBe(400);
+    // An explicit null count is rejected too, and leaves both agents offered.
+    const token = (await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string }).token;
+    const offered = async () => ((await request.get(`/api/chat/status?t=${encodeURIComponent(token)}`).then(response => response.json())) as { agents: unknown[] }).agents.length;
+    expect(await offered()).toBe(2);
+    expect((await request.post("/__e2e/chat", { data: { action: "agents", count: null } })).status()).toBe(400);
+    expect(await offered()).toBe(2);
   });
 
   test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {

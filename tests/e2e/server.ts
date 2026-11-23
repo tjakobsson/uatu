@@ -648,7 +648,8 @@ async function handleE2EChat(request: Request): Promise<Response> {
   const controlJson = (value: unknown) => Response.json(qualifyControlValue(value, targetAgentId));
   switch (body.action) {
     case "agents": {
-      const agentCount = body.stack === undefined ? body.count ?? 1 : 1;
+      // Only an omitted count means one agent; an explicit null is rejected.
+      const agentCount = body.stack !== undefined || body.count === undefined ? 1 : body.count;
       if (!Number.isInteger(agentCount) || agentCount < 1 || agentCount > fakeRouters.length) {
         return Response.json({ error: `count must be an integer from 1 to ${fakeRouters.length}` }, { status: 400 });
       }
