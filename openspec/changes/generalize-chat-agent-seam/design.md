@@ -578,7 +578,9 @@ map and its rules out of the Claude Code provider:
     a rewind's reply included; a release, from its write to its
     publication; a wakeup cancel; and every prompt until the provider
     accepts it or queues its rollback, so one already holding its session
-    (reading its attachments, say) is accepted. None of these waits on a
+    (reading its attachments, say) is accepted. Acceptance means delivery:
+    an accepted prompt is handed to its still-open query before the close,
+    never reported accepted and then dropped. None of these waits on a
     callback, which (b) has settled, or on a close once shutdown has
     started, so waiting cannot deadlock.
   - (d) Every query closes: its interrupt is sent but not waited on (it has

@@ -5569,7 +5569,7 @@ describe("plan usage on demand", () => {
     await provider.dispose();
   });
 
-  test("a prompt reading its attachment when shutdown begins is accepted within the grace", async () => {
+  test("a prompt reading its attachment when shutdown begins is accepted and delivered within the grace", async () => {
     const { provider, queries, workspace } = fixture();
     const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
@@ -5599,6 +5599,14 @@ describe("plan usage on demand", () => {
     }
     expect(queries[0]!.returned).toBe(true);
     await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2")));
+    // Accepted means delivered: the prompt reached the SDK's input stream.
+    const delivered: Array<{ message: { content: Array<{ type: string; text?: string }> } }> = [];
+    const input = queries[0]!.input.prompt[Symbol.asyncIterator]();
+    for (let next = await input.next(); !next.done; next = await input.next()) delivered.push(next.value as never);
+    expect(delivered.map(envelope => envelope.message.content.map(block => block.type === "text" ? block.text : block.type))).toEqual([
+      ["first"],
+      ["image", "with a picture"],
+    ]);
     stop();
   });
 

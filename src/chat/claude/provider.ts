@@ -1574,7 +1574,9 @@ export class ClaudeProvider implements ChatProvider {
       waitedFor = session.windowReady;
       await bounded(waitedFor ?? Promise.resolve(), remaining, this.disposal.promise);
     } while (session.windowAccountEpoch !== this.accountEpoch || waitedFor !== session.windowReady);
-    if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || this.disposed) {
+    // During the shutdown grace the query is still open: an accepted prompt
+    // is delivered to it, never reported accepted and then dropped.
+    if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session) {
       session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       if (this.live.get(sessionId) === session && session.pendingTurns === 0) await this.retireIfIdle(session);
       return { messageId: input.id };
