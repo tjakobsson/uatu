@@ -106,7 +106,8 @@ When proxying to a child, the hub SHALL rewrite the forwarded `Host` header to t
 #### Scenario: Caller-supplied Hub headers and tokens do not cross the hop
 - **WHEN** a browser request through the hub carries an `x-uatu-hub-chat-policy` or other `x-uatu-hub-*` header, or a `t` query parameter
 - **THEN** the child receives none of the caller's `x-uatu-hub-*` headers
-- **AND** the child receives the Hub-held session token as `t`, never the caller's value
+- **AND** when the session has a token, the child receives the Hub-held session token as `t`, never the caller's value
+- **AND** when the session has no token, the Hub adds none and the caller's `t` reaches the child as sent
 
 ## ADDED Requirements
 
