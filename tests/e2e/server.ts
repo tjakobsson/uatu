@@ -525,13 +525,19 @@ async function handleE2EChat(request: Request): Promise<Response> {
     }
     return value;
   };
-  if (typeof body.conversationId === "string") {
-    // The qualified id names the owning agent; remember it before stripping
-    // so conversation-scoped controls reach the right fake without every
-    // spec spelling `agent:` explicitly.
-    body.agent ??= qualifyingAgent(body.conversationId);
-    body.conversationId = stripAgentQualifier(body.conversationId);
+  // `agent` names a registered id when present; null or any other non-string
+  // is rejected below like an unregistered id, never read as "omitted".
+  if (body.agent !== undefined && typeof body.agent !== "string") {
+    return Response.json({ error: `no e2e agent registered as ${JSON.stringify(body.agent)}` }, { status: 400 });
   }
+  // Without `agent`, a qualified id names the owning agent: the top-level
+  // conversationId, else usageRead's outcome.conversationId. Remember it
+  // before stripping so conversation-scoped controls reach the right fake
+  // without every spec spelling `agent:` explicitly.
+  for (const id of [body.conversationId, body.outcome?.conversationId]) {
+    if (typeof id === "string") body.agent ??= qualifyingAgent(id);
+  }
+  if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
   if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
   if (body.older) body.older = stripQualifier(body.older) as typeof body.older;
   if (body.item) body.item = stripQualifier(body.item) as typeof body.item;

@@ -5201,13 +5201,19 @@ describe("login guidance and agent-named copy", () => {
     });
   }
 
-  // Before its runtime describes itself, the summary names the conversation's
-  // registered agent rather than a fixed one.
+  // Before its runtime describes itself, only the model summary names the
+  // conversation's registered agent rather than a fixed one. The picker row
+  // and the trigger's accessible label keep the generic "the agent" wording.
   test(`a runtime that has not described itself yet reads "Let Claude Code choose"`, async () => {
-    const { document, finish, modelReads } = await boot(CLAUDE, { hubServed: false, login: "ok", undescribed: true });
+    const models: ChatModel[] = [{ selection: { providerId: "groq", modelId: "llama" }, provider: "Groq", name: "Llama" }];
+    const { document, finish, modelReads } = await boot(CLAUDE, { hubServed: false, login: "ok", undescribed: true, models });
     try {
       const summary = document.querySelector<HTMLElement>("#chat-configuration-summary")!;
       await waitUntil(() => modelReads() > 0 && summary.textContent === "Let Claude Code choose", () => `summary ${summary.textContent}`);
+      const picker = document.querySelector<HTMLElement>("#chat-configuration-models")!;
+      await waitUntil(() => (picker.textContent ?? "").includes("Let the agent choose"), () => `picker ${picker.textContent}`);
+      expect(picker.textContent).not.toContain("Claude Code");
+      expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe("Chat configuration. Model: chosen by the agent");
     } finally { await finish(); }
   });
 

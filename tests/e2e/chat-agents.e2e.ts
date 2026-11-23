@@ -29,6 +29,21 @@ async function bootDualAgentChat(page: Page, request: APIRequestContext): Promis
 }
 
 test.describe("multi-agent chat", () => {
+  // The harness routes a control to the fake it names (ARCHITECTURE.md, "Add
+  // an e2e test"); a control aimed at Claude must leave OpenCode's fake alone.
+  test("harness controls reach the agent they name", async ({ request }) => {
+    await request.post("/__e2e/reset");
+    await control(request, { action: "agents", count: 2 });
+    const interrupted = async (agent: string) => (await control(request, { action: "stats", agent }) as { inventoryTransportInterrupted: boolean }).inventoryTransportInterrupted;
+    await control(request, { action: "inventoryInterrupt", agent: "claude" });
+    expect(await interrupted("claude")).toBe(true);
+    expect(await interrupted("opencode")).toBe(false);
+    // An explicit null is not an omitted agent.
+    expect((await request.post("/__e2e/chat", { data: { action: "inventoryResume", agent: null } })).status()).toBe(400);
+    await control(request, { action: "inventoryResume", agent: "claude" });
+    expect(await interrupted("claude")).toBe(false);
+  });
+
   test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {
     await request.post("/__e2e/reset");
     const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };

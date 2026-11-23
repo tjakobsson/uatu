@@ -321,10 +321,12 @@ takes the descriptor. It links to `/settings#agent-accounts/<id>` only when
 the page is Hub-served and the login is Hub-managed; otherwise it renders the
 existing "Run `<command>` where UatuCode runs." markup. `usageReadFailureLabel`
 takes the registered name of the agent it asked ("<name> could not answer").
-The `ui.ts` model-chooser copy names the conversation's agent by the name its
-runtime declares once the runtime has described itself, and by its registered
-name before that, instead of a fixed "OpenCode". Both read the same for Claude
-Code and OpenCode today.
+Once the runtime has described itself, every `ui.ts` model-chooser surface
+names the agent by the name its runtime declares. Before that, only the model
+summary's fallback uses the conversation's registered agent name ("Let <name>
+choose"), instead of a fixed "OpenCode"; the picker row and the trigger's
+accessible label keep main's generic "the agent" wording. Both read the same
+for Claude Code and OpenCode today.
 
 **API revision.** `ChatAgentDescriptor` is a closed object
 (`additionalProperties: false` in `api/openapi.yaml`, and `expectKeys` in
