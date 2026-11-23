@@ -50,7 +50,12 @@ src/
 │                   configures;
 │                   managed-process stops a runtime's child process group
 │                   (SIGTERM, grace, SIGKILL) and keeps a bounded copy of
-│                   its output);
+│                   its output;
+│                   pending-interactions holds the permission and question
+│                   requests an agent waits on through callbacks (settle
+│                   once, cancellation, abandonment, reconnect lists);
+│                   push-queue is the async queue behind a provider's
+│                   events());
 │                   agent-specific stacks below the seam, each with a
 │                   descriptor.ts (the agent's id, name and declared login,
 │                   which cli.ts registers and the Hub's Agent accounts read), in

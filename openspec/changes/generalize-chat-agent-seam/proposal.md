@@ -31,7 +31,21 @@ become observable; the refactors themselves are described in `design.md` and
   login commands in chat and the Hub. Copy that names a fixed agent is
   corrected.
 - Pending permission and question requests move into a shared holder that any
-  provider can use, with the Claude Code behaviour unchanged.
+  provider can use. Claude Code behaves as before apart from these approved
+  differences (design D4):
+  - a request redelivered while its original waits replaces it, and the
+    original now settles quietly instead of hanging; a late abort of the
+    original no longer removes the replacement;
+  - a request from a session already swept or retired, or one arriving during
+    shutdown, ends at once with its abandoned result and announces nothing;
+  - a session displaced by a racing start is swept and closed on disposal,
+    and its own requests are swept when its stream ends;
+  - cleanup is per session: when two queries for one conversation race,
+    ending one never abandons another query's requests while it still runs;
+  - approving a displaced query's plan switches only that query: no
+    `plan.approved` is emitted and the conversation's mode stays unchanged;
+  - committing a staged revert sweeps any request the interrupt left pending
+    before the replacement starts.
 - The end-to-end harness routes requests to any number of fake agents keyed by
   agent id.
 - **BREAKING** for strict workspace API validators: the agent descriptor gains

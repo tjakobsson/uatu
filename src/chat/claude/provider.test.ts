@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { notificationPipeline } from "../../../tests/notification-pipeline";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { promises as fsPromises } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -176,6 +177,86 @@ test("native turn metadata survives provider history pagination and cached reads
     expect(queries).toHaveLength(0);
   } finally { await provider.dispose(); }
 });
+
+// Both starts of a conversation gated at their transcript check and released
+// in a set order: the prompt's start installs first, a cold usage read's
+// installs over it, so the prompt's query is the one a racing start
+// displaces, as Claude Code's startup has always allowed.
+async function raceStarts(provider: ClaudeProvider, queries: FakeQuery[], conversationId: string, whileFirstIsLive?: () => Promise<void>): Promise<void> {
+  const access = fsPromises.access;
+  const gates: Array<() => void> = [];
+  const before = queries.length;
+  fsPromises.access = (async (...args: Parameters<typeof access>) => {
+    if (String(args[0]).endsWith(`${conversationId}.jsonl`)) await new Promise<void>(resolve => gates.push(resolve));
+    return access(...args);
+  }) as typeof access;
+  try {
+    const prompted = provider.prompt(conversationId, { id: "r-race", text: "now", delivery: "queue" });
+    await waitFor(() => gates.length === 1);
+    const read = provider.readUsage("start");
+    await waitFor(() => gates.length === 2);
+    gates[0]!();
+    await waitFor(() => queries.length === before + 1);
+    // The prompt's query is the live one until the read's start installs.
+    await whileFirstIsLive?.();
+    gates[1]!();
+    await prompted;
+    await read;
+  } finally {
+    fsPromises.access = access;
+  }
+}
+
+// A conversation with two stored turns, on a provider that can rewind and
+// fork, so a staged revert can be committed by a replacement prompt.
+function revertingProvider() {
+  const { queries, configDir, workspace } = fixture();
+  const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+  const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+  const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+    type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+    message: { role: "user", content: text },
+  });
+  writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+    turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+    turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
+  ].join("\n"));
+  writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+    turn("u1", "2026-08-30T10:00:00.000Z", "keep this"));
+  const forking = new ClaudeProvider({
+    workspacePath: workspace,
+    stateFile: path.join(workspace, ".uatu-test-state.json"),
+    executable: "/bin/claude",
+    catalogProbe: false,
+    configDir,
+    queryFactory: input => {
+      const query = new FakeQuery(input);
+      query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+      query.getContextUsage = async () => ({ categories: [], totalTokens: 1, maxTokens: 200_000 });
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ subscription_type: null, rate_limits_available: false });
+      queries.push(query);
+      return query;
+    },
+    forkSession: async () => ({ sessionId: forkId }),
+  });
+  return { forking, queries, storedId, forkId, workspace };
+}
+
+// The lifecycle edge a race test waits on: the provider's reader for a fake
+// query has finished, its stream-end or failure handling included.
+function readerExit(provider: ClaudeProvider, query: FakeQuery): Promise<void> {
+  const state = provider as unknown as { live: Map<string, { query: unknown; reader: Promise<void> }>; startedSessions: Set<{ query: unknown; reader: Promise<void> }>; closingSessions: Map<{ query: unknown; reader: Promise<void> }, unknown> };
+  const session = [...state.live.values(), ...state.startedSessions, ...state.closingSessions.keys()].find(candidate => candidate.query === query);
+  if (!session) throw new Error("no session holds this query");
+  return session.reader.catch(() => undefined);
+}
+
+const requestedIds = (events: NormalizedProviderEvent[]) => events
+  .filter(event => event.eventType === "interaction.requested")
+  .map(event => (event.updates[0] as { item: { requestId: string } }).item.requestId);
+const abandonedIds = (events: NormalizedProviderEvent[]) => events
+  .filter(event => event.eventType === "interaction.abandoned")
+  .map(event => (event.updates[0] as { item: { requestId: string } }).item.requestId);
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -2790,6 +2871,444 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  // Characterization of the pending-interaction rules the shared holder
+  // (`../pending-interactions.ts`) now owns. Each reads the ordered event
+  // stream, so a later request's announcement proves nothing earlier is
+  // still on its way.
+
+  test("an answered request settles once and emits nothing: a second reply and a late abort find nothing", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const abort = new AbortController();
+    const decision = query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: abort.signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await provider.replyPermission(session.id, "t1", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    await expect(provider.replyPermission(session.id, "t1", "reject")).rejects.toThrow("no pending permission t1 for this conversation");
+    abort.abort();
+    // The next request's announcement follows anything the first could
+    // still have emitted.
+    const next = query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    expect(abandonedIds(events)).toEqual([]);
+    expect(requestedIds(events)).toEqual(["t1", "t2"]);
+    await provider.replyPermission(session.id, "t2", "once");
+    await next;
+    stop();
+    await provider.dispose();
+  });
+
+  test("replies made in the same tick resolve in the order they were made, each in the turn it is made", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const signal = new AbortController().signal;
+    const decisions = [
+      query.input.options.canUseTool!("Bash", { command: "ls" }, { signal, toolUseID: "t1" }),
+      query.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal, toolUseID: "q1" }),
+      query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal, toolUseID: "t2" }),
+      query.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Other", header: "O", options: [] }] }, { signal, toolUseID: "q2" }),
+    ];
+    const order: string[] = [];
+    const replies = [
+      provider.replyPermission(session.id, "t1", "once").then(() => order.push("permission t1")),
+      provider.replyQuestion(session.id, "q1", [["A"]]).then(() => order.push("question q1")),
+      provider.rejectQuestion(session.id, "q2").then(() => order.push("reject q2")),
+      provider.replyPermission(session.id, "t2", "reject").then(() => order.push("reject t2")),
+    ];
+    // Queued after every handler is attached: a reply that settled in the
+    // turn it was made runs its handler before this marker; one extra await
+    // anywhere on its path would put it after.
+    queueMicrotask(() => order.push("marker"));
+    await Promise.all(replies);
+    expect(order).toEqual(["permission t1", "question q1", "reject q2", "reject t2", "marker"]);
+    await Promise.all(decisions);
+    await provider.dispose();
+  });
+
+  test("a tool request with an empty id is announced and answerable, as before", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "" });
+    await waitFor(() => requestedIds(events).includes(""));
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual([""]);
+    await provider.replyPermission(session.id, "", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a plan reply the holder refuses after the mapping succeeded throws, leaves the card pending, and switches no mode", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    const query = queries[0]!;
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    const modeCalls: string[] = [];
+    query.setPermissionMode = async mode => { modeCalls.push(mode); };
+    const decision = query.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    // An inherited `then` makes the holder refuse the result the mapping built.
+    Object.defineProperty(Object.prototype, "then", { value: () => undefined, configurable: true, writable: true });
+    let reply: Promise<void>;
+    try {
+      reply = provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    } finally {
+      delete (Object.prototype as { then?: unknown }).then;
+    }
+    await expect(reply).rejects.toThrow("must not inherit a `then`");
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["p1"]);
+    expect(modeCalls).toEqual([]);
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("plan");
+    await provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "steps" } });
+    expect(modeCalls).toEqual(["acceptEdits"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a callback from a session already swept is answered at once and announces nothing; a new session for the conversation registers as usual", async () => {
+    const neverAborts = new AbortController().signal;
+    const gone = "The session ended before the request could be shown.";
+    // After the session's stream ends.
+    {
+      const { provider, queries } = fixture();
+      const { events, stop } = collect(provider);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await queries[0]!.return();
+      await waitFor(() => provider.liveSessionCount() === 0);
+      expect(await queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: neverAborts, toolUseID: "t1" })).toEqual({ behavior: "deny", message: gone });
+      expect(await queries[0]!.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal: neverAborts, requestId: "el-1" })).toEqual({ action: "cancel" });
+      expect(await queries[0]!.input.options.onUserDialog!({ dialogKind: "refusal_fallback_prompt", payload: {} }, { signal: neverAborts, requestId: "dl-1" })).toEqual({ behavior: "cancelled" });
+      expect(await provider.listPermissions()).toEqual([]);
+      expect(await provider.listQuestions()).toEqual([]);
+      await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+      const fresh = queries[1]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: neverAborts, toolUseID: "t2" });
+      await waitFor(() => requestedIds(events).includes("t2"));
+      expect(requestedIds(events)).toEqual(["t2"]);
+      await provider.replyPermission(session.id, "t2", "once");
+      expect(await fresh).toEqual({ behavior: "allow", updatedInput: { command: "pwd" } });
+      stop();
+      await provider.dispose();
+    }
+    // After the session is retired at its turn's end.
+    {
+      const { provider, queries } = fixture();
+      const { events, stop } = collect(provider);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      queries[0]!.push({ type: "result", uuid: "res-1", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+      await waitFor(() => queries[0]!.returned);
+      expect(await queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: neverAborts, toolUseID: "t1" })).toEqual({ behavior: "deny", message: gone });
+      await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+      const fresh = queries[1]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: neverAborts, toolUseID: "t2" });
+      await waitFor(() => requestedIds(events).includes("t2"));
+      expect(requestedIds(events)).toEqual(["t2"]);
+      await provider.replyPermission(session.id, "t2", "once");
+      await fresh;
+      stop();
+      await provider.dispose();
+    }
+    // After the workspace shuts down.
+    {
+      const { provider, queries } = fixture();
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      const emitted: string[] = [];
+      const original = (provider as unknown as { emit: (id: string, event: { eventType: string }) => void }).emit.bind(provider);
+      (provider as unknown as { emit: (id: string, event: { eventType: string }) => void }).emit = (id, event) => { emitted.push(event.eventType); original(id, event); };
+      await provider.dispose();
+      expect(await queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: neverAborts, toolUseID: "t1" })).toEqual({ behavior: "deny", message: gone });
+      expect(emitted.filter(type => type.startsWith("interaction."))).toEqual([]);
+      expect(await provider.listPermissions()).toEqual([]);
+    }
+  });
+
+  test("a callback during disposal, after the sweep and before the queue closes, is answered at once and announces nothing", async () => {
+    const outcomes: Array<Promise<unknown>> = [];
+    const { provider, queries } = fixture(query => {
+      query.interrupt = async () => {
+        query.interrupts += 1;
+        outcomes.push(query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "late" }));
+        return {};
+      };
+    });
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const emitted: string[] = [];
+    const target = provider as unknown as { emit: (id: string, event: { eventType: string }) => void };
+    const original = target.emit.bind(provider);
+    target.emit = (id, event) => { emitted.push(event.eventType); original(id, event); };
+    await provider.dispose();
+    expect(queries[0]!.interrupts).toBe(1);
+    expect(await Promise.all(outcomes)).toEqual([{ behavior: "deny", message: "The session ended before the request could be shown." }]);
+    expect(emitted.filter(type => type.startsWith("interaction."))).toEqual([]);
+  });
+
+  test("a session's teardown abandons its requests in the order they were first asked, a redelivery keeping its place", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const signal = new AbortController().signal;
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal, toolUseID: "A" });
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal, toolUseID: "B" });
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls -a" }, { signal, toolUseID: "A" });
+    await waitFor(() => requestedIds(events).length === 3);
+    await queries[0]!.return();
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("an abort listener added after the request runs after the request has ended: its reply is refused", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const abort = new AbortController();
+    const decision = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: abort.signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    let reply: Promise<void> | undefined;
+    abort.signal.addEventListener("abort", () => {
+      reply = provider.replyPermission(session.id, "t1", "once");
+    });
+    abort.abort();
+    await expect(reply!).rejects.toThrow("no pending permission t1 for this conversation");
+    expect(await decision).toEqual({ behavior: "deny", message: "The turn was interrupted before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    stop();
+    await provider.dispose();
+  });
+
+  test("a callback the query factory fires at once is owned by its session: stream end and disposal settle it", async () => {
+    const outcomes: Array<Promise<unknown>> = [];
+    const early = (query: FakeQuery) => { outcomes.push(query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: `early-${outcomes.length}` })); };
+    {
+      const { provider, queries } = fixture(early);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await queries[0]!.return();
+      expect(await outcomes[0]).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+      await provider.dispose();
+    }
+    {
+      const { provider } = fixture(early);
+      const session = await provider.createSession("y");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await provider.dispose();
+      expect(await outcomes[1]).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    }
+  });
+
+  test("a query factory that registers a request and then throws leaves nothing pending", async () => {
+    const outcomes: Array<Promise<unknown>> = [];
+    const { provider } = fixture(query => {
+      outcomes.push(query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "early" }));
+      throw new Error("spawn failed");
+    });
+    const session = await provider.createSession("x");
+    await expect(provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" })).rejects.toThrow("spawn failed");
+    expect(await outcomes[0]).toEqual({ behavior: "deny", message: "The session failed before the user answered." });
+    expect(await provider.listPermissions()).toEqual([]);
+    await provider.dispose();
+    expect(await provider.listPermissions()).toEqual([]);
+  });
+
+  test("an already-aborted request is abandoned without ever being announced", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const aborted = new AbortController();
+    aborted.abort();
+    expect(await query.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal: aborted.signal, requestId: "el-0" })).toEqual({ action: "cancel" });
+    const next = query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    expect(abandonedIds(events)).toEqual(["el-0"]);
+    expect(requestedIds(events)).toEqual(["t2"]);
+    const abandoned = events.find(event => event.eventType === "interaction.abandoned")!;
+    expect(abandoned.conversationId).toBe(session.id);
+    expect(abandoned.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "question:el-0", status: "resolved", outcome: { kind: "rejected" } }) }]);
+    await provider.replyPermission(session.id, "t2", "once");
+    await next;
+    stop();
+    await provider.dispose();
+  });
+
+  test("a reply naming another conversation, another kind, or an unknown request is refused and leaves the request pending", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    const other = await provider.createSession("y");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await expect(provider.replyPermission(other.id, "t1", "once")).rejects.toThrow("no pending permission t1 for this conversation");
+    await expect(provider.replyQuestion(session.id, "t1", [["x"]])).rejects.toThrow("no pending question t1 for this conversation");
+    await expect(provider.rejectQuestion(session.id, "t1")).rejects.toThrow("no pending question t1 for this conversation");
+    await expect(provider.replyPermission(session.id, "t9", "once")).rejects.toThrow("no pending permission t9 for this conversation");
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission(session.id, "t1", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    await provider.dispose();
+  });
+
+  test("the pending lists span conversations and carry what a recovered card needs", async () => {
+    const { provider, queries } = fixture();
+    const first = await provider.createSession("a");
+    const second = await provider.createSession("b");
+    await provider.prompt(first.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    await provider.prompt(first.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    await provider.prompt(second.id, { id: "r2", text: "ask", delivery: "queue" });
+    const signal = new AbortController().signal;
+    const plan = queries[0]!.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal, toolUseID: "p1" });
+    const dialog = queries[1]!.input.options.onUserDialog!({ dialogKind: "refusal_fallback_prompt", payload: { fallbackModel: "claude-sonnet-5" } }, { signal, requestId: "dl-1" });
+    const question = queries[1]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal, toolUseID: "q1" });
+    expect(await provider.listPermissions()).toEqual([{
+      requestId: "p1",
+      conversationId: first.id,
+      action: "Review the plan",
+      resources: [],
+      plan: "steps",
+      choices: [
+        { id: "implement", label: "Approve and implement" },
+        { id: "implement-and-restore", label: "Approve, then return to acceptEdits", description: "Implement the plan, then go back to the mode this conversation used before planning." },
+      ],
+    }]);
+    expect(await provider.listQuestions()).toEqual([
+      expect.objectContaining({ requestId: "dl-1", conversationId: second.id, source: "dialog", schema: { dialogKind: "refusal_fallback_prompt", payload: { fallbackModel: "claude-sonnet-5" } } }),
+      { requestId: "q1", conversationId: second.id, questions: [expect.objectContaining({ prompt: "Pick" })] },
+    ]);
+    await provider.dispose();
+    await Promise.all([plan, dialog, question]);
+  });
+
+  test("dispose abandons every conversation's requests with the shutdown reason, each visibly", async () => {
+    const { provider, queries } = fixture();
+    const { events } = collect(provider);
+    const first = await provider.createSession("a");
+    const second = await provider.createSession("b");
+    await provider.prompt(first.id, { id: "r1", text: "one", delivery: "queue" });
+    await provider.prompt(second.id, { id: "r2", text: "two", delivery: "queue" });
+    const signal = new AbortController().signal;
+    const permission = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal, toolUseID: "t1" });
+    const elicitation = queries[1]!.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal, requestId: "el-1" });
+    await waitFor(() => requestedIds(events).length === 2);
+    await provider.dispose();
+    expect(await permission).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(await elicitation).toEqual({ action: "cancel" });
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(events.filter(event => event.eventType === "interaction.abandoned").map(event => [event.conversationId, (event.updates[0] as { item: { requestId: string } }).item.requestId]))
+      .toEqual([[first.id, "t1"], [second.id, "el-1"]]);
+    expect(await provider.listPermissions()).toEqual([]);
+    expect(await provider.listQuestions()).toEqual([]);
+  });
+
+  test("a session whose stream ends abandons its requests with the session-ended reason", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await queries[0]!.return();
+    expect(await decision).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    expect(await provider.listPermissions()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a retired session abandons its requests with the turn-ended reason", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    queries[0]!.push({ type: "result", uuid: "res-1", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+    expect(await decision).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    expect(await provider.listPermissions()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("an elicitation schema holding Infinity is announced and listed with Infinity in process, as before, and stays answerable", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const schema = { type: "object", properties: { count: { type: "integer", maximum: Number.POSITIVE_INFINITY } }, required: ["count"] };
+    const answer = queries[0]!.input.options.onElicitation!({ serverName: "svc", message: "How many?", mode: "form", requestedSchema: schema }, { signal: new AbortController().signal, requestId: "el-inf" });
+    await waitFor(() => requestedIds(events).includes("el-inf"));
+    const card = (events.find(event => event.eventType === "interaction.requested")!.updates[0] as { item: QuestionRequest }).item;
+    expect(card.schema).toEqual(schema);
+    expect((card.schema as typeof schema).properties.count.maximum).toBe(Number.POSITIVE_INFINITY);
+    expect((await provider.listQuestions())[0]!.schema).toEqual(card.schema);
+    await provider.replyQuestion(session.id, "el-inf", [["3"]]);
+    expect(await answer).toEqual({ action: "accept", content: { count: 3 } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a card the holder refuses ends its callback at once with its own abandoned result, announcing nothing", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const schema = { type: "object", properties: { name: { type: "string" } }, "x-revision": 1n };
+    expect(await query.input.options.onElicitation!({ serverName: "svc", message: "Name?", mode: "form", requestedSchema: schema }, { signal: new AbortController().signal, requestId: "el-big" }))
+      .toEqual({ action: "cancel" });
+    const next = query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    expect(requestedIds(events)).toEqual(["t2"]);
+    expect(abandonedIds(events)).toEqual([]);
+    expect(await provider.listQuestions()).toEqual([]);
+    await provider.replyPermission(session.id, "t2", "once");
+    await next;
+    stop();
+    await provider.dispose();
+  });
+
+  test("plan approval settles the request before it switches the mode, and a refused switch still approves", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    const query = queries[0]!;
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    let settled = false;
+    const decision = query.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" })
+      .then(value => { settled = true; return value; });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    const seen: Array<{ mode: string; settled: boolean; pending: number }> = [];
+    query.setPermissionMode = async mode => {
+      // Let the decision's continuation run first if it is already due.
+      await Promise.resolve();
+      seen.push({ mode, settled, pending: (await provider.listPermissions()).length });
+      throw new Error("the CLI refused the switch");
+    };
+    await provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    expect(seen).toEqual([{ mode: "acceptEdits", settled: true, pending: 0 }]);
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "steps" } });
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("acceptEdits");
+    await waitFor(() => events.some(event => event.eventType === "plan.approved"));
+    expect(abandonedIds(events)).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
   test("the live catalog replaces the manifest with real windows and effort levels", async () => {
     const { provider, queries } = fixture();
     // Cold: the static fallback answers (Opus 5 and Sonnet 5 run the enlarged window on their plain ids).
@@ -3936,6 +4455,329 @@ describe("ClaudeProvider sessions", () => {
     await forking.dispose();
   });
 
+  test("committing a revert interrupts the live session, whose abort ends its pending approval as before, and sweeps any survivor before the replacement starts", async () => {
+    const { forking, queries, storedId, forkId } = revertingProvider();
+    const { events, stop } = collect(forking);
+    // A turn keeps the session live through the undo and the commit.
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    expect(queries).toHaveLength(1);
+    // The SDK's interrupt aborts the turn's request signals; a request whose
+    // signal it does not reach survives the interrupt.
+    const turn1 = new AbortController();
+    queries[0]!.interrupt = async () => { queries[0]!.interrupts += 1; turn1.abort(); return {}; };
+    const approval = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: turn1.signal, toolUseID: "t1" });
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(await approval).toEqual({ behavior: "deny", message: "The turn was interrupted before the user answered." });
+    expect(await asked).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("q1"));
+    expect(abandonedIds(events)).toEqual(["t1", "q1"]);
+    expect(await forking.listQuestions()).toEqual([]);
+    // The replacement resumes the fork and asks as usual.
+    expect(queries.at(-1)!.input.options.resume).toBe(forkId);
+    const fresh = queries.at(-1)!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    await forking.replyPermission(storedId, "t2", "once");
+    await fresh;
+    stop();
+    await forking.dispose();
+  });
+
+  test("a revert's survivors keep the retire reason even when the stream ends during the interrupt", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    // The reader is captured while the session is live. The CLI's stream
+    // ends while it handles the interrupt, and the interrupt answers only
+    // once the provider has handled that end.
+    const exited = readerExit(forking, queries[0]!);
+    let exitedDuringInterrupt = false;
+    queries[0]!.interrupt = async () => {
+      queries[0]!.interrupts += 1;
+      await queries[0]!.return();
+      await exited;
+      exitedDuringInterrupt = true;
+      return {};
+    };
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(exitedDuringInterrupt).toBe(true);
+    expect(await asked).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    stop();
+    await forking.dispose();
+  });
+
+  test("disposal waits for a revert's close already under way, then leaves the query closed and its requests settled", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    let release: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    queries[0]!.interrupt = async () => {
+      queries[0]!.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return {};
+    };
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    let disposed = false;
+    const disposing = forking.dispose().then(() => { disposed = true; });
+    // Shutdown has swept the closing session. A macrotask boundary comes only
+    // once every microtask has run, so a disposal that did not wait for the
+    // blocked close would have finished by then.
+    expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(disposed).toBe(false);
+    expect(queries[0]!.returned).toBe(false);
+    release!();
+    await disposing;
+    expect(queries[0]!.returned).toBe(true);
+    expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(await forking.listQuestions()).toEqual([]);
+    expect(await committing).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
+  });
+
+  // Holds disposal on a persistence write already in flight; returns the
+  // release. The write gate is always removed, even if the test fails.
+  async function holdDisposalOnWrite(provider: ClaudeProvider): Promise<{ release: () => void; restore: () => void }> {
+    const writeFile = fsPromises.writeFile;
+    let release: (() => void) | undefined;
+    let writing: (() => void) | undefined;
+    const writeStarted = new Promise<void>(resolve => { writing = resolve; });
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      writing!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return writeFile(...args);
+    }) as typeof writeFile;
+    (provider as unknown as { persistDurableState: () => void }).persistDurableState();
+    await writeStarted;
+    return { release: () => release!(), restore: () => { fsPromises.writeFile = writeFile; } };
+  }
+
+  test("survivors are left to shutdown's sweep when the revert's interrupt returns while disposal is still busy", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    let releaseInterrupt: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    let closed: (() => void) | undefined;
+    const revertClosed = new Promise<void>(resolve => { closed = resolve; });
+    queries[0]!.interrupt = async () => {
+      queries[0]!.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { releaseInterrupt = resolve; });
+      return {};
+    };
+    const returnQuery = queries[0]!.return.bind(queries[0]!);
+    queries[0]!.return = async () => { const result = await returnQuery(); closed!(); return result; };
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      // The interrupt returns while disposal still waits on the write; the
+      // revert closes its query without sweeping.
+      releaseInterrupt!();
+      await revertClosed;
+      expect(abandonedIds(events)).toEqual([]);
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    await committing;
+  });
+
+  test("shutdown ends a displaced query's request and a closing revert's in the order they were asked", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    await forking.undo!(storedId);
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    void live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    let releaseInterrupt: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    live.interrupt = async () => {
+      live.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { releaseInterrupt = resolve; });
+      return {};
+    };
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      releaseInterrupt!();
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+    await committing;
+  });
+
+  test("a live query that retires while disposal waits leaves its request to shutdown's ordered sweep", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    const first = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    const second = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      // The live turn ends, and its idle session retires, while disposal
+      // still waits on the write.
+      live.push({ type: "result", uuid: "res-2", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+      await waitFor(() => live.returned);
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    const shutdown = { behavior: "deny" as const, message: "The workspace shut down before the user answered." };
+    expect([await first, await second]).toEqual([shutdown, shutdown]);
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+  });
+
+  // Gates the next durable write: resolves `started` when it begins and
+  // holds it until released. The gate is always removed.
+  function gateNextWrite() {
+    const writeFile = fsPromises.writeFile;
+    let release: (() => void) | undefined;
+    let begin: (() => void) | undefined;
+    const started = new Promise<void>(resolve => { begin = resolve; });
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      begin!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return writeFile(...args);
+    }) as typeof writeFile;
+    return { started, release: () => release!(), restore: () => { fsPromises.writeFile = writeFile; } };
+  }
+
+  const stateOnDisk = (workspace: string) => JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")) as { staged: Record<string, unknown> };
+
+  test("a redo in flight when disposal starts finishes its write before disposal returns: never changed without the write", async () => {
+    const { forking, storedId, workspace } = revertingProvider();
+    await forking.undo!(storedId);
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+    const gate = gateNextWrite();
+    try {
+      const redoing = forking.redo!(storedId);
+      await gate.started;
+      let disposed = false;
+      const disposing = forking.dispose().then(() => { disposed = true; });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(disposed).toBe(false);
+      gate.release();
+      expect((await redoing).outcome).toBe("changed");
+      await disposing;
+    } finally {
+      gate.restore();
+    }
+    expect(stateOnDisk(workspace).staged).toEqual({});
+  });
+
+  test("an undo in flight when disposal starts records its recovery state before its rewind, and disposal waits for it", async () => {
+    const { forking, queries, storedId, workspace } = revertingProvider();
+    const gate = gateNextWrite();
+    let rewoundBeforeWrite = false;
+    try {
+      const undoing = forking.undo!(storedId);
+      await gate.started;
+      const query = queries.at(-1)!;
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => {
+        if (!options?.dryRun && !existsSync(path.join(workspace, ".uatu-test-state.json"))) rewoundBeforeWrite = true;
+        return rewind(uuid, options);
+      };
+      const disposing = forking.dispose();
+      gate.release();
+      expect((await undoing).outcome).toBe("changed");
+      await disposing;
+    } finally {
+      gate.restore();
+    }
+    expect(rewoundBeforeWrite).toBe(false);
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+  });
+
+  test("a replacement prompt paused at its transcript check when disposal starts is waited for: its rollback lands before dispose returns, nothing after", async () => {
+    const { forking, storedId, forkId, workspace } = revertingProvider();
+    await forking.undo!(storedId);
+    const access = fsPromises.access;
+    const writeFile = fsPromises.writeFile;
+    let reached: (() => void) | undefined;
+    const paused = new Promise<void>(resolve => { reached = resolve; });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let disposeReturned = false;
+    const writesAfterDispose: string[] = [];
+    fsPromises.access = (async (...args: Parameters<typeof access>) => {
+      if (String(args[0]).endsWith(`${forkId}.jsonl`)) {
+        reached!();
+        await gate;
+      }
+      return access(...args);
+    }) as typeof access;
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (disposeReturned) writesAfterDispose.push(String(args[0]));
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+      await paused;
+      const disposing = forking.dispose().then(() => { disposeReturned = true; });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(disposeReturned).toBe(false);
+      release!();
+      expect(await prompting).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
+      await disposing;
+      await new Promise(resolve => setImmediate(resolve));
+    } finally {
+      fsPromises.access = access;
+      fsPromises.writeFile = writeFile;
+    }
+    expect(writesAfterDispose).toEqual([]);
+    // The rollback was recorded: the revert is staged again, uncommitted.
+    expect(stateOnDisk(workspace).staged[storedId]).toEqual(expect.not.objectContaining({ commit: expect.anything() }));
+  });
+
+  test("a history mutation started after disposal is refused before any side effect", async () => {
+    const { forking, queries, storedId, workspace } = revertingProvider();
+    await forking.dispose();
+    await expect(forking.undo!(storedId)).rejects.toThrow("Claude provider is disposed");
+    await expect(forking.redo!(storedId)).rejects.toThrow("Claude provider is disposed");
+    expect(queries).toHaveLength(0);
+    expect(existsSync(path.join(workspace, ".uatu-test-state.json"))).toBe(false);
+  });
+
   test("a fork-committed conversation's subagents resolve under the fork's directory", async () => {
     const { configDir, workspace } = fixture();
     const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
@@ -4301,6 +5143,279 @@ describe("plan usage on demand", () => {
     expect(queries[1]!.returned).toBe(false);
     stop();
     await provider.dispose();
+  });
+
+  function racingFixture() {
+    const made = fixture(query => {
+      query.getContextUsage = async () => context;
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => plan;
+    });
+    writeFileSync(path.join(claudeProjectDir(made.workspace, made.configDir), "idle-session.jsonl"), userRow("u1", "earlier", made.workspace));
+    return made;
+  }
+
+  test("a prompt and a cold start read that race as they always have: the displaced query's requests register and are answerable", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    // The read's query, installed last, was retired after its read and so
+    // swept; the prompt's query was only displaced, never swept.
+    expect(queries).toHaveLength(2);
+    expect([queries[0]!.returned, queries[1]!.returned]).toEqual([false, true]);
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission("idle-session", "t1", "once");
+    expect(await displaced).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    expect(await queries[1]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" }))
+      .toEqual({ behavior: "deny", message: "The session ended before the request could be shown." });
+    stop();
+    await provider.dispose();
+    // Disposal reaches the displaced query too: no process is left behind.
+    expect(queries[0]!.returned).toBe(true);
+  });
+
+  test("disposal sweeps and closes a displaced query, abandoning its unanswered request", async () => {
+    const { provider, queries } = racingFixture();
+    const { events } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    const pending = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await provider.dispose();
+    expect(await pending).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(queries[0]!.returned).toBe(true);
+    expect(queries[0]!.interrupts).toBeGreaterThan(0);
+    await waitFor(() => abandonedIds(events).includes("t1"));
+  });
+
+  test("a displaced query whose stream ends abandons its own unanswered request", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    const pending = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await queries[0]!.return();
+    expect(await pending).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    expect(await provider.listPermissions()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a displaced query's exit leaves the live query's replacement under the same id pending", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const live = queries.at(-1)!;
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).filter(id => id === "t1").length === 1);
+    // The live query asks under the same id: the newest registration wins.
+    const replacement = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).filter(id => id === "t1").length === 2);
+    // The replacement is pending before the old reader reaches its cleanup,
+    // and still pending once it has.
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    const exited = readerExit(provider, queries[0]!);
+    await queries[0]!.return();
+    await exited;
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission("idle-session", "t1", "once");
+    expect(await replacement).toEqual({ behavior: "allow", updatedInput: { command: "pwd" } });
+    void displaced;
+    stop();
+    await provider.dispose();
+  });
+
+  test("the newer query's end leaves the displaced query's approval pending", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const live = queries.at(-1)!;
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const newer = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    await live.return();
+    expect(await newer).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission("idle-session", "t1", "once");
+    expect(await displaced).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a revert sweeps only the old session's survivors, not a displaced query's", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events, stop } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    // A live session with a turn, then a staged revert on it.
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    await forking.undo!(storedId);
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const survivor = live.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(await survivor).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    expect((await forking.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await forking.replyPermission(storedId, "t1", "once");
+    expect(await displaced).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    stop();
+    await forking.dispose();
+  });
+
+  test("shutdown ends a conversation's requests in the order they were asked, across a displaced and a live query", async () => {
+    const { provider, queries } = racingFixture();
+    const { events } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const live = queries.at(-1)!;
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    void live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    await provider.dispose();
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+  });
+
+  test("a plan approval from a displaced query switches only that query: the conversation's saved and published mode stay the live query's", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const switched: Record<string, string[]> = { displaced: [], live: [] };
+    displaced.setPermissionMode = async mode => { switched.displaced!.push(mode); };
+    live.setPermissionMode = async mode => { switched.live!.push(mode); };
+    const modeBefore = (await provider.getConversationConfiguration("idle-session")).mode;
+    const decision = displaced.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    await provider.replyPermission("idle-session", "p1", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "steps" } });
+    expect(switched).toEqual({ displaced: ["auto"], live: [] });
+    // The conversation's saved and published mode stay the live query's.
+    expect((await provider.getConversationConfiguration("idle-session")).mode).toBe(modeBefore);
+    // A later announcement proves everything before it has arrived.
+    void live.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "later" });
+    await waitFor(() => requestedIds(events).includes("later"));
+    expect(events.some(event => event.eventType === "plan.approved")).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a displaced plan card restores the mode it offered, even after the live query's approval cleared the conversation's", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "edit", delivery: "queue", mode: "acceptEdits" });
+    await provider.prompt("idle-session", { id: "r3", text: "plan", delivery: "queue", mode: "plan" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const switched: string[] = [];
+    displaced.setPermissionMode = async mode => { switched.push(`displaced ${mode}`); };
+    live.setPermissionMode = async mode => { switched.push(`live ${mode}`); };
+    const displacedPlan = displaced.input.options.canUseTool!("ExitPlanMode", { plan: "theirs" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    const livePlan = live.input.options.canUseTool!("ExitPlanMode", { plan: "ours" }, { signal: new AbortController().signal, toolUseID: "p2" });
+    await waitFor(() => requestedIds(events).includes("p2"));
+    const offered = (events.find(event => event.eventType === "interaction.requested" && (event.updates[0] as { item: { requestId: string } }).item.requestId === "p1")!.updates[0] as { item: { choices?: Array<{ id: string; label: string }> } }).item.choices;
+    expect(offered?.at(-1)?.label).toContain("acceptEdits");
+    // The live approval returns the conversation to acceptEdits and clears
+    // its restore intent, exactly as before.
+    await provider.replyPermission("idle-session", "p2", "once", "implement-and-restore");
+    await livePlan;
+    expect((await provider.getConversationConfiguration("idle-session")).mode).toBe("acceptEdits");
+    await provider.replyPermission("idle-session", "p1", "once", "implement-and-restore");
+    await displacedPlan;
+    expect(switched).toEqual(["live acceptEdits", "displaced acceptEdits"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a plan approval whose asking query has ended switches no query", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const switched: string[] = [];
+    displaced.setPermissionMode = async mode => { switched.push(`displaced ${mode}`); };
+    live.setPermissionMode = async mode => { switched.push(`live ${mode}`); };
+    const decision = displaced.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    // The asking query ends; its approval is abandoned with it, so there is
+    // nothing left to approve and no query switches.
+    const exited = readerExit(provider, displaced);
+    await displaced.return();
+    await exited;
+    expect(await decision).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    await expect(provider.replyPermission("idle-session", "p1", "once")).rejects.toThrow("no pending permission p1 for this conversation");
+    expect(switched).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a displaced query whose stream fails abandons its own request and leaves the live query's pending", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const own = displaced.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const other = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    const exited = readerExit(provider, displaced);
+    displaced.fail(new Error("child died"));
+    await exited;
+    expect(await own).toEqual({ behavior: "deny", message: "The session failed before the user answered." });
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t2"]);
+    await provider.replyPermission("idle-session", "t2", "once");
+    expect(await other).toEqual({ behavior: "allow", updatedInput: { command: "pwd" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("disposal while a start waits on its transcript check leaves no query, no process, no request and no later write behind", async () => {
+    const { provider, queries, configDir, workspace } = fixture();
+    const writeFile = fsPromises.writeFile;
+    let disposedAt: number | undefined;
+    const writesAfterDispose: string[] = [];
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (disposedAt !== undefined) writesAfterDispose.push(String(args[0]));
+      return writeFile(...args);
+    }) as typeof writeFile;
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "idle-session.jsonl"), userRow("u1", "earlier", workspace));
+    const access = fsPromises.access;
+    let reached: (() => void) | undefined;
+    const waiting = new Promise<void>(resolve => { reached = resolve; });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    fsPromises.access = (async (...args: Parameters<typeof access>) => {
+      if (String(args[0]).endsWith("idle-session.jsonl")) {
+        reached!();
+        await gate;
+      }
+      return access(...args);
+    }) as typeof access;
+    try {
+      const started = provider.prompt("idle-session", { id: "r1", text: "now", delivery: "queue", mode: "plan" });
+      await waiting;
+      await provider.dispose();
+      disposedAt = Date.now();
+      release!();
+      await expect(started).rejects.toThrow("Claude provider is disposed");
+    } finally {
+      fsPromises.access = access;
+      fsPromises.writeFile = writeFile;
+    }
+    expect(writesAfterDispose).toEqual([]);
+    expect(queries.every(query => query.returned)).toBe(true);
+    expect(queries).toHaveLength(0);
+    expect(provider.liveSessionCount()).toBe(0);
+    expect(await provider.listPermissions()).toEqual([]);
   });
 
   test("a turn that ends under an explicit read defers retirement until the read answers", async () => {
@@ -4826,6 +5941,35 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     ]);
     expect(shutdown.query.returned).toBe(true);
     shutdown.stop();
+  });
+
+  test("shutdown settles the wakeups of a displaced query too", async () => {
+    const { provider, queries, configDir, workspace } = fixture(query => {
+      query.getContextUsage = async () => ({ categories: [], totalTokens: 1, maxTokens: 200_000 });
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ subscription_type: null, rate_limits_available: false });
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "idle-session.jsonl"), JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, cwd: workspace, timestamp: "2026-09-01T12:00:00Z", message: { role: "user", content: "earlier" } }) + "\n");
+    const { events, stop } = collect(provider);
+    // The prompt's query schedules a recurring wakeup while it is live; the
+    // read's start then displaces it.
+    await raceStarts(provider, queries, "idle-session", async () => {
+      const first = queries[0]!;
+      first.push({ type: "assistant", uuid: "cc", session_id: "idle-session", message: { role: "assistant", content: [
+        { type: "tool_use", id: "toolu_cc", name: "CronCreate", input: { cron: recurring.schedule, prompt: recurring.prompt, recurring: true } },
+      ] } });
+      first.push({ type: "user", uuid: "cc-result", session_id: "idle-session", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_cc", content: "Scheduled recurring job c1." }] }, tool_use_result: { id: "c1", recurring: true, durable: false } });
+      await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "tool:toolu_cc" && update.item.type === "tool" && update.item.status === "completed")));
+      await stopHook(first, { session_crons: [recurring] });
+      await waitFor(() => rows(events).some(row => row.id === "wakeup:c1"));
+    });
+    expect(queries[0]!.returned).toBe(false);
+    await provider.dispose();
+    await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+    expect(events.find(event => event.eventType === "wakeups.lost")!.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused", message: WAKEUP_PAUSED_MESSAGE }) },
+      { kind: "status", status: "idle" },
+    ]);
+    stop();
   });
 
   test("a released cron the resumed session rebuilds is blocked: no model turn, no status, no notification", async () => {

@@ -5,6 +5,8 @@ import path from "node:path";
 import { boundedSet } from "../../shared/bounded-map";
 import { CHAT_PRESENTATION_GUIDANCE } from "../presentation-guidance";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../history-reuse";
+import { PendingInteractions, type InteractionRegistration, type PendingInteraction, type Synchronous } from "../pending-interactions";
+import { PushQueue } from "../push-queue";
 
 import type {
   ChatProvider,
@@ -258,7 +260,24 @@ const TITLE_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000];
 const BACKGROUND_FOLLOW_UP_GRACE_MS = 5_000;
 const TITLE_LIMIT = 80;
 
+/**
+ * What a session's query callbacks register against, made before the query
+ * exists, so a callback the query factory fires at once is owned too.
+ */
+type SessionClaims = {
+  // Set when the session's requests are swept (retired, ended, failed,
+  // disposed, replaced by a committed revert): its query's callbacks then
+  // answer at once instead of registering.
+  swept: boolean;
+  // The registrations this session's query made that are still pending, by
+  // the token each was registered with.
+  requests: Set<object>;
+  // The query itself, once built: what a plan approval switches the mode of.
+  query?: ClaudeQueryHandle;
+};
+
 type LiveSession = {
+  claims: SessionClaims;
   id: string;
   notificationLifecycle: ClaudeNotificationLifecycle;
   queue: PushQueue<ClaudeUserEnvelope>;
@@ -604,6 +623,18 @@ export class ClaudeProvider implements ChatProvider {
   private probeQuery: ClaudeQueryHandle | null = null;
 
   private readonly live = new Map<string, LiveSession>();
+  // Every session started and not yet ended, displaced ones included: a
+  // query a racing start displaced from `live` still runs, so shutdown must
+  // reach it too.
+  private readonly startedSessions = new Set<LiveSession>();
+  // Sessions whose teardown (a retire, a revert's close) is under way, with
+  // its promise: still reachable for shutdown until it has finished.
+  private readonly closingSessions = new Map<LiveSession, Promise<void>>();
+  // History mutations admitted and not yet ended (see admit).
+  private readonly mutations = new Set<Promise<void>>();
+  // Replacement prompts committing a staged revert, until accepted or
+  // rolled back (see prompt).
+  private readonly stagedPrompts = new Set<Promise<void>>();
   // Sessions created but never prompted: they exist only here until the SDK
   // writes their first transcript entry.
   private readonly pending = new Map<string, ProviderSession>();
@@ -611,7 +642,7 @@ export class ClaudeProvider implements ChatProvider {
   // Tool approvals the SDK is waiting on, held here (the inverse of
   // OpenCode's server-held list — D5). Keyed by request id; each remembers
   // how to settle its callback and the card it published.
-  private readonly interactions = new Map<string, PendingInteraction>();
+  private readonly interactions = new PendingInteractions<ClaudeInteractionDetail>((conversationId, event) => this.emit(conversationId, event));
   // The mode a conversation ran before entering plan, for the
   // "implement and return to the previous mode" intent (D5).
   private readonly modeBeforePlan = new Map<string, string>();
@@ -1338,6 +1369,22 @@ export class ClaudeProvider implements ChatProvider {
   async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     await this.restoreDurableState();
     if (this.disposed) throw new Error("Claude provider is disposed");
+    // A replacement prompt that commits a staged revert changes durable
+    // state until it is accepted or its rollback is written: shutdown waits
+    // for it (after its sweep, since the commit closes a live session), so
+    // no write of this provider's lands after dispose() returns.
+    if (!this.staged.has(sessionId)) return this.promptAdmitted(sessionId, input);
+    const running = this.promptAdmitted(sessionId, input);
+    const tracked = running.then(() => undefined, () => undefined);
+    this.stagedPrompts.add(tracked);
+    try {
+      return await running;
+    } finally {
+      this.stagedPrompts.delete(tracked);
+    }
+  }
+
+  private async promptAdmitted(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     if (parseSubagentId(sessionId)) throw new Error("a subagent transcript is read-only");
     if (input.mode !== undefined) {
       const modes = await this.listModes();
@@ -1359,6 +1406,9 @@ export class ClaudeProvider implements ChatProvider {
     if (stagedBefore) await this.commitStagedRevert(sessionId);
     let session: LiveSession;
     let started: LiveSession | undefined;
+    // Whether the prompt got far enough to change the conversation's
+    // durable configuration (it does so only once its session is live).
+    let reachedConfiguration = false;
     const content: Array<Record<string, unknown>> = [];
     // Everything before the queue push can fail; the rollback must cover it
     // all — an attachment that vanished after admission is as much a
@@ -1366,6 +1416,7 @@ export class ClaudeProvider implements ChatProvider {
     try {
       const alreadyLive = this.live.get(sessionId);
       session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
+      reachedConfiguration = true;
       if (!alreadyLive) started = session;
       if (input.model) await this.switchModel(sessionId, input.model, input.variant);
       if (input.mode !== undefined) {
@@ -1448,9 +1499,12 @@ export class ClaudeProvider implements ChatProvider {
       }
       // The rollback is only real once recorded: the commit's redirect may
       // already be durable, and a lost corrective write would hand the next
-      // process the unused fork with Redo gone.
+      // process the unused fork with Redo gone. A failure that changed
+      // nothing durable (a start refused by shutdown, say) writes nothing:
+      // a replacement may already have recorded newer state.
+      const rolledBack = stagedBefore !== undefined || (reachedConfiguration && (input.model !== undefined || input.mode !== undefined || input.variant !== undefined));
       try {
-        await this.queuePersist(this.durableSnapshot());
+        if (rolledBack) await this.queuePersist(this.durableSnapshot());
       } catch (persistError) {
         throw new Error(`${error instanceof Error ? error.message : "prompt failed"}; additionally the rollback could not be recorded: ${persistError instanceof Error ? persistError.message : "write failed"}`);
       }
@@ -1560,41 +1614,71 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void> {
-    const pending = this.requireInteraction(sessionId, requestId, "permission");
-    if (reply === "reject") {
-      // Rejecting a plan keeps the conversation planning (spec): the deny
-      // returns to the turn, which continues refining under plan mode.
-      pending.settle({ behavior: "deny", message: (pending.item as PermissionRequest).plan !== undefined
-        ? "The user did not approve this plan. Keep planning and present a revised plan."
-        : "The user denied this action." });
-      return;
-    }
-    if ((pending.item as PermissionRequest).plan !== undefined) {
-      await this.approvePlan(sessionId, pending, choiceId);
-      return;
-    }
-    // "Always" returns the SDK's own suggestions, but only those scoped to
-    // the session: an approval uatu brokered must never outlive the session
-    // it was given in (D5: map conservatively).
-    const updatedPermissions = reply === "always" ? sessionScopedSuggestions(pending.suggestions) : [];
-    pending.settle({
-      behavior: "allow",
-      updatedInput: pending.input,
-      ...(updatedPermissions.length > 0 ? { updatedPermissions } : {}),
+    // Mapped inside the holder's answer operation, so the request is claimed
+    // while the result is built.
+    let returnMode: string | undefined;
+    let asker: SessionClaims | undefined;
+    const deferred = this.answerNow(sessionId, requestId, "permission", pending => {
+      const plan = (pending.item as PermissionRequest).plan !== undefined;
+      if (reply === "reject") {
+        // Rejecting a plan keeps the conversation planning (spec): the deny
+        // returns to the turn, which continues refining under plan mode.
+        return { behavior: "deny", message: plan
+          ? "The user did not approve this plan. Keep planning and present a revised plan."
+          : "The user denied this action." } satisfies ClaudePermissionResult;
+      }
+      if (plan) {
+        asker = pending.detail.claims;
+        // A displaced query's card restores the mode it offered; the
+        // conversation's own restore intent belongs to the live query.
+        const displaced = asker !== undefined && this.live.get(sessionId)?.claims !== asker;
+        returnMode = displaced
+          ? (choiceId === "implement-and-restore" ? pending.detail.restoreMode ?? "auto" : "auto")
+          : this.planReturnMode(sessionId, choiceId);
+        return { behavior: "allow", updatedInput: pending.detail.input } satisfies ClaudePermissionResult;
+      }
+      // "Always" returns the SDK's own suggestions, but only those scoped to
+      // the session: an approval uatu brokered must never outlive the session
+      // it was given in (D5: map conservatively).
+      const updatedPermissions = reply === "always" ? sessionScopedSuggestions(pending.detail.suggestions) : [];
+      return {
+        behavior: "allow",
+        updatedInput: pending.detail.input,
+        ...(updatedPermissions.length > 0 ? { updatedPermissions } : {}),
+      } satisfies ClaudePermissionResult;
     });
+    if (deferred) await deferred;
+    if (returnMode !== undefined) await this.approvePlan(sessionId, returnMode, asker);
   }
 
   async replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void> {
-    const pending = this.requireInteraction(sessionId, requestId, "question");
     // Each question kind maps the shared answer shape onto its own result:
     // the question tool's keyed record, an elicitation's content, a
-    // dialog's choice.
-    pending.settle(pending.onAnswer!(answers));
+    // dialog's choice. An answer the request refuses leaves it pending.
+    const deferred = this.answerNow(sessionId, requestId, "question", pending => pending.detail.onAnswer!(answers));
+    if (deferred) await deferred;
   }
 
   async rejectQuestion(sessionId: string, requestId: string): Promise<void> {
-    const pending = this.requireInteraction(sessionId, requestId, "question");
-    pending.settle(pending.onReject!());
+    const deferred = this.answerNow(sessionId, requestId, "question", pending => pending.detail.onReject!());
+    if (deferred) await deferred;
+  }
+
+  /**
+   * Answers through the holder with the timing replies have always had: a
+   * reply the adapter makes runs at once, so the holder reports its outcome
+   * before this returns. A refusal (no such request, an answer the request
+   * refuses, a result the holder refuses) throws here, synchronously, and a
+   * settled answer returns with no further turn, so each reply method
+   * settles in the same microtask turn as before and concurrent replies
+   * resolve in the order they were made. Only a reply the holder deferred
+   * (one made from inside a holder operation, which the adapter never does)
+   * returns its promise to wait on.
+   */
+  private answerNow<Mapped>(sessionId: string, requestId: string, kind: "permission" | "question", map: (pending: PendingInteraction<ClaudeInteractionDetail>) => Synchronous<Mapped>): Promise<void> | undefined {
+    const outcome = this.interactions.tryAnswer(sessionId, requestId, kind, map);
+    if (outcome.status === "refused") throw outcome.error;
+    return outcome.status === "deferred" ? outcome.done : undefined;
   }
 
   /**
@@ -1602,40 +1686,11 @@ export class ClaudeProvider implements ChatProvider {
    * live announcement a client missed is otherwise unknowable.
    */
   async listPermissions(): Promise<PendingPermission[]> {
-    return [...this.interactions.values()]
-      .filter(pending => pending.kind === "permission")
-      .map(pending => {
-        const item = pending.item as PermissionRequest;
-        return {
-          requestId: pending.requestId,
-          conversationId: pending.conversationId,
-          action: item.action,
-          resources: item.resources,
-          // A recovered plan card must still show the plan and its intent
-          // choices — the reader this path exists for missed the live one.
-          // Likewise the rules an always reply would install.
-          ...(item.alwaysPatterns === undefined ? {} : { alwaysPatterns: item.alwaysPatterns }),
-          ...(item.plan === undefined ? {} : { plan: item.plan }),
-          ...(item.choices === undefined ? {} : { choices: item.choices }),
-        };
-      });
+    return this.interactions.list("permission");
   }
 
   async listQuestions(): Promise<PendingQuestion[]> {
-    return [...this.interactions.values()]
-      .filter(pending => pending.kind === "question")
-      .map(pending => {
-        const item = pending.item as QuestionRequest;
-        return {
-          requestId: pending.requestId,
-          conversationId: pending.conversationId,
-          questions: item.questions,
-          ...(item.source === undefined ? {} : { source: item.source }),
-          ...(item.intro === undefined ? {} : { intro: item.intro }),
-          ...(item.link === undefined ? {} : { link: item.link }),
-          ...(item.schema === undefined ? {} : { schema: item.schema }),
-        };
-      });
+    return this.interactions.list("question");
   }
 
   /**
@@ -1651,6 +1706,9 @@ export class ClaudeProvider implements ChatProvider {
     if (this.windowRetryTimer) clearTimeout(this.windowRetryTimer);
     for (const timer of this.titleRefreshTimers.values()) clearTimeout(timer);
     this.titleRefreshTimers.clear();
+    // History mutations already admitted finish, their writes included;
+    // new ones are refused from here on (see admit).
+    await Promise.all([...this.mutations]);
     // Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     await this.probeQuery?.return?.().catch(() => undefined);
@@ -1663,22 +1721,57 @@ export class ClaudeProvider implements ChatProvider {
     }
     await this.hydration?.catch(() => undefined);
     const sessions = [...this.live.values()];
+    // Sessions a racing start displaced from `live` still run: they are
+    // swept and closed too, so no agent process outlives the workspace.
+    const displaced = [...this.startedSessions].filter(session => !sessions.includes(session));
+    // A teardown already under way (a retire, a revert's close) is swept
+    // now and awaited before shutdown finishes.
+    const closing = [...this.closingSessions];
+    this.startedSessions.clear();
     this.live.clear();
+    // Every tracked session of a conversation is swept in one call, so its
+    // requests end in the holder's order whichever session asked them, and
+    // conversations end one at a time, each followed by its lost wakeups.
+    const shutdown = "The workspace shut down before the user answered.";
+    const others = [...displaced, ...closing.map(([session]) => session)];
+    const sweepConversation = (owners: LiveSession[]) => {
+      for (const session of owners) session.claims.swept = true;
+      this.interactions.abandonRegistrations(owners.flatMap(session => [...session.claims.requests]), shutdown);
+    };
+    // Shutdown is the process exit a schedule cannot survive (D6): every
+    // session it closes, displaced and closing ones included, has its
+    // wakeups settled after its conversation's sweep, the live session
+    // first, then the others in the order they were tracked.
+    const loseWakeups = (session: LiveSession) => {
+      const lost = this.settleWakeups(session, "ended");
+      if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+    };
     for (const session of sessions) {
       this.cancelSessionWindowRead(session);
       this.clearIdleTimer(session);
-      this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
-      // Shutdown is the process exit a schedule cannot survive (D6): a
-      // reader still attached sees the rows lost and the state cleared.
-      const lost = this.settleWakeups(session, "ended");
-      if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
+      const group = [session, ...others.filter(other => other.id === session.id)];
+      sweepConversation(group);
+      for (const member of group) loseWakeups(member);
     }
-    await Promise.all(sessions.map(async session => {
-      await session.query.interrupt().catch(() => undefined);
-      session.queue.close();
-      await session.query.return?.().catch(() => undefined);
-      await session.reader.catch(() => undefined);
-    }));
+    const orphans = others.filter(other => !sessions.some(session => session.id === other.id));
+    for (const conversationId of new Set(orphans.map(session => session.id))) {
+      const group = orphans.filter(session => session.id === conversationId);
+      sweepConversation(group);
+      for (const member of group) loseWakeups(member);
+    }
+    await Promise.all([
+      ...[...sessions, ...displaced].map(async session => {
+        await session.query.interrupt().catch(() => undefined);
+        session.queue.close();
+        await session.query.return?.().catch(() => undefined);
+        await session.reader.catch(() => undefined);
+      }),
+      ...closing.map(([, closed]) => closed.catch(() => undefined)),
+    ]);
+    // A replacement prompt still committing a revert finishes or rolls back,
+    // and its write lands, before shutdown returns.
+    await Promise.all([...this.stagedPrompts]);
+    await this.persistChain.catch(() => undefined);
     this.events_.close();
   }
 
@@ -1699,18 +1792,26 @@ export class ClaudeProvider implements ChatProvider {
     if (!known) throw new Error(`unknown Claude conversation: ${sessionId}`);
     const nativeId = this.nativeId(sessionId);
     const hasTranscript = await fs.access(sessionTranscriptPath(this.workspacePath, nativeId, this.configDir)).then(() => true, () => false);
+    // A start that outlived the workspace's shutdown (it was waiting above)
+    // must not leave a process behind: it starts no query and fails its
+    // caller as a disposed provider does.
+    if (this.disposed) throw new Error("Claude provider is disposed");
     const queue = new PushQueue<ClaudeUserEnvelope>();
     const configuration = this.configurations.get(sessionId) ?? {};
     // The hooks close over the session they belong to, which exists only
     // once the query does; a hook that fires first (it cannot: hooks follow
     // a prompt) or for a retired session finds no owner and does nothing.
     let owner: LiveSession | undefined;
+    // What this query's callbacks belong to (see awaitInteraction), claimed
+    // before the query is built: a factory may call back at once.
+    const claims: SessionClaims = { swept: false, requests: new Set() };
+    const session_ = () => claims;
     const observe = (handler: (session: LiveSession, input: Record<string, unknown>) => void) => async (input: Record<string, unknown>) => {
       // Observers only: a hook that throws or blocks would change the turn.
       try { if (owner) { await owner.revivedReady; handler(owner, input); } } catch { /* observation is best-effort */ }
       return { continue: true as const };
     };
-    const query = this.queryFactory({
+    const query = this.startQuery(claims, () => this.queryFactory({
       prompt: queue,
       options: {
         cwd: this.workspacePath,
@@ -1732,12 +1833,12 @@ export class ClaudeProvider implements ChatProvider {
         // Effort is applied when the session starts; a variant staged while
         // the session is live takes effect on the next session start.
         ...((variant ?? configuration.variant) ? { effort: (variant ?? configuration.variant)! } : {}),
-        canUseTool: (toolName, input, options) => this.brokerToolUse(sessionId, toolName, input, options),
+        canUseTool: (toolName, input, options) => this.brokerToolUse(sessionId, session_, toolName, input, options),
         // Dialogs and elicitations are pending interactions like a tool
         // approval: a card in the owning conversation, answered through the
         // same registry, abandoned visibly when the session ends (D6).
-        onElicitation: (request, options) => this.brokerElicitation(sessionId, request, options),
-        onUserDialog: (request, options) => this.brokerDialog(sessionId, request, options),
+        onElicitation: (request, options) => this.brokerElicitation(sessionId, session_, request, options),
+        onUserDialog: (request, options) => this.brokerDialog(sessionId, session_, request, options),
         supportedDialogKinds: [...CLAUDE_SUPPORTED_DIALOG_KINDS],
         perTaskStopAffordance: true,
         hooks: {
@@ -1767,11 +1868,13 @@ export class ClaudeProvider implements ChatProvider {
         // conversation once the run is known (routeSubagentFrame).
         forwardSubagentText: true,
       },
-    });
-    const session: LiveSession = { id: sessionId, contextKey: randomUUID(), windowSelection: (model ?? configuration.model)?.modelId, windowSequence: 0, windowAttempts: 0, windowAccountEpoch: this.accountEpoch, cancelSequence: 0, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), wakeups: new Map(), firedSinceStop: new Map(), cronIds: new Set(), selfPacedPrompts: new Set(), blockedFires: 0, revived: new Map(), revivedSettled: false, revivedReady: Promise.resolve(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0, children: new Map(), forkBuffers: new Map() };
+    }));
+    claims.query = query;
+    const session: LiveSession = { id: sessionId, contextKey: randomUUID(), windowSelection: (model ?? configuration.model)?.modelId, windowSequence: 0, windowAttempts: 0, windowAccountEpoch: this.accountEpoch, cancelSequence: 0, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), wakeups: new Map(), firedSinceStop: new Map(), cronIds: new Set(), selfPacedPrompts: new Set(), blockedFires: 0, revived: new Map(), revivedSettled: false, revivedReady: Promise.resolve(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0, children: new Map(), forkBuffers: new Map(), claims };
     owner = session;
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
+    this.startedSessions.add(session);
     session.windowReady = this.prepareSessionWindow(session);
     // Observation begins with the conversation's first query in this
     // process: everything that query and its successors spend is counted.
@@ -1955,6 +2058,12 @@ export class ClaudeProvider implements ChatProvider {
         }
       }
       // The stream ended without dispose: the session's process is gone.
+      if (!this.disposed) this.startedSessions.delete(session);
+      // A session a racing start displaced from `live` ends too: its own
+      // requests go with it, the live session's stay.
+      // One closing for a retire or a revert is swept by that teardown, with
+      // its own reason.
+      if (!this.disposed && this.live.get(session.id) !== session && !this.closingSessions.has(session)) this.sweepSession(session, "The session ended before the user answered.");
       if (!this.disposed && this.live.get(session.id) === session) {
         this.live.delete(session.id);
         this.foldSessionTotals(session);
@@ -1962,7 +2071,7 @@ export class ClaudeProvider implements ChatProvider {
         // background work with an empty set: this exit is its idle edge.
         const inGrace = session.idleTimer !== undefined;
         this.clearIdleTimer(session);
-        this.abandonInteractions(session.id, "The session ended before the user answered.");
+        this.sweepSession(session, "The session ended before the user answered.");
         // A clean CLI exit mid-turn still ends the turn: without a terminal
         // status the adapter keeps the conversation running, prompts stay
         // held, and cancellation finds nothing to interrupt. Background
@@ -1989,11 +2098,16 @@ export class ClaudeProvider implements ChatProvider {
         }
       }
     } catch (error) {
-      if (this.disposed || this.live.get(session.id) !== session) return;
+      if (this.disposed) return;
+      this.startedSessions.delete(session);
+      if (this.live.get(session.id) !== session) {
+        if (!this.closingSessions.has(session)) this.sweepSession(session, "The session failed before the user answered.");
+        return;
+      }
       this.live.delete(session.id);
       this.foldSessionTotals(session);
       this.clearIdleTimer(session);
-      this.abandonInteractions(session.id, "The session failed before the user answered.");
+      this.sweepSession(session, "The session failed before the user answered.");
       this.settleChildren(session, "failed");
       this.emit(session.id, {
         updates: [
@@ -2017,6 +2131,10 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async undo(sessionId: string): Promise<ReversibleHistoryResult> {
+    return this.admit(() => this.undoAdmitted(sessionId));
+  }
+
+  private async undoAdmitted(sessionId: string): Promise<ReversibleHistoryResult> {
     await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const index = (this.staged.get(sessionId)?.boundaryIndex ?? context.turns.length) - 1;
@@ -2025,6 +2143,10 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async redo(sessionId: string): Promise<ReversibleHistoryResult> {
+    return this.admit(() => this.redoAdmitted(sessionId));
+  }
+
+  private async redoAdmitted(sessionId: string): Promise<ReversibleHistoryResult> {
     await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const stagedState = this.staged.get(sessionId);
@@ -2035,6 +2157,10 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async revert(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    return this.admit(() => this.revertAdmitted(sessionId, messageId));
+  }
+
+  private async revertAdmitted(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
     await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const index = context.turns.findIndex(turn => `message:${turn.uuid}` === messageId);
@@ -2043,6 +2169,10 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async restore(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    return this.admit(() => this.restoreAdmitted(sessionId, messageId));
+  }
+
+  private async restoreAdmitted(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
     await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const stagedState = this.staged.get(sessionId);
@@ -2203,6 +2333,32 @@ export class ClaudeProvider implements ChatProvider {
    * "empty fork".
    */
   private async commitStagedRevert(sessionId: string): Promise<void> {
+    await this.admit(() => this.recordStagedCommit(sessionId));
+    // The live session is bound to the pre-fork history; the next prompt
+    // resumes the fork instead.
+    const live = this.live.get(sessionId);
+    if (live) {
+      this.live.delete(sessionId);
+      this.startedSessions.delete(live);
+      // Its requests go with it: once it leaves the live map its stream's
+      // end no longer sweeps them, and a card it asked while the fork was
+      // persisted would outlive the replacement. Marked first, so nothing
+      // new registers; the interrupt then ends what is pending as it always
+      // has (the SDK aborts each request's signal), and whatever survives
+      // that is swept before the replacement starts. Once shutdown has
+      // started, the survivors are left to its single ordered sweep.
+      live.claims.swept = true;
+      await this.closeSession(live, async () => {
+        await live.query.interrupt().catch(() => undefined);
+        if (!this.disposed) this.sweepSession(live, "The turn ended before the user answered.");
+        live.queue.close();
+        await live.query.return?.().catch(() => undefined);
+      });
+    }
+  }
+
+  /** The commit's durable half: the fork and its redirect, recorded. */
+  private async recordStagedCommit(sessionId: string): Promise<void> {
     const stagedState = this.staged.get(sessionId);
     if (!stagedState) return;
     const context = await this.reversibleContext(sessionId);
@@ -2233,15 +2389,6 @@ export class ClaudeProvider implements ChatProvider {
       if (!hadHidden) this.hiddenNative.delete(replacement);
       delete stagedState.commit;
       throw new ReversibleHistoryTargetError(`the revert could not be recorded (${error instanceof Error ? error.message : "write failed"}); the staged state was kept`);
-    }
-    // The live session is bound to the pre-fork history; the next prompt
-    // resumes the fork instead.
-    const live = this.live.get(sessionId);
-    if (live) {
-      this.live.delete(sessionId);
-      await live.query.interrupt().catch(() => undefined);
-      live.queue.close();
-      await live.query.return?.().catch(() => undefined);
     }
   }
 
@@ -2384,7 +2531,7 @@ export class ClaudeProvider implements ChatProvider {
    * The returned promise settles when the user answers, when the turn is
    * interrupted (the SDK aborts the signal), or when the session ends.
    */
-  private brokerToolUse(sessionId: string, toolName: string, input: Record<string, unknown>, options: ClaudeCanUseToolOptions): Promise<ClaudePermissionResult> {
+  private brokerToolUse(sessionId: string, owner: () => SessionClaims, toolName: string, input: Record<string, unknown>, options: ClaudeCanUseToolOptions): Promise<ClaudePermissionResult> {
     const requestId = options.toolUseID ?? randomUUID();
     const createdAt = this.now();
     // A completed plan asks for its own kind of approval: the card carries
@@ -2425,24 +2572,27 @@ export class ClaudeProvider implements ChatProvider {
           alwaysPatterns: describeSessionScopedUpdates(options.suggestions),
           status: "pending",
         };
-    return this.awaitInteraction<ClaudePermissionResult>(sessionId, {
-      requestId,
-      kind: questions ? "question" : "permission",
+    return this.awaitInteraction<ClaudePermissionResult>(owner, {
+      conversationId: sessionId,
       item,
-      input,
-      suggestions: options.suggestions,
-      signal: options.signal,
+      detail: {
+        input,
+        suggestions: options.suggestions,
+        // The mode the card's restore intent offered, as announced.
+        ...(plan !== null && returnMode !== undefined ? { restoreMode: returnMode } : {}),
+        ...(questions ? {
+          // AskUserQuestion expects answers keyed by the full question text on
+          // its own input; a multi-select answer joins its labels.
+          onAnswer: (answers: string[][]): ClaudePermissionResult => {
+            const record: Record<string, string> = {};
+            questions.forEach((question, index) => { record[question.prompt] = (answers[index] ?? []).join(", "); });
+            return { behavior: "allow", updatedInput: { ...input, answers: record } };
+          },
+          onReject: (): ClaudePermissionResult => ({ behavior: "deny", message: "The user declined to answer." }),
+        } : {}),
+      },
+      cancellation: options.signal,
       abandoned: reason => ({ behavior: "deny", message: reason }),
-      ...(questions ? {
-        // AskUserQuestion expects answers keyed by the full question text on
-        // its own input; a multi-select answer joins its labels.
-        onAnswer: answers => {
-          const record: Record<string, string> = {};
-          questions.forEach((question, index) => { record[question.prompt] = (answers[index] ?? []).join(", "); });
-          return { behavior: "allow", updatedInput: { ...input, answers: record } };
-        },
-        onReject: () => ({ behavior: "deny", message: "The user declined to answer." }),
-      } : {}),
     });
   }
 
@@ -2453,7 +2603,7 @@ export class ClaudeProvider implements ChatProvider {
    * with the link to open. Accept returns the coerced values; decline and
    * a dead session return their own MCP actions.
    */
-  private brokerElicitation(sessionId: string, request: ClaudeElicitationRequest, options: { signal: AbortSignal; requestId: string }): Promise<ClaudeElicitationResult | null> {
+  private brokerElicitation(sessionId: string, owner: () => SessionClaims, request: ClaudeElicitationRequest, options: { signal: AbortSignal; requestId: string }): Promise<ClaudeElicitationResult | null> {
     const requestId = options.requestId || randomUUID();
     const createdAt = this.now();
     const { questions, coerce } = elicitationQuestions(request);
@@ -2469,16 +2619,17 @@ export class ClaudeProvider implements ChatProvider {
       ...(request.mode === "url" && request.url && /^https?:\/\//i.test(request.url) ? { link: request.url } : {}),
       ...(request.requestedSchema ? { schema: request.requestedSchema } : {}),
     };
-    return this.awaitInteraction<ClaudeElicitationResult>(sessionId, {
-      requestId,
-      kind: "question",
+    return this.awaitInteraction<ClaudeElicitationResult>(owner, {
+      conversationId: sessionId,
       item,
-      input: {},
-      suggestions: undefined,
-      signal: options.signal,
+      detail: {
+        input: {},
+        suggestions: undefined,
+        onAnswer: (answers): ClaudeElicitationResult => request.mode === "url" ? { action: "accept" } : { action: "accept", content: coerce(answers) },
+        onReject: (): ClaudeElicitationResult => ({ action: "decline" }),
+      },
+      cancellation: options.signal,
       abandoned: () => ({ action: "cancel" }),
-      onAnswer: answers => request.mode === "url" ? { action: "accept" } : { action: "accept", content: coerce(answers) },
-      onReject: () => ({ action: "decline" }),
     });
   }
 
@@ -2488,7 +2639,7 @@ export class ClaudeProvider implements ChatProvider {
    * never send — gets a card that can only dismiss it, the CLI's documented
    * answer for a kind the host does not render.
    */
-  private brokerDialog(sessionId: string, request: ClaudeUserDialogRequest, options: { signal: AbortSignal; requestId: string }): Promise<ClaudeUserDialogResult | null> {
+  private brokerDialog(sessionId: string, owner: () => SessionClaims, request: ClaudeUserDialogRequest, options: { signal: AbortSignal; requestId: string }): Promise<ClaudeUserDialogResult | null> {
     const requestId = options.requestId || request.toolUseID || randomUUID();
     const createdAt = this.now();
     const dialog = dialogQuestions(request);
@@ -2503,78 +2654,114 @@ export class ClaudeProvider implements ChatProvider {
       intro: dialog.intro,
       schema: { dialogKind: request.dialogKind, payload: request.payload },
     };
-    return this.awaitInteraction<ClaudeUserDialogResult>(sessionId, {
-      requestId,
-      kind: "question",
+    return this.awaitInteraction<ClaudeUserDialogResult>(owner, {
+      conversationId: sessionId,
       item,
-      input: request.payload,
-      suggestions: undefined,
-      signal: options.signal,
+      detail: {
+        input: request.payload,
+        suggestions: undefined,
+        onAnswer: (answers): ClaudeUserDialogResult => dialog.result(answers),
+        onReject: (): ClaudeUserDialogResult => ({ behavior: "cancelled" }),
+      },
+      cancellation: options.signal,
       abandoned: () => ({ behavior: "cancelled" }),
-      onAnswer: answers => dialog.result(answers),
-      onReject: () => ({ behavior: "cancelled" }),
     });
   }
 
   /**
-   * Registers one pending interaction and resolves with the request's own
-   * result when the user answers, when the turn is interrupted (the SDK
-   * aborts the signal), or when the session ends — never left hanging.
+   * Registers a card as built, as the provider always has, and returns the
+   * holder's own promise. The holder takes only plain data; the SDK's data in
+   * a card (an MCP schema, a dialog payload) is parsed JSON, so it always is.
+   * A card the holder refuses anyway (a BigInt, a cycle) could never have
+   * been shown, so its callback ends at once with the request's own
+   * abandoned result, and nothing is announced. The request's other
+   * rejection, an `abandoned` mapper that throws, cannot happen here:
+   * Claude Code's mappers return constants.
    */
-  private awaitInteraction<T>(sessionId: string, registration: {
-    requestId: string;
-    kind: "permission" | "question";
-    item: PermissionRequest | QuestionRequest;
-    input: Record<string, unknown>;
-    suggestions: unknown[] | undefined;
-    signal: AbortSignal;
-    abandoned: (reason: string) => T;
-    onAnswer?: (answers: string[][]) => T;
-    onReject?: () => T;
-  }): Promise<T> {
-    const { requestId, item } = registration;
-    return new Promise<T>(resolve => {
-      const settle = (result: T, resolution?: "answered") => {
-        if (!this.interactions.has(requestId)) return;
-        this.interactions.delete(requestId);
-        registration.signal.removeEventListener("abort", onAbort);
-        // The adapter publishes resolutions it brokered itself; only an
-        // unanswered end (abort, session death) must resolve the card here.
-        if (resolution !== "answered") {
-          this.emit(sessionId, {
-            updates: [{ kind: "upsert", item: item.type === "question"
-              ? { ...item, status: "resolved", outcome: { kind: "rejected" } }
-              : { ...item, status: "resolved", outcome: "rejected" } }],
-            outcome: "handled",
-            eventType: "interaction.abandoned",
-          });
-        }
-        resolve(result);
-      };
-      const onAbort = () => settle(registration.abandoned("The turn was interrupted before the user answered."));
-      // Registration precedes abort observation: settle() is a no-op until
-      // the map holds this request, so an abort firing between the two
-      // would strand a permanently pending card while Claude waits on the
-      // callback. An already-aborted signal settles immediately.
-      this.interactions.set(requestId, {
-        requestId,
-        conversationId: sessionId,
-        kind: registration.kind,
-        item,
-        input: registration.input,
-        suggestions: registration.suggestions,
-        ...(registration.onAnswer ? { onAnswer: registration.onAnswer as (answers: string[][]) => unknown } : {}),
-        ...(registration.onReject ? { onReject: registration.onReject as () => unknown } : {}),
-        settle: result => settle(result as T, "answered"),
-        abandon: reason => settle(registration.abandoned(reason)),
-      });
-      if (registration.signal.aborted) {
-        onAbort();
-        return;
-      }
-      registration.signal.addEventListener("abort", onAbort, { once: true });
-      this.emit(sessionId, { updates: [{ kind: "upsert", item }], outcome: "handled", eventType: "interaction.requested" });
-    });
+  private awaitInteraction<T>(owner: () => SessionClaims, registration: InteractionRegistration<ClaudeInteractionDetail, T>): Promise<T> {
+    // A callback whose session has already been swept (retired, ended,
+    // failed, replaced by a committed revert), or that arrives once the
+    // workspace is shutting down, would announce a card nothing could answer
+    // or sweep again: it ends at once with its own abandoned result,
+    // announcing nothing. A query merely displaced from the live map by a
+    // racing start is not swept, and its requests register as they always
+    // have.
+    const claims = owner();
+    if (this.disposed || claims.swept) return Promise.resolve(registration.abandoned(SESSION_GONE_REASON));
+    // Each session knows the exact registrations it made, so its cleanup
+    // ends those and no other session's, even under the same request id.
+    const token = {};
+    const settled = this.interactions.await<T>({ ...registration, detail: { ...registration.detail, claims }, token, whenRefused: () => registration.abandoned(UNSHOWABLE_INTERACTION_REASON) });
+    claims.requests.add(token);
+    const forget = () => { claims.requests.delete(token); };
+    settled.then(forget, forget);
+    return settled;
+  }
+
+  /**
+   * Marks a session swept and ends the registrations it made, visibly, in
+   * the holder's order (a redelivery keeps its original's place): every session-scoped cleanup (retire, stream
+   * end, failure, a revert's survivors, shutdown) goes through here, so one
+   * session's end never touches another's requests in the same
+   * conversation. A registration already settled or superseded is left
+   * alone. Claude Code never sweeps a whole conversation: its requests
+   * always belong to a session.
+   */
+  private sweepSession(session: LiveSession, reason: string): void {
+    session.claims.swept = true;
+    this.interactions.abandonRegistrations(session.claims.requests, reason);
+  }
+
+  /**
+   * Admits one history mutation (an undo, redo, revert or restore, or a
+   * revert's commit): refused with the disposed error, before it changes
+   * anything, once shutdown has started; otherwise tracked until it ends, so
+   * shutdown waits for it and its writes complete as they always do.
+   */
+  private async admit<T>(mutation: () => Promise<T>): Promise<T> {
+    if (this.disposed) throw new Error("Claude provider is disposed");
+    const running = mutation();
+    const tracked = running.then(() => undefined, () => undefined);
+    this.mutations.add(tracked);
+    try {
+      return await running;
+    } finally {
+      this.mutations.delete(tracked);
+    }
+  }
+
+  /**
+   * Builds a session's query. A factory that registered requests through a
+   * callback and then threw leaves no session to sweep them later, so they
+   * end here, with the failure reason, before the caller hears the error.
+   */
+  private startQuery(claims: SessionClaims, build: () => ClaudeQueryHandle): ClaudeQueryHandle {
+    try {
+      return build();
+    } catch (error) {
+      claims.swept = true;
+      this.interactions.abandonRegistrations(claims.requests, "The session failed before the user answered.");
+      throw error;
+    }
+  }
+
+  /**
+   * Runs a session's teardown while keeping it reachable for shutdown: a
+   * disposal that begins meanwhile sweeps it and waits for the close.
+   */
+  private async closeSession(session: LiveSession, teardown: () => Promise<void>): Promise<void> {
+    // Registered before the teardown starts: its first step (an interrupt)
+    // can already end the stream.
+    let finished!: () => void;
+    this.closingSessions.set(session, new Promise<void>(resolve => { finished = resolve; }));
+    try {
+      await teardown();
+    } finally {
+      // Once shutdown has started it owns the sweep: the session stays
+      // reachable for it even after its own close has finished.
+      if (!this.disposed) this.closingSessions.delete(session);
+      finished();
+    }
   }
 
   /**
@@ -2584,14 +2771,25 @@ export class ClaudeProvider implements ChatProvider {
    * mode used before planning. Either way the picker learns the new mode
    * through a configuration event, without a separate user mode change.
    */
-  private async approvePlan(sessionId: string, pending: PendingInteraction, choiceId?: string): Promise<void> {
+  private planReturnMode(sessionId: string, choiceId?: string): string {
     // Plain approval lands in the declared default mode (auto) — the same
     // mode a fresh conversation runs — while the restore intent returns to
     // whatever the conversation used before planning.
-    const returnMode = choiceId === "implement-and-restore"
+    return choiceId === "implement-and-restore"
       ? this.modeBeforePlan.get(sessionId) ?? "auto"
       : "auto";
-    pending.settle({ behavior: "allow", updatedInput: pending.input });
+  }
+
+  /** What follows the settled approval: the mode chosen in `planReturnMode`. */
+  private async approvePlan(sessionId: string, returnMode: string, asker: SessionClaims | undefined): Promise<void> {
+    // A query a racing start displaced from the live map asked: only that
+    // query switches. The conversation's saved mode, its restore intent and
+    // the published configuration belong to the live query and stay as they
+    // are, so the picker never shows a mode the live query is not in.
+    if (asker !== undefined && this.live.get(sessionId)?.claims !== asker) {
+      if (!asker.swept) await asker.query?.setPermissionMode?.(returnMode).catch(() => undefined);
+      return;
+    }
     this.modeBeforePlan.delete(sessionId);
     this.persistDurableState();
     const configuration = { ...this.configurations.get(sessionId), mode: returnMode };
@@ -2628,14 +2826,6 @@ export class ClaudeProvider implements ChatProvider {
     this.configurations.set(sessionId, configuration);
     this.persistDurableState();
     this.emit(sessionId, { updates: [], outcome: "handled", eventType: "model.fallback", configuration: { model: configuration.model } });
-  }
-
-  private requireInteraction(sessionId: string, requestId: string, kind: "permission" | "question"): PendingInteraction {
-    const pending = this.interactions.get(requestId);
-    if (!pending || pending.conversationId !== sessionId || pending.kind !== kind) {
-      throw new Error(`no pending ${kind} ${requestId} for this conversation`);
-    }
-    return pending;
   }
 
   /**
@@ -4006,17 +4196,15 @@ export class ClaudeProvider implements ChatProvider {
     // child's status is the last thing this query says about it.
     this.settleChildren(session, "interrupted");
     this.live.delete(session.id);
+    this.startedSessions.delete(session);
     this.foldSessionTotals(session);
-    this.abandonInteractions(session.id, "The turn ended before the user answered.");
-    session.queue.close();
-    await session.query.return?.().catch(() => undefined);
-  }
-
-  /** A session that ends cannot answer: its pending cards resolve visibly. */
-  private abandonInteractions(sessionId: string, reason: string): void {
-    for (const pending of [...this.interactions.values()]) {
-      if (pending.conversationId === sessionId) pending.abandon(reason);
-    }
+    // Once shutdown has started, its single ordered sweep takes the
+    // session's requests; closeSession keeps it reachable for that.
+    if (!this.disposed) this.sweepSession(session, "The turn ended before the user answered.");
+    await this.closeSession(session, async () => {
+      session.queue.close();
+      await session.query.return?.().catch(() => undefined);
+    });
   }
 
   private emit(conversationId: string, normalized: Omit<NormalizedProviderEvent, "conversationId">): void {
@@ -4505,21 +4693,32 @@ function defaultForkSession(sessionId: string, options: { upToMessageId: string;
   return forkSession(sessionId, { upToMessageId: options.upToMessageId, dir: options.dir, ...(options.title ? { title: options.title } : {}) });
 }
 
-type PendingInteraction = {
-  requestId: string;
-  conversationId: string;
-  kind: "permission" | "question";
-  item: PermissionRequest | QuestionRequest;
+/** Why a request that arrives after its session was swept ends at once. */
+const SESSION_GONE_REASON = "The session ended before the request could be shown.";
+
+/** Why a request whose card the holder refuses ends at once. */
+const UNSHOWABLE_INTERACTION_REASON = "The request could not be shown to the user.";
+
+/** What a Claude Code request keeps for its reply; the shared holder carries it unread. */
+type ClaudeInteractionDetail = {
+  // The tool's input, echoed back on allow, and the SDK's permission
+  // suggestions an always reply filters.
   input: Record<string, unknown>;
   suggestions: unknown[] | undefined;
   // For a question: how the shared answer shape becomes this request's own
   // result (a tool allow, an MCP accept, a dialog choice), and what a
   // rejection returns.
-  onAnswer?: (answers: string[][]) => unknown;
-  onReject?: () => unknown;
-  settle: (result: unknown) => void;
-  abandon: (reason: string) => void;
+  onAnswer?: (answers: string[][]) => ClaudeInteractionResult;
+  onReject?: () => ClaudeInteractionResult;
+  // The session that asked, set at registration: a plan approval switches
+  // the mode of that query, not whichever is live for the conversation.
+  claims?: SessionClaims;
+  // For a plan card: the mode its restore intent offered when announced.
+  restoreMode?: string;
 };
+
+/** Every result a Claude Code request settles with; none is a promise. */
+type ClaudeInteractionResult = ClaudePermissionResult | ClaudeElicitationResult | ClaudeUserDialogResult;
 
 /**
  * An elicitation's JSON schema → question steps, one per property, with a
@@ -4773,54 +4972,6 @@ function permissionResources(input: Record<string, unknown>, options: ClaudeCanU
     resources.push(compact && compact !== "{}" ? (compact.length > 200 ? `${compact.slice(0, 199)}…` : compact) : "(no arguments)");
   }
   return [...new Set(resources)];
-}
-
-/** An async queue that producers push into and one consumer iterates. */
-class PushQueue<T> implements AsyncIterable<T> {
-  private readonly values: T[] = [];
-  private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
-  private closed = false;
-
-  push(value: T): void {
-    if (this.closed) return;
-    const waiter = this.waiters.shift();
-    if (waiter) waiter({ value, done: false });
-    else this.values.push(value);
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
-  }
-
-  /**
-   * Ends every outstanding read without closing: banked values stay for
-   * the next consumer. What an aborted subscriber's replacement needs.
-   */
-  detachWaiters(): void {
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
-  }
-
-  take(): Promise<IteratorResult<T>> {
-    return this[Symbol.asyncIterator]().next();
-  }
-
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return {
-      next: (): Promise<IteratorResult<T>> => {
-        const value = this.values.shift();
-        if (value !== undefined) return Promise.resolve({ value, done: false });
-        if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
-        return new Promise(resolve => this.waiters.push(resolve));
-      },
-      return: async (): Promise<IteratorResult<T>> => {
-        this.close();
-        return { value: undefined as never, done: true };
-      },
-    };
-  }
 }
 
 /** Mirrors the attachment store's home: uatu's state, keyed by workspace. */

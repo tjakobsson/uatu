@@ -356,19 +356,274 @@ required field keeps clients from inventing a fallback command.
 map and its rules out of the Claude Code provider:
 
 - each request settles once, by answer, abandonment or cancellation;
+- a signal is heard twice: on the source itself, in its listeners' order as
+  before (a listener added after registration runs once the holder has
+  cancelled, so its reply is refused), and through a dependent signal
+  (`AbortSignal.any([signal])`) whose own abort event no listener on the
+  source can suppress: it fires synchronously inside the source's `abort()`,
+  after the source's own listeners, even when one of them calls
+  `stopImmediatePropagation`. Whichever is heard first delivers the cancel;
+  the other does nothing. An abort while the listeners are being attached is
+  caught by a recheck once both are in place and delivered the same way. Every abort is then a cancel queued like any other
+  call, in FIFO order, and reads (`require`, `list`) are plain snapshot reads
+  that see the request until that cancel runs. Both listeners are released
+  once, when the request settles. A signal already aborted at registration
+  settles the request at once, unannounced, as before;
 - registration happens before the cancellation trigger is observed, and an
-  already-fired trigger settles at once;
+  already-fired trigger settles at once, unannounced, emitting only
+  `interaction.abandoned`, ahead of any call made meanwhile. A signal has
+  fired when it is already aborted; a subscribe function reports a
+  cancellation that came before registration (ACP's `session/cancel`
+  arriving first) by returning `"cancelled"` instead of an unsubscribe. A
+  `cancel` call, even during subscription, is a new cancellation and an
+  operation of its own (see serialization below), so it waits behind calls
+  made before it;
 - `interaction.requested` is emitted on registration, `interaction.abandoned`
   (with the resolved, rejected card) on any unanswered end, and an answer
   emits nothing, because the adapter publishes resolutions it brokered;
-- `abandon(conversationId, reason)` covers dispose, session end and failure,
-  with today's reasons;
+- an answer's result type is not linked to the request's: replies arrive by
+  conversation, request id and kind, with no typed handle, so the provider
+  keeps them consistent with the request's `abandoned` result, and the
+  holder checks at run time only that a result is synchronous and plain;
+- `answer(conversationId, requestId, kind, map)` is the reply path: it claims
+  the request, calls the agent's `map` inside the operation, and settles with
+  its result, so a cancel `map` causes finds the request settled. It returns a
+  promise for that answer's own outcome, settled once its turn has run. A
+  `map` that throws (an answer the request refuses) releases the claim: the
+  request stays pending, nothing is emitted, and the promise rejects with the
+  error, as it does with today's error when no such request is pending;
+- `abandon(conversationId, reason)` ends a whole conversation's requests, for
+  a provider whose conversation is its session. A registration may carry a
+  caller's `token`; `abandonRegistrations(tokens, reason)` ends exactly
+  those registrations, visibly and in the holder's own order (a redelivery
+  keeps its original's place), leaving any already settled or superseded;
+  it reads the tokens inside its own turn, so anything their iteration sets
+  off waits behind it. A Claude Code session's claims (its tokens and its
+  swept mark) exist before its query is built, so a callback the query
+  factory fires at once is owned too. Shutdown sweeps every tracked session
+  of a conversation (live, displaced, closing) in one call, conversation by
+  conversation, each followed by its lost wakeups, so a conversation's
+  requests end in the holder's order whichever session asked them.
+  Claude Code sweeps by session, never by conversation: each session records
+  the tokens of the registrations it made, and every session-scoped cleanup
+  (retire, stream end, failure, a revert's survivors, dispose) ends only
+  those, with today's reasons, so one session's end never touches another
+  session's requests in the same conversation, even under the same request
+  id;
 - `list(kind)` serves reconnect recovery;
 - `require(conversationId, requestId, kind)` looks requests up by conversation,
-  request and kind, and throws today's error when they do not match.
+  request and kind, and throws today's error when they do not match. Requests
+  are keyed by all three, where the Claude Code provider keyed them by request
+  id alone: there, a second conversation's request, or a question, with the
+  same id overwrote the first, which then could not be answered, listed or
+  abandoned. Now they stay independent. Claude Code's ids are unique, so this
+  changes nothing for it;
+- operations are serialized. Registration, an answer, an abandonment, a sweep
+  and a cancel each run as one operation. Settlement is claimed before any
+  agent code (a mapper, an unsubscribe, a subscribe function) runs, so the
+  first end wins. A call into the holder that agent code makes during an
+  operation is deferred, and deferred calls run in order, synchronously,
+  before the outermost operation returns; a deferred `await` behaves as if it
+  had been called then. A sweep ends the requests it finds, and a request
+  delivered during it registers afterwards as a new request: the holder knows
+  conversations, not sessions, so keeping a late request out of an ended
+  session is its provider's job. `require` and `list` are reads and run at
+  once, even when called back in during an operation; this is an approved
+  decision: they see the holder's current state, so a mutation still queued
+  (a registration a mapper made, say) is not visible to them until it has
+  run, before the outermost operation returns. The Claude Code provider's callbacks never call back in, so nothing
+  changes for it;
+- a request redelivered with the same conversation, kind and request id while
+  the original waits replaces it, as today: the new card is announced, and
+  replies, lists and abandonment reach it. Unlike before, the original no
+  longer hangs: once the new request is announced, the original settles
+  quietly through its own abandoned result, emitting nothing (an abandoned
+  card would reject the id the new request shows), and its trigger is
+  released. That gives the one intended visible difference under newest
+  wins: before, a late abort of the original deleted the replacement and
+  emitted `interaction.abandoned` for the shared card, so the next reply
+  failed; now the replacement stays visible and answerable. A subscribe
+  function that throws rejects the new request, unannounced, and restores the
+  original as it was; cancels delivered meanwhile then apply in order, so the
+  original's own cancel abandons it visibly. An already-aborted new request is
+  abandoned visibly, and the original is superseded quietly;
+- an agent's `abandoned` mapper that throws, or returns a thenable (or a
+  result whose `then` cannot be inspected, by the same descriptor check as an
+  answer's, running no code), still ends its request: the entry is removed,
+  its trigger released, the abandoned card emitted (except on quiet
+  supersession), and the request's promise rejects with the mapper's error
+  or a `TypeError`, never adopting the thenable. Its type is synchronous, as
+  an answer mapping's and `whenRefused`'s are. One helper is the only place
+  the agent's promise is settled; its last step is that check, right before
+  `resolve` and after every callback (an unsubscribe, an emit) that could
+  have changed the result, so settlement adopts a thenable on no path;
+  an `abandon` sweep goes on to the next request. Each trigger is released at
+  most once;
+- each call's error reaches that call's own caller. `answer` rejects its own
+  promise. An `await` promise rejects in three cases, which a provider must
+  handle: the registration was refused (a field that throws, a card that is
+  not plain data, an unsupported kind, a request id that is not a string, a
+  conflicting owner; see below), its subscribe function threw (after the rollback
+  described below, and never through `whenRefused`), or the agent's `abandoned`
+  mapper threw when the request ended. A refused registration registers and
+  emits nothing. Every registration field is read once, and a field that
+  cannot be read rejects the request. A registration that gives
+  `whenRefused` settles with that result instead of rejecting only when its
+  card's data is refused (Claude Code's resolves with the request's own
+  abandoned result, on the holder's own promise, so its timing is unchanged); only failures after registration, such as an emit, follow
+  the reporting rules below. A call that ran at once (an `abandon`, a
+  `settle`, a handle's `abandon`, a trigger's cancel) throws its first error after the calls it deferred have
+  run. A cancel delivered by a signal has no caller either (EventTarget would
+  surface a rethrow as uncaught), so its errors go to `report` too. A call
+  that was deferred has already returned, so its failure goes to the holder's
+  `report` option (`console.error` by default). A reporter that
+  throws falls back to `console.error`, and the holder keeps draining its
+  queue whatever throws;
+- cards must be plain data: the card and everything in it are strings,
+  numbers (any number, `Infinity`, `NaN` and `-0` included, copied
+  faithfully), booleans, null, arrays without holes, and objects whose
+  prototype is `Object.prototype` or null, with string keys and enumerable
+  data properties only; an object property may be `undefined` for an absent
+  optional field. No accessor is allowed at any depth, and no getter is ever
+  run: registration reads each property once from its descriptor while it
+  copies the card. Anything else (a Proxy, detected without running a trap,
+  a class instance, an accessor, a `Map`, a function, a cycle) is refused at
+  registration. A cycle is a back-edge to a node still being copied; a node
+  shared by several fields is not one: it is read and copied once, and the
+  copy keeps that sharing, as `structuredClone` does for every later copy. The identity comes from that
+  copy, read as own data only (a field the card left out is absent, whatever a
+  prototype provides; the same holds for every later read of the copy): the
+  kind must be `permission` or `question` and the request id a
+  string (the empty one included, which Claude Code's tool requests may
+  carry), and an owner the card names (`conversationId`, which the UI
+  addresses replies to) must be the conversation it is registered under. A
+  card naming none stays without one, as Claude Code's do. The holder keeps
+  the copy private: `list` and both announcements get fresh copies, and
+  `require` and an answer's mapper get a fresh frozen handle (the request's
+  identity, a copy of the card, its detail, and `settle`/`abandon`). The
+  holder's own paths (triggers, sweeps, supersession) never go through a
+  handle, so nothing a caller does to one reaches them. Claude Code registers
+  its cards as built, so in-process payloads and lists are what they were (an
+  MCP schema's `Infinity` stays `Infinity`; only the wire turns it into
+  `null`, as before). The SDK's data is parsed JSON and so plain data; a card
+  the holder refuses anyway (a BigInt, a cycle) could never have been shown,
+  so its callback ends at once with the request's own abandoned result and
+  nothing is announced. Claude Code's history is read from transcripts, not
+  the holder;
+- per-session cleanup, approved as a deliberate difference: when two Claude
+  Code queries for one conversation race, ending one never abandons another
+  query's requests while that query is still running (before, a session's
+  end swept the whole conversation);
+- one deliberate change to Claude Code behaviour, approved, which predates
+  this change: a tool, elicitation or dialog callback whose session has
+  already been swept no longer registers. Disposal sweeps a session's
+  requests before it interrupts the query, so a callback arriving during
+  shutdown, with a signal that never aborts, used to announce a card after
+  the sweep that stayed pending forever. Every path that sweeps a session
+  marks that session object as swept, and the provider is marked disposed at
+  the start of `dispose()`. A callback refuses only when its own session is
+  marked swept or the provider is disposed: it resolves at once with its own
+  abandoned result and announces nothing. Committing a staged revert marks
+  the live session swept, interrupts it (the SDK's abort ends its pending
+  requests with the interrupted reason, as before), then sweeps any survivor
+  with the retire reason before the replacement starts, since its stream's
+  end no longer does. Startup is otherwise exactly as before, races
+  included: a query a racing start displaces from the live map is not swept
+  while it runs, so its requests register and work as they always have.
+  Every started session is tracked until it ends, displaced ones included,
+  and each knows its own pending requests: when a displaced session's stream
+  ends or fails, its own requests are swept and it is marked, leaving the
+  live session's alone, and `dispose()` sweeps, marks and closes every
+  tracked session, so no agent process outlives the workspace. A teardown
+  already under way (a retire, a revert's close) keeps its session reachable
+  until it finishes; `dispose()` sweeps it and awaits that close before it
+  returns. A session closing for a revert is swept by the revert, with the
+  retire reason, even if its stream ends during the interrupt, unless
+  shutdown has started, which then sweeps it (see below). A query factory that
+  registers a request through a callback and then throws leaves no session
+  behind, so its claims are swept with the failure reason before the caller
+  hears the error. A plan approval asked by the conversation's live query
+  behaves exactly as before (that query switches, the return mode is saved,
+  the restore intent cleared, `plan.approved` published). One asked by a
+  displaced query switches only that query (its claims carry it), leaving
+  the conversation's saved mode, restore intent and published configuration
+  as they are, and restores the mode its own card offered (captured when the
+  card was announced), not the conversation's restore intent, which the live
+  query's approval may already have cleared; one whose query has ended
+  switches nothing. An approved difference: a displaced query's approval
+  emits no `plan.approved` and leaves the conversation's mode unchanged.
+  Once shutdown has started, no session-scoped cleanup sweeps on its own (a
+  revert closing its session, a retirement, a stream's end or failure): the
+  session stays reachable for shutdown's single ordered sweep, which
+  includes closing sessions, so their requests end with the shutdown reason
+  and in the holder's order. Shutdown settles the lost wakeups of every
+  session it closes, displaced and closing ones included, after its
+  conversation's sweep: the live session first, then the others in the
+  order they were tracked. History mutations are fenced and drained, in two
+  cases. One that has not changed anything yet may be refused safely: a new
+  undo, redo, revert, restore or revert commit once shutdown has started,
+  or a cold undo whose start is refused at its transcript check, fails with
+  the disposed error before any side effect. One that has changed state must
+  finish or roll back, and `dispose()` waits for it: admitted undo, redo,
+  revert and restore operations (their write-ahead and corrective writes
+  complete normally), and a replacement prompt that committed a staged
+  revert, tracked until it is accepted or its rollback is written (shutdown
+  waits for it after its sweep, since the commit closes a live session).
+  No write of the provider lands after `dispose()` returns, and a durable
+  write never reports success without writing. A failed prompt that changed
+  nothing durable (a start refused by shutdown, say) writes nothing, so a
+  retired provider never overwrites a replacement's newer state. A start still waiting when the workspace shuts
+  down (on its transcript check, its last wait) starts no query and fails
+  its caller as a disposed provider does;
+- the Claude Code provider's replies keep their timing. A reply the adapter
+  makes runs at once, so the provider learns the holder's own outcome
+  synchronously through `tryAnswer` (settled, refused with its error, or
+  deferred with a promise): today's "no pending" error, a refused answer and
+  a result the holder refuses throw from the reply method as before, a plan
+  switches modes only after its approval actually settled, and each reply settles in the same microtask turn it always
+  did, so concurrent replies resolve in the order they were made;
+- an answer's mapping is synchronous, and every result (an answer's, a
+  `settle`'s, an `abandoned` or `whenRefused` mapping's) must be one whose
+  resolution can run no code: a primitive, or an object that is not a Proxy,
+  whose prototype chain, walked as it actually is, holds only
+  `Array.prototype` and `Object.prototype` (each at most once) before null,
+  with no `then` on the object or any link, read by descriptor. The Proxy check comes first and runs no trap
+  (`types.isProxy` from `node:util`); the prototype is then read with
+  `Object.getPrototypeOf` and `then` by descriptor, both guarded, so none of
+  the result's code runs. Anything else (a Proxy, a promise, a class
+  instance, an object inheriting from a Proxy, an own `then` of any kind, a
+  result that cannot be inspected) is refused. On an
+  answer this is like an answer the request does not accept (the claim
+  released, the request left pending, nothing emitted, the call rejected with
+  a `TypeError`); a handle's `settle` throws the `TypeError`. Claude Code's
+  results (allow and deny with `updatedInput` and `updatedPermissions`, MCP
+  accept, decline and cancel, dialog results, plan approval) are all object
+  literals, so they pass. A custom `then` is never called, and no species
+  code runs. The holder contains the rejection of a refused promise, through
+  the `then` and species getter captured at module load, only when it is an
+  exact same-realm `Promise` (prototype `Promise.prototype`, no own
+  `constructor`), `Promise.prototype.constructor` is still `Promise`, and the
+  species getter is still the original; otherwise, and for every other
+  refused thenable (a `Promise` subclass, another realm's promise, a custom
+  thenable), handling its eventual rejection is the mapper's responsibility.
+  An answer settles the agent's promise before any cleanup (its unsubscribe)
+  runs, so cleanup cannot change a checked result; answers publish nothing,
+  so the order of everything observable is unchanged. Every abandonment,
+  quiet supersession included, settles after its cleanup, so its result is
+  checked as cleanup left it. The type refuses
+  promise-returning mappings at compile time;
+- publication never blocks settlement. An `emit` that throws leaves the
+  request settled with its result or its mapper's error (or, for
+  `interaction.requested`, registered and listed for recovery), and the
+  operation and any sweep continue. The error is the running call's,
+  delivered as above. An unsubscribe that throws is different: cleanup is
+  best-effort and no caller's outcome depends on it, so its error always
+  goes to `report`. `await` never throws: its caller holds
+  only the request's promise, so a publication failure during it goes to
+  `report`.
 
 The cancellation trigger is explicit: an `AbortSignal`, or a subscribe function
-that returns an unsubscribe. The Claude Agent SDK gives a signal, while the
+that returns an unsubscribe (or `"cancelled"`). The Claude Agent SDK gives a signal, while the
 Agent Client Protocol cancels with a `session/cancel` notification. The push
 event queue (`PushQueue`) moves to its own module next to it. Agent-specific
 payloads (permission suggestions, `onAnswer` and `onReject`) remain fields the

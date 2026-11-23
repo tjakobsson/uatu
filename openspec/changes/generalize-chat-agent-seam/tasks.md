@@ -39,8 +39,8 @@ own. The Antigravity pull request (`add-antigravity-chat`, head
 
 ## 4. Shared pending-interactions holder (commit 4)
 
-- [ ] 4.1 Extract `PendingInteractions` and the push queue from `src/chat/claude/provider.ts`, with an explicit cancellation trigger (an `AbortSignal` or a subscribe function). Verify with direct unit tests for settle-once, registration before an already-fired trigger, requested/abandoned emission with nothing emitted on answer, abandonment by conversation, listing, and lookup mismatches.
-- [ ] 4.2 Switch the Claude Code provider to the holder. Verify that `src/chat/claude/provider.test.ts` passes unchanged and that `bun run test:ci` passes.
+- [x] 4.1 Extract `PendingInteractions` and the push queue from `src/chat/claude/provider.ts`, with an explicit cancellation trigger (an `AbortSignal` or a subscribe function). Verify with direct unit tests for settle-once, registration before an already-fired trigger, requested/abandoned emission with nothing emitted on answer, abandonment by conversation, listing, and lookup mismatches.
+- [x] 4.2 Switch the Claude Code provider to the holder. Verify that `src/chat/claude/provider.test.ts` passes unchanged and that `bun run test:ci` passes.
 
 ## 5. E2E harness routes any agent (commit 5)
 
