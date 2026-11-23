@@ -622,7 +622,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
   // without every spec spelling `agent:` explicitly.
   // Ids qualify by the production wire rule (the first colon); a qualifier
   // that names no registered fake is rejected rather than routed to the first.
-  const usageId = body.action === "usageRead" ? body.outcome?.conversationId : body.action === "usageReport" ? body.report?.conversationId : undefined;
+  const usageId: unknown = body.action === "usageRead" ? body.outcome?.conversationId : body.action === "usageReport" ? body.report?.conversationId : undefined;
+  if (usageId !== undefined && typeof usageId !== "string") {
+    return Response.json({ error: `conversationId must be a string, not ${JSON.stringify(usageId)}` }, { status: 400 });
+  }
   for (const id of [body.conversationId, usageId]) {
     if (typeof id !== "string") continue;
     // A colon makes an id qualified; one the wire rule cannot parse (an
