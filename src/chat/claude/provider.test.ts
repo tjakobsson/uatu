@@ -6973,6 +6973,57 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a session left for a cancel is reconciled for the whole grace, even after the cancel has finished", async () => {
+    const { provider, events, stop, query, queries, session, workspace } = await scheduled([oneShot, recurring]);
+    // Another conversation's prompt, reading its attachment, keeps the grace
+    // open after the cancel is done.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    queries.at(-1)!.consumeInput();
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    await settledWrites(provider);
+    const hold = holdNextWrite();
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      // The cancel's write is in flight at shutdown, so its session is left
+      // for the end; then the cancel finishes inside the grace.
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await cancelling;
+      // The other wakeup fires in the grace and the CLI's Stop drops it.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ continue: true });
+      await stopHook(query, { session_crons: [recurring] });
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      hold.restore();
+      fsPromises.readFile = readFile;
+    }
+    const statuses = (wakeupId: string) => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === `wakeup:${wakeupId}`)
+      .map(update => (update as { item: { status: string } }).item.status);
+    expect(statuses("c1")).toContain("cancelled");
+    expect(statuses("w1").at(-1)).toBe("fired");
+    expect(statuses("w1")).not.toContain("lost");
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();

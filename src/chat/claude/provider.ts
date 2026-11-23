@@ -312,6 +312,10 @@ type LiveSession = {
   releasing?: boolean;
   cancelling?: number;
   released?: boolean;
+  // Left by shutdown's sweep for its end, because its own release or cancel
+  // was under way then: set for the rest of shutdown, after that operation
+  // finishes too.
+  deferredAtShutdown?: boolean;
   // Wakeups shutdown has reported lost or paused, by id with their prompt:
   // they stay settled, and none of them fires during the grace.
   settledAtShutdown?: Map<string, string>;
@@ -1810,8 +1814,10 @@ export class ClaudeProvider implements ChatProvider {
       for (const session of group) {
         this.cancelSessionWindowRead(session);
         this.clearIdleTimer(session);
-        if (session.releasing || session.cancelling) deferred.push(session);
-        else this.emitLostWakeups(session);
+        if (session.releasing || session.cancelling) {
+          session.deferredAtShutdown = true;
+          deferred.push(session);
+        } else this.emitLostWakeups(session);
       }
     };
     for (const session of sessions) endConversation([session, ...others.filter(other => other.id === session.id)]);
@@ -3099,16 +3105,17 @@ export class ClaudeProvider implements ChatProvider {
     // A session shutdown has swept: a wakeup it has reported stays settled,
     // and one first seen now is reported the way shutdown reports it, lost
     // or paused, at once.
-    if (this.disposed && !session.releasing && !session.cancelling) {
+    if (this.disposed && !session.deferredAtShutdown) {
       for (const [wakeupId, wakeup] of next) {
         if (!session.settledAtShutdown?.has(wakeupId) && !session.wakeups.has(wakeupId)) session.wakeups.set(wakeupId, wakeup);
       }
       this.emitLostWakeups(session);
       return;
     }
-    // A session its own release or cancel owns is reconciled as usual, so
-    // shutdown settles at the end only the wakeups still pending: one that
-    // fired in the grace keeps its fired row.
+    // A session the sweep left for shutdown's end (its own release or cancel
+    // was under way) is reconciled as usual for the whole grace, even once
+    // that operation has finished, so shutdown settles at the end only the
+    // wakeups still pending: one that fired in the grace keeps its fired row.
     // A fire attributed to a one-shot this Stop still lists went to a
     // same-prompt sibling that is gone: the disappearance is the CLI's word
     // on which one fired, so the fire moves there and its header follows.
