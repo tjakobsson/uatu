@@ -499,6 +499,12 @@ async function handleE2EChat(request: Request): Promise<Response> {
     if (typeof body.conversationId === "string" && hasEmptyReservedQualifier(body.conversationId)) {
       return Response.json({ error: `malformed conversation id ${JSON.stringify(body.conversationId)}` }, { status: 400 });
     }
+    // The scripted server is OpenCode's; another registered agent's id is
+    // never one of its sessions.
+    const scriptedOwner = typeof body.conversationId === "string" ? qualifyingAgent(body.conversationId) : undefined;
+    if (scriptedOwner !== undefined && scriptedOwner !== OPENCODE_AGENT.id) {
+      return Response.json({ error: `${body.conversationId} belongs to ${scriptedOwner}, not the scripted OpenCode server` }, { status: 400 });
+    }
     if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
     switch (body.op) {
       case "losePromptResponse":
