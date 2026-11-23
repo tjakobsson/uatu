@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ClientError } from "@opencode/client";
@@ -13391,6 +13391,101 @@ describe("OpenCodeV2Provider session moves and active sessions", () => {
       await recovery?.catch(() => undefined);
       await provider.dispose();
       fake.stop();
+    }
+  });
+
+  test("move-in via a symlink-alias directory rejected by V2 provider does not seed stuck working state", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-v2-symlink-move-"));
+    const realDir = path.join(root, "real-ws");
+    const aliasDir = path.join(root, "alias-ws");
+    await mkdir(realDir);
+    await symlink(realDir, aliasDir);
+
+    let childDirectory = realDir;
+    let send!: (frame: unknown) => void;
+    let resolveConnected!: () => void;
+    const connected = new Promise<void>(resolve => { resolveConnected = resolve; });
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const activeProbes: string[] = [];
+    const taskScheduler: import("../../task-scheduler").ChatTaskScheduler = {
+      run: async (name, work) => {
+        if (name.startsWith("active.probe:")) activeProbes.push(name);
+        try { return await work(); }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          send = frame => controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
+          send({ type: "server.connected", data: {} });
+          resolveConnected();
+        },
+      }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session": () => ({ data: [session("ses_parent", { location: { directory: realDir } })], cursor: { next: null } }),
+      "GET /api/session/ses_parent": () => session("ses_parent", { location: { directory: realDir } }),
+      "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent", location: { directory: childDirectory } }),
+      "GET /api/session/active": () => ({ ses_child: { status: "running" } }),
+      "GET /api/session/ses_parent/message": () => ({ data: [], cursor: { next: null } }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    });
+    const provider = server.provider(realDir);
+    const adapter = new ChatAdapter({ provider, workspacePath: realDir, coalesceWindowMs: 0, taskScheduler });
+    const pump = adapter.startEventPump();
+    try {
+      await connected;
+      const startedDone = waitForEvent("session.execution.started");
+      send({
+        id: "evt_start",
+        created: Date.now(),
+        type: "session.execution.started",
+        location: { directory: realDir },
+        data: { sessionID: "ses_child" },
+      });
+      await startedDone;
+      expect(adapter.activity().working).toBe(true);
+
+      // Child moves out, then moves "back" to a symlink-alias path that V2's owns()/foreign() reject.
+      childDirectory = aliasDir;
+      const moveOutDone = waitForEvent("session.moved");
+      send({
+        id: "evt_out",
+        created: Date.now(),
+        type: "session.moved",
+        location: { directory: "/tmp/uatu-elsewhere" },
+        data: { sessionID: "ses_child", location: { directory: "/tmp/uatu-elsewhere" }, projectID: "proj_1" },
+      });
+      await moveOutDone;
+      expect(adapter.activity().working).toBe(false);
+
+      const moveBackDone = waitForEvent("session.moved");
+      send({
+        id: "evt_alias",
+        created: Date.now(),
+        type: "session.moved",
+        location: { directory: aliasDir },
+        data: { sessionID: "ses_child", location: { directory: aliasDir }, projectID: "proj_1" },
+      });
+      await moveBackDone;
+      expect(adapter.activity().working).toBe(false);
+      expect(activeProbes).toEqual([]);
+    } finally {
+      await adapter.dispose();
+      await Promise.allSettled([pump]);
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

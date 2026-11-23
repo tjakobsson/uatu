@@ -7199,7 +7199,7 @@ export class ChatAdapter {
     }
     if (lifecycle.kind === "moved") {
       const inWorkspace = await this.isInWorkspace(lifecycle);
-      if (!inWorkspace) {
+      const finishMovedOut = async (): Promise<false> => {
         this.cancelRevertReconciliation(lifecycle.id);
         const wasListed = this.listedSessions.delete(lifecycle.id);
         const previous = this.inventorySessions.get(lifecycle.id);
@@ -7216,24 +7216,43 @@ export class ChatAdapter {
         }
         await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal);
         return false;
+      };
+      if (!inWorkspace) return finishMovedOut();
+      const moveInStarted = ++this.presenceClock;
+      let confirmed: ProviderSession | null | undefined;
+      try {
+        confirmed = await this.provider.getSession(lifecycle.id);
+      } catch {
+        confirmed = undefined;
       }
-      const parentId = await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null);
+      if (confirmed === null || (confirmed !== undefined && !await this.isInWorkspace(confirmed, false))) {
+        if (this.presenceSequence(lifecycle.id) <= moveInStarted) this.forgetActivity(lifecycle.id);
+        return finishMovedOut();
+      }
+      const parentId = confirmed !== undefined
+        ? (confirmed.parentId ?? null)
+        : this.sessionParents.get(lifecycle.id) ?? null;
+      if (confirmed !== undefined) {
+        boundedSet(this.sessionParents, lifecycle.id, parentId, INVENTORY_SESSION_LIMIT);
+      }
       const previous = this.inventorySessions.get(lifecycle.id);
       const next: InventorySessionMetadata = {
         inWorkspace: true,
         parentId,
-        title: previous?.title ?? lifecycle.title,
+        title: previous?.title ?? confirmed?.title ?? lifecycle.title,
         deleted: false,
       };
       // Fence any concurrent stale lookup or list cleanup from before move-in.
       this.bumpStatusSequence(lifecycle.id);
-      this.bumpPresenceSequence(lifecycle.id);
+      this.bumpPresenceSequence(lifecycle.id, moveInStarted);
       this.rememberInventorySession(lifecycle.id, next, true);
       if (parentId === null) {
         boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
         this.scheduleBackgroundRecovery(lifecycle.id);
       }
-      void this.runTask(`active.probe:${lifecycle.id}`, () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal));
+      if (confirmed !== undefined) {
+        void this.runTask(`active.probe:${lifecycle.id}`, () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal));
+      }
       return true;
     }
     // A sparse update names only what changed (2.x's rename: id and title).

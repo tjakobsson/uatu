@@ -13722,7 +13722,17 @@ describe("workspace activity summary", () => {
   });
 
   test("server.connected reconciles missed moves out without fabricating unobserved runs", async () => {
-    const { adapter, provider } = activityAdapter();
+    const tasks = new Map<string, Promise<unknown>>();
+    const taskScheduler: ChatTaskScheduler = {
+      run(name, work) {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        return result;
+      },
+      setTimeout(_name, work, delay) { return setTimeout(work, delay); },
+      clearTimeout(timer) { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
     provider.waitForEventStream = async () => {};
     const movedAway = fixtureSession("moved-away");
     const unobserved = fixtureSession("unobserved");
@@ -13731,12 +13741,18 @@ describe("workspace activity summary", () => {
     expect(adapter.activity().working).toBe(true);
 
     // On reconnect, moved-away is gone from this workspace while unobserved never emitted a live start or move-in.
+    // Gate listSessions so we assert only after stream.discovery itself completes.
+    let resolveDiscoveryList!: (sessions: ProviderSession[]) => void;
     provider.sessions = [unobserved];
+    provider.listSessions = () => new Promise<ProviderSession[]>(resolve => { resolveDiscoveryList = resolve; });
     provider.listActiveSessions = async () => ["unobserved", "foreign-active"];
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
 
-    await waitUntil(() => adapter.projectionForTests("moved-away").status === "idle");
+    await waitUntil(() => resolveDiscoveryList !== undefined && tasks.has("stream.discovery"));
+    resolveDiscoveryList([unobserved]);
+    await tasks.get("stream.discovery");
+    expect(adapter.projectionForTests("moved-away").status).toBe("idle");
     expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests("unobserved").status).toBe("idle");
     expect(adapter.projectionForTests("foreign-active").status).toBe("idle");
