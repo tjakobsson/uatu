@@ -4902,8 +4902,16 @@ describe("ClaudeProvider sessions", () => {
   });
 
   test("a replacement prompt paused at its transcript check when disposal starts is waited for: its rollback lands before dispose returns, nothing after", async () => {
-    const { forking, storedId, forkId, workspace } = revertingProvider();
+    // The undo captures a file, so the staged record carries a recovery
+    // snapshot as well as its boundary.
+    const { forking, storedId, forkId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => ({ ...(await rewind(uuid, options)), filesChanged: ["notes.txt"] });
+    });
+    writeFileSync(path.join(workspace, "notes.txt"), "tip");
     await forking.undo!(storedId);
+    const stagedBefore = stateOnDisk(workspace).staged[storedId] as { boundaryIndex: number; tipSnapshot: Record<string, unknown> };
+    expect(Object.keys(stagedBefore.tipSnapshot)).toEqual([path.join(workspace, "notes.txt")]);
     const access = fsPromises.access;
     const writeFile = fsPromises.writeFile;
     let reached: (() => void) | undefined;
@@ -4938,8 +4946,10 @@ describe("ClaudeProvider sessions", () => {
       fsPromises.writeFile = writeFile;
     }
     expect(writesAfterDispose).toEqual([]);
-    // The rollback was recorded: the revert is staged again, uncommitted.
-    expect(stateOnDisk(workspace).staged[storedId]).toEqual(expect.not.objectContaining({ commit: expect.anything() }));
+    // The rollback was recorded: the original boundary and recovery
+    // snapshot are on disk as they were before the commit, with only the
+    // commit marker gone.
+    expect(stateOnDisk(workspace).staged[storedId]).toEqual(stagedBefore);
   });
 
   test("a history mutation started after disposal is refused before any side effect", async () => {
