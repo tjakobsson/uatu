@@ -3422,8 +3422,10 @@ export class ClaudeProvider implements ChatProvider {
     if (!session) return;
     // The whole release is one admitted operation, which shutdown waits for
     // and which decides its session's wakeups: released, or (refused or
-    // failed) left to shutdown to report lost. It never waits on a callback
-    // or, once shutdown has started, on a close, so waiting cannot deadlock.
+    // failed) left to shutdown to report lost. It never waits on a callback.
+    // In the grace it can still reach retireSession() and await the SDK's
+    // close; the grace bounds shutdown's first wait for it, and shutdown's
+    // close step waits for that close within the SDK's close budget.
     session.releasing = true;
     try {
       await this.admit(() => this.releaseAdmitted(session));
