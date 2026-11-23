@@ -74,6 +74,11 @@ test.describe("multi-agent chat", () => {
       { action: "status", conversationId: "claud:conversation-1", status: "idle" },
       { action: "usageRead", outcome: { outcome: "fail", conversationId: "claud:conversation-1" } },
     ]) expect((await request.post("/__e2e/chat", { data })).status()).toBe(400);
+    // An explicit agent that disagrees with the id's owner is rejected too.
+    for (const data of [
+      { action: "status", agent: "opencode", conversationId: "claude:conversation-1", status: "idle" },
+      { action: "usageRead", agent: "opencode", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } },
+    ]) expect((await request.post("/__e2e/chat", { data })).status()).toBe(400);
   });
 
   test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {

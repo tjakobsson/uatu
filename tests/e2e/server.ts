@@ -644,6 +644,11 @@ async function handleE2EChat(request: Request): Promise<Response> {
     if (qualifier !== undefined && !E2E_FAKES_BY_ID.has(qualifier)) {
       return Response.json({ error: `no e2e agent registered as ${qualifier}` }, { status: 400 });
     }
+    // A qualifier must agree with the agent already selected, whether named
+    // by `agent` or by an earlier id; a conflict is rejected before stripping.
+    if (qualifier !== undefined && body.agent !== undefined && qualifier !== body.agent) {
+      return Response.json({ error: `${id} belongs to ${qualifier}, not ${body.agent}` }, { status: 400 });
+    }
     body.agent ??= qualifier;
   }
   if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
