@@ -4971,18 +4971,25 @@ describe("ClaudeProvider sessions", () => {
   });
 
   test("an undo in flight when disposal starts records its recovery state before its rewind, and disposal waits for it", async () => {
-    const { forking, queries, storedId, workspace } = revertingProvider();
-    const gate = gateNextWrite();
     let rewoundBeforeWrite = false;
+    let stateFile = "";
+    // Close-aware, like the SDK: a rewind sent after the query closed is
+    // refused without being applied.
+    const { forking, queries, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => {
+        if (query.returned) throw new Error("query closed");
+        if (!options?.dryRun && !existsSync(stateFile)) rewoundBeforeWrite = true;
+        return rewind(uuid, options);
+      };
+    // A grace far longer than the test: shutdown closes the query only once
+    // the undo has ended, which is the event this test waits on.
+    }, { shutdownGraceMs: 60_000 });
+    stateFile = path.join(workspace, ".uatu-test-state.json");
+    const gate = gateNextWrite();
     try {
       const undoing = forking.undo!(storedId);
       await gate.started;
-      const query = queries.at(-1)!;
-      const rewind = query.rewindFiles!.bind(query);
-      query.rewindFiles = async (uuid, options) => {
-        if (!options?.dryRun && !existsSync(path.join(workspace, ".uatu-test-state.json"))) rewoundBeforeWrite = true;
-        return rewind(uuid, options);
-      };
       const disposing = forking.dispose();
       gate.release();
       expect((await undoing).outcome).toBe("changed");
@@ -4990,6 +4997,7 @@ describe("ClaudeProvider sessions", () => {
     } finally {
       gate.restore();
     }
+    expect(queries.at(-1)!.returned).toBe(true);
     expect(rewoundBeforeWrite).toBe(false);
     expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
   });
