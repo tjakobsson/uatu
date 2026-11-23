@@ -156,7 +156,8 @@ src/
 │                   `classifySessionPath`, which says what the Hub does with a
 │                   session path), headers (what crosses the hop), token (the
 │                   session token), link (the session link: the Hub's one
-│                   handle to a running session); its test adapter is
+│                   handle to a running session); its real-process check is
+│                   `session.integration.test.ts`, its test adapter
 │                   `tests/contracts/session-link.ts`
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test

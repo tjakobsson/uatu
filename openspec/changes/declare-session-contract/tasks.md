@@ -19,7 +19,7 @@
 
 ## 3. Real-process contract test
 
-- [ ] 3.1 Add `src/session-contract/session.integration.test.ts`. It starts one real session via `LocalProcessBackend` (source run) behind an in-process Hub fetch handler and checks: the ready line parses, policy trust becomes ready through fd 3 and the proof, every internal path in the contract's list answers on the direct listener, every `refused-stream` path (including `/api/chat/notifications/events`) answers 410 through the Hub with no request reaching the session, each path is classified by `api/exclusions.yaml`, and closing stdin makes the session exit. Use event-driven waits only, with a budget above 5 s if needed. Verify that it passes under `bun run test:ci`, and add it to `tests/unit-timings.json` if it is among the slow files.
+- [x] 3.1 Add `src/session-contract/session.integration.test.ts`. It starts one real session via `LocalProcessBackend` (source run) behind an in-process Hub fetch handler and checks: the ready line parses, policy trust becomes ready through fd 3 and the proof, every internal path in the contract's list answers on the direct listener, every `refused-stream` path (including `/api/chat/notifications/events`) answers 410 through the Hub with no request reaching the session, each path is classified by `api/exclusions.yaml`, and closing stdin makes the session exit. Use event-driven waits only, with a budget above 5 s if needed. Verify that it passes under `bun run test:ci`, and add it to `tests/unit-timings.json` if it is among the slow files.
 
 ## 4. Fix: refuse internal routes through the Hub (separate commit)
 

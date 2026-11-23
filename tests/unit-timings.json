@@ -12,6 +12,7 @@
     "src/hub/backend.integration.test.ts": 10890,
     "src/hub/credential-api.integration.test.ts": 10323,
     "src/watchdog/main.test.ts": 10289,
+    "src/session-contract/session.integration.test.ts": 8600,
     "src/server/git-observer.test.ts": 7903,
     "src/hub/live-stream.integration.test.ts": 7808,
     "src/server/file-observer.test.ts": 6962,

@@ -470,6 +470,8 @@ Hub-held token applied as `t`, `link.requestHeaders()` and
 session path from the method and path alone: refuse a per-stream source
 with 410, forward a discard with a Hub-scoped operation id, sign a policy
 action, tap a conversation snapshot, pass media untransformed, or forward.
+`src/session-contract/session.integration.test.ts` starts one real session
+and checks each of these expectations against it.
 
 The hub also owns Git worktrees: a linked checkout is a child workspace of
 the main one it forks from, sharing its Git objects and repository
@@ -2054,7 +2056,7 @@ being where the searched text always exists.
 1. Add the route to `src/server/routes.ts` inside the `buildRoutes(deps)` function. Use `deps` for anything the handler needs (the watch session, the metrics snapshot, e2e helpers, etc.) — do not reach into module-level state from inside the handler.
 2. If the route is prod-only or e2e-only, place it inside the appropriate `mode === "prod"` / `mode === "e2e"` branch and add the required dep to the corresponding `ProdRouteDeps` / `E2ERouteDeps` shape.
 3. Both `src/cli.ts` and `tests/e2e/server.ts` will pick up the new route automatically — they each `Bun.serve({ routes: buildRoutes(...) })`.
-4. If only the Hub calls the route (an internal path), declare its path as a constant in `src/session-contract/paths.ts`, add it to `INTERNAL_SESSION_PATHS`, key the route with `p(THAT_CONSTANT)` instead of a literal, and have the Hub reach it through the session link (`link.url(THAT_CONSTANT)`). If browsers must not reach it through the Hub, give it a refused class in `classifySessionPath`. `api/route-coverage.test.ts` fails a contract-keyed route that the contract's list or `api/exclusions.yaml` does not cover.
+4. If only the Hub calls the route (an internal path), declare its path as a constant in `src/session-contract/paths.ts`, add it to `INTERNAL_SESSION_PATHS`, key the route with `p(THAT_CONSTANT)` instead of a literal, and have the Hub reach it through the session link (`link.url(THAT_CONSTANT)`). If browsers must not reach it through the Hub, give it a refused class in `classifySessionPath`. `api/route-coverage.test.ts` fails a contract-keyed route that the contract's list or `api/exclusions.yaml` does not cover, and `src/session-contract/session.integration.test.ts` requests every listed path from a real workspace session.
 
 ### Break the client/server API contract
 
