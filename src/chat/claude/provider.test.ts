@@ -7295,6 +7295,13 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     stop();
   });
 
+  test("a release that arrives after shutdown is refused, not reported done", async () => {
+    const { provider, stop, session } = await scheduled([oneShot]);
+    await provider.dispose();
+    await expect(provider.release(session.id)).rejects.toThrow("Claude provider is disposed");
+    stop();
+  });
+
   test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
     const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
     const hold = holdNextWrite();

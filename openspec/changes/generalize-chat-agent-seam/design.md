@@ -558,8 +558,10 @@ map and its rules out of the Claude Code provider:
   displaced, closing) stays reachable for the steps below.
   - (a) The provider is marked disposed. New admitted work is refused with
     the disposed error before any side effect: an undo, redo, revert,
-    restore or revert commit, a release or wakeup cancel (a live wakeup's
-    or a paused one's, admitted before its transcript lookup), a prompt. A
+    restore or revert commit, a release (even one that arrives once
+    shutdown has cleared the live sessions, so it is never reported done)
+    or wakeup cancel (a live wakeup's or a paused one's, admitted before its
+    transcript lookup), a prompt. A
     start still waiting on its transcript check (its last wait) starts no
     query and fails the same way.
   - (b) Every pending request ends once, with the shutdown reason; an abort

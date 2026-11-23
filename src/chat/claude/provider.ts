@@ -3507,6 +3507,9 @@ export class ClaudeProvider implements ChatProvider {
    * fresh. Refused while a turn runs or background work would die with it.
    */
   async release(sessionId: string): Promise<void> {
+    // Refused once shutdown has started, as other new work is: shutdown
+    // clears the live sessions, and "nothing to release" would read as done.
+    if (this.disposed) throw new Error("Claude provider is disposed");
     const session = this.live.get(sessionId);
     if (!session) return;
     // The whole release is one admitted operation, which shutdown waits for
