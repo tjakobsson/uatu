@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { ChatAdapter } from "../../src/chat/adapter";
 import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
-import { MultiAgentChatService } from "../../src/chat/agents";
+import { MultiAgentChatService, parseQualifiedConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { VisualStore } from "../../src/chat/visual-store";
@@ -120,35 +120,6 @@ const fakeChatAgent = new FakeE2EChatService({
     await fs.writeFile(target, contents, "utf8");
   },
 });
-const E2E_AGENT_DESCRIPTORS: Record<string, ChatAgentDescriptor> = { opencode: OPENCODE_AGENT, claude: CLAUDE_CODE_AGENT };
-function qualifyControlValue<T>(value: T, agentId = "opencode"): T {
-  const walk = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(walk);
-    if (node && typeof node === "object") {
-      const record = node as Record<string, unknown>;
-      const next: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(record)) {
-        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string" && !entry.includes(":")) {
-          next[key] = `${agentId}:${entry}`;
-          continue;
-        }
-        next[key] = walk(entry);
-      }
-      // A conversation summary is recognizable by its shape; stamp the wire form.
-      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next && !(next.id as string).includes(":")) {
-        next.id = `${agentId}:${next.id as string}`;
-        const descriptor = E2E_AGENT_DESCRIPTORS[agentId];
-        if (!descriptor) throw new Error(`no e2e agent registered as ${agentId}`);
-        next.agent = descriptor;
-      }
-      return next;
-    }
-    return node;
-  };
-  return walk(value) as T;
-}
-const controlJson = (value: unknown, agentId = "opencode") => Response.json(qualifyControlValue(value, agentId));
-
 // A second stub agent, offered only when a spec opts in: most chat specs
 // exercise single-agent behavior (creation without a choice), and the agent
 // set is fixed per router — so the harness swaps routers behind a delegating
@@ -164,6 +135,55 @@ const fakeSecondAgent = new FakeE2EChatService({
   // (opencode-v2-steering D2): Send now dispatches a dormant queue's message.
   extraCapabilities: ["custom-model-id", "background-tasks", "scheduled-wakeups", "usage", "send-now"],
 });
+// Every fake agent, in the order a spec enables them (`{ action: "agents",
+// count }` offers the first `count`). Each is registered under its shared
+// descriptor; the descriptor's id is what the control body's `agent` field
+// and the wire's `<agentId>:<providerId>` qualifier name. The first is the
+// default target of every control.
+const E2E_FAKE_AGENTS: readonly { descriptor: ChatAgentDescriptor; service: FakeE2EChatService }[] = [
+  { descriptor: OPENCODE_AGENT, service: fakeChatAgent },
+  // `claude-fixture` internally, but registered as Claude Code.
+  { descriptor: CLAUDE_CODE_AGENT, service: fakeSecondAgent },
+];
+const E2E_FAKES_BY_ID = new Map(E2E_FAKE_AGENTS.map(fake => [fake.descriptor.id, fake]));
+const E2E_DEFAULT_AGENT_ID = E2E_FAKE_AGENTS[0]!.descriptor.id;
+// The registered agent a qualified id names, or undefined for a bare id.
+function qualifyingAgent(value: string): string | undefined {
+  const agentId = parseQualifiedConversationId(value)?.agentId;
+  return agentId !== undefined && E2E_FAKES_BY_ID.has(agentId) ? agentId : undefined;
+}
+function stripAgentQualifier(value: string): string {
+  const agentId = qualifyingAgent(value);
+  return agentId === undefined ? value : value.slice(agentId.length + 1);
+}
+function qualifyControlValue<T>(value: T, agentId = E2E_DEFAULT_AGENT_ID): T {
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === "object") {
+      const record = node as Record<string, unknown>;
+      const next: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(record)) {
+        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string" && !entry.includes(":")) {
+          next[key] = `${agentId}:${entry}`;
+          continue;
+        }
+        next[key] = walk(entry);
+      }
+      // A conversation summary is recognizable by its shape; stamp the wire form.
+      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next && !(next.id as string).includes(":")) {
+        next.id = `${agentId}:${next.id as string}`;
+        const fake = E2E_FAKES_BY_ID.get(agentId);
+        if (!fake) throw new Error(`no e2e agent registered as ${agentId}`);
+        next.agent = fake.descriptor;
+      }
+      return next;
+    }
+    return node;
+  };
+  return walk(value) as T;
+}
+const controlJson = (value: unknown, agentId = E2E_DEFAULT_AGENT_ID) => Response.json(qualifyControlValue(value, agentId));
+
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a
 // second store the fake would never see.
@@ -181,21 +201,14 @@ const fakeAttachmentStore = {
 // All routers represent the same workspace and share its reader and snapshots.
 const fakeVisualStore = new VisualStore(E2E_WORKSPACE_ROOT, path.join(E2E_WORKSPACE_ROOT, "..", "chat-visual-state"));
 
-const singleAgentRouter = new MultiAgentChatService({
+// fakeRouters[n - 1] offers the first n fakes.
+const fakeRouters = E2E_FAKE_AGENTS.map((_, index) => new MultiAgentChatService({
   workspacePath: E2E_WORKSPACE_ROOT,
-  agents: [{ descriptor: OPENCODE_AGENT, service: fakeChatAgent }],
+  agents: E2E_FAKE_AGENTS.slice(0, index + 1),
   attachmentStore: fakeAttachmentStore,
   visualStore: fakeVisualStore,
-});
-const dualAgentRouter = new MultiAgentChatService({
-  workspacePath: E2E_WORKSPACE_ROOT,
-  agents: [
-    { descriptor: OPENCODE_AGENT, service: fakeChatAgent },
-    { descriptor: CLAUDE_CODE_AGENT, service: fakeSecondAgent },
-  ],
-  attachmentStore: fakeAttachmentStore,
-  visualStore: fakeVisualStore,
-});
+}));
+const singleAgentRouter = fakeRouters[0]!;
 // The real 2.x stack (opencode-v2-steering D13): the real ChatAdapter and
 // OpenCodeV2Provider over a scripted fake OpenCode 2.0.28 server, selected
 // with `{ action: "agents", stack: "opencode-v2" }` and driven with
@@ -360,8 +373,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   terminalCloseDelayMs = 0;
   terminalCloseHold?.release();
   terminalCloseHold = null;
-  fakeChatAgent.reset();
-  fakeSecondAgent.reset();
+  for (const fake of E2E_FAKE_AGENTS) fake.service.reset();
   activeChatRouter = singleAgentRouter;
   const retiringOpenCodeV2 = openCodeV2Router;
   openCodeV2Router = null;
@@ -467,7 +479,8 @@ async function handleE2EChat(request: Request): Promise<Response> {
     // A seeded conversation's last activity (epoch ms).
     updatedAt?: number;
     reversibleFiles?: ReversibleFileFixture[];
-    agent?: "opencode" | "claude";
+    // A registered agent id (E2E_FAKE_AGENTS); defaults to the first fake.
+    agent?: string;
     count?: number;
     // A shell task's fake output: what the task view's pane reads, set or
     // appended to while the task runs (design D7).
@@ -496,7 +509,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     childId?: string;
     inboxId?: string;
   };
-  // The chat wire is agent-qualified ("opencode:<id>") while the fake works
+  // The chat wire is agent-qualified ("<agentId>:<id>") while the fakes work
   // in bare provider ids. The control boundary translates both directions so
   // specs keep using the ids they see in the UI.
   const stripQualifier = (value: unknown): unknown => {
@@ -504,7 +517,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     if (value && typeof value === "object") {
       const record = { ...(value as Record<string, unknown>) };
       for (const key of ["conversationId", "childConversationId"]) {
-        if (typeof record[key] === "string") record[key] = (record[key] as string).replace(/^(?:opencode|claude):/, "");
+        if (typeof record[key] === "string") record[key] = stripAgentQualifier(record[key] as string);
       }
       for (const [key, entry] of Object.entries(record)) {
         if (key !== "conversationId" && key !== "childConversationId") record[key] = stripQualifier(entry);
@@ -517,16 +530,20 @@ async function handleE2EChat(request: Request): Promise<Response> {
     // The qualified id names the owning agent; remember it before stripping
     // so conversation-scoped controls reach the right fake without every
     // spec spelling `agent:` explicitly.
-    if (body.agent === undefined && body.conversationId.startsWith("claude:")) body.agent = "claude";
-    body.conversationId = body.conversationId.replace(/^(?:opencode|claude):/, "");
+    body.agent ??= qualifyingAgent(body.conversationId);
+    body.conversationId = stripAgentQualifier(body.conversationId);
   }
   if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
   if (body.older) body.older = stripQualifier(body.older) as typeof body.older;
   if (body.item) body.item = stripQualifier(body.item) as typeof body.item;
-  const targetFake = body.agent === "claude" ? fakeSecondAgent : fakeChatAgent;
+  const targetAgentId = body.agent ?? E2E_DEFAULT_AGENT_ID;
+  const targetFake = E2E_FAKES_BY_ID.get(targetAgentId)?.service;
+  if (!targetFake) return Response.json({ error: `no e2e agent registered as ${targetAgentId}` }, { status: 400 });
   switch (body.action) {
     case "agents": {
-      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : body.count === 2 ? dualAgentRouter : singleAgentRouter;
+      const agentCount = body.stack === undefined ? body.count ?? 1 : 1;
+      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : fakeRouters[agentCount - 1];
+      if (!next) return Response.json({ error: `the harness has no router for ${agentCount} fake agents` }, { status: 400 });
       if (next !== activeChatRouter) {
         // Existing SSE subscriptions are bound to their original router;
         // changing the delegating proxy only affects new requests.
@@ -534,7 +551,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
         activeChatRouter = next;
         setLiveSessionRunning(true);
       }
-      return Response.json({ agents: body.count === 2 && body.stack === undefined ? 2 : 1, ...(body.stack ? { stack: body.stack } : {}) });
+      return Response.json({ agents: agentCount, ...(body.stack ? { stack: body.stack } : {}) });
     }
     // The scripted fake OpenCode 2.0.28 behind the real stack. Conversation
     // ids arrive qualified or bare; the fake works in bare session ids.
@@ -633,9 +650,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       break;
     case "seed":
-      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt), body.agent ?? "opencode");
+      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt), targetAgentId);
     case "externalCreate":
-      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }), body.agent ?? "opencode");
+      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }), targetAgentId);
     case "externalRename":
       if (body.conversationId) return controlJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
       break;
@@ -680,7 +697,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       fakeChatAgent.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: [...fakeChatAgent.usageReads, ...fakeSecondAgent.usageReads].map(read => read.mode), ...targetFake.inventoryStats() });
+      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":
       fakeChatAgent.invalidateInventory();
       return Response.json({ ok: true });
@@ -724,7 +741,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.setUsageReport(body.report ?? null);
       return Response.json({ ok: true });
     case "usageRead":
-      targetFake.setUsageReadOutcome({ ...(body.outcome ?? { outcome: "no-live-session" }), ...(body.outcome?.conversationId ? { conversationId: body.outcome.conversationId.replace(/^(?:opencode|claude):/, "") } : {}) });
+      targetFake.setUsageReadOutcome({ ...(body.outcome ?? { outcome: "no-live-session" }), ...(body.outcome?.conversationId ? { conversationId: stripAgentQualifier(body.outcome.conversationId) } : {}) });
       return Response.json({ ok: true });
     case "taskOutput":
       if (body.taskId) {
@@ -953,8 +970,7 @@ const shutdown = async () => {
   shuttingDown = true;
   liveEndpoint.endAll();
   liveBroker.dispose();
-  await singleAgentRouter.dispose();
-  await dualAgentRouter.dispose().catch(() => undefined);
+  for (const router of fakeRouters) await router.dispose().catch(() => undefined);
   await openCodeV2Router?.dispose().catch(() => undefined);
   await openCodeV2Fake.stop().catch(() => undefined);
   await watchSession.stop();

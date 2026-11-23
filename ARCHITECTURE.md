@@ -2093,6 +2093,7 @@ one that matches what actually broke.
    desktop file-tree page without the chat token, so each chat file uses its own
    tokenized chat setup instead.
 3. The harness reset (`/__e2e/reset`) is in `tests/e2e/config.ts`; the workspace fixture lives at `testdata/watch-docs/`.
+4. Chat specs drive fake agents through `POST /__e2e/chat` (`handleE2EChat` in `tests/e2e/server.ts`). The harness lists its fakes once, in `E2E_FAKE_AGENTS`, each registered under the agent's shared descriptor (`src/chat/<agent>/descriptor.ts`). A control's `agent` field names a registered id (any other is rejected) and defaults to the first fake. An agent-qualified `conversationId` (`<agentId>:<providerId>`) picks its owner without `agent`, and the harness strips the qualifier before the fake sees it. `{ action: "agents", count: n }` offers the first `n` fakes; the second is the `claude-fixture` fake, registered as `claude`. `{ action: "agents", stack: "opencode-v2" }` instead swaps in the real OpenCode 2.x stack over a scripted fake server. To give specs another agent, append a fake to the list.
 
 ## Run and test
 

@@ -44,8 +44,8 @@ own. The Antigravity pull request (`add-antigravity-chat`, head
 
 ## 5. E2E harness routes any agent (commit 5)
 
-- [ ] 5.1 Build the harness routers from one list of fakes keyed by agent id, and strip qualifiers and route `agent` by the registered ids. Keep `claude-fixture` registered as `claude`. Verify that the chat e2e files pass unchanged (`bun run test:e2e` for the affected files) and that `bun run test:ci` passes.
-- [ ] 5.2 Update the harness notes in `ARCHITECTURE.md` if they name the dual router. Verify that the documented harness actions match `tests/e2e/server.ts`.
+- [x] 5.1 Build the harness routers from one list of fakes keyed by agent id, and strip qualifiers and route `agent` by the registered ids. Keep `claude-fixture` registered as `claude`. Verify that the chat e2e files pass unchanged (`bun run test:e2e` for the affected files) and that `bun run test:ci` passes.
+- [x] 5.2 Update the harness notes in `ARCHITECTURE.md` if they name the dual router. Verify that the documented harness actions match `tests/e2e/server.ts`.
 
 ## 6. Integration
 
