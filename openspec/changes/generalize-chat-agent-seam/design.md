@@ -611,7 +611,9 @@ map and its rules out of the Claude Code provider:
     and delivered means the SDK's input iterator has taken the prompt while
     its query is open: such a prompt is acknowledged only once taken, never
     reported accepted and then dropped, and one nothing takes before the
-    close is refused and rolled back. A query whose stream has ended or
+    close is refused and rolled back. Until it is taken it is no turn
+    either, so a stream that ends meanwhile ends no turn, and the refusal is
+    all its caller hears. A query whose stream has ended or
     failed is not open, even while shutdown still holds it, so a prompt for
     it is refused. Nor is one whose SDK cleanup has closed the transport
     before the provider has seen its stream end: the SDK's input loop can

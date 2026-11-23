@@ -1626,7 +1626,10 @@ export class ClaudeProvider implements ChatProvider {
       accept();
       this.retitleFromFirstPrompt(sessionId, input.text);
     }
-    session.pendingTurns += 1;
+    // An acknowledged prompt's turn counts from now. One that waits for
+    // delivery counts only once the SDK has taken it: until then it is no
+    // turn, and a refusal is all its caller hears.
+    if (!awaitsDelivery) session.pendingTurns += 1;
     const cancelSequence = session.cancelSequence;
     // An account change can land inside the startup wait. Revalidate before
     // delivery, sharing one total grace budget even if accounts change again.
@@ -1645,8 +1648,8 @@ export class ClaudeProvider implements ChatProvider {
     // During the shutdown grace the query is still open: an accepted prompt
     // is delivered to it, never reported accepted and then dropped.
     if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || session.ended) {
-      session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       if (awaitsDelivery) return rollBack(new Error("Claude Code session ended before the prompt was accepted"));
+      session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       if (this.live.get(sessionId) === session && session.pendingTurns === 0) await this.retireIfIdle(session);
       return { messageId: input.id };
     }
@@ -1666,9 +1669,9 @@ export class ClaudeProvider implements ChatProvider {
     // close it before the output reader sees the stream end, and its input
     // loop then still takes an envelope it can no longer write.
     if (!await session.queue.offer(envelope) || session.query.cleanupPerformed === true) {
-      session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       return rollBack(new Error("Claude Code session closed before it took the prompt"));
     }
+    session.pendingTurns += 1;
     accept();
     this.retitleFromFirstPrompt(sessionId, input.text);
     if (stagedBefore) {

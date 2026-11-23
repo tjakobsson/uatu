@@ -5581,9 +5581,10 @@ describe("ClaudeProvider sessions", () => {
     await forking.dispose();
   });
 
-  test("a staged replacement whose stream ends before it takes the input is refused, keeping Redo", async () => {
+  test("a staged replacement whose stream ends before it takes the input is refused, keeping Redo, and ends no turn", async () => {
     let unread = false;
     const { forking, queries, storedId } = revertingProvider(query => { query.inputUnread = unread; });
+    const { events, stop } = collect(forking);
     await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
     await forking.undo!(storedId);
     unread = true;
@@ -5594,6 +5595,12 @@ describe("ClaudeProvider sessions", () => {
     await queries[1]!.return();
     expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
     expect(await forking.getReversibleHistoryState!(storedId)).toEqual(expect.objectContaining({ staged: true, canRedo: true }));
+    await settledWrites(forking);
+    // The untaken prompt was never a turn: the replacement's exit ends none,
+    // and the refusal is all the caller hears.
+    const endedTurn = (event: NormalizedProviderEvent) => event.updates.some(update => update.kind === "status" && (update as { message?: string }).message === "Claude Code session ended before finishing the turn");
+    expect(events.filter(endedTurn)).toEqual([]);
+    stop();
     await forking.dispose();
   });
 
