@@ -35,7 +35,9 @@ import {
   SESSION_ACCOUNTS_CHANGED_PATH,
   SESSION_POLICY_PROOF_PATH,
   sessionBasePath,
+  sessionConversationEventsPath,
   sessionPath,
+  sessionWorkerEvidencePath,
 } from "./paths";
 import { formatReadyLine, parseReadyLine, sessionServeArgv } from "./spawn";
 
@@ -175,6 +177,20 @@ async function direct(item: { path: string; method: string }): Promise<{ status:
   }
 }
 
+// The two conversation-scoped internal paths, as the contract samples them.
+const CONVERSATION_SCOPED: ReadonlySet<string> = new Set([sessionConversationEventsPath("sample"), sessionWorkerEvidencePath("sample")]);
+
+// A GET on the session's own listener with the Hub's headers, for an answer
+// that is JSON.
+async function directJson(target: string): Promise<{ status: number; contentType: string; body: unknown }> {
+  const response = await fetch(session.link.url(target), { headers: session.link.requestHeaders("application/json"), redirect: "manual" });
+  return {
+    status: response.status,
+    contentType: (response.headers.get("content-type") ?? "").split(";")[0]!,
+    body: await response.json(),
+  };
+}
+
 describe("session contract against a real workspace session", () => {
   test("the Hub spawns the contract's argv with piped stdio, a private descriptor and an explicit environment", () => {
     expect(spawned.argv).toEqual(sessionServeArgv(UATU_ARGV, path.join(directory, "project"), basePath));
@@ -203,24 +219,45 @@ describe("session contract against a real workspace session", () => {
 
   test("every internal path the Hub calls exists on the session's own listener", async () => {
     // The control: a path no route serves gets the listener's plain-text
-    // 404. A conversation-scoped route answers its own JSON 404 for the
-    // sample conversation, which is the route existing, so the fallback is
-    // told apart by its content type.
+    // 404, which is how a missing route is told apart from a route's own
+    // answer.
     const unrouted = (answer: { status: number; contentType: string }) =>
       answer.status === 404 && !answer.contentType.includes("application/json");
     expect(unrouted(await direct({ path: "/api/internal/not-a-session-route", method: "POST" }))).toBe(true);
+    // The conversation-scoped routes are proved by their handlers' own
+    // answers in the next test: for the sample conversation, a JSON 404 is
+    // the agent resolver's answer and says nothing about the route.
     const missing: string[] = [];
-    for (const item of INTERNAL_SESSION_PATHS) {
+    for (const item of INTERNAL_SESSION_PATHS.filter(entry => !CONVERSATION_SCOPED.has(entry.path))) {
       if (unrouted(await direct(item))) missing.push(`${item.method} ${item.path}`);
     }
     expect(missing).toEqual([]);
     // The streams the Hub subscribes to open on the session's own listener.
-    for (const item of INTERNAL_SESSION_PATHS.filter(entry => classifySessionPath(entry.method, entry.path) === "refused-stream" && !entry.path.includes("/sample/"))) {
+    for (const item of INTERNAL_SESSION_PATHS.filter(entry => classifySessionPath(entry.method, entry.path) === "refused-stream" && !CONVERSATION_SCOPED.has(entry.path))) {
       const answer = await direct(item);
       expect(answer.status).toBe(200);
       expect(answer.contentType).toContain("text/event-stream");
     }
   }, 30_000);
+
+  test("the conversation stream and worker evidence answer from their own handlers for the ids the Hub sends", async () => {
+    // A conversation exists only behind a running agent runtime (an OpenCode
+    // server, a Claude Code SDK session), which this session would have to
+    // start and the test machine need not have. So the routes are proved by
+    // the answers their handlers give before any agent is asked: each runs
+    // after the session accepted the link's token and the agent-qualified id
+    // the Hub sends, and neither is the resolver's 404 nor the fallback's.
+    const id = "opencode:sample";
+    // The live broker's catch-up names its cursor in the query; an empty one
+    // is the stream handler's own refusal.
+    expect(await directJson(`${sessionConversationEventsPath(id)}?cursor=`)).toEqual({
+      status: 400, contentType: "application/json", body: { error: "invalid cursor" },
+    });
+    // Worker evidence takes no query beyond the token.
+    expect(await directJson(`${sessionWorkerEvidencePath(id)}?unexpected=1`)).toEqual({
+      status: 400, contentType: "application/json", body: { error: "unexpected query parameter" },
+    });
+  });
 
   test("a forwarded path reaches the session through the Hub", async () => {
     const response = await throughHub("/api/state");
