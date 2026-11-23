@@ -117,6 +117,9 @@ test.describe("multi-agent chat", () => {
     await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
     expect(await outcomeOf("claude")).toEqual({ outcome: "fail", conversationId: "claude:conversation-1" });
     expect((await outcomeOf("opencode")).outcome).toBe("no-live-session");
+    // A raw top-level id does not stop the usage qualifier from naming the owner.
+    await control(request, { action: "usageRead", conversationId: "sub:s1:worker", outcome: { outcome: "ok", conversationId: "claude:conversation-1" } });
+    expect((await outcomeOf("claude")).outcome).toBe("ok");
     // So does a reversible attempt's conversationId.
     await control(request, { action: "declareOnly", agent: "claude", capabilities: ["reversible-history", "usage"] });
     const undone = await control(request, { action: "seed", agent: "claude", title: "Undo target", items: [] }) as { conversation: { id: string } };

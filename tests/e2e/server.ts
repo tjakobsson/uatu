@@ -615,23 +615,25 @@ async function handleE2EChat(request: Request): Promise<Response> {
   if (usageId !== undefined && typeof usageId !== "string") {
     return Response.json({ error: `conversationId must be a string, not ${JSON.stringify(usageId)}` }, { status: 400 });
   }
-  for (const id of [body.conversationId, usageId]) {
-    if (typeof id !== "string") continue;
+  const ids = [body.conversationId, usageId].filter((id): id is string => typeof id === "string");
+  for (const id of ids) {
     if (hasEmptyReservedQualifier(id)) {
       return Response.json({ error: `malformed conversation id ${JSON.stringify(id)}` }, { status: 400 });
     }
     const qualifier = qualifyingAgent(id);
-    // An id about to choose the agent must name a registered one; otherwise
-    // an unregistered prefix (`claud:`) would silently reach the first fake.
-    if (qualifier === undefined && body.agent === undefined && id.includes(":")) {
-      return Response.json({ error: `${JSON.stringify(id)} names no registered agent` }, { status: 400 });
-    }
     // A qualifier must agree with the agent already selected, whether named
     // by `agent` or by an earlier id; a conflict is rejected before stripping.
     if (qualifier !== undefined && body.agent !== undefined && qualifier !== body.agent) {
       return Response.json({ error: `${id} belongs to ${qualifier}, not ${body.agent}` }, { status: 400 });
     }
     body.agent ??= qualifier;
+  }
+  // Only when no owner came from `agent` or any qualifier does an id's
+  // unregistered prefix (`claud:`) matter: it would otherwise silently reach
+  // the first fake.
+  const unowned = body.agent === undefined ? ids.find(id => id.includes(":")) : undefined;
+  if (unowned !== undefined) {
+    return Response.json({ error: `${JSON.stringify(unowned)} names no registered agent` }, { status: 400 });
   }
   const targetAgentId = body.agent ?? E2E_DEFAULT_AGENT_ID;
   const targetFake = E2E_FAKES_BY_ID.get(targetAgentId)?.service;
