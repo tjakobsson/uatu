@@ -656,11 +656,15 @@ map and its rules out of the Claude Code provider:
     newer rename writes only once that one has landed, so the newer title
     is the one that stands. A manual rename takes the record over before
     its own native write, so a turn ending meanwhile starts no write of the
-    stale title, and gives it back if that write fails. That newer rename drops the record on disk too, so a
-    restart cannot apply the stale title over it. One already being written when shutdown starts
-    finishes in (c); one not started is not written once shutdown has
-    started, even when a turn ends in the grace: it is durable, so the next
-    start writes it after that conversation's next turn.
+    stale title, and gives it back if that write fails. Once its native
+    write has landed, it drops the record on disk too, so a restart cannot
+    apply the stale title over it. If that state write fails, the rename
+    still reports success (its native write has landed) and the stale title
+    can reapply after a restart, the same exposure `main` has for a failed
+    state write. A deferred rename already being written when shutdown
+    starts finishes in (c); one not started is not written once shutdown
+    has started, even when a turn ends in the grace: it is durable, so the
+    next start writes it after that conversation's next turn.
 
   A known limitation, which already exists on `main` and is outside this
   change: a rewind still unanswered when the grace ends is cut off by the
