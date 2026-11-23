@@ -654,14 +654,18 @@ map and its rules out of the Claude Code provider:
     native write succeeds, so a write made meanwhile, or a failure, leaves
     it for the next start. Only one native write of it runs at a time, and a
     newer rename writes only once that one has landed, so the newer title
-    is the one that stands. A manual rename takes the record over before
-    its own native write, so a turn ending meanwhile starts no write of the
-    stale title, and gives it back if that write fails. Once its native
-    write has landed, it drops the record on disk too, so a restart cannot
-    apply the stale title over it. If that state write fails, the rename
-    still reports success (its native write has landed) and the stale title
-    can reapply after a restart, the same exposure `main` has for a failed
-    state write. A deferred rename already being written when shutdown
+    is the one that stands. While a manual rename's native write is out, a
+    turn ending starts no write of the deferred title (an in-memory marker,
+    owned by that rename, holds it back), but the record itself stays, in
+    memory and in every snapshot. Only a manual rename that has landed
+    drops it, on disk too, so a restart cannot apply the stale title over
+    it; a failed one leaves the record as it was and releases the marker
+    only if it still owns it. Manual renames of one conversation write one
+    after another, in the order they claimed their turn, so the newest one
+    that succeeds is the title that stands. If the state write dropping the
+    record fails, the rename still reports success (its native write has
+    landed) and the stale title can reapply after a restart, the same
+    exposure `main` has for a failed state write. A deferred rename already being written when shutdown
     starts finishes in (c); one not started is not written once shutdown
     has started, even when a turn ends in the grace: it is durable, so the
     next start writes it after that conversation's next turn.

@@ -2868,7 +2868,7 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
-  test("a manual rename takes over the deferred title before writing, and gives it back if its write fails", async () => {
+  test("a manual rename holds back the deferred title's write while its own is out, and leaves the title for the next turn if its write fails", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-takeover-")));
     const workspace = path.join(root, "workspace");
     mkdirSync(workspace, { recursive: true });
@@ -2910,8 +2910,8 @@ describe("ClaudeProvider sessions", () => {
     await waitFor(() => refreshed === 1);
     // The refresh starts no write of the superseded title.
     expect(started).toEqual(["Newer"]);
-    // The write fails: the deferred title is the conversation's again, so
-    // the next turn's refresh writes it.
+    // The write fails: the deferred title, which stayed recorded, is
+    // written by the next turn's refresh.
     finish.get("Newer")!(true);
     expect(await renaming).toEqual(expect.objectContaining({ message: "disk full" }));
     expect(recorded()).toEqual({ [session.id]: "Planned work" });
@@ -2921,6 +2921,94 @@ describe("ClaudeProvider sessions", () => {
     expect(started).toEqual(["Newer", "Planned work"]);
     await settledWrites(provider);
     expect(recorded()).toEqual({});
+    await provider.dispose();
+  });
+
+  // A conversation renamed before its first turn, whose transcript now
+  // exists; every manual native write is held until the test settles it.
+  async function renamedBeforeFirstTurn(prefix: string) {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), prefix)));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    const started: string[] = [];
+    const finish = new Map<string, (fail: boolean) => void>();
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // No title retries: each turn's refresh runs once.
+      titleRefreshDelaysMs: [],
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") return;
+        mostInFlight = Math.max(mostInFlight, ++inFlight);
+        try {
+          if (await new Promise<boolean>(resolve => { finish.set(title, resolve); })) throw new Error("disk full");
+        } finally {
+          inFlight -= 1;
+        }
+      },
+    });
+    // Counts each turn-end title refresh once it has finished.
+    const state = provider as unknown as { refreshGeneratedTitle: (sessionId: string, attempt?: number) => Promise<void> };
+    const refresh = state.refreshGeneratedTitle.bind(provider);
+    let refreshed = 0;
+    state.refreshGeneratedTitle = async (sessionId, attempt) => { await refresh(sessionId, attempt); refreshed += 1; };
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    // Ends a turn and waits until its title refresh has finished.
+    const endTurn = async (uuid: string) => {
+      const before = refreshed;
+      queries.at(-1)!.push({ type: "result", subtype: "success", uuid, timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+      await waitFor(() => refreshed === before + 1);
+    };
+    return { provider, session, started, finish, recorded, endTurn, mostInFlight: () => mostInFlight };
+  }
+
+  test("a deferred title stays in every snapshot while a manual rename's write is out", async () => {
+    const { provider, session, started, finish, recorded } = await renamedBeforeFirstTurn("uatu-claude-rename-snapshot-");
+    const renaming = provider.renameSession(session.id, "Newer");
+    await waitFor(() => started.includes("Newer"));
+    // Another state write meanwhile still records the deferred title.
+    (provider as unknown as { persistDurableState: () => void }).persistDurableState();
+    await settledWrites(provider);
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    finish.get("Newer")!(false);
+    await renaming;
+    expect(recorded()).toEqual({});
+    await provider.dispose();
+  });
+
+  test("manual renames write one after another, and a failed older one never brings the stale title back", async () => {
+    const { provider, session, started, finish, recorded, endTurn, mostInFlight } = await renamedBeforeFirstTurn("uatu-claude-rename-order-");
+    const holder = () => (provider as unknown as { renameSuppressions?: Map<string, number> }).renameSuppressions?.get(session.id) ?? 0;
+    const first = provider.renameSession(session.id, "First").catch(error => error as Error);
+    await waitFor(() => started.includes("First"));
+    const firstHolder = holder();
+    const second = provider.renameSession(session.id, "Second");
+    // The newer rename has claimed its turn: queued behind the older one
+    // (it now holds the deferred title back), or, unordered, writing.
+    await waitFor(() => started.includes("Second") || holder() > firstHolder);
+    // The older rename fails; the newer one, behind it, succeeds.
+    finish.get("First")!(true);
+    expect(await first).toEqual(expect.objectContaining({ message: "disk full" }));
+    await waitFor(() => started.includes("Second"));
+    finish.get("Second")!(false);
+    await second;
+    expect(mostInFlight()).toBe(1);
+    expect(recorded()).toEqual({});
+    // The next turn writes no stale title.
+    await endTurn("res1");
+    expect(started).toEqual(["First", "Second"]);
     await provider.dispose();
   });
 

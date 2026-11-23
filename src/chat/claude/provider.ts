@@ -734,6 +734,15 @@ export class ClaudeProvider implements ChatProvider {
   // A deferred rename's native write under way, by conversation: one at a
   // time, and a newer rename writes only after it has landed.
   private readonly deferredRenameWrites = new Map<string, Promise<void>>();
+  // A manual rename under way, by conversation, with its owner token: while
+  // it is out, a turn ending starts no deferred write. The record itself
+  // stays (in memory and in every snapshot) until a manual rename succeeds.
+  private readonly renameSuppressions = new Map<string, number>();
+  private renameTokens = 0;
+  // Manual renames of a conversation, one after another in the order they
+  // claimed their turn, so the newest one that succeeds is the title that
+  // stands.
+  private readonly manualRenames = new Map<string, Promise<void>>();
   // Wakeups the user cancelled, by conversation: id → the prompt it fires.
   // The CLI rebuilds a cron when its session resumes, so a cancel is
   // enforced here, durably: a cancelled wakeup never holds a session and
@@ -4114,7 +4123,7 @@ export class ClaudeProvider implements ChatProvider {
       const deferred = this.deferredRenames.get(sessionId);
       // A newer rename during the existence check supersedes this one: the
       // native write must not land after it and overwrite it.
-      if (deferred !== undefined && await fileExists(file) && !this.disposed && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred) {
+      if (deferred !== undefined && await fileExists(file) && !this.disposed && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred && !this.renameSuppressions.has(sessionId)) {
         // A write already under way is the one: it reads the titles once
         // it has landed.
         if (this.deferredRenameWrites.has(sessionId)) return;
@@ -4185,30 +4194,37 @@ export class ClaudeProvider implements ChatProvider {
     const trimmed = title.trim();
     this.renameGenerations.set(sessionId, (this.renameGenerations.get(sessionId) ?? 0) + 1);
     if (this.renameGenerations.size > 4_096) this.renameGenerations.clear();
-    // A conversation that has not run a turn has no native transcript yet
-    // (the SDK's rename throws on one): the title is kept here and written
-    // to the transcript once the first turn has created it.
-    if (await fileExists(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))) {
-      // This rename takes the deferred title over before anything else, so
-      // a turn ending meanwhile starts no write of it; a failed write gives
-      // it back.
-      const superseded = this.deferredRenames.get(sessionId);
-      this.deferredRenames.delete(sessionId);
-      // A deferred write already under way lands first, so this newer title
-      // is the one the transcript ends with.
-      await this.deferredRenameWrites.get(sessionId);
-      try {
+    // From here until this rename settles, a turn ending starts no deferred
+    // write (the token says which rename holds it back), and the rename
+    // waits for any manual rename of the conversation before it.
+    const token = ++this.renameTokens;
+    this.renameSuppressions.set(sessionId, token);
+    const previous = this.manualRenames.get(sessionId);
+    let settled!: () => void;
+    const turn = new Promise<void>(resolve => { settled = resolve; });
+    this.manualRenames.set(sessionId, turn);
+    try {
+      await previous;
+      // A conversation that has not run a turn has no native transcript yet
+      // (the SDK's rename throws on one): the title is kept here and written
+      // to the transcript once the first turn has created it.
+      if (await fileExists(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))) {
+        // A deferred write already under way lands first, so this newer
+        // title is the one the transcript ends with.
+        await this.deferredRenameWrites.get(sessionId);
         await this.renameNativeSession(this.nativeId(sessionId), trimmed, { dir: this.workspacePath });
-      } catch (error) {
-        if (superseded !== undefined && !this.deferredRenames.has(sessionId)) this.deferredRenames.set(sessionId, superseded);
-        throw error;
+        // Only a rename that has landed drops the deferred record, on disk
+        // too, so a restart cannot apply the stale title over this one; a
+        // failed one leaves it as it was.
+        if (this.deferredRenames.delete(sessionId)) await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
+      } else {
+        this.deferredRenames.set(sessionId, trimmed);
+        this.persistDurableState();
       }
-      // The dropped record goes from disk too, so a restart cannot apply
-      // the stale title over this one.
-      if (superseded !== undefined) await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
-    } else {
-      this.deferredRenames.set(sessionId, trimmed);
-      this.persistDurableState();
+    } finally {
+      if (this.renameSuppressions.get(sessionId) === token) this.renameSuppressions.delete(sessionId);
+      settled();
+      if (this.manualRenames.get(sessionId) === turn) this.manualRenames.delete(sessionId);
     }
     this.announcedTitles.set(sessionId, trimmed);
     const pending = this.pending.get(sessionId);
