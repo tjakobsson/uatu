@@ -20,6 +20,7 @@
 //   end-then-refuse-steer present: a prompt sent during a run ends the earlier
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
+//   refuse-next-steer    present: the next steer is refused, and the flag removed
 //   hold-config          present: `session/set_config_option` waits to answer until
 //                        it is removed
 //   fail-load            present: `session/load` fails after sending its replay
@@ -36,7 +37,7 @@
 // taken into the run as agy does: the first prompt resolves `end_turn` and
 // the second carries the run on.
 
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { agent, methods, ndJsonStream, RequestError, type AgentContext } from "@agentclientprotocol/sdk";
@@ -239,6 +240,10 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   const text = params.prompt.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
   const running = runs.get(params.sessionId);
   if (running) setTimeout(() => { for (const waiter of running.promptWaiters.splice(0)) waiter(); }, 0);
+  if (running && flag("refuse-next-steer")) {
+    rmSync(path.join(stateDir, "refuse-next-steer"), { force: true });
+    throw new RequestError(-32603, "Antigravity is busy and did not take the message");
+  }
   if (running && flag("refuse-steer")) throw new RequestError(-32603, "Antigravity is busy and did not take the message");
   if (running && flag("end-then-refuse-steer")) {
     // The earlier prompt ends on its own just before agy refuses the steer.

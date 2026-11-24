@@ -586,6 +586,25 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(statuses(session.id)).toEqual(["interrupted"]);
     });
 
+    test("a steer refused after a second was sent leaves the second's ids as replay numbers them", async () => {
+      const { fake, provider, waitFor, upserts, ended } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      await fake.setFlag("refuse-next-steer", true);
+      const one = await provider.prompt(session.id, { id: "s1", text: "One", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      const two = await provider.prompt(session.id, { id: "s2", text: "Two", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      expect((await one.confirmation).outcome).toBe("refused");
+      expect((await two.confirmation).outcome).toBe("accepted");
+      await ended(session.id);
+      const order = (items: ConversationItem[]) => items.filter(item => item.type === "user_message" || item.type === "command" || item.type === "assistant_message" && item.markdown !== "").map(item => item.id);
+      const live = order((await provider.listMessages(session.id, { limit: 100 })).items);
+      const reread = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reread.dispose());
+      expect(order((await reread.listMessages(session.id, { limit: 100 })).items)).toEqual(live);
+      expect(live.filter(id => id.startsWith("message:") && /\.u\d+$/.test(id)).map(id => id.match(/\.u(\d+)$/)![1])).toEqual(["1", "2"]);
+    });
+
     test("a steer agy refuses leaves the running reply where it was, so what follows extends it", async () => {
       const { fake, provider, waitFor, upserts, ended } = await setup();
       const session = await provider.createSession("a");
