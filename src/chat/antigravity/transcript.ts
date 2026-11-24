@@ -155,7 +155,11 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
   // same position.
   const words = (user: ConversationItem) => user.type === "user_message" ? user.text.trim() : "";
   const matched = new Set(users.flatMap((user, index) => words(user) !== "" && words(user) === turns[index]!.request ? [index + 1] : []));
-  if (matched.size === 0) return null;
+  // A conversation of images alone has no words to prove it: it is this
+  // transcript's when every request on both sides is wordless, as many and
+  // at the same positions.
+  const wordless = users.every(user => words(user) === "") && turns.every(turn => !turn.request);
+  if (matched.size === 0 && !wordless) return null;
   users.forEach((user, index) => { if (words(user) === "" && !turns[index]!.request) matched.add(index + 1); });
   const toolsByTurn = new Map<number, number[]>();
   let turn = 0;

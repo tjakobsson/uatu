@@ -236,3 +236,25 @@ test("an image-only turn keeps its recorded tokens and cost on reopen, matched t
   expect(carrier?.usage).toEqual(expect.objectContaining({ input: 500, output: 20, costUsd: 0.5 }));
   expect(enriched?.accounting.map(entry => entry.messageId)).toEqual(["s.t1", "s.t2"]);
 });
+
+test("a conversation of image-only turns keeps its recorded tokens on reopen, and a worded transcript is not taken for it", async () => {
+  const replayed: ConversationItem[] = [
+    { id: "message:s.u1", type: "user_message", createdAt: 1, text: "", attachments: [{ id: "one", name: "one.png", mimeType: "image/png" }] },
+    { id: "message:s.a1.1", type: "assistant_message", createdAt: 2, markdown: "A chart" },
+    { id: "message:s.u2", type: "user_message", createdAt: 3, text: "", attachments: [{ id: "two", name: "two.png", mimeType: "image/png" }] },
+    { id: "message:s.a2.1", type: "assistant_message", createdAt: 4, markdown: "Another chart" },
+  ];
+  const enrich = async (requests: string[]) => {
+    const file = path.join(home, "images-only.jsonl");
+    await writeFile(file, requests.flatMap((request, index) => [
+      { step_index: index * 2, type: "USER_INPUT", content: `<USER_REQUEST>\n${request}\n</USER_REQUEST>` },
+      { step_index: index * 2 + 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", content: "A chart", input_tokens: 100 * (index + 1), output_tokens: 10 },
+    ]).map(step => JSON.stringify(step)).join("\n"));
+    const read = await readTranscript(file);
+    if (!("steps" in read)) throw new Error("the transcript was not read");
+    return enrichReplay(replayed, "s", transcriptTurns(read.steps), { family: model => transcriptModelFamily(model, () => false), price: usage => (usage.input ?? 0) / 1000 });
+  };
+  const own = await enrich(["", ""]);
+  expect(own?.accounting.map(entry => [entry.messageId, entry.usage?.input, entry.usage?.costUsd])).toEqual([["s.t1", 100, 0.1], ["s.t2", 200, 0.2]]);
+  expect(await enrich(["Say hello", ""])).toBeNull();
+});
