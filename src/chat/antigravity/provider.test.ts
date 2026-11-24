@@ -142,7 +142,7 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(reply).toEqual(expect.objectContaining({ markdown: "Hello, how can I help you today?" }));
       expect((reply as Record<symbol, unknown>)[CHAT_TURN]).toEqual({ completed: true, authority: "provisional" });
       expect(upserts(session.id).find(item => item.id.startsWith("usage:"))).toEqual(expect.objectContaining({
-        type: "assistant_message", markdown: "", usage: { input: 8886, output: 32, reasoning: 22, cacheRead: 0, cacheWrite: 0 },
+        type: "assistant_message", markdown: "", usage: { input: 8886, output: 32, reasoning: 22, cacheRead: 0, cacheWrite: 0, costUsd: expect.any(Number) },
         model: { providerId: "antigravity", modelId: "gemini-4-neon" },
       }));
       expect(upserts(session.id).findLast(item => item.type === "context_report")).toEqual(expect.objectContaining({ total: 8918, max: 1048576 }));

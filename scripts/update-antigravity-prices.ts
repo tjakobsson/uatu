@@ -34,9 +34,9 @@ export const MODELS_DEV_SOURCES: Readonly<Record<string, { provider: string; mod
   "gemini-4-argon": { provider: "google-vertex", model: "gemini-4-argon" },
   "gemini-4-hydrogen": { provider: "google-vertex", model: "gemini-4-hydrogen" },
   "gemini-3.8-flash": { provider: "google-vertex", model: "gemini-3.8-flash" },
-  "claude-opus-5-5": { provider: "google-vertex", model: "claude-opus-5-5" },
-  "claude-sonnet-5-5": { provider: "google-vertex", model: "claude-sonnet-5-5" },
-  "gpt-oss-120b-medium": { provider: "google-vertex", model: "gpt-oss-120b" },
+  "claude-opus-5-5": { provider: "google-vertex", model: "claude-opus-5-5@default" },
+  "claude-sonnet-5-5": { provider: "google-vertex", model: "claude-sonnet-5-5@default" },
+  "gpt-oss-120b-medium": { provider: "google-vertex", model: "openai/gpt-oss-120b-maas" },
 };
 
 // Models without a models.dev entry of their own, and the family they are priced as.

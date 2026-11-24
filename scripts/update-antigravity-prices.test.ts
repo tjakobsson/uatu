@@ -14,8 +14,8 @@ test("each agy family takes Vertex's base input, output and cache-read rates, an
   expect(table.models["gemini-4-neon"]).toEqual({ input: 1.25, output: 10, cacheRead: 0.31, from: "google-vertex/gemini-4-neon" });
   expect(table.models["gemini-4-hydrogen"]).toEqual({ input: 0.3, output: 2.5, from: "google-vertex/gemini-4-hydrogen" });
   // Partner models are priced from their Vertex entries too.
-  expect(table.models["claude-opus-5-5"]).toEqual({ input: 5, output: 25, cacheRead: 0.5, from: "google-vertex/claude-opus-5-5" });
-  expect(table.models["gpt-oss-120b-medium"]).toEqual({ input: 0.15, output: 0.6, from: "google-vertex/gpt-oss-120b" });
+  expect(table.models["claude-opus-5-5"]).toEqual({ input: 5, output: 25, cacheRead: 0.5, from: "google-vertex/claude-opus-5-5@default" });
+  expect(table.models["gpt-oss-120b-medium"]).toEqual({ input: 0.15, output: 0.6, from: "google-vertex/openai/gpt-oss-120b-maas" });
   expect(Object.keys(table.models).sort()).toEqual(Object.keys(MODELS_DEV_SOURCES).sort());
 });
 
@@ -27,8 +27,8 @@ test("models without their own entry borrow their family's price", () => {
 test("a missing entry fails the run, naming it, instead of writing a thinner table", () => {
   const thinner = structuredClone(sample);
   delete thinner["google-vertex"].models["gemini-4-argon"];
-  thinner["google-vertex"].models["gpt-oss-120b"].cost = { input: 0.15 };
-  expect(() => buildPriceTable(thinner, "2026-11-24")).toThrow("gemini-4-argon (google-vertex/gemini-4-argon), gpt-oss-120b-medium (google-vertex/gpt-oss-120b)");
+  thinner["google-vertex"].models["openai/gpt-oss-120b-maas"].cost = { input: 0.15 };
+  expect(() => buildPriceTable(thinner, "2026-11-24")).toThrow("gemini-4-argon (google-vertex/gemini-4-argon), gpt-oss-120b-medium (google-vertex/openai/gpt-oss-120b-maas)");
 });
 
 test("the rendered table records its source and snapshot date", () => {

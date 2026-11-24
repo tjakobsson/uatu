@@ -8,9 +8,9 @@
       "gemini-4-argon": { "id": "gemini-4-argon", "cost": { "input": 2, "output": 12, "cache_read": 0.5 } },
       "gemini-4-hydrogen": { "id": "gemini-4-hydrogen", "cost": { "input": 0.3, "output": 2.5 } },
       "gemini-3.8-flash": { "id": "gemini-3.8-flash", "cost": { "input": 0.5, "output": 3, "cache_read": 0.05 } },
-      "claude-opus-5-5": { "id": "claude-opus-5-5", "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 } },
-      "claude-sonnet-5-5": { "id": "claude-sonnet-5-5", "cost": { "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75 } },
-      "gpt-oss-120b": { "id": "gpt-oss-120b", "cost": { "input": 0.15, "output": 0.6 } }
+      "claude-opus-5-5@default": { "id": "claude-opus-5-5@default", "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 } },
+      "claude-sonnet-5-5@default": { "id": "claude-sonnet-5-5@default", "cost": { "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75 } },
+      "openai/gpt-oss-120b-maas": { "id": "openai/gpt-oss-120b-maas", "cost": { "input": 0.15, "output": 0.6 } }
     }
   },
   "google": {

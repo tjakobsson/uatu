@@ -51,7 +51,7 @@ commit that passes `bun run test:ci` on its own.
 
 ## 4. Price table (commit 4)
 
-- [ ] 4.1 Write `scripts/update-antigravity-prices.ts` with the D11 rules (base rates only) and the family map. Get approval before running it, because it fetches models.dev, then generate `src/chat/antigravity/prices.ts` with its source and snapshot date. Verify that the script's rule tests pass on a stored sample of the models.dev data.
+- [x] 4.1 Write `scripts/update-antigravity-prices.ts` with the D11 rules (base rates only) and the family map. Get approval before running it, because it fetches models.dev, then generate `src/chat/antigravity/prices.ts` with its source and snapshot date. Verify that the script's rule tests pass on a stored sample of the models.dev data.
 - [x] 4.2 Price each turn into `TokenUsage.costUsd`. Verify with tests for thinking at the output rate, cache writes unpriced, a family-borrowed price, equal rates across thinking levels, an unpriced model contributing no cost, and the receipt's by-model total matching the chip.
 
 ## 5. Transcript enrichment (commit 5)
