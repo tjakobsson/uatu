@@ -199,26 +199,31 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await reader.getSession(session.id)).toBeNull();
     });
 
-    test("a listing cut short at its page cap evicts nothing and refuses no id", async () => {
-      const { fake, provider, run } = await setup();
-      const first = await provider.createSession("a");
-      await run(first.id, "Say hello");
-      const second = await provider.createSession("b");
-      await run(second.id, "Say hello");
-      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, listPageLimit: 1 });
-      cleanups.push(() => reader.dispose());
-      // A complete listing first, then only capped ones.
-      expect(await reader.listSessions()).toHaveLength(2);
+    test("the listing follows agy's pages to the end: a conversation on page 25 is listed and opens, an unlisted id does not", async () => {
+      const { fake, provider } = await setup();
+      const session = await provider.createSession("a");
+      // 24 more sessions, written as agy keeps them, listed one per page.
+      const stored = await fake.sessions();
+      const filler = Array.from({ length: 24 }, (_, index) => ({ ...stored[0]!, sessionId: `00000000-0000-0000-0000-${String(index).padStart(12, "0")}`, title: `Filler ${index}`, replay: [] }));
+      await writeFile(path.join(fake.stateDirectory, "sessions.json"), JSON.stringify([...filler, ...stored]));
       await fake.setFlag("paged-list", true);
-      // A capped listing keeps the ids it did not reach.
-      expect((await reader.listSessions()).map(session => session.id).sort()).toEqual([first.id, second.id].sort());
-      const fresh = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, listPageLimit: 1 });
-      cleanups.push(() => fresh.dispose());
-      const shown = (await fresh.listSessions()).map(session => session.id);
-      expect(shown).toHaveLength(1);
-      const unseen = shown[0] === first.id ? second.id : first.id;
-      // Not on the page the cap reached, but the listing did not end: it is loaded, not refused.
-      expect((await fresh.listMessages(unseen, { limit: 50 })).items.filter(item => item.type === "user_message")).toHaveLength(1);
+      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reader.dispose());
+      const listed = (await reader.listSessions()).map(listedSession => listedSession.id);
+      expect(listed).toHaveLength(25);
+      expect(listed.at(-1)).toBe(session.id);
+      expect(await reader.getSession(session.id)).toEqual(expect.objectContaining({ id: session.id }));
+      await expect(reader.listMessages("11111111-1111-1111-1111-111111111111", { limit: 50 })).rejects.toBeInstanceOf(ConversationNotFoundError);
+    });
+
+    test("a listing that cannot finish fails as unavailable and loads nothing", async () => {
+      const { fake, provider } = await setup({ setupDeadlineMs: 600 });
+      const session = await provider.createSession("a");
+      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, setupDeadlineMs: 600 });
+      cleanups.push(() => reader.dispose());
+      await fake.setFlag("hang-list", true);
+      await expect(reader.listMessages(session.id, { limit: 50 })).rejects.toThrow("did not answer session/list");
+      expect((await fake.log()).filter(entry => entry.method === "session/load")).toEqual([]);
     });
 
     test("a load that fails after part of its replay leaves no partial history behind", async () => {
