@@ -733,6 +733,25 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(carriers(upserts, session.id).map(item => item.usage?.input)).toEqual([1000, 8886]);
     });
 
+    test("without ACP usage, a steered turn's tokens cover every input it carried", async () => {
+      const { fake, provider, upserts, waitFor, ended } = await setup({ prices });
+      const session = await provider.createSession("a");
+      await fake.setFlag("no-usage", true);
+      await Bun.write(path.join(fake.stateDirectory, "home", ".gemini", "antigravity-cli", "brain", session.id, ".system_generated", "logs", "transcript.jsonl"), [
+        { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nsteer: run it\n</USER_REQUEST>" },
+        { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", input_tokens: 1000, output_tokens: 100, cache_read_tokens: 0 },
+        { step_index: 2, type: "USER_INPUT", content: "<USER_REQUEST>\nAlso this\n</USER_REQUEST>" },
+        { step_index: 3, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", input_tokens: 500, output_tokens: 50, cache_read_tokens: 200 },
+      ].map(step => JSON.stringify(step)).join("\n"));
+      await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      const sent = await provider.prompt(session.id, { id: "s", text: "Also this", delivery: "steer" });
+      expect((await sent.confirmation)?.outcome).toBe("accepted");
+      await ended(session.id);
+      await waitFor(() => carriers(upserts, session.id).length > 0, "the transcript's usage");
+      expect(carriers(upserts, session.id)[0]!.usage).toEqual(expect.objectContaining({ input: 1500, output: 150, cacheRead: 200 }));
+    });
+
     test("a turn on an unpriced model has no cost", async () => {
       const { provider, run, upserts } = await setup({ prices });
       const session = await provider.createSession("a");

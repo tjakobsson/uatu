@@ -560,10 +560,24 @@ export class AntigravityProvider implements ChatProvider {
   private async usageFromTranscript(conversation: Conversation, turn: Turn, carrierId: string, model: ModelSelection | undefined): Promise<void> {
     const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
     if (!("steps" in read) || this.disposed) return;
-    const recorded = transcriptTurns(read.steps)[turn.userIndex - 1];
-    if (!recorded?.usage || recorded.request !== turn.request.trim()) return;
-    const recordedModel = recorded.model ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: transcriptModelFamily(recorded.model, id => this.knownModel(id)) } : model;
-    const update = this.usageCarrier(conversation, carrierId, recorded.usage, recordedModel, this.now());
+    // Every input the turn carried: its opening prompt and each steer agy
+    // took, each a turn of its own in the transcript, matched by its words.
+    const inputs = [{ position: turn.userIndex, text: turn.request }, ...[...turn.prompts.values()]
+      .flatMap(state => state.steer?.decided === "accepted" ? [{ position: state.steer.position, text: state.steer.text }] : [])];
+    const recordedTurns = transcriptTurns(read.steps);
+    const tokens: TokenUsage = {};
+    let recordedModelId: string | undefined;
+    for (const input of inputs) {
+      const recorded = recordedTurns[input.position - 1];
+      if (!recorded || recorded.request !== input.text.trim()) return;
+      for (const key of ["input", "output", "cacheRead"] as const) {
+        if (recorded.usage?.[key] !== undefined) tokens[key] = (tokens[key] ?? 0) + recorded.usage[key]!;
+      }
+      recordedModelId = recorded.model ?? recordedModelId;
+    }
+    if (Object.keys(tokens).length === 0) return;
+    const recordedModel = recordedModelId ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: transcriptModelFamily(recordedModelId, id => this.knownModel(id)) } : model;
+    const update = this.usageCarrier(conversation, carrierId, tokens, recordedModel, this.now());
     this.emit(conversation, { updates: [update], outcome: "handled", eventType: "transcript.usage", assistantUsage: { messageId: carrierId, usage: (update as { item: { usage: TokenUsage } }).item.usage } });
   }
 

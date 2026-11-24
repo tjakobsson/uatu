@@ -313,7 +313,7 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       if (answer.outcome.outcome === "cancelled" || run.cancelled) return cancelled();
       if (answer.outcome.optionId === "deny") { steps = [...steps.slice(0, index + 1), ...(script.onReject ?? [])]; continue; }
     } else if ("waitForSteer" in step) {
-      run.pendingSteerUsage = step.waitForSteer.usage;
+      run.pendingSteerUsage = flag("no-usage") ? undefined : step.waitForSteer.usage;
       await new Promise<void>(resolve => { run.steerWaiters.push(resolve); run.cancelWaiters.push(resolve); });
       run.pendingSteerUsage = undefined;
     } else if ("waitForCancel" in step) {
