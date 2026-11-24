@@ -1144,7 +1144,7 @@ test("completed code copy stays reachable without hover or reflow", async ({ pag
   // The copied state is set once the clipboard write has resolved, and it
   // clears again after a moment: assert it first, then read the clipboard.
   await expect(code).toHaveAttribute("data-state", "copied");
-  expect(await readClipboardMock(page)).toBe("const touch = true;\n");
+  expect(await readClipboardMock(page)).toBe("const touch = true;");
   const after = await message.boundingBox();
   expect(after?.width).toBeCloseTo(before?.width ?? 0, 1);
   expect(after?.height).toBeCloseTo(before?.height ?? 0, 1);

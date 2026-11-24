@@ -3,6 +3,7 @@
 // rendering-time DOM massaging lives with the rest of the preview pipeline.
 
 import { writeClipboardText } from "../shared/clipboard";
+import { codeBlockCopyText } from "../shared/code-copy";
 import { splitHighlightedLines } from "./highlight-lines";
 
 // Restructure each <pre><code> in the container into one `.uatu-cl` block per
@@ -98,7 +99,7 @@ export function attachCopyButtons(container: HTMLElement) {
 
     button.addEventListener("click", async event => {
       event.preventDefault();
-      const text = code.textContent ?? "";
+      const text = codeBlockCopyText(pre, code);
       if (await writeClipboardText(text)) {
         flashCopyButton(button, "Copied!", "is-copied");
       } else {

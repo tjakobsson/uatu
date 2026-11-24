@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { fromHtml } from "hast-util-from-html";
+import { sanitize } from "hast-util-sanitize";
+import { toHtml } from "hast-util-to-html";
+import { micromark } from "micromark";
+import { gfm, gfmHtml } from "micromark-extension-gfm";
 
 import {
+  highlightCodeBlocks,
+  markdownSanitizeSchema,
   renderCodeAsHtml,
   renderMarkdownToHtml,
   SYNTAX_HIGHLIGHT_BYTES_LIMIT,
@@ -34,7 +41,7 @@ Visit https://example.com and ~~remove~~ text.`);
   test("highlights known languages with github-style tokens", () => {
     const { html } = renderMarkdownToHtml("```js\nconst answer = 42;\n```");
 
-    expect(html).toContain('<pre><code class="hljs language-js">');
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
     expect(html).toContain("hljs-keyword");
     expect(html).toContain("hljs-number");
   });
@@ -42,9 +49,53 @@ Visit https://example.com and ~~remove~~ text.`);
   test("falls back gracefully for unknown languages", () => {
     const { html } = renderMarkdownToHtml("```madeuplang\nnot a real language\n```");
 
-    expect(html).toContain('<pre><code class="hljs');
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs');
     expect(html).toContain("not a real language");
     expect(html).not.toContain("hljs-keyword");
+  });
+
+  test("marks indented Markdown code blocks but never raw HTML pre blocks (even with forged attributes)", () => {
+    const indented = renderMarkdownToHtml("    indented line\n").html;
+    expect(indented).toContain('<pre data-uatu-markdown-code><code class="hljs">');
+
+    const rawHtml = renderMarkdownToHtml('<pre data-uatu-markdown-code><code>raw line\n</code></pre>').html;
+    expect(rawHtml).toContain('<pre><code class="hljs">');
+    expect(rawHtml).not.toContain("data-uatu-markdown-code");
+  });
+
+  test("does not leak markers into raw-text HTML spans or quoted HTML attributes, and still marks real code blocks", () => {
+    const baseline = (source: string) => highlightCodeBlocks(
+      toHtml(
+        sanitize(
+          fromHtml(
+            micromark(source, { allowDangerousHtml: true, extensions: [gfm()], htmlExtensions: [gfmHtml()] }),
+            { fragment: true },
+          ),
+          markdownSanitizeSchema,
+        ),
+      ),
+    );
+
+    const noscript = renderMarkdownToHtml("<noscript>\n\n```js\nconst x = 1;\n```\n\n</noscript>\n\n```js\nconst y = 2;\n```\n").html;
+    expect(noscript).not.toContain("uatu-pre-");
+    expect(noscript).not.toContain("uatu-md-code-");
+    expect(noscript).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
+
+    const doubleQuotedSource = '<div title="note\n\n```\nhello\n```\n\nend">shown</div>';
+    const doubleQuoted = renderMarkdownToHtml(doubleQuotedSource).html;
+    expect(doubleQuoted).toBe(baseline(doubleQuotedSource));
+    expect(doubleQuoted).not.toContain("uatu-pre-");
+    expect(doubleQuoted).not.toContain("data-uatu-markdown-code");
+
+    const singleQuotedSource = "<div title='note\n\n```\nhello\n```\n\nend'>shown</div>";
+    const singleQuoted = renderMarkdownToHtml(singleQuotedSource).html;
+    expect(singleQuoted).toBe(baseline(singleQuotedSource));
+    expect(singleQuoted).not.toContain("uatu-pre-");
+    expect(singleQuoted).not.toContain("data-uatu-markdown-code");
+
+    // Reordered GFM footnote buffers and CRLF raw HTML prefixes still match exact `<pre>` offsets.
+    const footnoteAndCrlf = renderMarkdownToHtml('<div title="a\r\nb">x</div>\r\n\r\nRef[^1]\r\n\r\n[^1]:\r\n    ```js\r\n    const f = 1;\r\n    ```\r\n').html;
+    expect(footnoteAndCrlf).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
   });
 
   test("passes through GitHub-style inline HTML blocks (e.g. centered README hero)", () => {
@@ -60,7 +111,7 @@ Visit https://example.com and ~~remove~~ text.`);
   test("still escapes HTML inside fenced code blocks", () => {
     const { html } = renderMarkdownToHtml("```html\n<script>alert(1)</script>\n```");
 
-    expect(html).toContain('<pre><code class="hljs');
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs');
     expect(html).not.toContain("<script>alert(1)</script>");
     // Either named (&lt;) or numeric (&#x3C;) — both are valid HTML escapes.
     expect(html).toMatch(/&(lt;|#x3[Cc];)/);

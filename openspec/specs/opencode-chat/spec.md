@@ -2477,7 +2477,7 @@ Completed assistant code blocks SHALL offer safe, accessible, code-only copying 
 
 #### Scenario: A completed assistant message contains a fenced code block
 - **WHEN** a completed assistant message contains a fenced code block
-- **THEN** Each fenced code block inside completed assistant content SHALL offer an accessible copy action that writes only the code content with its source line breaks, excluding syntax markup, fence delimiters, and controls.
+- **THEN** Each fenced code block inside completed assistant content SHALL offer an accessible copy action that writes only the code content with its source line breaks, excluding syntax markup, fence delimiters, controls, and the parser-synthesized trailing newline.
 - **AND** Completed assistant messages MUST NOT present a whole-answer copy action.
 
 #### Scenario: A keyboard or coarse-pointer reader copies code and clipboard access succeeds or fails
@@ -2492,9 +2492,10 @@ Completed assistant code blocks SHALL offer safe, accessible, code-only copying 
 - **AND** each completed fenced code block retains its own scoped copy action
 
 #### Scenario: Copy one fenced code block
-- **WHEN** the user activates copy for a fenced code block in completed assistant content
-- **THEN** the clipboard receives only that block's code with its source line breaks
+- **WHEN** the user activates copy for a fenced code block in completed assistant content or uncaptured Markdown surfaces such as side-reader answers, request plans, or subagent results
+- **THEN** the clipboard receives only that block's code with its internal line breaks preserved and the single parser-synthesized trailing newline omitted
 - **AND** syntax markup, fences, and control labels are excluded
+- **AND** captured inline SVG visual source copies remain byte-exact
 
 #### Scenario: Streaming answer is not presented as complete
 - **WHEN** an assistant message is still streaming
