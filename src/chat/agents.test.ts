@@ -1282,6 +1282,46 @@ test("a late reference definition inside the cadence reindexes captured images b
   } finally { clock.mockRestore(); await h.cleanup(); }
 });
 
+test("a split definition destination reindexes once at its opener, leaves continuations on the cadence, and flushes at its line end", async () => {
+  const h = await visualSubscriptionHarness("test");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const captures = spyOn(h.store, "captureMany");
+  const enrichments = spyOn(h.service as unknown as { enrichItem(id: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> }, "enrichItem");
+  h.files.available = true;
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const result = applyChatEvent(client, event);
+    expect(result.outcome).toBe("applied");
+    client = result.projection;
+  };
+  const visuals = () => (client.items[0] as AssistantMessageItem).visuals?.map(visual => [visual.index, visual.status, visual.id]);
+  const work = () => [enrichments.mock.calls.length, captures.mock.calls.length];
+  const append = async (text: string) => {
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text });
+    return (await deliveredBatch(h.replay, h.iterator, project)).map(event => event.type);
+  };
+  try {
+    h.projection.upsert({ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![First][ref]\n\n![Second](second.png)" });
+    await deliveredBatch(h.replay, h.iterator, project);
+    const [[, , second]] = visuals()! as [[number, string, string]];
+    const [enriched, captured] = work() as [number, number];
+    // The first destination character resolves the label and moves the
+    // captured image to index 1, so it reindexes inside the frozen cadence.
+    expect(await append("\n\n[ref]: f")).toEqual(["item.upsert"]);
+    expect(work()).toEqual([enriched + 1, captured + 1]);
+    expect(visuals()).toEqual([[0, "pending", undefined], [1, "ready", second]]);
+    // Extending the same provisional destination changes no index.
+    for (const chunk of ["ir", "st", "-im", "age", ".pn", "g"]) expect(await append(chunk)).toEqual(["item.text_delta"]);
+    expect(work()).toEqual([enriched + 1, captured + 1]);
+    expect(h.files.reads).toBe(1);
+    // The line end finalizes the destination and flushes immediately.
+    expect(await append("\n")).toEqual(["item.upsert"]);
+    expect(work()).toEqual([enriched + 2, captured + 2]);
+    expect(visuals()).toEqual([[0, "ready", expect.any(String)], [1, "ready", second]]);
+    expect(h.files.reads).toBe(2);
+  } finally { enrichments.mockRestore(); captures.mockRestore(); clock.mockRestore(); await h.cleanup(); }
+});
+
 test("a shorthand label inside the cadence stays provisional, then following whitespace flushes its resolved source immediately", async () => {
   const h = await visualSubscriptionHarness("test");
   const clock = spyOn(Date, "now").mockReturnValue(1_000);
