@@ -277,7 +277,7 @@
           <section class="sidebar-pane" data-pane-id="pull-request" data-pane-unavailable hidden>
             <header class="pane-header">
               <h2>Pull request</h2>
-              <div class="pane-meta"><span id="pull-request-pane-meta" class="pr-pane-meta"></span></div>
+              <div class="pane-meta"><span id="pull-request-pane-meta" class="pr-pane-meta"></span><span id="pull-request-updated" class="pr-pane-updated" aria-hidden="true" hidden>Updated just now</span></div>
               <div class="pane-actions">
                 <button id="pull-request-browse" class="pane-action" type="button" aria-label="Browse pull requests…" title="Browse pull requests: open another one"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6.75" cy="6.75" r="4.75"/><path d="m10.25 10.25 4 4"/></svg></button>
                 <button id="pull-request-refresh" class="pane-action" type="button" aria-label="Refresh pull request from GitHub" title="Refresh from GitHub">↻</button>
@@ -292,8 +292,8 @@
           <section class="sidebar-pane" data-pane-id="change-overview">
             <header class="pane-header">
               <h2>Change Overview</h2>
-              <!-- While a pull request is picked (sidebar/pull-request-scope.ts):
-                   this pane still describes the checked-out branch. -->
+              <!-- "Local branch" whenever this pane's comparison isn't the
+                   pull request's diff (sidebar/pull-request-scope.ts). -->
               <div class="pane-meta"><span id="change-overview-scope" class="pane-scope-note" hidden></span></div>
               <div class="pane-actions">
                 <button class="pane-action" type="button" data-pane-collapse="change-overview" aria-label="Collapse Change Overview" title="Collapse pane">−</button>
@@ -566,9 +566,16 @@
                  the preview target (html[data-preview-kind]). -->
             <div id="pr-view-control" class="view-control pr-view-control" role="tablist" aria-label="Pull request view">
               <button id="pr-tab-conversation" class="view-segment" type="button" role="tab" aria-controls="pr-panel-conversation" data-pr-tab="conversation">Conversation <span class="pr-tab-count" data-pr-tab-count="conversation"></span></button>
-              <button id="pr-tab-files" class="view-segment" type="button" role="tab" aria-controls="pr-panel-files" tabindex="-1" data-pr-tab="files">Files changed <span class="pr-tab-count" data-pr-tab-count="files"></span></button>
+              <button id="pr-tab-files" class="view-segment" type="button" role="tab" aria-controls="pr-panel-files" tabindex="-1" data-pr-tab="files"><span>Files<span class="pr-tab-long"> changed</span></span> <span class="pr-tab-count" data-pr-tab-count="files"></span></button>
             </div>
+            <!-- Touch mode: the review state in the tabs row (diff-review.ts
+                 renderReviewBar, surface "header"): Review, or Finish (n)
+                 while a review is pending. -->
+            <div id="pr-view-review" class="pr-header-review" role="region" aria-label="Your review" hidden></div>
             <a id="pr-view-github" class="action-icon pr-view-github" href="#" target="_blank" rel="noopener noreferrer" title="Open on GitHub" aria-label="Open on GitHub (opens in a new tab)">↗</a>
+            <!-- Files changed: the one Jump to file control (the list of every
+                 file), at the end of the pinned tabs row. -->
+            <button id="pr-view-jump" class="pr-view-jump" type="button" hidden aria-label="Jump to file" title="Jump to file"><svg class="pr-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h12M9 12h12M9 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg><span class="pr-view-jump-label">Jump to file</span></button>
             <div
               id="view-control"
               class="view-control"

@@ -1,22 +1,51 @@
 import { describe, expect, test } from "bun:test";
 
 import type { PullRequestDetail } from "../shared/github-contract";
-import { reviewActionLabel, reviewDialogStart, reviewSubmitReason, unsentReviewDrafts } from "./review-dialogs";
+import { caretAtEnd, createLeftAsDrafts, reviewActionLabel, reviewDialogStart, reviewSubmitReason, submitReviewLabel, summaryGuidance, unsentReviewDrafts } from "./review-dialogs";
 
 describe("reviewSubmitReason", () => {
   const open = { number: 7, state: "OPEN" };
   test("needs a verdict, and words for Comment or Request changes", () => {
     expect(reviewSubmitReason({ paused: null, pr: open, choice: null, summary: "", pendingComments: 0 })).toBe("Choose Comment, Approve or Request changes.");
-    expect(reviewSubmitReason({ paused: null, pr: open, choice: "COMMENT", summary: "", pendingComments: 0 })).toBe("Write a summary or add a comment first.");
-    expect(reviewSubmitReason({ paused: null, pr: open, choice: "REQUEST_CHANGES", summary: " ", pendingComments: 0 })).toBe("Say what needs to change.");
+    expect(reviewSubmitReason({ paused: null, pr: open, choice: "COMMENT", summary: "", pendingComments: 0 })).toBe("Write a summary or add a line comment first.");
+    expect(reviewSubmitReason({ paused: null, pr: open, choice: "REQUEST_CHANGES", summary: " ", pendingComments: 0 })).toBe("Say what needs to change in the summary.");
     expect(reviewSubmitReason({ paused: null, pr: open, choice: "APPROVE", summary: "", pendingComments: 0 })).toBeNull();
     expect(reviewSubmitReason({ paused: null, pr: open, choice: "COMMENT", summary: "", pendingComments: 1 })).toBeNull();
+  });
+
+  test("a change request needs a summary even with pending comments (GitHub's rule)", () => {
+    expect(reviewSubmitReason({ paused: null, pr: open, choice: "REQUEST_CHANGES", summary: "", pendingComments: 2 })).toBe("Say what needs to change in the summary.");
+    expect(reviewSubmitReason({ paused: null, pr: open, choice: "REQUEST_CHANGES", summary: "Split it.", pendingComments: 0 })).toBeNull();
   });
 
   test("waits while GitHub can't take writes, and refuses a closed pull request", () => {
     expect(reviewSubmitReason({ paused: "paused", pr: open, choice: "APPROVE", summary: "", pendingComments: 0 })).toBe("paused");
     expect(reviewSubmitReason({ paused: null, pr: { number: 7, state: "MERGED" }, choice: "APPROVE", summary: "", pendingComments: 0 }))
       .toBe("#7 is merged; it can no longer be reviewed.");
+  });
+});
+
+describe("summaryGuidance", () => {
+  const cases: [Parameters<typeof summaryGuidance>[0], number][] = [
+    [null, 0], [null, 2], ["APPROVE", 0], ["APPROVE", 1], ["COMMENT", 0], ["COMMENT", 1], ["COMMENT", 3], ["REQUEST_CHANGES", 0], ["REQUEST_CHANGES", 2],
+  ];
+  test("says required exactly when an empty summary can't be submitted", () => {
+    const open = { number: 7, state: "OPEN" };
+    for (const [choice, pending] of cases) {
+      if (choice === null) continue;
+      const blocked = reviewSubmitReason({ paused: null, pr: open, choice, summary: "", pendingComments: pending }) !== null;
+      expect(`${choice}/${pending}: ${summaryGuidance(choice, pending).need}`).toBe(`${choice}/${pending}: ${blocked ? "required" : "optional"}`);
+    }
+  });
+
+  test("follows the verdict and the pending count", () => {
+    expect(summaryGuidance(null, 0)).toEqual({ need: null, placeholder: "Leave a summary (Markdown). Required to comment or request changes; optional to approve." });
+    expect(summaryGuidance(null, 2).placeholder).toBe("Leave a summary (Markdown). Required to request changes.");
+    expect(summaryGuidance("APPROVE", 0).placeholder).toBe("Optional: add a note to your approval (Markdown).");
+    expect(summaryGuidance("COMMENT", 1).placeholder).toBe("Optional: your pending comment is published with it (Markdown).");
+    expect(summaryGuidance("COMMENT", 3).placeholder).toBe("Optional: your 3 pending comments are published with it (Markdown).");
+    expect(summaryGuidance("COMMENT", 0).placeholder).toBe("Write your comment (Markdown).");
+    expect(summaryGuidance("REQUEST_CHANGES", 2).placeholder).toBe("Say what needs to change (Markdown).");
   });
 });
 
@@ -66,11 +95,25 @@ describe("unsent drafts at Finish review", () => {
   test("skips blank drafts, ones GitHub already holds, and places gone from the pull request", () => {
     expect(unsentReviewDrafts([
       { location: { kind: "inline", path: "a.md", side: "RIGHT", line: 14 }, draft: draft("  ") },
-      { location: { kind: "inline", path: "a.md", side: "RIGHT", line: 2 }, draft: draft("sent already") },
+      { location: { kind: "inline", path: "a.md", side: "RIGHT", line: 2 }, draft: { ...draft("sent already"), sending: [] } },
       { location: { kind: "inline", path: "gone.md", side: "RIGHT", line: 1 }, draft: draft("x") },
       { location: { kind: "reply", threadId: "gone" }, draft: draft("x") },
       { location: { kind: "conversation" }, draft: draft("not a review comment") },
     ], detail)).toEqual([]);
+  });
+  test("keeps the same words typed again on a line that already has them", () => {
+    const repeat = unsentReviewDrafts([{ location: { kind: "inline", path: "a.md", side: "RIGHT", line: 2 }, draft: draft("sent already") }], detail);
+    expect(repeat.map(entry => entry.where)).toEqual(["a.md:2 (new)"]);
+  });
+  test("a draft left out stays left out until its text changes", () => {
+    const left = createLeftAsDrafts();
+    const pr = { repositoryId: "repo", number: 7 };
+    const entry = { location: { kind: "inline" as const, path: "a.md", side: "RIGHT" as const, line: 14 }, text: "look here" };
+    expect(left.has(pr, entry)).toBe(false);
+    left.leave(pr, entry);
+    expect(left.has(pr, entry)).toBe(true);
+    expect(left.has(pr, { ...entry, text: "look here, again" })).toBe(false);
+    expect(left.has({ ...pr, number: 8 }, entry)).toBe(false);
   });
   test("Submit waits until each is added or left as a draft", () => {
     const open = { number: 7, state: "OPEN" };
@@ -83,8 +126,29 @@ describe("unsent drafts at Finish review", () => {
 });
 
 describe("reviewActionLabel", () => {
-  test("starts a review, or finishes the one in progress with its count", () => {
-    expect(reviewActionLabel(0)).toBe("Start review");
+  test("one review button: Review, or Finish review with the pending count", () => {
+    expect(reviewActionLabel(0)).toBe("Review");
     expect(reviewActionLabel(2)).toBe("Finish review (2)");
+  });
+});
+
+describe("submitReviewLabel", () => {
+  test("names the verdict it publishes", () => {
+    expect(submitReviewLabel("APPROVE")).toBe("Publish approval");
+    expect(submitReviewLabel("REQUEST_CHANGES")).toBe("Request changes");
+    expect(submitReviewLabel("COMMENT")).toBe("Post comment review");
+    expect(submitReviewLabel(null)).toBe("Submit review");
+  });
+});
+
+describe("caretAtEnd", () => {
+  test("puts the caret after text the field was given, so typing appends", () => {
+    let range = [-1, -1];
+    const field = { value: "Escape-loss test", setSelectionRange: (start: number, end: number) => { range = [start, end]; } };
+    caretAtEnd(field);
+    expect(range).toEqual([16, 16]);
+    field.value = "";
+    caretAtEnd(field);
+    expect(range).toEqual([0, 0]);
   });
 });

@@ -5,14 +5,24 @@
 // line number (src/preview/diff-review-lines.ts) opens a composer, and
 // "Add to review" is its only action, so every inline comment lands in the
 // pending review. Several lines may hold unsent drafts at once: opening
-// another line keeps a composer with text open and closes an empty one. On
-// touch, each file also offers a full-size "Comment on a line" button, and
-// the composer's line picker moves it. A bar above the files, pinned while
-// the files scroll, counts pending comments and offers Discard review /
-// Finish review (n); without any, Start review moves focus to the first
-// file's line numbers. On a phone the bar is one row: a count badge, Discard
-// and Finish (n). A resolved thread folds away unless it holds the viewer's
-// pending reply or an open reply box.
+// another line keeps a composer with text open and closes an empty one.
+// Files are listed in tree order (src/shared/tree-order.ts), as the Files
+// pane lists them. Each file's header, pinned only within its own file
+// while its diff scrolls, names the file and holds Comment on a line (a
+// composer on the file's first non-blank changed line, whose line picker
+// moves it; on touch with a visible "Comment" label). Jump to file (a list of
+// every file) is one button in the preview header's pinned tabs row
+// (pull-request-view.ts opens it through openJump), and so is the one review
+// button, Review (it opens the review dialog, whose Add line comments comes
+// back here through addLineComments), or Finish (n) while a review is in
+// progress (reviewBarShownOn). On desktop a bar above the files holds the
+// how-to and, while a review is in progress, the pending count and Discard
+// review, pinned. On touch the how-to is a one-line hint in the files
+// toolbar that folds to an icon once the reviewer starts or scrolls
+// (remembered per device), and a tap on a line's row opens its composer. A
+// resolved thread folds away the moment it is resolved, unless it holds the
+// viewer's pending reply or reply text; a pending reply has its own Edit and
+// Discard.
 //
 // Unsent text survives re-renders and reloads: composers are kept across
 // annotation re-renders and their text is saved per location
@@ -33,13 +43,16 @@ import { age, avatar, shortOid } from "../github/present";
 import type { DiffSide, PendingComment, PullRequestDetail, PullRequestFile, ReviewThread } from "../shared/github-contract";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
-import { previewScrollRoot } from "../shell/preview-scroll-root";
+import { previewScrollEventTarget, previewScrollRoot } from "../shell/preview-scroll-root";
 import { tabBarBottomInset } from "../shell/tab-bar";
+import { onUiModeChange } from "../shell/ui-mode";
 import type { DiffStyle } from "../shared/types";
 import { createComposer, type Composer } from "./pr-composer";
-import { draftAlreadySent, prDrafts } from "./pr-drafts";
-import { confirmDiscardPendingComment, confirmDiscardReview, openSubmitReviewDialog, reviewActionLabel, showToast } from "./review-dialogs";
-import { anchorLabel } from "./diff-review-lines";
+import { draftAlreadySent, matchingComments, prDrafts } from "./pr-drafts";
+import { confirmDiscardPendingComment, confirmDiscardReview, openSubmitReviewDialog, reviewActionLabel, showToast, trackDialogFooter } from "./review-dialogs";
+import { anchorLabel, filterJumpPaths, firstCommentLine, inlineComposerPrompt, lineOptionText, moveLineIndex } from "./diff-review-lines";
+import { inTreeOrder } from "../shared/tree-order";
+import { presentationLocalStorage } from "../shell/presentation-storage";
 import { renderReviewDiff, type DiffAnnotationSide, type DiffReviewAnnotation, type DiffReviewHandle } from "./diff-view";
 
 type AnnotationData =
@@ -55,9 +68,12 @@ export type FilesChangedView = {
   // Re-reads whether GitHub takes writes now (the summary moved).
   syncAvailability: () => void;
   reveal: (target: { path?: string; threadId?: string; pendingId?: string }) => void;
-  // Start review: focus where a review comment begins (the first file's line
-  // numbers; on touch, its "Comment on a line…").
-  focusFirstLine: () => void;
+  // "Add line comments" (the review dialog): a composer on the first file's
+  // first non-blank changed line, with focus in its text (the line picker is
+  // one Shift+Tab back).
+  addLineComments: () => void;
+  // Jump to file: the list of every file, the one being read marked.
+  openJump: (opener: HTMLElement) => void;
 };
 
 // Split needs room for two code columns; below this the diff stays Unified.
@@ -102,6 +118,40 @@ export function reviewMarkBadges(mark: { threads: number; pending: number } | un
 // full-size control: touch, where line numbers are too small to aim at.
 const touchMode = () => document.documentElement.dataset.uiMode === "touch";
 
+// Beside Resolve / Unresolve on touch, where no tooltip shows: resolving is
+// not part of the pending review. Decoration: the button's name says it.
+const APPLIES_NOW = `<span class="pr-applies-now" aria-hidden="true">Applies now</span>`;
+// How long a thread just resolved offers Undo in its folded footer.
+const UNDO_RESOLVE_MS = 8000;
+
+// The file header's Comment button icon (decoration: the button is named;
+// on touch a short visible label sits beside it).
+const COMMENT_PLUS_ICON = `<svg class="pr-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3.5 20.5l1.4-4.6A8.5 8.5 0 1 1 21 11.5z"/><path d="M12.25 8v7M8.75 11.5h7"/></svg>`;
+
+// The touch how-to hint (in the files toolbar), once folded to its icon on
+// this device: dismissed, or folded on its own once the reviewer started (a
+// pending comment, an open composer) or scrolled the files.
+const REVIEW_HINT_KEY = "uatu:pr-review-hint-dismissed";
+export const reviewHintDismissed = (): boolean => presentationLocalStorage()?.getItem(REVIEW_HINT_KEY) === "1";
+const dismissReviewHint = () => presentationLocalStorage()?.setItem(REVIEW_HINT_KEY, "1");
+
+// Where the review state shows. The one review button (Review, or Finish
+// while a review is pending) is in the preview header's tabs row (the
+// "header" surface, pinned while the diff scrolls) on both tabs, on touch
+// and desktop alike. Desktop adds a bar above the files on Files changed
+// (the how-to, and while a review is pending its count and Discard review)
+// and above the conversation while a review is pending; touch has no such
+// band, so it takes no rows.
+export type ReviewBarSurface = "files" | "conversation" | "header";
+export function reviewBarShownOn(surface: ReviewBarSurface, layout: { touch: boolean; pending: number; open: boolean }): boolean {
+  if (surface === "header") return layout.open || layout.pending > 0;
+  if (surface === "files") return !layout.touch;
+  return layout.pending > 0 && !layout.touch;
+}
+
+// The keys that comment on a line, said in the desktop bar.
+export const REVIEW_KEYS_HINT = "Click a line number (or hover a line and click <kbd>+</kbd>) to comment on it. From the keyboard: <kbd>Tab</kbd> to a file's line numbers, move with <kbd>↑</kbd> <kbd>↓</kbd>, and press <kbd>Enter</kbd>.";
+
 export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail, repositoryId: string): FilesChangedView {
   let detail = initial;
   let version = 0;
@@ -111,6 +161,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   // gives way when another line is opened.
   const composers = new Map<string, ComposerTarget>();
   const composerBoxes = new Map<string, { wrapper: HTMLElement; box: Composer }>();
+  const composerOpeners = new Map<string, HTMLElement | null>();
   // Focus a composer's textarea (or its line picker) when it next renders.
   let composerFocus: { key: string; kind: "text" | "line" } | null = null;
   // Threads whose reply box is open, and their composers.
@@ -120,6 +171,20 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   const openEdits = new Set<string>();
   const editBoxes = new Map<string, Composer>();
   const expandedResolved = new Set<string>();
+  // Threads being resolved or unresolved: shown in their new state at once,
+  // while GitHub takes the write.
+  const resolving = new Map<string, boolean>();
+  // Threads the reviewer has just resolved: their folded footer says so,
+  // with the way back named Undo, for UNDO_RESOLVE_MS (the same button as
+  // Unresolve, so focus stays on it when the window ends).
+  const justResolved = new Map<string, ReturnType<typeof setTimeout>>();
+  const forgetJustResolved = (threadId: string) => {
+    const timer = justResolved.get(threadId);
+    if (timer !== undefined) clearTimeout(timer);
+    justResolved.delete(threadId);
+  };
+  // The files in tree order, as the Files pane lists them.
+  const orderedFiles = () => inTreeOrder(detail.files);
   const handles = new Map<string, DiffReviewHandle<AnnotationData>>();
   const target = () => ({ repository: repositoryId, number: detail.summary.number });
   let diffStyle: DiffStyle = appState.diffStyle;
@@ -130,7 +195,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   // Drafts left by an earlier page: reopen them where they were, except
   // those GitHub already holds (the page went away after sending them).
   const unsent = (kind: "inline" | "reply" | "edit") => prDrafts.list(draftTarget, kind).filter(entry => {
-    if (!draftAlreadySent(entry.location, entry.draft.text, initial)) return true;
+    if (!draftAlreadySent(entry.location, entry.draft, initial)) return true;
     prDrafts.clear(draftTarget, entry.location);
     return false;
   });
@@ -150,10 +215,8 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   host.innerHTML = `
     <div class="pr-review-bar" data-pr-review-bar role="region" aria-label="Your review"></div>
     <div class="pr-files-toolbar">
-      <details class="pr-file-index">
-        <summary class="pr-files-summary" data-pr-files-summary></summary>
-        <nav aria-label="Changed files" data-pr-file-index></nav>
-      </details>
+      <p class="pr-files-summary" data-pr-files-summary></p>
+      <span class="pr-review-hint" data-review-hint hidden></span>
       <div class="view-control" role="radiogroup" aria-label="Diff layout">
         <button type="button" class="view-segment" role="radio" data-diff-style="unified">Unified</button>
         <button type="button" class="view-segment" role="radio" data-diff-style="split">Split</button>
@@ -162,7 +225,6 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     <div class="pr-files" data-pr-files></div>`;
   const bar = host.querySelector<HTMLElement>("[data-pr-review-bar]")!;
   const filesElement = host.querySelector<HTMLElement>("[data-pr-files]")!;
-  const indexElement = host.querySelector<HTMLElement>("[data-pr-file-index]")!;
   const effectiveStyle = (): DiffStyle => (narrow ? "unified" : diffStyle);
 
   // The bar is pinned under the preview's sticky header, at
@@ -171,7 +233,14 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   // scroll-margin reads this); an inactive bar scrolls away, so it counts 0.
   const syncBarHeight = () => {
     host.style.setProperty("--pr-review-bar-height", `${bar.classList.contains("is-active") ? bar.offsetHeight : 0}px`);
+    const header = filesElement.querySelector<HTMLElement>(".pr-file-header");
+    if (header) host.style.setProperty("--pr-file-header-height", `${header.offsetHeight}px`);
   };
+  // What is pinned over the files at the top of the scroll root: the preview
+  // header, an active review bar, and (inside a file) its header.
+  const pinnedHeight = (insideFile: boolean) => (parseFloat(getComputedStyle(host).getPropertyValue("--pr-sticky-top")) || 0)
+    + (bar.classList.contains("is-active") ? bar.offsetHeight : 0)
+    + (insideFile ? filesElement.querySelector<HTMLElement>(".pr-file-header")?.offsetHeight ?? 0 : 0);
   const resizeObserver = new ResizeObserver(() => {
     syncBarHeight();
     const nextNarrow = host.clientWidth > 0 && host.clientWidth < SPLIT_MIN_WIDTH;
@@ -189,16 +258,96 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     const next = await run();
     pullRequestStore.applyDetail(next);
   };
-  const focusBar = () => (bar.querySelector<HTMLElement>("[data-review-finish]:not(:disabled)") ?? bar.querySelector<HTMLElement>("[data-review-start]"))?.focus();
+  // The one review button, in the preview header's tabs row; else the bar.
+  const focusBar = () => {
+    const button = document.querySelector<HTMLElement>("#pr-view-review [data-review-finish]:not(:disabled), #pr-view-review [data-review-open]");
+    if (button) { button.focus({ preventScroll: true }); return; }
+    bar.tabIndex = -1;
+    bar.focus({ preventScroll: true });
+  };
 
   function renderBar() {
-    renderReviewBar(bar, detail, repositoryId, { surface: "files", onStart: () => view.focusFirstLine() });
+    renderReviewBar(bar, detail, repositoryId, { surface: "files", fallbackFocus: afterReviewFocus });
+    renderHint();
     syncBarHeight();
   }
 
+  // Touch's how-to: one line in the files toolbar, with a button that folds
+  // it to an icon (remembered on this device). It folds on its own once the
+  // reviewer has started (a pending comment, an open composer) or scrolled
+  // the files; the icon opens it again for this page.
+  const hintElement = host.querySelector<HTMLElement>("[data-review-hint]")!;
+  let hintOpen: boolean | null = null;
+  function renderHint() {
+    const show = touchMode() && detail.summary.state === "OPEN";
+    hintElement.hidden = !show;
+    if (!show) { hintElement.innerHTML = ""; return; }
+    if (pendingComments().length > 0 || composers.size > 0) foldHint();
+    const expanded = hintOpen ?? !reviewHintDismissed();
+    const hadFocus = hintElement.contains(document.activeElement);
+    const id = `pr-review-hint-${detail.summary.number}`;
+    hintElement.classList.toggle("is-folded", !expanded);
+    hintElement.innerHTML = `${expanded ? `<span class="pr-review-hint-text" id="${id}">Tap a line to comment on it.</span>` : ""}<button type="button" class="pr-review-hint-toggle" data-review-hint-toggle aria-expanded="${expanded}"${expanded ? ` aria-controls="${id}" aria-label="Hide how to comment" title="Hide this hint"` : ` aria-label="How to comment" title="How to comment"`}>${expanded ? "×" : "?"}</button>`;
+    if (hadFocus) hintElement.querySelector<HTMLElement>("[data-review-hint-toggle]")?.focus({ preventScroll: true });
+  }
+  // Folded for good on this device; a hint reopened on this page stays open.
+  function foldHint() {
+    if (!reviewHintDismissed()) dismissReviewHint();
+  }
+  hintElement.addEventListener("click", event => {
+    if (!(event.target as HTMLElement).closest("[data-review-hint-toggle]")) return;
+    const expanded = hintOpen ?? !reviewHintDismissed();
+    if (expanded) { dismissReviewHint(); hintOpen = false; } else hintOpen = true;
+    renderHint();
+  });
+  // The first scroll of the files folds the hint.
+  const scrollTarget = previewScrollEventTarget();
+  const scrollStart = previewScrollRoot().scrollTop;
+  const onFirstScroll = () => {
+    if (!host.isConnected) { scrollTarget.removeEventListener("scroll", onFirstScroll); return; }
+    if (host.closest<HTMLElement>("[data-pr-panel]")?.hidden || Math.abs(previewScrollRoot().scrollTop - scrollStart) < 24) return;
+    scrollTarget.removeEventListener("scroll", onFirstScroll);
+    if (reviewHintDismissed()) return;
+    foldHint();
+    renderHint();
+  };
+  scrollTarget.addEventListener("scroll", onFirstScroll, { passive: true });
+
+  // The file being read: the one taking the most of the visible rows under
+  // the pinned chrome, else the first.
+  function currentSection(): HTMLElement | null {
+    const sections = [...filesElement.querySelectorAll<HTMLElement>(".pr-file")];
+    const root = previewScrollRoot();
+    const page = root === document.scrollingElement;
+    const top = (page ? 0 : root.getBoundingClientRect().top) + pinnedHeight(false);
+    const bottom = Math.min(window.innerHeight, page ? window.innerHeight : root.getBoundingClientRect().bottom) - tabBarBottomInset();
+    let best: HTMLElement | null = null;
+    let most = 0;
+    for (const section of sections) {
+      const rect = section.getBoundingClientRect();
+      const shown = Math.min(rect.bottom, bottom) - Math.max(rect.top, top);
+      if (shown > most) { most = shown; best = section; }
+    }
+    return best ?? sections[0] ?? null;
+  }
+
+  // After Finish review publishes the review (the bar's Finish is gone),
+  // focus stays in Files changed: on the bar when it is in view, else on
+  // the header of the file being read.
+  function afterReviewFocus(): HTMLElement | null {
+    const rect = bar.getBoundingClientRect();
+    if (rect.bottom > 0 && rect.top < window.innerHeight - tabBarBottomInset()) {
+      bar.tabIndex = -1;
+      return bar;
+    }
+    return currentSection()?.querySelector<HTMLElement>("[data-file-toggle]") ?? null;
+  }
+
+  // One line: the counts, then base → head (what the diffs compare).
   function renderSummary() {
     const pr = detail.summary;
-    host.querySelector("[data-pr-files-summary]")!.innerHTML = `<span class="pr-files-summary-toggle">${plural(pr.changedFiles, "file", "files")}</span> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span> · base <code>${escapeHtml(pr.baseRefName)} @ ${escapeHtml(shortOid(pr.baseRefOid))}</code> (PR base) · head <code>${escapeHtml(shortOid(pr.headRefOid))}</code>${detail.mock ? ` · <span class="gh-mock-label">Mocked diffs</span>` : ""}`;
+    const refs = `Compared against the pull request's base, ${pr.baseRefName} at ${shortOid(pr.baseRefOid)}; head ${shortOid(pr.headRefOid)}`;
+    host.querySelector("[data-pr-files-summary]")!.innerHTML = `<strong>${plural(pr.changedFiles, "file", "files")}</strong> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span> · <span class="pr-files-refs" title="${escapeHtmlAttribute(refs)}"><span class="sr-only">base </span><code>${escapeHtml(pr.baseRefName)}@${escapeHtml(shortOid(pr.baseRefOid))}</code> <span aria-hidden="true">←</span><span class="sr-only"> head </span> <code>${escapeHtml(shortOid(pr.headRefOid))}</code></span>${detail.mock ? ` · <span class="gh-mock-label" title="Mocked diffs: served by the in-memory fake; nothing reaches GitHub">Mocked</span>` : ""}`;
     for (const button of host.querySelectorAll<HTMLButtonElement>("[data-diff-style]")) {
       const active = button.dataset.diffStyle === effectiveStyle();
       button.classList.toggle("is-active", active);
@@ -209,24 +358,114 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     const layout = host.querySelector<HTMLElement>(".pr-files-toolbar .view-control");
     if (layout) layout.hidden = narrow;
     const marks = reviewMarksByPath(detail);
-    indexElement.innerHTML = detail.files.map(file => `
-      <a href="#" class="pr-file-index-item" data-jump-path="${escapeHtmlAttribute(file.path)}">
-        <span class="pr-file-index-path">${escapeHtml(file.path)}</span>
-        ${reviewMarkBadges(marks.get(file.path))}
-        <span class="gh-add">+${file.additions}</span><span class="gh-del">−${file.deletions}</span>
-      </a>`).join("");
     for (const file of detail.files) {
       const header = filesElement.querySelector<HTMLElement>(`[data-file-header="${CSS.escape(file.path)}"] [data-file-badges]`);
       if (header) header.innerHTML = reviewMarkBadges(marks.get(file.path));
     }
   }
 
-  indexElement.addEventListener("click", event => {
-    const link = (event.target as HTMLElement).closest<HTMLElement>("[data-jump-path]");
-    if (!link) return;
-    event.preventDefault();
-    view.reveal({ path: link.dataset.jumpPath });
-  });
+  // Jump to file: every file in tree order, with its counts; the file being
+  // read is marked. A filter field over the list narrows it by path (focused
+  // on desktop; on touch, where it would raise the keyboard, a tap away):
+  // Enter there opens the first match, and the arrow keys move between the
+  // filter and the rows. Picking one scrolls to it and focuses its header.
+  function openJumpDialog(opener: HTMLElement) {
+    const marks = reviewMarksByPath(detail);
+    // The file being read.
+    const current = currentSection()?.dataset.filePath ?? null;
+    const files = orderedFiles();
+    const dialog = document.createElement("dialog");
+    dialog.className = "gh-dialog pr-jump-dialog";
+    dialog.setAttribute("aria-labelledby", "pr-jump-title");
+    dialog.innerHTML = `<div class="gh-dialog-body">
+        <h2 class="gh-dialog-title" id="pr-jump-title">Jump to file</h2>
+        <p class="gh-dialog-sub">${plural(files.length, "file", "files")} in #${detail.summary.number}</p>
+        <input type="search" class="gh-input pr-jump-filter" data-jump-filter placeholder="Filter by path" aria-label="Filter files by path" aria-controls="pr-jump-list" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+        <p class="pr-muted pr-jump-empty" data-jump-empty role="status" hidden></p>
+        <ul class="pr-jump-list" id="pr-jump-list">${files.map(file => `<li data-jump-row="${escapeHtmlAttribute(file.path)}"><button type="button" class="pr-jump-item" data-jump-path="${escapeHtmlAttribute(file.path)}"${file.path === current ? ` aria-current="true"` : ""}>
+            <span class="pr-jump-path">${escapeHtml(file.path)}</span>
+            ${reviewMarkBadges(marks.get(file.path))}
+            <span class="pr-jump-counts"><span class="gh-add">+${file.additions}</span> <span class="gh-del">−${file.deletions}</span></span>
+          </button></li>`).join("")}</ul>
+        <div class="gh-dialog-footer"><span></span><span class="gh-dialog-actions"><button type="button" class="gh-button" data-dialog-cancel>Close</button></span></div>
+      </div>`;
+    document.body.append(dialog);
+    const filter = dialog.querySelector<HTMLInputElement>("[data-jump-filter]")!;
+    const empty = dialog.querySelector<HTMLElement>("[data-jump-empty]")!;
+    const shownItems = () => [...dialog.querySelectorAll<HTMLElement>("[data-jump-row]:not([hidden]) [data-jump-path]")];
+    filter.addEventListener("input", () => {
+      const matches = new Set(filterJumpPaths(files.map(file => file.path), filter.value));
+      for (const row of dialog.querySelectorAll<HTMLElement>("[data-jump-row]")) row.hidden = !matches.has(row.dataset.jumpRow!);
+      empty.hidden = matches.size > 0;
+      empty.textContent = matches.size > 0 ? "" : `No file path contains “${filter.value.trim()}”.`;
+    });
+    let picked: string | null = null;
+    filter.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const first = shownItems()[0];
+        if (first) { picked = first.dataset.jumpPath!; dialog.close(); }
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        shownItems()[0]?.focus();
+      }
+    });
+    dialog.querySelector(".pr-jump-list")!.addEventListener("keydown", event => {
+      const key = (event as KeyboardEvent).key;
+      const items = shownItems();
+      const index = items.indexOf(event.target as HTMLElement);
+      if (index < 0) return;
+      if (key === "ArrowUp" && index === 0) {
+        event.preventDefault();
+        filter.focus();
+        return;
+      }
+      const next = moveLineIndex(index, key, items.length);
+      if (next === null) return;
+      event.preventDefault();
+      items[next]!.focus();
+    });
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      if (picked === null) { if (opener.isConnected) opener.focus({ preventScroll: true }); return; }
+      view.reveal({ path: picked });
+      // The URL follows (pull-request-view.ts), so a reload lands here too.
+      document.dispatchEvent(new CustomEvent("uatu:pull-request-anchor", { detail: { number: detail.summary.number, file: picked } }));
+      void rendered.then(() => requestAnimationFrame(() => requestAnimationFrame(() =>
+        filesElement.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(picked!)}"] [data-file-toggle]`)?.focus({ preventScroll: true }))));
+    });
+    dialog.addEventListener("click", event => {
+      if (event.target === dialog) { dialog.close(); return; }
+      const item = (event.target as HTMLElement).closest<HTMLElement>("[data-jump-path]");
+      if (item) { picked = item.dataset.jumpPath!; dialog.close(); }
+    });
+    dialog.querySelector("[data-dialog-cancel]")!.addEventListener("click", () => dialog.close());
+    trackDialogFooter(dialog);
+    dialog.showModal();
+    if (touchMode()) (dialog.querySelector<HTMLElement>('[aria-current="true"]') ?? dialog.querySelector<HTMLElement>("[data-jump-path]"))?.focus();
+    else filter.focus();
+  }
+
+  // A file's header toggles its diff; Comment on a line opens its composer.
+  function setFileOpen(section: HTMLElement, open: boolean) {
+    section.classList.toggle("is-collapsed", !open);
+    section.querySelector<HTMLElement>("[data-file-toggle]")?.setAttribute("aria-expanded", String(open));
+    const body = section.querySelector<HTMLElement>(".pr-file-body");
+    if (body) body.hidden = !open;
+  }
+
+  // A whole file's composer: on its first non-blank changed line
+  // (firstCommentLine). From the file's Comment button focus goes to the
+  // line picker, so the composer can be moved; from Add line comments, into
+  // the text.
+  function commentOnFile(path: string, opener: HTMLElement | null = null, focus: "text" | "line" = "line") {
+    const first = firstCommentLine(handles.get(path)?.lines() ?? []);
+    const section = filesElement.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(path)}"]`);
+    if (section) setFileOpen(section, true);
+    if (first) startComment({ path, side: toSide(first.side), line: first.lineNumber }, focus, opener);
+  }
   for (const button of host.querySelectorAll<HTMLButtonElement>("[data-diff-style]")) {
     button.addEventListener("click", () => {
       const next = button.dataset.diffStyle as DiffStyle;
@@ -277,18 +516,31 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     </div>`;
   }
 
+  // The viewer's pending reply in a thread: the comment with its Pending
+  // badge, then Edit and Discard (or its open edit).
+  function pendingReplyHtml(comment: PendingComment, where: string, blocked: string | null): string {
+    const editing = openEdits.has(comment.id) && detail.summary.state === "OPEN";
+    return `<div class="pr-pending-reply" data-pending-id="${escapeHtmlAttribute(comment.id)}" tabindex="-1" role="group" aria-label="Your pending reply on ${escapeHtmlAttribute(where)}">
+      ${editing ? `<div class="pr-pending-edit" data-pending-edit-slot></div>` : `${commentHtml(detail.viewer, comment.createdAt, comment.bodyHtml, true)}
+      <div class="pr-pending-reply-actions">
+        <button type="button" class="gh-button gh-button-quiet" data-pending-edit aria-label="Edit pending reply on ${escapeHtmlAttribute(where)}"${detail.summary.state === "OPEN" ? "" : " disabled"}>Edit</button>
+        <button type="button" class="gh-button gh-button-quiet" data-pending-discard aria-label="Discard pending reply on ${escapeHtmlAttribute(where)}"${blocked ? ` disabled title="${escapeHtmlAttribute(blocked)}"` : ""}>Discard</button>
+      </div>`}
+    </div>`;
+  }
+
   function replyComposer(thread: ReviewThread): Composer {
     let reply = replyBoxes.get(thread.id);
     if (reply) return reply;
     reply = createComposer({
       placeholder: "Reply…",
-      label: `Reply to the thread on ${thread.path} line ${thread.line}`,
+      label: `Reply to the thread on ${thread.line === null ? thread.path : anchorLabel({ path: thread.path, line: thread.line, side: thread.side })}`,
       draftName: `your reply on ${thread.line === null ? thread.path : anchorLabel({ path: thread.path, line: thread.line, side: thread.side })}`,
       submitLabel: "Add reply to review",
       shortcutAction: "adds to review",
       note: `Goes into your pending review as @${detail.viewer}.`,
       draft: { target: draftTarget, location: { kind: "reply", threadId: thread.id } },
-      alreadySent: text => draftAlreadySent({ kind: "reply", threadId: thread.id }, text, detail),
+      sentAgainst: () => detail,
       blockedReason: blockedReason(),
       autofocus: true,
       rows: 2,
@@ -323,31 +575,37 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     element.setAttribute("role", "group");
     const where = `${thread.path} line ${thread.line}`;
     element.setAttribute("aria-label", `Review thread on ${where}`);
+    // Shown as resolved (or not) the moment the button is pressed.
+    const isResolved = resolving.get(thread.id) ?? thread.isResolved;
     const replies = pendingComments().filter(comment => comment.threadId === thread.id);
     const total = thread.comments.length;
     const blocked = blockedReason();
-    const resolveAttributes = blocked ? ` disabled title="${escapeHtmlAttribute(blocked)}"` : "";
+    // Resolving isn't part of the pending review: GitHub applies it at once,
+    // which the tooltip and the accessible name say.
+    const resolveNow = "Applies on GitHub now, not with your review";
+    const resolveAttributes = blocked ? ` disabled title="${escapeHtmlAttribute(blocked)}"` : ` title="${resolveNow}"`;
     const header = `<div class="pr-thread-header">
         <span>Line ${thread.line} · ${plural(total, "comment", "comments")}${replies.length ? ` · ${replies.length} pending` : ""}</span>
-        ${thread.isResolved ? `<span class="gh-pill">Resolved</span>` : `<span class="gh-pill gh-pill-attention">Unresolved</span>`}
+        ${isResolved ? `<span class="gh-pill">Resolved</span>` : `<span class="gh-pill gh-pill-attention">Unresolved</span>`}
       </div>`;
     // A resolved thread folds away, unless it holds something of the
     // viewer's not yet sent: a pending reply, or an open reply box.
-    if (thread.isResolved && !expandedResolved.has(thread.id) && replies.length === 0 && !openReplies.has(thread.id)) {
+    if (isResolved && !expandedResolved.has(thread.id) && replies.length === 0 && !openReplies.has(thread.id)) {
       element.classList.add("is-resolved");
+      const undo = justResolved.has(thread.id) && !blocked;
       element.innerHTML = `${header}<div class="pr-thread-footer">
-        <span class="pr-muted">Conversation resolved.</span>
+        <span class="pr-muted"${undo ? ` data-thread-outcome` : ""}>${undo ? "Resolved on GitHub just now." : "Conversation resolved."}</span>
         <span class="pr-thread-actions"><button type="button" class="gh-button gh-button-quiet" data-thread-show aria-label="Show resolved conversation on ${escapeHtmlAttribute(where)}">Show</button>
-        <button type="button" class="gh-button" data-thread-resolve="false" aria-label="Unresolve conversation on ${escapeHtmlAttribute(where)}"${resolveAttributes}>Unresolve</button></span></div>`;
+        ${blocked || undo ? "" : APPLIES_NOW}<button type="button" class="gh-button" data-thread-resolve="false" aria-label="${undo ? "Undo: unresolve" : "Unresolve"} conversation on ${escapeHtmlAttribute(where)} (applies now)"${resolveAttributes}>${undo ? "Undo" : "Unresolve"}</button></span></div>`;
     } else {
       element.innerHTML = `${header}
         ${thread.comments.map(comment => commentHtml(comment.author, comment.createdAt, comment.bodyHtml)).join("")}
-        ${replies.map(comment => commentHtml(detail.viewer, comment.createdAt, comment.bodyHtml, true)).join("")}
+        ${replies.map(comment => pendingReplyHtml(comment, where, blocked)).join("")}
         <div class="pr-thread-footer">
           <div class="pr-thread-reply" data-thread-reply></div>
           <span class="pr-thread-actions">
-            ${thread.isResolved && replies.length === 0 && !openReplies.has(thread.id) ? `<button type="button" class="gh-button gh-button-quiet" data-thread-hide aria-label="Hide resolved conversation on ${escapeHtmlAttribute(where)}">Hide</button>` : ""}
-            <button type="button" class="gh-button" data-thread-resolve="${thread.isResolved ? "false" : "true"}" aria-label="${thread.isResolved ? "Unresolve" : "Resolve"} conversation on ${escapeHtmlAttribute(where)}"${resolveAttributes}>${thread.isResolved ? "Unresolve" : "Resolve conversation"}</button>
+            ${isResolved && replies.length === 0 && !openReplies.has(thread.id) ? `<button type="button" class="gh-button gh-button-quiet" data-thread-hide aria-label="Hide resolved conversation on ${escapeHtmlAttribute(where)}">Hide</button>` : ""}
+            ${blocked ? "" : APPLIES_NOW}<button type="button" class="gh-button" data-thread-resolve="${isResolved ? "false" : "true"}" aria-label="${isResolved ? "Unresolve" : "Resolve"} conversation on ${escapeHtmlAttribute(where)} (applies now)"${resolveAttributes}>${isResolved ? "Unresolve" : "Resolve conversation"}</button>
           </span>
         </div>`;
       const replySlot = element.querySelector<HTMLElement>("[data-thread-reply]")!;
@@ -364,6 +622,27 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
         });
       }
     }
+    // A pending reply is edited or discarded in place, as a pending line
+    // comment is.
+    for (const reply of replies) {
+      const slot = element.querySelector<HTMLElement>(`[data-pending-id="${CSS.escape(reply.id)}"]`);
+      if (!slot) continue;
+      if (openEdits.has(reply.id) && detail.summary.state === "OPEN") {
+        const box = editComposer(reply);
+        box.setBlocked(blocked);
+        slot.querySelector<HTMLElement>("[data-pending-edit-slot]")?.append(box.element);
+      }
+      slot.querySelector("[data-pending-edit]")?.addEventListener("click", () => {
+        openEdits.add(reply.id);
+        refreshAnnotations();
+      });
+      slot.querySelector("[data-pending-discard]")?.addEventListener("click", async () => {
+        if (!(await confirmDiscardPendingComment(`your reply on ${where}`, detail.summary.number))) return;
+        await write(() => githubApi.deletePendingComment(target(), reply.id)).then(
+          () => focusLater(`[data-thread-id="${CSS.escape(thread.id)}"] [data-thread-reply-open]`),
+          error => alertError(error));
+      });
+    }
     element.querySelector("[data-thread-show]")?.addEventListener("click", () => {
       expandedResolved.add(thread.id);
       refreshAnnotations();
@@ -376,9 +655,37 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     });
     element.querySelector<HTMLButtonElement>("[data-thread-resolve]")?.addEventListener("click", event => {
       const resolved = (event.currentTarget as HTMLButtonElement).dataset.threadResolve === "true";
-      if (resolved) expandedResolved.delete(thread.id);
+      if (resolved) {
+        expandedResolved.delete(thread.id);
+        // An empty reply box goes with it; reply text keeps the thread open.
+        if (openReplies.has(thread.id) && (replyBoxes.get(thread.id)?.value() ?? "").trim() === "") {
+          openReplies.delete(thread.id);
+          replyBoxes.delete(thread.id);
+          prDrafts.clear(draftTarget, { kind: "reply", threadId: thread.id });
+        }
+      }
+      const focusResolve = () => focusLater(`[data-thread-id="${CSS.escape(thread.id)}"] [data-thread-resolve]`);
+      forgetJustResolved(thread.id);
+      if (resolved) {
+        justResolved.set(thread.id, setTimeout(() => {
+          justResolved.delete(thread.id);
+          if (!host.isConnected) return;
+          const focused = document.activeElement?.closest?.(`[data-thread-id="${CSS.escape(thread.id)}"] [data-thread-resolve]`);
+          refreshAnnotations();
+          if (focused) focusResolve();
+        }, UNDO_RESOLVE_MS));
+      }
+      resolving.set(thread.id, resolved);
+      refreshAnnotations();
+      focusResolve();
       void write(() => githubApi.resolve(target(), thread.id, resolved))
-        .then(() => focusLater(`[data-thread-id="${CSS.escape(thread.id)}"] [data-thread-resolve]`), error => alertError(error));
+        .then(() => { resolving.delete(thread.id); }, error => {
+          resolving.delete(thread.id);
+          forgetJustResolved(thread.id);
+          refreshAnnotations();
+          focusResolve();
+          alertError(error);
+        });
     });
     return element;
   }
@@ -432,13 +739,13 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     };
     box = createComposer({
       placeholder: "Edit your pending comment…",
-      label: `Edit your pending comment on ${comment.path} line ${comment.line}`,
+      label: `Edit your pending comment on ${anchorLabel(comment)}`,
       draftName: `your edit of the comment on ${anchorLabel(comment)}`,
       submitLabel: "Save",
       shortcutAction: "saves",
       note: "Still pending: nobody sees it until you finish your review.",
       draft: { target: draftTarget, location },
-      alreadySent: text => draftAlreadySent(location, text, detail),
+      sentAgainst: () => detail,
       initialText: comment.body,
       blockedReason: blockedReason(),
       autofocus: true,
@@ -475,15 +782,14 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
       seen.add(value);
       const option = document.createElement("option");
       option.value = value;
-      const text = line.text.trim();
-      option.textContent = `line ${line.lineNumber}${line.side === "deletions" ? " (old)" : ""}${text ? ` · ${text.length > 40 ? `${text.slice(0, 40)}…` : text}` : ""}`;
+      option.textContent = lineOptionText(line, line.text);
       select.append(option);
     }
     const current = `${position.side}:${position.line}`;
     if (!seen.has(current)) {
       const option = document.createElement("option");
       option.value = current;
-      option.textContent = `line ${position.line}${position.side === "LEFT" ? " (old)" : ""}`;
+      option.textContent = lineOptionText({ side: fromSide(position.side), lineNumber: position.line }, "");
       select.prepend(option);
     }
     select.value = current;
@@ -515,6 +821,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   function closeComposer(key: string) {
     composers.delete(key);
     composerBoxes.delete(key);
+    composerOpeners.delete(key);
     refreshAnnotations();
   }
 
@@ -523,27 +830,33 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     const kept = composerBoxes.get(key);
     if (kept) {
       kept.box.setBlocked(blockedReason());
+      kept.box.refresh();
       return kept.wrapper;
     }
     const wrapper = document.createElement("div");
     wrapper.className = "pr-inline-composer";
-    const count = pendingComments().length;
     const focus = composerFocus?.key === key ? composerFocus.kind : null;
     if (focus) composerFocus = null;
     const box = createComposer({
       heading: lineHeading(file, position),
       shortcutAction: "adds to review",
-      placeholder: `Comment on ${file.path}:${position.line} as @${detail.viewer}…`,
+      placeholder: inlineComposerPrompt(position, detail.viewer),
       draftName: `your comment on ${anchorLabel({ path: file.path, line: position.line, side: position.side })}`,
       submitLabel: "Add to review",
-      note: count === 0 ? "Starts your review. Nothing is published until you finish it." : `Your review has ${plural(count, "pending comment", "pending comments")}.`,
+      // Read live: a review submitted or a comment added elsewhere changes it.
+      note: () => {
+        const count = pendingComments().length;
+        return count === 0 ? "Starts your review. Nothing is published until you finish it." : `Your review has ${plural(count, "pending comment", "pending comments")}.`;
+      },
       draft: { target: draftTarget, location: { kind: "inline", ...position } },
-      alreadySent: text => draftAlreadySent({ kind: "inline", ...position }, text, detail),
+      sentAgainst: () => detail,
       blockedReason: blockedReason(),
       autofocus: focus === "text",
       onCancel: () => {
+        const opener = composerOpeners.get(key);
         closeComposer(key);
-        handles.get(position.path)?.focusLine({ side: fromSide(position.side), lineNumber: position.line });
+        if (opener?.isConnected && opener.checkVisibility()) opener.focus({ preventScroll: true });
+        else handles.get(position.path)?.focusLine({ side: fromSide(position.side), lineNumber: position.line });
       },
       // The draft goes the moment GitHub has the comment (sendThenClearDraft),
       // before the page updates: a reload can't bring it back as unsent.
@@ -567,9 +880,12 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
 
   // Opens a composer on a line. Composers holding text elsewhere stay open
   // as drafts (Finish review lists them); empty ones give way.
-  function startComment(next: ComposerTarget, focus: "text" | "line" = "text") {
+  function startComment(next: ComposerTarget, focus: "text" | "line" = "text", opener: HTMLElement | null = null) {
     if (detail.summary.state !== "OPEN") return;
     const key = composerKey(next);
+    // Cancel gives focus back to what opened it: Comment on a line, else
+    // the line's number (a click or tap on the number or its row).
+    composerOpeners.set(key, opener);
     if (composers.has(key)) {
       const kept = composerBoxes.get(key);
       if (focus === "line") kept?.wrapper.querySelector<HTMLElement>("[data-composer-line]")?.focus();
@@ -586,8 +902,21 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     composers.set(key, next);
     composerFocus = { key, kind: focus };
     refreshAnnotations();
+    renderHint();
     keepComposerInView(key);
   }
+
+  // A rotation or a resized window keeps the composer being written in view
+  // and its actions above the touch tab bar.
+  let resizeFrame = 0;
+  const onResize = () => {
+    if (!host.isConnected) { window.removeEventListener("resize", onResize); return; }
+    cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(() => {
+      for (const [key, { wrapper }] of composerBoxes) if (wrapper.contains(document.activeElement)) keepComposerInView(key, 20);
+    });
+  };
+  window.addEventListener("resize", onResize);
 
   // The line being commented on stays visible above the composer (about two
   // lines of room under the pinned header and review bar), and the
@@ -605,8 +934,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
         ? { top: 0, bottom: window.innerHeight }
         : root.getBoundingClientRect();
       const lineRoom = 48;
-      const top = viewport.top + (parseFloat(getComputedStyle(host).getPropertyValue("--pr-sticky-top")) || 0)
-        + (bar.classList.contains("is-active") ? bar.offsetHeight : 0) + lineRoom;
+      const top = viewport.top + pinnedHeight(true) + lineRoom;
       const bottom = Math.min(viewport.bottom, window.innerHeight) - tabBarBottomInset() - 8;
       const rect = wrapper.getBoundingClientRect();
       let delta = rect.bottom > bottom ? rect.bottom - bottom : 0;
@@ -682,24 +1010,31 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     filesElement.innerHTML = "";
     const marks = reviewMarksByPath(detail);
     const style = effectiveStyle();
-    for (const file of detail.files) {
-      const section = document.createElement("details");
+    for (const [index, file] of orderedFiles().entries()) {
+      const section = document.createElement("section");
       section.className = "pr-file";
-      section.open = true;
       section.dataset.filePath = file.path;
-      section.innerHTML = `<summary class="pr-file-header" data-file-header="${escapeHtmlAttribute(file.path)}">
-          <span class="pr-file-path">${escapeHtml(file.path)}</span>
-          ${file.status === "added" ? `<span class="gh-pill">New</span>` : ""}
-          <span class="gh-del">−${file.deletions}</span><span class="gh-add">+${file.additions}</span>
-          <span class="pr-file-badges" data-file-badges>${reviewMarkBadges(marks.get(file.path))}</span>
-        </summary>
-        ${detail.summary.state === "OPEN" ? `<div class="pr-file-tools"><button type="button" class="gh-button" data-file-comment>Comment on a line…</button></div>` : ""}
-        <div class="uatu-diff-host pr-file-diff"></div>`;
+      const bodyId = `pr-file-body-${detail.summary.number}-${index}`;
+      // The header is one row: the toggle (path, counts, marks), then the
+      // icon buttons. The path keeps its end (the file name) when it must be
+      // shortened.
+      section.innerHTML = `<div class="pr-file-header" data-file-header="${escapeHtmlAttribute(file.path)}">
+          <button type="button" class="pr-file-toggle" data-file-toggle aria-expanded="true" aria-controls="${bodyId}">
+            <span class="pr-file-chevron" aria-hidden="true"></span>
+            <span class="pr-file-path" dir="rtl"><bdi dir="ltr">${escapeHtml(file.path)}</bdi></span>
+            ${file.status === "added" ? `<span class="gh-pill">New</span>` : ""}
+            <span class="pr-file-counts"><span class="gh-del">−${file.deletions}</span><span class="gh-add">+${file.additions}</span></span>
+            <span class="pr-file-badges" data-file-badges>${reviewMarkBadges(marks.get(file.path))}</span>
+          </button>
+          <span class="pr-file-actions">
+            ${detail.summary.state === "OPEN" ? `<button type="button" class="pr-file-action" data-file-comment aria-label="Comment on a line in ${escapeHtmlAttribute(file.path)}" title="Comment on a line…">${COMMENT_PLUS_ICON}<span class="pr-file-action-label" aria-hidden="true">Comment</span></button>` : ""}
+          </span>
+        </div>
+        <div class="pr-file-body" id="${bodyId}"><div class="uatu-diff-host pr-file-diff"></div></div>`;
       filesElement.append(section);
-      section.querySelector("[data-file-comment]")?.addEventListener("click", () => {
-        const first = handles.get(file.path)?.lines().find(line => line.side === "additions") ?? handles.get(file.path)?.lines()[0];
-        if (first) void startComment({ path: file.path, side: toSide(first.side), line: first.lineNumber }, "line");
-      });
+      section.querySelector("[data-file-toggle]")!.addEventListener("click", () => setFileOpen(section, section.classList.contains("is-collapsed")));
+      section.querySelector("[data-file-comment]")?.addEventListener("click", event => commentOnFile(file.path, event.currentTarget as HTMLElement));
+      if (index === 0) syncBarHeight();
       const diffHost = section.querySelector<HTMLElement>(".pr-file-diff")!;
       const handle = await renderReviewDiff<AnnotationData>(diffHost, {
         path: file.path,
@@ -715,6 +1050,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
           annotations: annotationsFor(file),
           renderAnnotation: annotation => renderAnnotation(file, annotation),
           onStartComment: position => void startComment({ path: file.path, side: toSide(position.side), line: position.lineNumber }),
+          rowTap: touchMode,
         },
       });
       if (handle) handles.set(file.path, handle);
@@ -729,8 +1065,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     const rect = element.getBoundingClientRect();
     // Never under the pinned header and review bar (pinned only while a
     // review is active), even for a card taller than half the screen.
-    const pinned = (parseFloat(getComputedStyle(host).getPropertyValue("--pr-sticky-top")) || 0)
-      + (bar.classList.contains("is-active") ? bar.offsetHeight : 0) + 12;
+    const pinned = pinnedHeight(!element.classList.contains("pr-file")) + 12;
     const offset = block === "center" ? Math.max(pinned, (Math.min(window.innerHeight, root.clientHeight) - rect.height) / 2) : pinned;
     root.scrollTop += rect.top - rootTop - offset;
   }
@@ -742,7 +1077,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     for (const [key, position] of composers) {
       const location = { kind: "inline" as const, ...position };
       const text = composerBoxes.get(key)?.box.value() ?? "";
-      if (text.trim() !== "" && prDrafts.text(draftTarget, location) === "" && draftAlreadySent(location, text, detail)) {
+      if (text.trim() !== "" && prDrafts.text(draftTarget, location) === "" && matchingComments(location, text, detail).length > 0) {
         composers.delete(key);
         composerBoxes.delete(key);
       }
@@ -750,7 +1085,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     for (const threadId of [...openReplies]) {
       const location = { kind: "reply" as const, threadId };
       const text = replyBoxes.get(threadId)?.value() ?? "";
-      if (text.trim() !== "" && prDrafts.text(draftTarget, location) === "" && draftAlreadySent(location, text, detail)) {
+      if (text.trim() !== "" && prDrafts.text(draftTarget, location) === "" && matchingComments(location, text, detail).length > 0) {
         openReplies.delete(threadId);
         replyBoxes.delete(threadId);
       }
@@ -775,12 +1110,12 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
       const filePath = path ?? threadPath ?? pendingPath ?? "";
       // Files append one by one as they render: look the section up again
       // once they all have.
-      const findSection = () => filesElement.querySelector<HTMLDetailsElement>(`[data-file-path="${CSS.escape(filePath)}"]`);
+      const findSection = () => filesElement.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(filePath)}"]`);
       const pending = findSection();
-      if (pending) pending.open = true;
+      if (pending) setFileOpen(pending, true);
       void rendered.then(() => requestAnimationFrame(() => {
         const section = findSection();
-        if (section) section.open = true;
+        if (section) setFileOpen(section, true);
         const card = threadId ? host.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(threadId)}"]`)
           : pendingId ? host.querySelector<HTMLElement>(`[data-pending-id="${CSS.escape(pendingId)}"]`) : null;
         const targetElement = card ?? section;
@@ -794,15 +1129,17 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
         }
       }));
     },
-    focusFirstLine() {
+    openJump: opener => openJumpDialog(opener),
+    addLineComments() {
       void rendered.then(() => requestAnimationFrame(() => {
-        const first = detail.files[0];
-        const section = first ? filesElement.querySelector<HTMLDetailsElement>(`[data-file-path="${CSS.escape(first.path)}"]`) : null;
+        const first = orderedFiles()[0];
+        const section = first ? filesElement.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(first.path)}"]`) : null;
         if (!first || !section) return;
-        section.open = true;
+        setFileOpen(section, true);
         // Files changed from its top when the first file's opening lines
-        // still show below the bar and summary: no row is left half under
-        // the pinned header. Otherwise the first file goes to the top.
+        // still show below the bar and summary; otherwise the first file
+        // goes to the top. Then the composer opens there (keepComposerInView
+        // settles its position).
         const root = previewScrollRoot();
         const page = root === document.scrollingElement;
         const rootTop = page ? 0 : root.getBoundingClientRect().top;
@@ -818,14 +1155,24 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
         } else {
           scrollToElement(section, "start");
         }
-        const button = section.querySelector<HTMLElement>("[data-file-comment]");
-        if (touchMode() && button) { button.focus({ preventScroll: true }); return; }
-        const handle = handles.get(first.path);
-        const line = handle?.lines()[0];
-        if (!line || !handle?.focusLine(line)) button?.focus({ preventScroll: true });
+        if (detail.summary.state === "OPEN" && (handles.get(first.path)?.lines().length ?? 0) > 0) commentOnFile(first.path, null, "text");
+        else section.querySelector<HTMLElement>("[data-file-toggle]")?.focus({ preventScroll: true });
       }));
     },
   };
+
+  // Touch and desktop render the files differently (touch always wraps), and
+  // the review bar's place follows the mode: a switch re-renders what
+  // changed, without a reload.
+  let wasTouch = touchMode();
+  const stopUiMode = onUiModeChange(() => {
+    if (!host.isConnected) { stopUiMode(); return; }
+    renderBar();
+    renderSummary();
+    if (touchMode() === wasTouch) return;
+    wasTouch = touchMode();
+    rendered = renderFiles();
+  });
 
   renderBar();
   renderSummary();
@@ -834,67 +1181,89 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
 }
 
 // The review bar, on Files changed and (while a review is pending) on
-// Conversation: the pending count, Discard review and Finish review (n), or
-// on Files changed without one, how to start and Start review (which only
-// moves focus to the first line: nothing is written). One paused-write rule
-// for every review write: while GitHub can't take writes (rate limit,
-// outage, no credential), Discard and Finish are disabled, and the reason is
-// shown in the bar and named by both buttons.
-export function renderReviewBar(bar: HTMLElement, detail: PullRequestDetail, repositoryId: string, options: { surface: "files" | "conversation"; onStart?: () => void }): void {
+// Conversation, or on touch in the preview header's tabs row
+// (reviewBarShownOn). One review button everywhere: Review, which opens the
+// review dialog (verdict, summary, the pending comments, and Add line
+// comments), or Finish review (n) while comments are pending; the desktop
+// bars add the pending count and Discard review (on touch Discard is in the
+// dialog). One paused-write rule for every review write: while GitHub can't
+// take writes (rate limit, outage, no credential), Discard and Finish are
+// disabled, and the reason is shown in the bar and named by both buttons.
+export function renderReviewBar(bar: HTMLElement, detail: PullRequestDetail, repositoryId: string, options: {
+  surface: ReviewBarSurface;
+  // The pull request view's tab (the header surface follows it).
+  tab?: "files" | "conversation";
+  // Where focus goes once Finish review has published the review and the
+  // bar's Finish is gone (Files changed: the bar, or the file being read).
+  fallbackFocus?: () => HTMLElement | null;
+}): void {
   const count = detail.pendingReview?.comments.length ?? 0;
   const pr = detail.summary;
   const open = pr.state === "OPEN";
+  const header = options.surface === "header";
+  const base = header ? "pr-header-review" : "pr-review-bar";
+  // (The bar itself, focused after a review was published, keeps focus as is.)
+  const focused = bar.contains(document.activeElement) && document.activeElement !== bar ? (document.activeElement as HTMLElement).dataset : null;
+  const touch = touchMode();
+  if (!reviewBarShownOn(options.surface, { touch, pending: detail.pendingReview ? count : 0, open })) {
+    bar.hidden = true;
+    bar.className = base;
+    bar.innerHTML = "";
+    // Moved away under focus (touch: to the tabs row and back).
+    if (focused) options.fallbackFocus?.()?.focus({ preventScroll: true });
+    return;
+  }
   const paused = githubWritesPausedReason(pullRequestStore.state.summary);
   const reasonId = `pr-review-bar-reason-${options.surface}`;
   const reason = paused ? `<span class="pr-review-bar-reason" id="${reasonId}">${escapeHtml(paused)} Your comments stay pending.</span>` : "";
   const pausedAttributes = paused ? ` disabled aria-describedby="${reasonId}" title="${escapeHtmlAttribute(paused)}"` : "";
-  const focused = bar.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset : null;
+  bar.hidden = false;
   if (detail.pendingReview && count > 0) {
     const comments = plural(count, "pending comment", "pending comments");
-    // On a phone the pinned bar is one short row: the count and Finish.
-    const compact = touchMode();
-    bar.hidden = false;
-    bar.className = `pr-review-bar is-active${paused ? " is-paused" : ""}`;
-    bar.innerHTML = `
-      <span class="gh-pill gh-pill-solid-attention">${compact ? `<span aria-hidden="true">✎ ${count}</span><span class="sr-only">Review in progress: ${comments}</span>` : "Review in progress"}</span>
+    bar.className = `${base} is-active${paused ? " is-paused" : ""}`;
+    // In the tabs row it is one short button: the count and Finish (named in
+    // full). The desktop bars say what is pending and hold Discard review.
+    bar.innerHTML = header
+      ? `<button type="button" class="gh-button gh-button-primary" data-review-finish aria-label="${reviewActionLabel(count)}" title="${escapeHtmlAttribute(paused ?? `${reviewActionLabel(count)}: publish your pending comments as a comment, approval or change request`)}"${paused ? ` disabled aria-describedby="${reasonId}"` : ""}><span class="pr-header-review-count" aria-hidden="true">✎ ${count}</span> Finish</button>${reason}`
+      : `<span class="gh-pill gh-pill-solid-attention">Review in progress</span>
       <span class="pr-review-bar-text"><strong>${comments}</strong> on #${pr.number} · visible only to you until submitted</span>
       <span class="pr-review-bar-actions">
-        <button type="button" class="gh-button${compact ? " gh-button-quiet" : ""}" data-review-discard aria-label="Discard your pending review (${plural(count, "comment", "comments")})"${pausedAttributes}>${compact ? "Discard" : "Discard review"}</button>
-        <button type="button" class="gh-button gh-button-primary" data-review-finish${compact ? ` aria-label="${reviewActionLabel(count)}"` : ""}${pausedAttributes}>${compact ? `Finish (${count})` : reviewActionLabel(count)}</button>
+        <button type="button" class="gh-button" data-review-discard aria-label="Discard your pending review (${plural(count, "comment", "comments")})"${pausedAttributes}>Discard review</button>
       </span>
       ${reason}`;
-  } else if (options.surface === "conversation") {
-    bar.hidden = true;
-    bar.className = "pr-review-bar";
-    bar.innerHTML = "";
-    return;
   } else {
-    bar.hidden = false;
-    bar.className = "pr-review-bar";
-    bar.innerHTML = open
-      ? `<span class="pr-review-bar-text">${touchMode() ? "Tap a line number, or use <strong>Comment on a line</strong> on a file," : "Click a line number (or hover a line and click <kbd>+</kbd>), or Tab to a file's line numbers and press <kbd>Enter</kbd>,"} to start a review comment. Comments stay pending until you finish your review.</span>
-         <span class="pr-review-bar-actions"><button type="button" class="gh-button gh-button-quiet" data-review-summary-only title="Approve, comment or request changes with a summary and no line comments">Review without line comments…</button><button type="button" class="gh-button" data-review-start>${reviewActionLabel(0)}</button></span>`
-      : `<span class="pr-review-bar-text">This pull request is ${pr.state.toLowerCase()}; reviewing is closed.</span>`;
+    bar.className = base;
+    // Desktop's how-to is in the bar; touch's is a one-line hint in the files
+    // toolbar (mountFilesChanged). The tabs-row copy is the one button.
+    bar.innerHTML = !open ? `<span class="pr-review-bar-text">This pull request is ${pr.state.toLowerCase()}; reviewing is closed.</span>`
+      : header ? `<span class="pr-review-bar-actions"><button type="button" class="gh-button" data-review-open title="Approve, comment or request changes, with a summary and any line comments">${reviewActionLabel(0)}</button></span>`
+      : `<span class="pr-review-bar-text">${REVIEW_KEYS_HINT} Comments stay pending until you finish your review.</span>`;
   }
   const target = { repository: repositoryId, number: pr.number };
-  const focusFinish = () => (bar.querySelector<HTMLElement>("[data-review-finish]:not(:disabled)") ?? bar.querySelector<HTMLElement>("[data-review-start]"))?.focus();
+  // Never scrolling: the bar may be pinned (the tabs row on touch), and a
+  // plain focus() scrolls to where it would sit unpinned.
+  const focusFinish = () => (bar.querySelector<HTMLElement>("[data-review-finish]:not(:disabled)") ?? bar.querySelector<HTMLElement>("[data-review-open]"))?.focus({ preventScroll: true });
   bar.querySelector("[data-review-discard]")?.addEventListener("click", async () => {
     if (!(await confirmDiscardReview(count, pr.number))) return;
     await githubApi.discardReview(target).then(next => {
       pullRequestStore.applyDetail(next);
-      focusFinish();
+      // The bar may have moved (touch: the header copy goes with the review).
+      if (bar.contains(document.activeElement)) return;
+      if (!bar.hidden) focusFinish();
+      if (!bar.contains(document.activeElement)) options.fallbackFocus?.()?.focus({ preventScroll: true });
     }, error => alertError(error));
   });
-  bar.querySelector("[data-review-finish]")?.addEventListener("click", () => openSubmitReviewDialog({ repositoryId, number: pr.number }, { fallbackFocus: () => bar.querySelector<HTMLElement>("[data-review-finish]") }));
-  bar.querySelector("[data-review-start]")?.addEventListener("click", () => options.onStart?.());
-  // Approving (or a summary-only comment) needs no line comments: the dialog
-  // stays one click away.
-  bar.querySelector("[data-review-summary-only]")?.addEventListener("click", () => openSubmitReviewDialog({ repositoryId, number: pr.number }, { fallbackFocus: () => bar.querySelector<HTMLElement>("[data-review-summary-only]") }));
+  // After the dialog: the bar's review button (Review, or Finish while
+  // comments stay pending), else the fallback.
+  const afterReview = () => bar.querySelector<HTMLElement>("[data-review-finish], [data-review-open]") ?? options.fallbackFocus?.() ?? null;
+  for (const button of bar.querySelectorAll("[data-review-finish], [data-review-open]")) {
+    button.addEventListener("click", () => openSubmitReviewDialog({ repositoryId, number: pr.number }, { fallbackFocus: afterReview }));
+  }
   // A re-render keeps the bar's focused button focused.
   if (focused) {
-    const key = "reviewDiscard" in focused ? "[data-review-discard]" : "reviewStart" in focused ? "[data-review-start]" : "reviewSummaryOnly" in focused ? "[data-review-summary-only]" : "[data-review-finish]";
+    const key = "reviewDiscard" in focused ? "[data-review-discard]" : "[data-review-finish], [data-review-open]";
     const next = bar.querySelector<HTMLButtonElement>(key);
-    if (next && !next.disabled) next.focus();
+    if (next && !next.disabled) next.focus({ preventScroll: true });
     else focusFinish();
   }
 }

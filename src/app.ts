@@ -26,6 +26,7 @@ import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initUiMode } from "./shell/ui-mode";
+import { initNarrowLayoutOffer } from "./shell/narrow-layout-offer";
 import { initDesktopViewport } from "./shell/desktop-viewport";
 import { initTabBar } from "./shell/tab-bar";
 import { initChatPanel } from "./chat/surface";
@@ -100,6 +101,7 @@ if (
 initUiMode();
 initDesktopViewport();
 initTabBar();
+initNarrowLayoutOffer();
 initMediaDock();
 // A cached page can return with its JS heap intact. End the audition before
 // page departure so pageshow/foreground recovery cannot restore playback.

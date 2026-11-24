@@ -98,7 +98,7 @@ function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolutio
 
 // --- Pull request preview (`?repository=<id>&pr=<n>[&tab=files]`) ---------
 
-type PullRequestRenderer = (mode: Extract<SurfacePreviewMode, { kind: "pull-request" }>, options?: { tab?: "conversation" | "files"; file?: string }) => void;
+type PullRequestRenderer = (mode: Extract<SurfacePreviewMode, { kind: "pull-request" }>, options?: { tab?: "conversation" | "files"; file?: string; thread?: string }) => void;
 
 // The view (src/preview/pull-request-view.ts) registers itself when app.ts
 // loads it. A static import from here would pull the whole PR view into
@@ -127,9 +127,9 @@ export function activatePullRequestPreview(params: PullRequestPreviewParams, opt
   setPreviewMode({ kind: "pull-request", repositoryId: params.repositoryId, number: params.number });
   pullRequestStore.select(params.number);
   syncFollowToggle();
-  if (options.pushHistory) pushPullRequestPreview(params.repositoryId, params.number, params.tab, params.file);
+  if (options.pushHistory) pushPullRequestPreview(params.repositoryId, params.number, params.tab, { file: params.file, thread: params.thread });
   renderSidebar();
-  renderPullRequestPreview(appState.previewMode as Extract<SurfacePreviewMode, { kind: "pull-request" }>, { tab: params.tab, file: params.file });
+  renderPullRequestPreview(appState.previewMode as Extract<SurfacePreviewMode, { kind: "pull-request" }>, { tab: params.tab, file: params.file, thread: params.thread });
 }
 
 // The one re-render entry for URL-addressed previews, used when document
@@ -140,6 +140,6 @@ export function renderSurfacePreview(mode: SurfacePreviewMode) {
   // The URL keeps the open tab (replaced in place on every switch).
   else {
     const params = pullRequestPreviewParamsFromUrl();
-    renderPullRequestPreview(mode, { tab: params?.tab, file: params?.file });
+    renderPullRequestPreview(mode, { tab: params?.tab, file: params?.file, thread: params?.thread });
   }
 }

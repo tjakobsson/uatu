@@ -2,12 +2,18 @@
 // A pinned top row (state, review decision, and the Details toggle; the
 // number is in the pane header), then a compact summary a short pane always
 // shows (title, checks count and the first merge blocker, any pending
-// comments), then the actions (Start review, which opens Files changed at
-// the first line, or Finish review (n), which opens the dialog; Merge on
-// GitHub ↗), then the details behind the toggle (head → base, stats, author,
-// merge readiness with every reason, the per-check list, reviewers). The
-// pane is sized to whole rows (sidebar/panes.ts), so no row is cut at its
-// bottom. uatu never merges: readiness is read-only and merging links to
+// comments), then the actions (the one review button, Review or Finish
+// review (n), which opens the review dialog; Merge on GitHub ↗ while the PR
+// is ready, else View on GitHub ↗), then the details behind the toggle (head
+// → base, stats, author, merge readiness with every reason, the per-check
+// list, reviewers; open by default on touch, where the expanded pane takes
+// the Files tab, up to its content's height). On desktop, where the pane
+// shares the sidebar with others and can't always grow enough, the open
+// details float beside the toggle as one panel (Escape or a click outside
+// closes it) instead of opening into a short scroll region. The title's
+// clamp is on its text. The pane is sized
+// to whole rows, so no row is cut at its bottom. A manual ↻ says "Updated
+// just now" in the header once GitHub has answered. uatu never merges: readiness is read-only and merging links to
 // GitHub (design D11). The title and number open the PR preview. Each GitHub
 // status has its own empty or error state (mockup 6), and stale data stays
 // visible with its age and a Retry that says what it is doing; while
@@ -35,6 +41,7 @@ import {
   clockTime,
   clockTimeWithSeconds,
   externalLink,
+  mergeLinkHtml,
   mockNotice,
   repositoryName,
   reviewDecisionBadge,
@@ -48,7 +55,8 @@ import { appState } from "../shell/state";
 import { buildPullRequestPreviewPath } from "../shell/history";
 import { revealPreviewSurface } from "../shell/tab-bar";
 import { activatePullRequestPreview } from "../shell/url";
-import { connectGithubHtml, revealPullRequestHeading, startPullRequestReview } from "../preview/pull-request-view";
+import { connectGithubHtml } from "../github/connect";
+import { githubWorkspaceName, revealPullRequestHeading } from "../preview/pull-request-view";
 import { confirmResetMockData, openSubmitReviewDialog, reviewActionLabel } from "../preview/review-dialogs";
 import { reviewMarksByPath } from "../preview/diff-review";
 import { OPEN_PULL_REQUEST_EVENT, openPullRequestPicker, type OpenPullRequestDetail } from "../shell/pull-request-picker";
@@ -63,14 +71,23 @@ const paneMeta = document.querySelector<HTMLElement>("#pull-request-pane-meta")!
 const refreshButton = document.querySelector<HTMLButtonElement>("#pull-request-refresh")!;
 const browseButton = document.querySelector<HTMLButtonElement>("#pull-request-browse")!;
 const liveRegion = document.querySelector<HTMLElement>("#pull-request-live");
+const updatedNote = document.querySelector<HTMLElement>("#pull-request-updated");
 // The body's children are rows the pane stack sizes the pane to (panes.ts).
 paneBody.toggleAttribute("data-pane-rows", true);
 
 // The details (branches, stats, readiness reasons, checks, reviewers) start
-// folded: the pane is short, and the summary above the actions carries what
-// matters at a glance. The toggle's choice holds for the page.
-let detailsOpen = false;
+// folded on desktop: the pane is short, and the summary above the actions
+// carries what matters at a glance. The toggle's choice holds for the page.
+// On touch the expanded pane fills the Files tab's stack (the accordion
+// folds the others), so the details start open there instead of leaving the
+// space empty; a choice made with the toggle holds either way.
+let detailsChoice: boolean | null = null;
+const detailsOpen = () => detailsChoice ?? document.documentElement.dataset.uiMode === "touch";
+// Desktop: the open details are a floating panel (positionDetails).
+const detailsFloat = () => document.documentElement.dataset.uiMode !== "touch";
 let scenarioBusy = false;
+// Bumped by Reset data: the pane starts again at its top.
+let resetGeneration = 0;
 // What the pane showed last: a change scrolls it back to its top.
 let shownKey = "";
 let retryWas: string | null = null;
@@ -97,12 +114,17 @@ export function initPullRequestPane(): void {
   // In the header, so it is there whatever the pane shows.
   browseButton.addEventListener("click", () => openPullRequestPicker({ returnFocus: browseButton }));
   refreshButton.addEventListener("click", () => {
+    // Busy, it says so (aria-disabled) but stays focusable: a keyboard
+    // Refresh keeps focus on the button through the re-render.
+    if (refreshButton.getAttribute("aria-disabled") === "true") return;
     const scoped = pullRequestStore.scopedNumber();
     if (scoped !== null) {
       scopedRequested = null;
       scopedError = null;
     }
-    void pullRequestStore.refresh(true);
+    // Acknowledged once GitHub has answered: "Updated just now" in the
+    // header for a few seconds (and said to screen readers).
+    void pullRequestStore.refresh(true).then(() => acknowledgeRefresh());
   });
   // The pane header's #number and pending-review pill act like the body's.
   const onClick = (event: MouseEvent) => {
@@ -119,10 +141,10 @@ export function initPullRequestPane(): void {
       return;
     }
     if (element.closest("[data-pr-details-toggle]")) {
-      detailsOpen = !detailsOpen;
+      detailsChoice = !detailsOpen();
       renderPullRequestPane();
       // After the pane stack refits the taller content (a frame later).
-      if (detailsOpen) requestAnimationFrame(revealDetails);
+      if (detailsChoice && !detailsFloat()) requestAnimationFrame(revealDetails);
       return;
     }
     if (element.closest("[data-pr-back-to-branch]")) {
@@ -153,18 +175,33 @@ export function initPullRequestPane(): void {
     // Focus comes back to the same action, in the same place (the header's
     // pending count or the body's button), after the pane re-renders, or to
     // the title when that action is gone or disabled.
+    // A published review turns Finish review into Review: the pane's
+    // review button, either way, is where focus lands.
     const container = paneMeta.contains(element) ? paneMeta : paneBody;
     const fallbackFocus = () => container.querySelector<HTMLElement>(`[data-pr-action="${action}"]:not(:disabled)`)
+      ?? paneBody.querySelector<HTMLElement>(`[data-pr-action="review"]:not(:disabled)`)
       ?? paneBody.querySelector<HTMLElement>(".pr-pane-title");
-    // Finish review (n) opens the dialog; Start review opens Files changed
-    // at the first file's line numbers (nothing to publish yet).
+    // Review / Finish review (n) opens the review dialog (whose Add line
+    // comments opens Files changed).
     if (action === "review") openSubmitReviewDialog({ repositoryId, number }, { fallbackFocus });
-    if (action === "start-review") {
-      revealPreviewSurface();
-      startPullRequestReview({ repositoryId, number });
-    }
   };
   paneBody.addEventListener("click", onClick);
+  // The floating details close on Escape (focus back on the toggle) and on
+  // a click anywhere outside them and the toggle.
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !floatingDetailsShown()) return;
+    const inside = paneBody.contains(document.activeElement);
+    if (!inside && document.activeElement !== document.body) return;
+    event.preventDefault();
+    closeFloatingDetails(true);
+  });
+  document.addEventListener("pointerdown", event => {
+    if (!floatingDetailsShown()) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("#pr-pane-details, [data-pr-details-toggle], dialog")) return;
+    closeFloatingDetails(false);
+  });
+  window.addEventListener("resize", positionDetails);
   paneMeta.addEventListener("click", onClick);
   paneBody.addEventListener("change", event => {
     const select = (event.target as HTMLElement).closest<HTMLSelectElement>("[data-pr-scenario]");
@@ -174,6 +211,19 @@ export function initPullRequestPane(): void {
     if (!(event.target as HTMLElement).closest("[data-pr-reset]")) return;
     if (await confirmResetMockData()) void runScenario({ reset: true });
   });
+}
+
+// A manual refresh that GitHub answered says so briefly beside the number
+// (and to screen readers); a refusal says itself (the stale line, the error
+// card), so it gets no "updated".
+let updatedTimer: ReturnType<typeof setTimeout> | null = null;
+function acknowledgeRefresh(): void {
+  const state = pullRequestStore.state;
+  if (!updatedNote || state.error || !state.summary || staleNotice(state.summary)) return;
+  updatedNote.hidden = false;
+  if (liveRegion) liveRegion.textContent = `Pull request updated from GitHub at ${clockTime(state.summary.checkedAt)}.`;
+  if (updatedTimer) clearTimeout(updatedTimer);
+  updatedTimer = setTimeout(() => { updatedNote.hidden = true; }, 4000);
 }
 
 // Runs on every sidebar render: picks up branch/HEAD changes.
@@ -187,6 +237,7 @@ async function runScenario(input: Parameters<typeof githubApi.setScenario>[0]): 
   try {
     await githubApi.setScenario(input);
     detailKey = "";
+    if (input.reset) resetGeneration += 1;
     await pullRequestStore.refresh(true);
     const mode = appState.previewMode;
     // Reload an open PR preview against the new scenario (the view follows
@@ -212,6 +263,15 @@ function collapsedSummary(pr: PullRequestSummary): string {
 
 function setMeta(html: string): void {
   paneMeta.innerHTML = html;
+}
+
+// Why the pull request's detail couldn't be read, in the header's tooltip;
+// it goes as soon as fresh data arrives (or GitHub's status changes).
+let metaError: { message: string; status: string } | null = null;
+function setMetaError(message: string | null): void {
+  metaError = message === null ? null : { message, status: pullRequestStore.state.summary?.status ?? "" };
+  if (message === null) paneMeta.removeAttribute("title");
+  else paneMeta.title = message;
 }
 
 // A control inside the pane, described well enough to find its successor
@@ -261,7 +321,7 @@ if (typeof ResizeObserver === "function") {
 function revealDetails(): void {
   const details = paneBody.querySelector<HTMLElement>(".pr-pane-details");
   const title = paneBody.querySelector<HTMLElement>(".pr-pane-title");
-  const top = paneBody.querySelector<HTMLElement>(".pr-pane-top");
+  const top = paneBody.querySelector<HTMLElement>(".pr-pane-pin");
   if (!details || !title) return;
   const box = paneBody.getBoundingClientRect();
   const wanted = details.getBoundingClientRect().top + 48 - box.bottom;
@@ -276,17 +336,54 @@ function revealDetails(): void {
 
 function renderPane(): void {
   renderPaneContent();
+  positionDetails();
   syncEssentialHeight();
+}
+
+const floatingDetailsShown = () => Boolean(paneBody.querySelector("#pr-pane-details.is-floating:not([hidden])"));
+// Closed in place, not re-rendered: the pointerdown that closes them may be
+// the start of a click on one of the pane's controls (Review), which must
+// still be there to take it.
+function closeFloatingDetails(focusToggle: boolean): void {
+  detailsChoice = false;
+  const details = paneBody.querySelector<HTMLElement>("#pr-pane-details.is-floating");
+  const toggle = paneBody.querySelector<HTMLElement>("[data-pr-details-toggle]");
+  if (details) details.hidden = true;
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.textContent = "▸ Details";
+  }
+  if (focusToggle) toggle?.focus();
+}
+
+// The floating details sit beside the pane, level with the Details toggle,
+// so the summary and the actions stay in view (under the toggle when the
+// window has no room beside it), as tall as the window allows (then they
+// scroll on their own).
+function positionDetails(): void {
+  const details = paneBody.querySelector<HTMLElement>("#pr-pane-details.is-floating:not([hidden])");
+  const toggle = paneBody.querySelector<HTMLElement>("[data-pr-details-toggle]");
+  if (!details || !toggle) return;
+  const box = paneBody.getBoundingClientRect();
+  const toggleBox = toggle.getBoundingClientRect();
+  const beside = window.innerWidth - box.right >= 380;
+  const top = Math.max(8, beside ? toggleBox.top - 8 : toggleBox.bottom + 6);
+  const left = Math.max(8, beside ? box.right + 6 : box.left + 8);
+  details.style.setProperty("--pr-details-top", `${Math.round(top)}px`);
+  details.style.setProperty("--pr-details-left", `${Math.round(left)}px`);
+  details.style.setProperty("--pr-details-width", `${Math.round(Math.min(380, window.innerWidth - left - 12))}px`);
+  details.style.setProperty("--pr-details-max-height", `${Math.round(window.innerHeight - top - 12)}px`);
 }
 
 function renderPaneContent(): void {
   const state = pullRequestStore.state;
   setPaneAvailable("pull-request", state.enabled === true && state.repositoryId !== null);
-  refreshButton.disabled = state.loading;
+  refreshButton.setAttribute("aria-disabled", String(state.loading));
   refreshButton.classList.toggle("is-spinning", state.loading);
   if (state.enabled === false || !state.repositoryId) return;
   announceRetry();
   const summary = state.summary;
+  if (metaError && metaError.status !== (summary?.status ?? "")) setMetaError(null);
   if (!summary) {
     setMeta("");
     paneBody.innerHTML = state.error
@@ -303,6 +400,14 @@ function renderPaneContent(): void {
   const paused = githubWritesPausedReason(summary);
   setMeta(pr ? `<a href="${escapeHtmlAttribute(previewHref(pr.number))}" data-pr-open="${pr.number}" class="pr-pane-number">#${pr.number}</a><span class="pane-collapsed-summary">· ${escapeHtml(collapsedSummary(pr))}</span>${pending && pr.state === "OPEN" ? `<button type="button" class="gh-pill gh-pill-attention gh-pill-xs gh-pill-button" data-pr-action="review" title="${escapeHtmlAttribute(paused ? `${pendingLabel}: ${paused}` : pendingLabel)}" aria-label="${escapeHtmlAttribute(pendingLabel)}"${paused ? ` disabled aria-describedby="pr-pane-paused"` : ""}><span aria-hidden="true">✎ ${pending}</span></button>` : ""}` : "");
   const stale = summary.status === "rate-limited" || summary.status === "unavailable";
+  // No credential: nothing can be read. The preview, when it shows a pull
+  // request, holds the full guidance; the pane says it in one line then.
+  if (summary.status === "no-credential") {
+    const variant = appState.previewMode.kind === "pull-request" ? "line" : "compact";
+    paneBody.innerHTML = `${scoped !== null ? scopeNotice() : ""}${connectGithubHtml(variant, githubWorkspaceName())}${pendingElsewhereHtml([])}${scenarioControl()}`;
+    resetScrollOnChange(`no-credential\n${scoped}\n${variant}`);
+    return;
+  }
   if (scoped !== null) {
     const body = pr ? summaryHtml(pr) : scopeNotice() + (scopedError ? stateCard("danger", `Couldn't read pull request #${scoped}`, escapeHtml(scopedError), retryActionsHtml())
       : `<p class="pane-empty">Reading pull request #${scoped}…</p>`);
@@ -313,7 +418,10 @@ function renderPaneContent(): void {
     const status = stale && pr ? staleLine(pr.number) : statusSection(summary.status);
     paneBody.innerHTML = `${status}${pr ? summaryHtml(pr) : ""}${scenarioControl()}`;
   }
-  resetScrollOnChange(`${summary.status}\n${scoped}\n${pr?.number ?? ""}\n${pr?.state ?? ""}`);
+  // What the pane says changed (another PR or status, a review decision, the
+  // pending count, a new update on GitHub, Reset data): back to its top, so
+  // the title row is in view.
+  resetScrollOnChange([summary.status, scoped, pr?.number, pr?.state, pr?.reviewDecision, pr?.viewerPendingComments, pr?.updatedAt, resetGeneration].join("\n"));
 }
 
 // A new thing to show starts at the pane's top: a stale position from the
@@ -353,8 +461,10 @@ function currentPullRequest(): PullRequestSummary | null {
 }
 
 // A picked pull request says so, with the way back, above its summary.
+// (On a short touch screen it is "Picked · ← Back", beside the top row:
+// styles.css.)
 function scopeNotice(): string {
-  return `<div class="pr-pane-scope"><span>Picked PR, not checked out.</span>${backToBranchHtml()}</div>`;
+  return `<div class="pr-pane-scope"><span>Picked<span class="pr-pane-scope-rest"> PR, not checked out.</span></span>${backToBranchHtml()}</div>`;
 }
 
 function previewHref(number: number, tab: "conversation" | "files" = "conversation"): string {
@@ -391,8 +501,6 @@ function statusSection(status: GithubStatus): string {
   switch (status) {
     case "ready":
       return "";
-    case "no-credential":
-      return connectGithubHtml("compact");
     case "no-pull-request": {
       const branch = state.branch ?? "this branch";
       const create = summary.repository && state.branch
@@ -404,20 +512,22 @@ function statusSection(status: GithubStatus): string {
     case "rate-limited":
     case "unavailable": {
       const notice = staleNotice(summary)!;
-      return stateCard("danger", notice.title, escapeHtml(notice.why), retryActionsHtml());
+      return stateCard("danger", notice.title, escapeHtml(notice.why), retryActionsHtml()) + pendingElsewhereHtml([]);
     }
     default:
-      return stateCard("attention", "GitHub is unavailable", escapeHtml(summary.message ?? status));
+      return stateCard("attention", "GitHub is unavailable", escapeHtml(summary.message ?? status)) + pendingElsewhereHtml([]);
   }
 }
 
 // The viewer's pending reviews on pull requests other than the ones shown:
-// leaving a pull request with a pending review never hides it.
+// leaving a pull request with a pending review never hides it, and neither
+// does a status without one (no pull request for the branch, no credential,
+// GitHub unreachable): the store keeps the last known counts.
 function pendingElsewhereHtml(shown: readonly number[]): string {
   const elsewhere = pullRequestStore.pendingElsewhere(shown);
   if (elsewhere.length === 0) return "";
   return `<ul class="pr-pane-elsewhere" aria-label="Your pending reviews on other pull requests">${elsewhere.map(({ number, count }) =>
-    `<li><span class="gh-pill gh-pill-attention gh-pill-xs" aria-hidden="true">✎ ${count}</span> Your review of <a href="${escapeHtmlAttribute(previewHref(number, "files"))}" data-pr-pending-open="${number}">#${number}</a> is pending: ${count} ${count === 1 ? "comment" : "comments"}</li>`).join("")}</ul>`;
+    `<li><span class="gh-pill gh-pill-attention gh-pill-xs" aria-hidden="true">✎ ${count}</span> <span><a href="${escapeHtmlAttribute(previewHref(number, "files"))}" data-pr-pending-open="${number}" aria-label="Your review of #${number}">#${number}</a>: ${count} pending ${count === 1 ? "comment" : "comments"}</span></li>`).join("")}</ul>`;
 }
 
 function summaryHtml(pr: PullRequestSummary): string {
@@ -429,47 +539,49 @@ function summaryHtml(pr: PullRequestSummary): string {
   const reviewers = [...pr.reviewers];
   if (viewer && !reviewers.some(reviewer => reviewer.login === viewer) && pending > 0) reviewers.push({ login: viewer, state: "REQUESTED" });
   const open = pr.state === "OPEN";
-  const readiness = mergeReadinessView(pr, detail?.mergeReadiness ?? null);
+  // GitHub can't be asked: the verdict is the last one read, said in place.
+  const lastKnownAt = summary.status === "rate-limited" || summary.status === "unavailable" ? clockTime(summary.checkedAt) : null;
+  const readiness = mergeReadinessView(pr, detail?.mergeReadiness ?? null, lastKnownAt);
   const scoped = pullRequestStore.scopedNumber() === pr.number;
-  const toneClass = `is-${readiness.tone}`;
+  const toneClass = `is-${readiness.tone}${readiness.stale ? " is-stale" : ""}`;
   const previewed = appState.previewMode.kind === "pull-request" ? appState.previewMode.number : null;
   const paused = githubWritesPausedReason(summary);
   const finishPaused = pending > 0 && paused !== null;
   const reviewTitle = !open ? "This pull request is closed for review"
     : finishPaused ? `${paused} Your comments stay pending.`
     : pending > 0 ? "Finish your review: publish your pending comments as a comment, approval or change request"
-    : "Open Files changed at the first line: comments you add there start your review";
+    : "Approve, comment or request changes, with a summary and any line comments";
   // Always in view, even in a short pane: the top row (state, decision and
-  // the Details toggle; the number is in the pane header) stays pinned while
-  // the pane scrolls;
+  // the Details toggle; the number is in the pane header), and over it a
+  // picked pull request's note with its way back, stay pinned while the
+  // pane scrolls;
   // then the title, checks and the first blocker, then the actions. The rest
   // folds under Details. Rows are `data-pane-rows` children: the pane stack
   // sizes the pane to whole rows (sidebar/panes.ts).
   return `<div class="pr-pane${stale ? " is-stale" : ""}${scoped ? " is-picked" : ""}" data-pane-rows>
-      ${scoped ? scopeNotice() : ""}
-      <div class="pr-pane-top">
-        <span class="pr-pane-row">
-          ${stateBadge(pr)}
-          ${open ? reviewDecisionBadge(pr.reviewDecision) : ""}
-        </span>
-        <button type="button" class="pr-pane-details-toggle" data-pr-details-toggle aria-expanded="${detailsOpen}" aria-controls="pr-pane-details">${detailsOpen ? "▾" : "▸"} Details</button>
+      <div class="pr-pane-pin">
+        ${scoped ? scopeNotice() : ""}
+        <div class="pr-pane-top">
+          <span class="pr-pane-row">
+            ${stateBadge(pr)}
+            ${open ? reviewDecisionBadge(pr.reviewDecision) : ""}
+          </span>
+          <button type="button" class="pr-pane-details-toggle" data-pr-details-toggle aria-expanded="${detailsOpen()}" aria-controls="pr-pane-details">${detailsOpen() ? "▾" : "▸"} Details</button>
+        </div>
       </div>
-      <a href="${escapeHtmlAttribute(previewHref(pr.number))}" data-pr-open="${pr.number}" class="pr-pane-title">${escapeHtml(pr.title)}</a>
+      <a href="${escapeHtmlAttribute(previewHref(pr.number))}" data-pr-open="${pr.number}" class="pr-pane-title" title="${escapeHtmlAttribute(pr.title)}"><span class="pr-pane-title-text">${escapeHtml(pr.title)}</span></a>
       <p class="pr-pane-status ${toneClass}" title="${escapeHtmlAttribute([readiness.headline, ...readiness.reasons.slice(1)].join(" "))}"><span class="pr-pane-status-checks">${checksSummaryHtml(pr.checks)}</span> · <span>${escapeHtml(readiness.headline)}</span></p>
-      ${open && readiness.pendingNote ? `<p class="pr-pane-pending">${escapeHtml(readiness.pendingNote)}</p>` : ""}
-      <div class="pr-pane-actions" data-pane-essential-end>
-        <button type="button" class="gh-button${pending > 0 ? " gh-button-primary" : ""}" data-pr-action="${pending > 0 ? "review" : "start-review"}"${open && !finishPaused ? "" : " disabled"}${finishPaused ? ` aria-describedby="pr-pane-paused"` : ""} title="${escapeHtmlAttribute(reviewTitle)}">${reviewActionLabel(pending)}</button>
-        ${open
-          ? externalLink(pr.url, "Merge on GitHub", `gh-button${readiness.tone === "ready" ? " gh-button-merge" : ""} pr-pane-merge`, "Merging happens on GitHub, which handles merge queues, rulesets and stacked pull requests")
-          : externalLink(pr.url, "GitHub")}
+      ${open && readiness.pendingNote ? `<p class="pr-pane-pending"><span class="pr-pane-pending-full">${escapeHtml(readiness.pendingNote)}</span><span class="pr-pane-pending-short" aria-hidden="true">Finish your review before merging.</span></p>` : ""}
+      <div class="pr-pane-actions"${detailsOpen() && !detailsFloat() ? "" : " data-pane-essential-end"}>
+        <button type="button" class="gh-button${pending > 0 ? " gh-button-primary" : ""}" data-pr-action="review"${open && !finishPaused ? "" : " disabled"}${finishPaused ? ` aria-describedby="pr-pane-paused"` : ""} title="${escapeHtmlAttribute(reviewTitle)}">${reviewActionLabel(pending)}</button>
+        ${open ? mergeLinkHtml(pr.url, readiness.tone === "ready" && !readiness.stale, "pr-pane-merge") : externalLink(pr.url, "View on GitHub")}
       </div>
       ${pendingElsewhereHtml([pr.number, ...(previewed === null ? [] : [previewed])])}
-      <div id="pr-pane-details" class="pr-pane-details" data-pane-rows${detailsOpen ? "" : " hidden"}>
+      <div id="pr-pane-details" class="pr-pane-details${detailsFloat() ? " is-floating" : ""}"${detailsFloat() ? ` role="group" aria-label="Details of #${pr.number}"` : " data-pane-rows"}${detailsOpen() ? (detailsFloat() ? "" : " data-pane-essential-end") : " hidden"}>
         <div class="pr-pane-branches">${branchesHtml(pr)}<span class="pr-pane-repo">${escapeHtml(repositoryName(summary))}</span></div>
         <div class="pr-pane-stats">${pr.commits} ${pr.commits === 1 ? "commit" : "commits"} · <a href="${escapeHtmlAttribute(previewHref(pr.number, "files"))}" data-pr-open="${pr.number}" data-pr-tab="files">${pr.changedFiles} ${pr.changedFiles === 1 ? "file" : "files"}</a> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span> · by ${escapeHtml(pr.author)}</div>
         <h4 class="pr-pane-heading">Merge readiness</h4>
         <div class="pr-pane-readiness ${toneClass}" data-pane-rows>
-          <p class="pr-pane-readiness-headline">${escapeHtml(readiness.tone === "blocked" ? "Blocked on GitHub" : readiness.headline)}</p>
           ${readiness.reasons.length ? `<ul class="pr-pane-reasons" data-pane-rows>${readiness.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}
           ${readiness.notes.map(note => `<p class="pr-muted">${escapeHtml(note)}</p>`).join("")}
         </div>
@@ -518,9 +630,7 @@ function syncDetail(): void {
   if (detail) ensureTreeView().setReviewMarks(reviewMarksByPath(detail), `#${pr.number}`);
   if (key === detailKey) return;
   detailKey = key;
-  pullRequestStore.loadDetail(pr.number).catch(error => {
-    paneMeta.title = errorMessage(error);
-  });
+  pullRequestStore.loadDetail(pr.number).then(() => setMetaError(null), error => setMetaError(errorMessage(error)));
 }
 
 function syncScopedDetail(): void {

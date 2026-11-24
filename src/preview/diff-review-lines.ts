@@ -7,6 +7,10 @@
 // The line numbers live in the shadow root Pierre renders, so this module
 // decorates them after every Pierre render, and activation goes through the
 // same click Pierre already handles, which knows the line's side and number.
+//
+// On touch (`rowTap`) the compact number column is a small target, so a tap
+// anywhere on a line's row opens its composer the same way: a tap, not a
+// drag or a long press that selected text, and never one on a comment.
 
 import type { DiffAnnotationSide } from "./diff-view";
 
@@ -39,6 +43,17 @@ export function moveLineIndex(index: number, key: string, count: number): number
   }
 }
 
+// Jump to file's filter: the paths (in their order) containing every word of
+// the query, case-insensitively; an empty query keeps them all.
+export function filterJumpPaths(paths: readonly string[], query: string): string[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [...paths];
+  return paths.filter(path => {
+    const lower = path.toLowerCase();
+    return words.every(word => lower.includes(word));
+  });
+}
+
 const sameLine = (a: ReviewLine | null, b: ReviewLine | null) =>
   a !== null && b !== null && a.side === b.side && a.lineNumber === b.lineNumber;
 
@@ -55,15 +70,32 @@ function lineOf(cell: Element): ReviewLine | null {
 export type ReviewLineKeys = {
   // Re-applies the buttons' attributes after Pierre renders.
   decorate: () => void;
-  // The diff's lines, in display order, for the composer's line picker.
-  lines: () => (ReviewLine & { text: string })[];
+  // The diff's lines, in display order, for the composer's line picker, and
+  // whether each is a change (Add line comments opens on the first one).
+  lines: () => (ReviewLine & { text: string; changed: boolean })[];
   // Moves focus to a line's number (after a composer closes, say).
   focus: (line: ReviewLine) => boolean;
   // The line whose number has focus, if any.
   focused: () => ReviewLine | null;
 };
 
-export function attachReviewLineKeys(host: HTMLElement, split: () => boolean, path: string): ReviewLineKeys {
+// The number cell a tap on a line's code stands for: the cell with the same
+// line index in the same column. Null when the tap was not on a line's code
+// (an annotation, a separator, a number itself).
+export function rowTapNumberCell(path: readonly EventTarget[]): HTMLElement | null {
+  for (const target of path) {
+    const element = target as Element;
+    if (typeof element?.hasAttribute !== "function") continue;
+    if (element.tagName === "SLOT" || element.hasAttribute("data-line-annotation") || element.hasAttribute("data-column-number")) return null;
+    if (!element.hasAttribute("data-line")) continue;
+    const index = element.getAttribute("data-line-index");
+    if (index === null) return null;
+    return element.closest("code")?.querySelector<HTMLElement>(`[data-column-number][data-line-index="${index.replace(/["\\]/g, "\\$&")}"]`) ?? null;
+  }
+  return null;
+}
+
+export function attachReviewLineKeys(host: HTMLElement, split: () => boolean, path: string, rowTap: () => boolean = () => false): ReviewLineKeys {
   // The line that holds the file's Tab stop.
   let stop: ReviewLine | null = null;
   const root = () => host.querySelector("diffs-container")?.shadowRoot ?? null;
@@ -130,10 +162,22 @@ export function attachReviewLineKeys(host: HTMLElement, split: () => boolean, pa
     setStop(next);
     next.focus();
   });
-  // A click (pointer or keyboard) moves the Tab stop to that line.
+  // A click (pointer or keyboard) moves the Tab stop to that line; on touch
+  // a tap on the line's code clicks its number.
   host.addEventListener("click", event => {
-    const cell = event.composedPath()[0];
-    if (cell instanceof HTMLElement && cell.hasAttribute("data-column-number")) setStop(cell);
+    const composed = event.composedPath();
+    const cell = composed[0];
+    if (cell instanceof HTMLElement && cell.hasAttribute("data-column-number")) { setStop(cell); return; }
+    if (!rowTap() || event.defaultPrevented) return;
+    const number = rowTapNumberCell(composed);
+    if (!number) return;
+    // Text selected (a long press, a drag): the reader is selecting, not
+    // asking for a composer.
+    const shadow = root() as (ShadowRoot & { getSelection?: () => Selection | null }) | null;
+    const selection = shadow?.getSelection?.() ?? document.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim() !== "") return;
+    setStop(number);
+    number.click();
   });
 
   return {
@@ -144,7 +188,9 @@ export function attachReviewLineKeys(host: HTMLElement, split: () => boolean, pa
       const index = cell.getAttribute("data-line-index");
       const code = cell.closest("code");
       const text = index ? code?.querySelector(`[data-line][data-line-index="${CSS.escape(index)}"]`)?.textContent ?? "" : "";
-      return [{ ...line, text }];
+      // An added or removed line, not context.
+      const changed = cell.getAttribute("data-line-type")?.startsWith("change") ?? false;
+      return [{ ...line, text, changed }];
     }),
     focused: () => {
       const active = root()?.activeElement;
@@ -170,6 +216,20 @@ export function anchorLabel(anchor: Anchor): string {
   return `${anchor.path}:${anchor.line} (${anchor.side === "LEFT" ? "old" : "new"})`;
 }
 
+// An inline composer's prompt and accessible name. The side is part of it:
+// in Split a context line has a composer on each side, and the two must not
+// read alike.
+export function inlineComposerPrompt(anchor: Anchor, viewer: string): string {
+  return `Comment on ${anchorLabel(anchor)} as @${viewer}…`;
+}
+
+// One option of the composer's line picker: the line, its side, and the
+// start of its text.
+export function lineOptionText(line: ReviewLine, text: string): string {
+  const trimmed = text.trim();
+  return `line ${line.lineNumber} (${line.side === "deletions" ? "old" : "new"})${trimmed ? ` · ${trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed}` : ""}`;
+}
+
 // The commented line's code on one line, for lists of comments away from the
 // diff; empty when the file or line is not in the pull request.
 export function lineExcerpt(files: readonly { path: string; oldContents: string; newContents: string }[], anchor: Anchor, max = 72): string {
@@ -177,4 +237,16 @@ export function lineExcerpt(files: readonly { path: string; oldContents: string;
   const contents = anchor.side === "LEFT" ? file?.oldContents : file?.newContents;
   const text = contents?.split("\n")[anchor.line - 1]?.trim().replace(/\s+/g, " ") ?? "";
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// Where a composer opened for a whole file goes ("Add line comments", a
+// file's Comment button): its first non-blank added line, else its first
+// non-blank changed line, else its first changed line, else its first line.
+// A blank line is a poor first anchor: nothing on it to comment about.
+export function firstCommentLine<T extends ReviewLine & { text: string; changed: boolean }>(lines: readonly T[]): T | undefined {
+  const filled = (line: T) => line.text.trim() !== "";
+  return lines.find(line => line.changed && line.side === "additions" && filled(line))
+    ?? lines.find(line => line.changed && filled(line))
+    ?? lines.find(line => line.changed)
+    ?? lines[0];
 }

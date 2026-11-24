@@ -77,9 +77,9 @@ uatu shows the checked-out branch's pull request in the
 
 ## Reviewing
 
-Open **Diff** to compare against the PR's base branch.
-Click \`+\` beside a line to start a review comment; comments
-stay pending until you submit the review.
+Open the pull request's **Files changed** to review it against its base.
+Click or tap a line to start a review comment there; comments
+stay pending until you finish your review.
 
 ## Finishing a review
 

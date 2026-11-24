@@ -16,7 +16,10 @@ export type DraftLocation =
   // An open edit of one of the viewer's pending comments.
   | { kind: "edit"; commentId: string };
 
-export type Draft = { text: string; at: number };
+// `sending`: the ids of the comments at this place with this text that
+// already existed when a send of it began (see markSending). A draft
+// without it was never sent, so it is never taken for sent text.
+export type Draft = { text: string; at: number; sending?: string[] };
 
 type DraftTarget = { repositoryId: string; number: number };
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
@@ -58,7 +61,10 @@ export function createDraftStore(storage: () => DraftStorage | null, now: () => 
       const raw = storage()?.getItem(key);
       if (!raw) return null;
       const value = JSON.parse(raw) as Partial<Draft>;
-      return typeof value.text === "string" ? { text: value.text, at: Number(value.at) || 0 } : null;
+      if (typeof value.text !== "string") return null;
+      const draft: Draft = { text: value.text, at: Number(value.at) || 0 };
+      if (Array.isArray(value.sending)) draft.sending = value.sending.filter((id): id is string => typeof id === "string");
+      return draft;
     } catch {
       return null;
     }
@@ -70,7 +76,8 @@ export function createDraftStore(storage: () => DraftStorage | null, now: () => 
     text(target: DraftTarget, location: DraftLocation): string {
       return read(draftKey(target, location))?.text ?? "";
     },
-    // Empty or whitespace-only text removes the draft.
+    // Empty or whitespace-only text removes the draft. Typing starts over:
+    // any send-attempt mark goes with the old text.
     set(target: DraftTarget, location: DraftLocation, text: string): void {
       const key = draftKey(target, location);
       try {
@@ -78,6 +85,17 @@ export function createDraftStore(storage: () => DraftStorage | null, now: () => 
         else storage()?.setItem(key, JSON.stringify({ text, at: now() }));
       } catch {
         // Storage full or unavailable: the draft lives only in the page.
+      }
+    },
+    // A send of the draft's text is starting: `known` are the matching
+    // comments already there (matchingComments), which the send can't have
+    // made. A failed send calls set() again, which drops the mark.
+    markSending(target: DraftTarget, location: DraftLocation, text: string, known: readonly string[]): void {
+      if (text.trim() === "") return;
+      try {
+        storage()?.setItem(draftKey(target, location), JSON.stringify({ text, at: now(), sending: [...known] }));
+      } catch {
+        // Unavailable: without the mark the draft is kept, never lost.
       }
     },
     clear(target: DraftTarget, location: DraftLocation): void {
@@ -123,26 +141,38 @@ export async function sendThenClearDraft(send: () => Promise<(() => void) | void
   }
 }
 
-// A saved draft GitHub already holds: the page went away (a reload, a
-// crash) after the send went through but before the draft was dropped. A
-// draft that matches what is now on the pull request is not unsent text.
-export function draftAlreadySent(location: DraftLocation, text: string, detail: Pick<PullRequestDetail, "viewer" | "pendingReview" | "timeline">): boolean {
+// The viewer's comments at a draft's place whose text is the draft's: new
+// line comments on its line, replies in its thread, conversation comments.
+export function matchingComments(location: DraftLocation, text: string, detail: Pick<PullRequestDetail, "viewer" | "pendingReview" | "timeline">): string[] {
   const body = text.trim();
-  if (body === "") return false;
+  if (body === "") return [];
   const pending = detail.pendingReview?.comments ?? [];
   switch (location.kind) {
     case "inline":
-      return pending.some(comment => !comment.threadId && comment.path === location.path && comment.side === location.side
-        && comment.line === location.line && comment.body.trim() === body);
+      return pending.filter(comment => !comment.threadId && comment.path === location.path && comment.side === location.side
+        && comment.line === location.line && comment.body.trim() === body).map(comment => comment.id);
     case "reply":
-      return pending.some(comment => comment.threadId === location.threadId && comment.body.trim() === body);
+      return pending.filter(comment => comment.threadId === location.threadId && comment.body.trim() === body).map(comment => comment.id);
     case "conversation":
-      return detail.timeline.some(item => item.kind === "comment" && item.comment.author === detail.viewer && item.comment.body.trim() === body);
-    case "edit": {
-      const comment = pending.find(candidate => candidate.id === location.commentId);
-      return !comment || comment.body.trim() === body;
-    }
+      return detail.timeline.flatMap(item => item.kind === "comment" && item.comment.author === detail.viewer && item.comment.body.trim() === body ? [item.comment.id] : []);
+    case "edit":
     case "review":
-      return false;
+      return [];
   }
+}
+
+// A saved draft GitHub already holds: the page went away (a reload, a
+// crash) after the send went through but before the draft was dropped. Only
+// a draft whose send began (markSending) counts, and only a matching comment
+// that wasn't there when it began: the same words posted earlier on purpose
+// and typed again are unsent text.
+export function draftAlreadySent(location: DraftLocation, draft: Pick<Draft, "text" | "sending">, detail: Pick<PullRequestDetail, "viewer" | "pendingReview" | "timeline">): boolean {
+  if (draft.text.trim() === "") return false;
+  if (location.kind === "edit") {
+    const comment = detail.pendingReview?.comments.find(candidate => candidate.id === location.commentId);
+    return !comment || comment.body.trim() === draft.text.trim();
+  }
+  const known = draft.sending;
+  if (!known) return false;
+  return matchingComments(location, draft.text, detail).some(id => !known.includes(id));
 }

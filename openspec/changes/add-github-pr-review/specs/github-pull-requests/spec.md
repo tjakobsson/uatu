@@ -157,28 +157,64 @@ When a repository has a detected pull request, the workspace SHALL show it witho
 #### Scenario: A short pane
 - **WHEN** the pane holding the summary is only a few lines tall
 - **THEN** a top row pinned while the pane scrolls holds the state, the review decision and the `Details` toggle on one line (the number is in the pane header), and below it the title, checks count and the first merge blocker sit above the summary's actions
-- **AND** whenever the pull request or the status shown changes, the pane starts at its top
+- **AND** the review decision is never cut: `Open`, `Changes requested` and `Details` fit one line in a 300px sidebar, and in a narrower one the decision wraps under the state
+- **AND** whenever what the pane says changes (the pull request, the status, the review decision, the pending count, an update on GitHub, or the fake's Reset data), the pane starts at its top, so its title row is in view
+- **AND** the pinned top row covers the pane from its top edge: nothing scrolled shows above it, with Details open or closed
+
+#### Scenario: The pane on touch fills the Files tab
+- **WHEN** the Pull request pane is the expanded pane of touch mode's accordion
+- **THEN** its details start open, so the pane's height holds the pull request's branches, readiness, checks and reviewers instead of empty space, and the Details toggle still folds them
+- **AND** with less to show than the room (Details folded, no pull request, no credential) the pane is as tall as its content and the folded panes' headers follow right under it, leaving no blank stretch inside the pane
+- **AND** the title shows at most its clamped lines (two on touch, a picked pull request's too), a clipped extra line never shows, a one-line title leaves no gap under it, its full text is its tooltip, and its tap box is still at least 44px tall
+
+#### Scenario: The pane's header on touch
+- **WHEN** the viewer has 1 pending comment and the Pull request pane's header shows on a phone
+- **THEN** its pending count is a compact `✎ 1` pill, not stretched to the row's height, with a 44px tap box around it
+
+#### Scenario: Refreshing by keyboard
+- **WHEN** the user presses Enter on the pane's Refresh
+- **THEN** focus stays on Refresh while it runs and after the pane re-renders; while busy it says so without being disabled
+
+#### Scenario: A stale error tooltip goes
+- **WHEN** reading the pull request failed (no credential) and the header's tooltip said why, and GitHub then answers
+- **THEN** the tooltip is gone once fresh data arrives or the status changes
+
+#### Scenario: The pending review stays in sight in every state
+- **WHEN** the viewer has 1 pending comment on #642 and the pane turns to no pull request for the branch, no credential, or GitHub unreachable
+- **THEN** the pane still says `#642: 1 pending comment` on one line (its link named `Your review of #642`) with a link to its Files changed, wherever the count is known on the page
+
+#### Scenario: A picked pull request on a short screen
+- **WHEN** a picked pull request with a pending comment is shown in the expanded Pull request pane on an 844×390 touch phone
+- **THEN** its note is a compact `Picked · ← Back` beside the state row and the pending note keeps to `Finish your review before merging.`, so Finish review (1) and Merge on GitHub are inside the pane without scrolling; their full words stay their accessible text
+
+#### Scenario: The way back stays in reach
+- **WHEN** a picked pull request is shown in the Pull request pane and the pane is scrolled to its end, or Details is opened, on a desktop or a touch device
+- **THEN** the picked note and its `← Back` stay pinned at the top of the pane body with the state row under them, never scrolled out of view
+- **AND** Back is at least 24px tall on a desktop and 44px on touch, and is hit at its centre
 
 #### Scenario: No row is cut at the pane's bottom
 - **WHEN** the pane is at its default height, with Details closed or open
 - **THEN** its bottom edge falls between rows: a row that would be cut is left wholly below it, and the pixels go to another pane
 
 #### Scenario: Opening the details
-- **WHEN** the user expands the details
-- **THEN** the title stays in view; the pane scrolls only as far as keeps the title below the pinned top row and its bottom edge between rows
+- **WHEN** the user expands the details on a desktop at 1440×900, the Pull request, Change Overview and Files panes shown
+- **THEN** the details float beside the pane, level with the Details toggle, as one panel holding the branches, stats, merge readiness with every reason, the checks and the reviewers, whole and hit where they show; the pane's summary and actions stay in view, and the panel scrolls on its own only when the window is too short for it
+- **AND** Escape closes it with focus back on Details, and so does a click outside it; a click on one of the pane's controls (Review) both closes it and reaches that control, so the review dialog opens on the first click
+- **AND** it is the same floating panel whatever GitHub's status: over stale data (rate-limited, unreachable) it is opaque and on top of the preview, and only the pane's rows are dimmed
+- **AND** on touch, where the expanded pane takes the Files tab, the details open in the pane itself; the title stays in view, and the pane scrolls only as far as keeps the title below the pinned top row and its bottom edge between rows
 
-#### Scenario: Review actions say what they do
+#### Scenario: One review button
 - **WHEN** the viewer has no pending review on the shown pull request
-- **THEN** the summary's review action reads `Start review`, and it opens the pull request's Files changed with focus on the first file's line numbers (on touch, its `Comment on a line…`), without a dialog
-- **AND** with 2 pending comments it reads `Finish review (2)`, as the Files changed review bar does, and opens the Finish review dialog
-- **AND** a review with a summary only (an approval without line comments) starts from Files changed's `Review without line comments…`
+- **THEN** the summary's review action is one button, `Review`, as in the pull request view's tabs row; it opens the review dialog (the verdict with nothing preselected, the summary, the pending comments, and `Add line comments`)
+- **AND** with 2 pending comments it reads `Finish review (2)` everywhere and opens the same dialog
+- **AND** a manual ↻ that GitHub answers shows `Updated just now` beside the number for a few seconds, and says it to screen readers
 
 #### Scenario: Links to GitHub say they open a new tab
 - **WHEN** a screen reader reaches `Merge on GitHub ↗`, Open on GitHub, or another link that opens GitHub in a new tab
 - **THEN** its name ends with `(opens in a new tab)`
 
 ### Requirement: Merge readiness is shown read-only, and merging happens on GitHub
-Uatu MUST NOT merge pull requests. For a shown pull request it SHALL say, read-only, whether GitHub would merge it now and every reason it would not, beside the checks and review state, the repository's allowed merge methods, and whether GitHub deletes the head branch after merging. It SHALL offer a prominent `Merge on GitHub ↗` link that opens the pull request on GitHub. When the viewer has pending review comments on the pull request, it SHALL say so before the link.
+Uatu MUST NOT merge pull requests. For a shown pull request it SHALL say, read-only, whether GitHub would merge it now and every reason it would not, beside the checks and review state, the allowed merge methods and branch deletion. It SHALL link to the pull request on GitHub: a prominent `Merge on GitHub ↗` while GitHub would merge it, else a secondary `View on GitHub ↗`. When the viewer has pending review comments on the pull request, it SHALL say so before the link.
 
 #### Scenario: Ready to merge
 - **WHEN** an open pull request has its required reviews and passing checks, and no conflicts
@@ -186,7 +222,16 @@ Uatu MUST NOT merge pull requests. For a shown pull request it SHALL say, read-o
 
 #### Scenario: Blocked
 - **WHEN** GitHub would refuse the merge because a required check is still running and a review is missing
-- **THEN** the summary shows the first reason with a count of the rest, its details list both reasons, and `Merge on GitHub ↗` still opens the pull request on GitHub
+- **THEN** the summary shows the first reason with a count of the rest, its details list both reasons, and the link is a secondary `View on GitHub ↗` that opens the pull request on GitHub
+
+#### Scenario: Changes requested and approvals missing
+- **WHEN** a reviewer requests changes on a pull request whose base requires 2 approving reviews and has 1
+- **THEN** the reasons list both `Changes were requested; that reviewer must approve.` and `main requires 2 approving reviews.`: one blocker never hides another
+
+#### Scenario: Last known readiness while GitHub can't be asked
+- **WHEN** GitHub is rate-limited or unreachable while a pull request's readiness is shown
+- **THEN** the conversation's merge box and the pane's status line qualify it in place, like `Last known: ready to merge · as of 09:41` or `Last known: blocked · as of 09:41` (short: the reasons are the bullets under it, not repeated in the heading), dimmed, and the link is the secondary `View on GitHub ↗`
+- **AND** the pane says the readiness once: its status line, with the reasons and merge notes under Details' `Merge readiness`
 
 #### Scenario: Pending comments
 - **WHEN** the viewer has 2 pending review comments on the pull request
@@ -214,6 +259,7 @@ The workspace SHALL list the resolved repository's open pull requests on demand,
 #### Scenario: Picking on a phone
 - **WHEN** the user opens the list on a touch device
 - **THEN** it fills the screen, its search field does not take focus (the keyboard would cover the list), and each row's actions sit outside the row, so rows hold no nested controls
+- **AND** all four filter chips are whole, never cut or scrolled out of sight: on a 390px phone they fit one row (`Review requested` reads `To review`, its full name kept as the chip's name), and on a narrower one they wrap to a second row; its footer buttons are one compact row, and at 320px they read `Cancel`, `Worktree…` and `Show here`, named in full
 
 #### Scenario: Opened to create a worktree
 - **WHEN** the user chooses `From a pull request…` in the worktree menu and selects #639
@@ -229,9 +275,37 @@ The workspace SHALL list the resolved repository's open pull requests on demand,
 - **WHEN** the user activates a filter chip with Enter or Space
 - **THEN** the list filters and focus stays on that chip
 
+#### Scenario: Arrow keys from the search field
+- **WHEN** the search field is empty, no row is selected, and the user presses ArrowUp (or ArrowDown)
+- **THEN** the last row (or the first) is selected, and further presses move one row, wrapping at both ends
+
 #### Scenario: Finding a merged or closed pull request by number
 - **WHEN** the user types `#642` or pastes the pull request's URL, and #642 is merged
-- **THEN** the list says #642 isn't open, looks it up in any state, and offers to show it with its state
+- **THEN** the list says #642 is merged, so it isn't in the open list, after looking it up in any state, and shows it as the one result; the footer's `Show in workspace` acts on it and there is no second set of actions
+
+#### Scenario: Typing a number looks it up once
+- **WHEN** the user types `6`, `3`, `0` (looking for #630, which isn't open)
+- **THEN** nothing is looked up and nothing says "not found" while an open pull request matches what is typed, or until typing pauses (about 400ms) or Enter is pressed; then #630 alone is looked up
+
+#### Scenario: A number or URL naming an open pull request
+- **WHEN** the user types `642` or pastes #642's URL, and #642 is open
+- **THEN** #642's row is selected in the list, and the footer acts on it
+
+#### Scenario: A URL for another repository
+- **WHEN** the user pastes `https://github.com/someone/else/pull/642` in a workspace of `octo-org/uatu`
+- **THEN** the list says `This link is for someone/else, not octo-org/uatu.`, looks nothing up and offers no action; hosts, owners and names compare case-insensitively
+
+#### Scenario: A number that doesn't exist
+- **WHEN** the user types `#99999` and GitHub has no such pull request
+- **THEN** one sentence says `There's no pull request #99999 in octo-org/uatu.`
+
+#### Scenario: Browsing without a credential
+- **WHEN** the user opens Browse pull requests… while GitHub isn't connected for the workspace
+- **THEN** the dialog holds only the explanation and `Open Hub Settings → Credentials` (outside a Hub, the `gh auth login` step) with Close, and no search field, filters or pull request actions
+
+#### Scenario: The dialog stays put
+- **WHEN** the user selects a fork's pull request in the list on desktop and its fork notice appears
+- **THEN** the dialog's top edge doesn't move; it grows downward
 
 ### Requirement: The pull request view renders the description and conversation
 The pull request view SHALL render the description and the conversation in time order: comments, submitted reviews with their bodies, and review threads with their file path, resolved and outdated flags, and replies. All GitHub-authored Markdown SHALL be rendered with the same sanitizer used for documents. Large conversations SHALL be bounded with a link to GitHub.
@@ -239,6 +313,10 @@ The pull request view SHALL render the description and the conversation in time 
 #### Scenario: Opening the pull request view
 - **WHEN** the user opens the detected pull request from its summary
 - **THEN** the view shows the title, state, description, and conversation
+
+#### Scenario: A review thread's summary
+- **WHEN** a review in Conversation lists its threads
+- **THEN** each says its file, its line, Resolved or Unresolved and its reply count (`1 reply`, `2 replies`); a thread with only its first comment says no count at all, never `0 replies`
 
 #### Scenario: Hostile Markdown in a comment
 - **WHEN** a comment contains `<script>`, an `onerror` attribute, or a `javascript:` link
@@ -256,6 +334,8 @@ The pull request view SHALL render the description and the conversation in time 
 - **WHEN** the pull request view is shown at phone width (390px), in the light or the dark theme
 - **THEN** the pull request's facts, the description, each review and comment, the merge box and the composer are each set apart: a full-width band with a tinted header strip (author · action · time) or tinted surface, hairlines above and below, and the same gap between parts, with no width given to side borders
 - **AND** review threads are tinted cards, and all their text keeps at least 4.5:1 contrast
+- **AND** `View in diff →` on a thread summary and the ready state's `Merge on GitHub ↗` keep at least 4.5:1 contrast in light and dark themes
+- **AND** the state badges' white text (`Open`, `Merged`, `Closed`, `Draft`) and the green `+N` addition counts, file headers included, keep at least 4.5:1 contrast in light and dark themes
 
 ### Requirement: The pull request view is addressable by URL
 The pull request view SHALL have a same-origin URL naming the pull request number (`?pr=<n>`), and the repository only when it is not the workspace's pull request repository (its first Git repository). URLs that name the repository SHALL keep working. Direct arrival, refresh, and browser Back/Forward SHALL restore it, and an unresolvable URL SHALL show why the pull request is unavailable rather than an unrelated document.
@@ -280,6 +360,15 @@ The pull request view SHALL have a same-origin URL naming the pull request numbe
 - **WHEN** the URL names an unknown repository, a pull request that does not exist, or a repository whose GitHub status is not ready
 - **THEN** the view explains why the pull request is unavailable and the sidebar remains usable
 
+#### Scenario: A picked pull request without a credential
+- **WHEN** GitHub isn't connected and the user opens `?pr=639`
+- **THEN** the header still names `Pull request #639` (`#639 · <owner>/<repo> · GitHub not connected`), the main card gives the full guidance to connect GitHub, and the Pull request pane says it in one short line with a link to connect, so the message is said once
+
+#### Scenario: A thread's place survives reload and Back / Forward
+- **WHEN** the reviewer chooses `View in diff →` on a thread in Conversation, then reloads, or goes Back to Conversation and Forward again
+- **THEN** the URL names the thread (`?pr=642&tab=files&thread=<id>`), and each time Files changed opens scrolled to that thread with focus on it, clear of the pinned header
+- **AND** a Jump to file choice updates the URL's `file=` in place, so a reload lands on that file
+
 #### Scenario: Another pull request in the repository
 - **WHEN** the URL names a pull request other than the checked-out branch's
 - **THEN** it is shown with its full review: conversation comments, and inline comments and replies on its Files changed, which renders GitHub's own diff of that pull request rather than this checkout
@@ -292,8 +381,18 @@ Choosing **Show in workspace** for a pull request SHALL make it the workspace's 
 - **WHEN** the user picks pull request #639 while `feat/view-pr` (#642) is checked out
 - **THEN** the Pull request pane shows #639 with a note that `feat/view-pr` stays checked out, above #639's summary and clear of its actions
 - **AND** the Files pane's heading reads `PR #639 files`, and it lists #639's changed files under a `PR #639` label in place of the workspace tree
+- **AND** on touch the label, #639's title (up to two lines) and `← Back` (named `← Back to feat/view-pr`) share one row
 - **AND** Change Overview is labelled as describing the local branch `feat/view-pr`, not #639
+- **AND** the same `Local branch` label (its tooltip saying why) marks Change Overview whenever its comparison isn't the shown pull request's diff: uncommitted changes, a checked-out commit other than the pull request's head, or Since last commit
 
+
+#### Scenario: The Files options act on the workspace tree only
+- **WHEN** a picked pull request's files are shown in the Files pane
+- **THEN** the Files options (ignored files, file types) and the tree's filters are hidden, so nothing changes the workspace tree out of sight, and they are back with the workspace tree
+
+#### Scenario: One file order everywhere
+- **WHEN** a pull request changes `README.md`, `docs/pr-review.md` and `docs/hub.md`
+- **THEN** the Files pane's pull request scope, Files changed and its Jump to file list all show `docs/hub.md`, `docs/pr-review.md`, then `README.md`: tree order, folders before files at every level, then by name
 
 #### Scenario: Opening a file from the pull request scope
 - **WHEN** the user picks a file in the Files pane's pull request scope
@@ -310,6 +409,7 @@ Choosing **Show in workspace** for a pull request SHALL make it the workspace's 
 #### Scenario: One way back
 - **WHEN** a picked pull request is shown
 - **THEN** the Pull request pane's note offers `← Back to <branch>`, and the Files pane offers the same control only while the Pull request pane is hidden or collapsed, so each screen says it once
+- **AND** on touch, where the Preview tab has no Pull request pane beside it, the preview header's number row carries a compact `Picked · ← Back` chip (named `Picked PR, not checked out`), adding no row; Back returns to the branch's pull request and focuses its heading
 
 #### Scenario: Focus after showing a pull request
 - **WHEN** the user shows a pull request from Browse pull requests…, including from a simulated worktree's result, or opens one from the pane while the preview is out of sight (a narrow window stacking the sidebar above the preview, or touch mode's Files tab)

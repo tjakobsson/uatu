@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createDraftStore, draftAlreadySent, draftKey, sendThenClearDraft } from "./pr-drafts";
+import { createDraftStore, draftAlreadySent, draftKey, matchingComments, sendThenClearDraft } from "./pr-drafts";
 
 function memoryStorage() {
   const map = new Map<string, string>();
@@ -110,22 +110,51 @@ describe("draftAlreadySent", () => {
     timeline: [{ kind: "comment" as const, comment: { id: "c1", author: "me", body: "posted", bodyHtml: "", createdAt: "" } }],
   };
 
-  test("recognises an inline note, a reply and a conversation comment GitHub already holds", () => {
-    expect(draftAlreadySent({ kind: "inline", path: "a.md", side: "RIGHT", line: 3 }, "nit", detail)).toBe(true);
-    expect(draftAlreadySent({ kind: "reply", threadId: "t1" }, "thanks", detail)).toBe(true);
-    expect(draftAlreadySent({ kind: "conversation" }, "posted", detail)).toBe(true);
+  // A send began before any of these comments existed.
+  const sent = (text: string) => ({ text, sending: [] as string[] });
+
+  test("recognises an inline note, a reply and a conversation comment a send attempt made", () => {
+    expect(draftAlreadySent({ kind: "inline", path: "a.md", side: "RIGHT", line: 3 }, sent("nit"), detail)).toBe(true);
+    expect(draftAlreadySent({ kind: "reply", threadId: "t1" }, sent("thanks"), detail)).toBe(true);
+    expect(draftAlreadySent({ kind: "conversation" }, sent("posted"), detail)).toBe(true);
   });
 
   test("keeps different text, another line, and a summary", () => {
-    expect(draftAlreadySent({ kind: "inline", path: "a.md", side: "RIGHT", line: 3 }, "nit, longer", detail)).toBe(false);
-    expect(draftAlreadySent({ kind: "inline", path: "a.md", side: "RIGHT", line: 4 }, "nit", detail)).toBe(false);
-    expect(draftAlreadySent({ kind: "review" }, "nit", detail)).toBe(false);
-    expect(draftAlreadySent({ kind: "conversation" }, "", detail)).toBe(false);
+    expect(draftAlreadySent({ kind: "inline", path: "a.md", side: "RIGHT", line: 3 }, sent("nit, longer"), detail)).toBe(false);
+    expect(draftAlreadySent({ kind: "inline", path: "a.md", side: "RIGHT", line: 4 }, sent("nit"), detail)).toBe(false);
+    expect(draftAlreadySent({ kind: "review" }, sent("nit"), detail)).toBe(false);
+    expect(draftAlreadySent({ kind: "conversation" }, sent(""), detail)).toBe(false);
+  });
+
+  test("keeps the same words typed again on purpose: never sent, or only matched by comments older than the send", () => {
+    for (const [location, text, id] of [
+      [{ kind: "inline", path: "a.md", side: "RIGHT", line: 3 }, "nit", "p1"],
+      [{ kind: "reply", threadId: "t1" }, "thanks", "p2"],
+      [{ kind: "conversation" }, "posted", "c1"],
+    ] as const) {
+      expect(draftAlreadySent(location, { text }, detail)).toBe(false);
+      expect(draftAlreadySent(location, { text, sending: [id] }, detail)).toBe(false);
+    }
+    // A repeat whose send went through: the new comment is not the old one.
+    const twice = { ...detail, timeline: [...detail.timeline, { kind: "comment" as const, comment: { id: "c2", author: "me", body: "posted", bodyHtml: "", createdAt: "" } }] };
+    expect(draftAlreadySent({ kind: "conversation" }, { text: "posted", sending: ["c1"] }, twice)).toBe(true);
+  });
+
+  test("the store records a send attempt, and typing drops it", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(() => storage);
+    const where = { kind: "conversation" as const };
+    store.set(PR, where, "posted");
+    expect(store.get(PR, where)?.sending).toBeUndefined();
+    store.markSending(PR, where, "posted", matchingComments(where, "posted", detail));
+    expect(store.get(PR, where)).toMatchObject({ text: "posted", sending: ["c1"] });
+    store.set(PR, where, "posted");
+    expect(store.get(PR, where)?.sending).toBeUndefined();
   });
 
   test("an edit is sent when the comment says it, or when the comment is gone", () => {
-    expect(draftAlreadySent({ kind: "edit", commentId: "p1" }, "nit", detail)).toBe(true);
-    expect(draftAlreadySent({ kind: "edit", commentId: "p1" }, "nit, reworded", detail)).toBe(false);
-    expect(draftAlreadySent({ kind: "edit", commentId: "gone" }, "anything", detail)).toBe(true);
+    expect(draftAlreadySent({ kind: "edit", commentId: "p1" }, { text: "nit" }, detail)).toBe(true);
+    expect(draftAlreadySent({ kind: "edit", commentId: "p1" }, { text: "nit, reworded" }, detail)).toBe(false);
+    expect(draftAlreadySent({ kind: "edit", commentId: "gone" }, { text: "anything" }, detail)).toBe(true);
   });
 });

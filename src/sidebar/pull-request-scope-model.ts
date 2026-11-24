@@ -44,3 +44,28 @@ export function pullRequestFileDecoration(row: PullRequestFileRow): { text: stri
   ].filter(Boolean).join(", ");
   return { text: parts.map(part => part.text).join(""), title, parts: parts.filter(part => part.text) };
 }
+
+// Why Change Overview's comparison isn't the pull request's diff, or null
+// when it is: a picked pull request (Change Overview still describes the
+// checked-out branch), uncommitted changes, a local HEAD other than the pull
+// request's head, or Since last commit. Shown as the pane's "Local branch"
+// label, with this as its tooltip.
+export function changeOverviewDifference(input: {
+  branch: string | null;
+  picked: number | null;
+  pullRequest: { number: number; headRefOid: string } | null;
+  dirty: boolean;
+  commitShort: string | null;
+  compareTarget: "base" | "last-commit";
+}): string | null {
+  const branch = input.branch ? ` ${input.branch}` : "";
+  if (input.picked !== null) return `Change Overview describes the checked-out branch${branch}, not the picked pull request #${input.picked}.`;
+  const pr = input.pullRequest;
+  if (!pr) return null;
+  const reasons: string[] = [];
+  if (input.compareTarget === "last-commit") reasons.push("it compares against the last commit, not the pull request's base");
+  if (input.commitShort && !pr.headRefOid.startsWith(input.commitShort)) reasons.push(`the checked-out commit ${input.commitShort} isn't the pull request's head ${pr.headRefOid.slice(0, 7)}`);
+  if (input.dirty) reasons.push("it includes uncommitted changes");
+  if (reasons.length === 0) return null;
+  return `Change Overview describes the local branch${branch}, which differs from #${pr.number}'s diff: ${reasons.join("; ")}.`;
+}

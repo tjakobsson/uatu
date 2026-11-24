@@ -77,3 +77,15 @@ Every diff (the document Diff view and a pull request's Files changed) SHALL, in
 #### Scenario: Desktop keeps its column
 - **WHEN** a diff is shown in desktop mode at 1440×900
 - **THEN** the line-number column keeps its default size
+
+### Requirement: A file in the current pull request links to its review
+The document Diff view of a file the workspace's current pull request changes SHALL offer, in its header row beside the layout toggle, a compact `Review this file in #<n>` link that opens that pull request's Files changed scrolled to the file, where its lines take comments. Other files SHALL show no link.
+
+#### Scenario: Reviewing from the document Diff
+- **WHEN** the user opens `docs/pr-review.md`'s Diff while #642, which changes it, is the current pull request, and activates `Review this file in #642`
+- **THEN** #642's Files changed opens scrolled to `docs/pr-review.md`, and the URL names the file
+
+#### Scenario: A file outside the pull request
+- **WHEN** the user opens the Diff of a file #642 does not change
+- **THEN** the Diff view shows no review link
+

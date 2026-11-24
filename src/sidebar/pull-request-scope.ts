@@ -12,6 +12,14 @@
 // here, on the branch's pull request in the pane. While GitHub can't be
 // reached the bar says so, as the pane and the preview do.
 //
+// While the scope is shown the workspace tree's filters and Files options
+// (ignored files, file types) are hidden: they would change a tree that
+// isn't on screen.
+//
+// Change Overview carries a "Local branch" label whenever its comparison
+// isn't the pull request's diff: a picked pull request, uncommitted changes,
+// another HEAD, or Since last commit (its tooltip says which).
+//
 // The tree is a second instance of the same library the workspace tree uses
 // (sidebar/tree-view.ts), with the same theme. It holds PR paths, not
 // workspace documents, so it stays out of TreeView's document selection and
@@ -28,8 +36,8 @@ import { showDefaultDocument } from "../shell/history";
 import { revealPreviewSurface } from "../shell/tab-bar";
 import { activeColorScheme, onColorSchemeChange } from "../shell/theme";
 import { activatePullRequestPreview } from "../shell/url";
-import { pullRequestFileDecoration, pullRequestFileRows, type PullRequestFileRow } from "./pull-request-scope-model";
-import { renderSidebar, setFilesScopeCount } from "./shell";
+import { changeOverviewDifference, pullRequestFileDecoration, pullRequestFileRows, type PullRequestFileRow } from "./pull-request-scope-model";
+import { onSidebarRepositories, renderSidebar, setFilesScopeCount } from "./shell";
 import { setPaneTitle } from "./panes";
 import { ancestorPaths, applyTreeTheme } from "./tree-view";
 
@@ -48,6 +56,7 @@ let shownCount: number | null = null;
 export function initPullRequestScope(): void {
   setFilesScopeCount(() => shownCount);
   pullRequestStore.subscribe(renderPullRequestScope);
+  onSidebarRepositories(renderChangeOverviewNote);
   onColorSchemeChange(scheme => applyTreeTheme(treeElement, scheme));
   barElement.addEventListener("click", event => {
     if (!(event.target as HTMLElement).closest("[data-pr-back-to-branch]")) return;
@@ -55,6 +64,19 @@ export function initPullRequestScope(): void {
     // The bar (and the button) is gone: focus lands in the workspace tree
     // that took its place.
     requestAnimationFrame(() => focusWorkspaceTree());
+  });
+  // The touch preview header's "Picked · ← Back" chip (pull-request-view.ts):
+  // the preview gives way to the branch's pull request, whose heading takes
+  // focus.
+  document.querySelector<HTMLElement>("#preview-path")?.addEventListener("click", event => {
+    if (!(event.target as HTMLElement).closest("[data-pr-back-to-branch]")) return;
+    showBranchPullRequest();
+    requestAnimationFrame(() => {
+      const title = document.querySelector<HTMLElement>("#preview-title");
+      if (!title) return;
+      title.tabIndex = -1;
+      title.focus({ preventScroll: true });
+    });
   });
   // Rows are native buttons inside the library's shadow root: a click, a tap
   // and Enter/Space all arrive here, including on the row already selected.
@@ -68,10 +90,12 @@ export function initPullRequestScope(): void {
 
 // The one "back to the checked-out branch" control, in the Pull request pane
 // and the Files pane's PR scope bar alike.
+// On touch the Files pane's scope bar shows it as "← Back" in its one row
+// (styles.css); its name stays whole.
 export function backToBranchHtml(): string {
   const branch = pullRequestStore.state.branch;
-  const label = branch ? `← Back to ${branch}` : "← Back to this branch";
-  return `<button type="button" class="gh-link-button pr-back-to-branch" data-pr-back-to-branch title="Show the checked-out branch's pull request and the workspace files${branch ? `; ${escapeHtmlAttribute(branch)} stays checked out` : ""}">${escapeHtml(label)}</button>`;
+  const rest = branch ? ` to ${branch}` : " to this branch";
+  return `<button type="button" class="gh-link-button pr-back-to-branch" data-pr-back-to-branch title="Show the checked-out branch's pull request and the workspace files${branch ? `; ${escapeHtmlAttribute(branch)} stays checked out` : ""}">← Back<span class="pr-back-rest">${escapeHtml(rest)}</span></button>`;
 }
 
 // Returns the workspace to the checked-out branch: the pane shows its pull
@@ -106,19 +130,44 @@ function openFile(path: string): void {
   document.dispatchEvent(new CustomEvent("uatu:pull-request-reveal", { detail: { number, path } }));
 }
 
+// "Local branch" on Change Overview whenever what it compares differs from
+// the pull request's diff (changeOverviewDifference says why, in its
+// tooltip). Re-read on every sidebar render: HEAD, dirtiness and the compare
+// target change there.
+export function renderChangeOverviewNote(): void {
+  if (!overviewNote) return;
+  const state = pullRequestStore.state;
+  const repository = appState.repositories.find(candidate => candidate.id === state.repositoryId);
+  const why = state.summary?.status === "no-credential" ? null : changeOverviewDifference({
+    branch: state.branch,
+    picked: pullRequestStore.scopedNumber(),
+    pullRequest: state.summary?.pullRequest ?? null,
+    dirty: repository?.metadata.dirty ?? false,
+    commitShort: repository?.metadata.commitShort ?? null,
+    compareTarget: appState.compareTarget,
+  });
+  overviewNote.hidden = why === null;
+  overviewNote.textContent = why === null ? "" : "Local branch";
+  overviewNote.title = why ?? "";
+}
+
 export function renderPullRequestScope(): void {
   const number = pullRequestStore.scopedNumber();
   const scoped = number !== null;
   scopeElement.hidden = !scoped;
   filesPane.toggleAttribute("data-files-scope", scoped);
+  // Files options act on the workspace tree only: hidden (and closed) here.
+  if (scoped) {
+    const options = filesPane.querySelector<HTMLElement>("#files-options-popover");
+    try {
+      if (options?.matches(":popover-open")) options.hidePopover();
+    } catch {
+      // No popover support: the options can't be open.
+    }
+  }
   // Whose files the pane lists, and what Change Overview still describes.
   setPaneTitle("files", scoped ? `PR #${number} files` : "Files");
-  const branch = pullRequestStore.state.branch;
-  if (overviewNote) {
-    overviewNote.hidden = !scoped;
-    overviewNote.textContent = scoped ? "Local branch" : "";
-    overviewNote.title = scoped ? `Change Overview describes the checked-out branch${branch ? ` ${branch}` : ""}, not the picked pull request #${number}.` : "";
-  }
+  renderChangeOverviewNote();
   const detail = scoped ? pullRequestStore.detail(number) : null;
   const count = detail ? detail.files.length : null;
   if (count !== shownCount) {
@@ -133,7 +182,7 @@ export function renderPullRequestScope(): void {
   const stale = staleNotice(summary);
   barElement.innerHTML = `
     <span class="pr-scope-label" title="Files changed in pull request #${number}">PR #${number}</span>
-    <span class="pr-scope-title">${pr ? escapeHtml(pr.title) : "Reading GitHub…"}</span>
+    <span class="pr-scope-title"${pr ? ` title="${escapeHtmlAttribute(pr.title)}"` : ""}>${pr ? escapeHtml(pr.title) : "Reading GitHub…"}</span>
     ${detail?.mock ? `<span class="gh-mock-label" title="Mocked GitHub data: served by the in-memory fake (src/github/fake.ts). Nothing reaches GitHub.">Mocked</span>` : ""}
     ${backToBranchHtml()}
     ${stale ? `<span class="pr-scope-status" role="status" title="${escapeHtmlAttribute(stale.why)}"><strong>${escapeHtml(stale.title)}.</strong> Showing #${number} as of ${escapeHtml(clockTime(summary!.checkedAt))}; sending is paused.</span>` : ""}`;

@@ -412,8 +412,11 @@ export function syncPaneDom() {
     element.hidden = !paneShown(pane.id);
     element.classList.toggle("is-collapsed", collapsed);
     if (touch && !collapsed) {
-      // The accordion's one expanded pane takes the rest of the stack.
-      element.style.flex = "1 1 0px";
+      // The accordion's one expanded pane takes the rest of the stack. The
+      // Pull request pane is a summary, not a list: it is as tall as what it
+      // shows (scrolling past the room left), and the folded headers follow
+      // right under it instead of under a blank stretch.
+      element.style.flex = pane.id === "pull-request" ? "0 1 auto" : "1 1 0px";
     } else if (!touch && state.height && !collapsed) {
       element.style.flex = `${pane.id === growPaneId ? 1 : 0} 1 ${state.height + (rowTrims.get(pane.id) ?? 0)}px`;
     } else {

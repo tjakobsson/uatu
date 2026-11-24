@@ -214,11 +214,10 @@ export class FakeGithubService implements GithubService {
     }
     const body = input.body.trim() === "" ? "" : checkedBody(input.body);
     const comments = record.pendingReview?.comments ?? [];
-    if (input.event !== "APPROVE" && body === "" && comments.length === 0) {
-      throw new GithubError(422, input.event === "COMMENT"
-        ? "Write a summary or add a comment before submitting."
-        : "Explain what needs to change in the summary.");
-    }
+    // GitHub's rule: a change request needs a body; a comment review needs a
+    // body or line comments; an approval needs neither.
+    if (input.event === "REQUEST_CHANGES" && body === "") throw new GithubError(422, "Explain what needs to change in the summary.");
+    if (input.event === "COMMENT" && body === "" && comments.length === 0) throw new GithubError(422, "Write a summary or add a comment before submitting.");
     const threadIds: string[] = [];
     for (const pending of comments) {
       const comment: GithubComment = { id: this.id("comment"), author: FAKE_VIEWER, body: pending.body, bodyHtml: pending.bodyHtml, createdAt: this.iso(this.now()) };
@@ -390,9 +389,7 @@ export class FakeGithubService implements GithubService {
     const blockers: string[] = [];
     if (record.seed.isDraft) blockers.push("Draft: mark it ready for review on GitHub first.");
     if (record.seed.conflicting) blockers.push(`Conflicts with ${record.seed.baseRefName} must be resolved.`);
-    const decision = this.reviewDecision(record);
-    if (decision === "CHANGES_REQUESTED") blockers.push("Changes were requested; that reviewer must approve.");
-    if (decision === "REVIEW_REQUIRED") blockers.push(`${record.seed.baseRefName} requires ${FAKE_REPOSITORY_SETTINGS.requiredApprovals} approving reviews.`);
+    blockers.push(...reviewBlockers([...record.reviewerStates.values()], FAKE_REPOSITORY_SETTINGS.requiredApprovals, record.seed.baseRefName));
     const runs = this.checkRuns(record);
     const failing = runs.filter(run => run.state === "FAILURE").map(run => run.name);
     if (failing.length > 0) blockers.push(`Required ${failing.length === 1 ? "check" : "checks"} failing: ${failing.join(", ")}.`);
@@ -453,6 +450,19 @@ export class FakeGithubService implements GithubService {
       })(),
     };
   }
+}
+
+// The review rules' blockers, every one that holds: a change request and
+// too few approvals are separate rules, so a change request never hides
+// that approvals are still missing.
+export function reviewBlockers(states: readonly string[], requiredApprovals: number, baseRefName: string): string[] {
+  const blockers: string[] = [];
+  if (states.includes("CHANGES_REQUESTED")) blockers.push("Changes were requested; that reviewer must approve.");
+  const approvals = states.filter(state => state === "APPROVED").length;
+  if (approvals < requiredApprovals) {
+    blockers.push(`${baseRefName} requires ${requiredApprovals} approving ${requiredApprovals === 1 ? "review" : "reviews"}.`);
+  }
+  return blockers;
 }
 
 function checkedBody(body: string): string {

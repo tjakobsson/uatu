@@ -18,10 +18,21 @@
 // way to the "connect GitHub" card on both tabs. Conversation opens with the
 // pending-review bar while a review is pending (Discard, Finish review (n);
 // the same bar as Files changed) and ends with the read-only merge readiness
-// and "Merge on GitHub ↗": uatu never merges. "Start review" from the Pull
-// request pane opens Files changed with focus on the first file's line
-// numbers. In a short touch viewport the preview header scrolls away and the
-// review bars pin at the top (--pr-sticky-top follows the header).
+// and "Merge on GitHub ↗" (or "View on GitHub ↗" while merging is blocked):
+// uatu never merges. The review dialog's "Add line comments" (from any
+// review button) opens Files changed with a composer on the first file's
+// first non-blank changed line. The tabs row holds the one review button
+// (diff-review.ts; Review, or Finish (n)) on touch and desktop alike and, on
+// Files changed, Jump to file. On a phone the preview header is a title row
+// (#n, the title in up to two lines, Open on GitHub and text size; a picked
+// PR's number row keeps its own line for the Picked chip) over the tabs row;
+// in portrait the title row scrolls away and the tabs row stays pinned, in a
+// short touch viewport the whole header is one pinned row (--pr-sticky-top
+// follows the header). Files changed leaves out the state, author and branch facts
+// above it: the header names the PR, and its own summary line has the counts
+// and refs. The URL keeps the tab, and on Files changed the file or review
+// thread last jumped to (`file=`, `thread=`), so a reload or Back / Forward
+// lands there again.
 //
 // The module also follows which pull requests are on screen (this view's and
 // the workspace's current one): write dialogs for any other one close, and
@@ -38,17 +49,18 @@ import {
   checksSummaryHtml,
   clockTime,
   clockTimeWithSeconds,
-  externalLink,
+  mergeLinkHtml,
   mockNotice,
   reviewDecisionBadge,
   stateBadge,
 } from "../github/present";
 import { mergeReadinessView } from "../github/readiness";
 import type { PullRequestDetail, ReviewThread, TimelineItem } from "../shared/github-contract";
-import { appUrl, hubUrl, isHubPage } from "../shared/app-url";
+import { appUrl } from "../shared/app-url";
+import { connectGithubHtml } from "../github/connect";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
-import { pushPullRequestPreview } from "../shell/history";
+import { pushPullRequestPreview, replacePullRequestPreview } from "../shell/history";
 import { activatePullRequestPreview, registerPullRequestPreviewRenderer } from "../shell/url";
 import { previewScrollRoot } from "../shell/preview-scroll-root";
 import { releaseMediaPreview } from "../media/preview";
@@ -57,9 +69,10 @@ import { closeMermaidViewer } from "./mermaid-viewer";
 import { hideViewToggle } from "./view-mode";
 import { deferHiddenPreview } from "./deferred";
 import { createComposer, tabKeyIndex, type Composer } from "./pr-composer";
-import { draftAlreadySent } from "./pr-drafts";
 import { mountFilesChanged, renderReviewBar, type FilesChangedView } from "./diff-review";
-import { closePullRequestDialogsOutside, showToast } from "./review-dialogs";
+import { onUiModeChange } from "../shell/ui-mode";
+import { revealPreviewSurface } from "../shell/tab-bar";
+import { ADD_LINE_COMMENTS_EVENT, closePullRequestDialogsOutside, showToast } from "./review-dialogs";
 
 export type PullRequestTab = "conversation" | "files";
 type Mode = { kind: "pull-request"; repositoryId: string; number: number };
@@ -70,6 +83,8 @@ const previewPathElement = document.querySelector<HTMLElement>("#preview-path")!
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base")!;
 const tabControl = document.querySelector<HTMLElement>("#pr-view-control");
 const githubLink = document.querySelector<HTMLAnchorElement>("#pr-view-github");
+const headerReview = document.querySelector<HTMLElement>("#pr-view-review");
+const jumpButton = document.querySelector<HTMLButtonElement>("#pr-view-jump");
 
 type Mounted = {
   repositoryId: string;
@@ -80,43 +95,93 @@ type Mounted = {
   files: FilesChangedView | null;
   composer: Composer | null;
   loading: boolean;
-  // The URL's `file=`: waiting to be scrolled to, and last scrolled to (a
-  // re-render with the same one leaves the scroll position alone).
-  pendingFile: string | null;
-  revealedFile: string | null;
+  // The URL's `file=` or `thread=`: waiting to be scrolled to, and last
+  // scrolled to (a re-render with the same one leaves the scroll position
+  // alone; a tab switch forgets it, so Forward lands there again).
+  pendingAnchor: Anchor | null;
+  revealedAnchor: string | null;
 };
+type Anchor = { file?: string; thread?: string };
+const anchorKey = (anchor: Anchor) => `${anchor.file ?? ""}\n${anchor.thread ?? ""}`;
 
 let mounted: Mounted | null = null;
-// Start review asked for this pull request: Files changed focuses its first
-// line once mounted.
-let startReviewFor: number | null = null;
+// Add line comments asked for this pull request: Files changed opens its
+// first composer once mounted.
+let addLinesFor: number | null = null;
 
-// The review bars pin under the preview's sticky header; in a short touch
-// viewport the header scrolls away (styles.css), so they pin at the top.
+// The review bars and file headers pin under the preview's sticky header
+// (--pr-sticky-top). On a phone in portrait only the header's tabs row stays
+// pinned: the number and title rows above it scroll away, their height
+// the header's negative top (--pr-header-hide). Everything pinned over the
+// content (the header, an active review bar, a file's header on Files
+// changed) is the page's scroll inset (--pr-pinned, styles.css), so focus
+// and jumps land below it.
 const previewHeader = document.querySelector<HTMLElement>(".preview-header");
 function syncStickyTop(): void {
   if (!mounted || !previewHeader) return;
+  const heading = previewHeader.querySelector<HTMLElement>(".preview-heading");
+  const toolbar = previewHeader.querySelector<HTMLElement>(".preview-toolbar");
+  const stacked = heading && toolbar && toolbar.offsetTop >= heading.offsetTop + heading.offsetHeight - 1;
+  // What stays above the tabs row once the rows over it scroll away: the
+  // gap between them, never a sliver of those rows' controls.
+  const headerStyle = getComputedStyle(previewHeader);
+  const keep = Math.min(parseFloat(headerStyle.paddingTop) || 0, parseFloat(headerStyle.rowGap) || 0);
+  const hide = stacked ? Math.max(0, toolbar.offsetTop - keep) : 0;
+  previewHeader.style.setProperty("--pr-header-hide", `${hide}px`);
   const style = getComputedStyle(previewHeader);
   const pinned = style.position === "sticky" || style.position === "fixed";
-  mounted.root.style.setProperty("--pr-sticky-top", `${pinned ? Math.round(previewHeader.offsetHeight + (parseFloat(style.top) || 0)) : 0}px`);
+  // Whole pixels, tucked 1px under the header's bottom edge (which paints
+  // over what pins below it): no gap, however the header's height rounds.
+  const top = pinned ? Math.max(0, Math.floor(previewHeader.getBoundingClientRect().height + (parseFloat(style.top) || 0)) - 1) : 0;
+  mounted.root.style.setProperty("--pr-sticky-top", `${top}px`);
+  const panel = mounted.root.querySelector<HTMLElement>(`[data-pr-panel="${mounted.tab}"]`);
+  const bar = panel?.querySelector<HTMLElement>(".pr-review-bar.is-active")?.offsetHeight ?? 0;
+  const fileHeader = mounted.tab === "files" ? panel?.querySelector<HTMLElement>(".pr-file-header")?.offsetHeight ?? 0 : 0;
+  document.documentElement.style.setProperty("--pr-pinned", `${top + bar + fileHeader}px`);
 }
-if (previewHeader && typeof ResizeObserver === "function") new ResizeObserver(syncStickyTop).observe(previewHeader);
+const stickyObserver = typeof ResizeObserver === "function" ? new ResizeObserver(syncStickyTop) : null;
+if (previewHeader) stickyObserver?.observe(previewHeader);
 window.addEventListener("resize", syncStickyTop);
 
-// "Start review" (no pending comments, from the Pull request pane): open the
-// pull request's Files changed with focus on the first file's line numbers,
-// where a review comment starts. Nothing is written.
-export function startPullRequestReview(target: { repositoryId: string; number: number }): void {
-  startReviewFor = target.number;
-  activatePullRequestPreview({ repositoryId: target.repositoryId, number: target.number, tab: "files" }, { pushHistory: true });
-  if (mounted?.number === target.number) startPendingReview(mounted);
+// "Add line comments" (the review dialog, from any review button): open the
+// pull request's Files changed (the Preview tab on touch) and a composer on
+// its first file's first non-blank changed line, with focus in its text.
+// Nothing is written until a comment is added.
+document.addEventListener(ADD_LINE_COMMENTS_EVENT, event => {
+  const target = (event as CustomEvent<{ repositoryId: string; number: number }>).detail;
+  addLinesFor = target.number;
+  revealPreviewSurface();
+  if (mounted?.number === target.number && mounted.root.isConnected && appState.previewMode.kind === "pull-request") showTab("files");
+  else activatePullRequestPreview({ repositoryId: target.repositoryId, number: target.number, tab: "files" }, { pushHistory: true });
+  if (mounted?.number === target.number) addPendingLines(mounted);
+});
+
+function addPendingLines(view: Mounted): void {
+  if (addLinesFor !== view.number || view.tab !== "files" || !view.files) return;
+  addLinesFor = null;
+  view.files.addLineComments();
 }
 
-function startPendingReview(view: Mounted): void {
-  if (startReviewFor !== view.number || view.tab !== "files" || !view.files) return;
-  startReviewFor = null;
-  view.files.focusFirstLine();
+// Jump to file, in the pinned tabs row on Files changed: named with the
+// file count.
+jumpButton?.addEventListener("click", () => {
+  if (mounted?.tab === "files") mounted.files?.openJump(jumpButton);
+});
+function syncJumpButton(view: Mounted): void {
+  if (!jumpButton || mounted !== view) return;
+  const count = view.detail?.files.length ?? 0;
+  jumpButton.hidden = !(view.tab === "files" && view.detail && count > 0);
+  const name = `Jump to file (${count} ${count === 1 ? "file" : "files"})`;
+  jumpButton.setAttribute("aria-label", name);
+  jumpButton.title = name;
 }
+
+// On touch the title shows two lines; a tap on it shows the rest (and a
+// second tap folds it again).
+previewTitleElement.addEventListener("click", () => {
+  if (appState.previewMode.kind !== "pull-request" || document.documentElement.dataset.uiMode !== "touch") return;
+  previewTitleElement.toggleAttribute("data-expanded");
+});
 
 tabControl?.addEventListener("click", event => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-pr-tab]");
@@ -139,7 +204,7 @@ tabControl?.addEventListener("keydown", event => {
 document.addEventListener("uatu:pull-request-reveal", event => {
   const detail = (event as CustomEvent<{ number: number; path?: string; threadId?: string; pendingId?: string }>).detail;
   if (!mounted || mounted.number !== detail.number) return;
-  showTab("files");
+  showTab("files", { anchor: detail.threadId ? { thread: detail.threadId } : detail.path ? { file: detail.path } : undefined });
   mounted.files?.reveal({ path: detail.path, threadId: detail.threadId, pendingId: detail.pendingId });
 });
 
@@ -236,13 +301,16 @@ export function revealPullRequestHeading(options: { always?: boolean } = {}): vo
   });
 }
 
-export function renderPullRequestPreview(mode: Mode, options: { tab?: PullRequestTab; file?: string } = {}): void {
+export function renderPullRequestPreview(mode: Mode, options: { tab?: PullRequestTab; file?: string; thread?: string } = {}): void {
   if (deferHiddenPreview(() => {
     if (appState.previewMode.kind === "pull-request") renderPullRequestPreview(appState.previewMode, options);
   })) return;
   if (mounted && mounted.root.isConnected && mounted.repositoryId === mode.repositoryId && mounted.number === mode.number) {
-    if (options.tab && options.tab !== mounted.tab) showTab(options.tab, { fromUrl: true });
-    revealFile(mounted, options.file);
+    if (options.tab && options.tab !== mounted.tab) {
+      showTab(options.tab, { fromUrl: true });
+      mounted.revealedAnchor = null;
+    }
+    revealAnchor(mounted, anchorOf(options));
     return;
   }
   releaseMediaPreview();
@@ -252,6 +320,7 @@ export function renderPullRequestPreview(mode: Mode, options: { tab?: PullReques
   previewBaseElement.href = new URL(appUrl("/"), window.location.origin).toString();
   previewElement.classList.remove("empty");
   previewTitleElement.textContent = `Pull request #${mode.number}`;
+  previewTitleElement.removeAttribute("data-expanded");
   previewPathElement.textContent = "Reading GitHub…";
   previewElement.innerHTML = `<section class="pr-view">
       <div class="pr-view-banner" data-pr-banner hidden></div>
@@ -262,33 +331,51 @@ export function renderPullRequestPreview(mode: Mode, options: { tab?: PullReques
   const root = previewElement.querySelector<HTMLElement>(".pr-view")!;
   // Another pull request starts at its top, not at the last one's offset.
   previewScrollRoot().scrollTop = 0;
-  mounted = { repositoryId: mode.repositoryId, number: mode.number, tab: options.tab ?? "conversation", root, detail: null, files: null, composer: null, loading: false, pendingFile: null, revealedFile: null };
+  if (mounted) stickyObserver?.unobserve(mounted.root);
+  mounted = { repositoryId: mode.repositoryId, number: mode.number, tab: options.tab ?? "conversation", root, detail: null, files: null, composer: null, loading: false, pendingAnchor: null, revealedAnchor: null };
+  // A review bar or file header appearing (or changing height) changes
+  // what is pinned.
+  stickyObserver?.observe(root);
   syncStickyTop();
   // On screen now: focus and Retry re-read it, and dialogs for another
   // pull request close.
   pullRequestStore.watch("view", mode.number);
   syncShown();
   // Nothing about this pull request is known yet: no counts from the last
-  // one, and no GitHub link until its URL is.
+  // one, no review state, and no GitHub link until its URL is.
   setHeaderDetail(null);
+  renderHeaderReview(mounted);
   syncTabs(mounted);
   const cached = pullRequestStore.detail(mode.number);
   if (cached) present(mounted, cached);
-  revealFile(mounted, options.file);
+  revealAnchor(mounted, anchorOf(options));
   void load(mounted);
   // Opening a pull request view is a refresh trigger (design D6).
   if (pullRequestStore.state.enabled !== false) void pullRequestStore.refresh(false);
 }
 
-// Scrolls Files changed to `file` once it is mounted (present() retries
-// after the detail arrives).
-function revealFile(view: Mounted, file: string | undefined): void {
-  if (file && file !== view.revealedFile) view.pendingFile = file;
-  if (!view.pendingFile || !view.files || view.tab !== "files") return;
-  view.files.reveal({ path: view.pendingFile });
-  view.revealedFile = view.pendingFile;
-  view.pendingFile = null;
+const anchorOf = (options: { file?: string; thread?: string }): Anchor | null =>
+  options.thread ? { thread: options.thread } : options.file ? { file: options.file } : null;
+
+// Scrolls Files changed to the URL's file or thread (focusing the thread)
+// once it is mounted (present() retries after the detail arrives).
+function revealAnchor(view: Mounted, anchor: Anchor | null): void {
+  if (anchor && anchorKey(anchor) !== view.revealedAnchor) view.pendingAnchor = anchor;
+  const pending = view.pendingAnchor;
+  if (!pending || !view.files || view.tab !== "files") return;
+  view.files.reveal({ path: pending.file, threadId: pending.thread });
+  view.revealedAnchor = anchorKey(pending);
+  view.pendingAnchor = null;
 }
+
+// Files changed reports where a jump landed (Jump to file, a pending
+// comment's link): the URL keeps it in place, so a reload lands there too.
+document.addEventListener("uatu:pull-request-anchor", event => {
+  const anchor = (event as CustomEvent<Anchor & { number: number }>).detail;
+  if (!mounted || mounted.number !== anchor.number || mounted.tab !== "files") return;
+  replacePullRequestPreview(mounted.repositoryId, mounted.number, "files", { file: anchor.file, thread: anchor.thread });
+  mounted.revealedAnchor = anchorKey(anchor);
+});
 
 async function load(view: Mounted): Promise<void> {
   view.loading = true;
@@ -302,18 +389,26 @@ async function load(view: Mounted): Promise<void> {
   }
 }
 
-// A tab switch is a history entry; a navigation (`fromUrl`) already wrote
-// it, including any `file=`.
-function showTab(tab: PullRequestTab, options: { fromUrl?: boolean } = {}): void {
+// A tab switch is a history entry, and so is a jump from Conversation to a
+// thread in Files changed (`anchor`: View in diff); a navigation (`fromUrl`)
+// already wrote it, including any `file=` or `thread=`.
+function showTab(tab: PullRequestTab, options: { fromUrl?: boolean; anchor?: Anchor } = {}): void {
   if (!mounted) return;
-  if (mounted.tab !== tab && !options.fromUrl) pushPullRequestPreview(mounted.repositoryId, mounted.number, tab);
+  if ((mounted.tab !== tab || options.anchor) && !options.fromUrl) {
+    pushPullRequestPreview(mounted.repositoryId, mounted.number, tab, tab === "files" ? options.anchor : undefined);
+  }
+  if (options.anchor) mounted.revealedAnchor = anchorKey(options.anchor);
   mounted.tab = tab;
   syncTabs(mounted);
   if (tab === "files" && mounted.detail && !mounted.files) mountFiles(mounted, mounted.detail);
-  startPendingReview(mounted);
+  renderHeaderReview(mounted);
+  syncJumpButton(mounted);
+  addPendingLines(mounted);
 }
 
 function syncTabs(view: Mounted): void {
+  // Files changed leaves out the facts band (styles.css).
+  view.root.dataset.prTab = view.tab;
   for (const button of tabControl?.querySelectorAll<HTMLButtonElement>("[data-pr-tab]") ?? []) {
     const active = button.dataset.prTab === view.tab;
     button.classList.toggle("is-active", active);
@@ -340,7 +435,7 @@ function present(view: Mounted, detail: PullRequestDetail): void {
     view.files = null;
   }
   previewTitleElement.textContent = pr.title;
-  previewPathElement.textContent = `#${pr.number} · ${detail.repository.owner}/${detail.repository.name}`;
+  renderPathLine(detail);
   setHeaderDetail(detail);
   view.root.querySelector<HTMLElement>("[data-pr-meta]")!.innerHTML = `${stateBadge(pr)}
     <span><strong>${escapeHtml(pr.author)}</strong> opened ${escapeHtml(age(pr.createdAt))}</span>
@@ -359,9 +454,29 @@ function present(view: Mounted, detail: PullRequestDetail): void {
   if (view.files) view.files.update(detail);
   else if (view.tab === "files") mountFiles(view, detail);
   syncAvailability(view);
-  revealFile(view, undefined);
-  startPendingReview(view);
+  syncJumpButton(view);
+  revealAnchor(view, null);
+  addPendingLines(view);
 }
+
+// "#642 · owner/repo", and for a picked pull request (not the checked-out
+// branch's) a compact "Picked · ← Back" chip in the same row: on touch the
+// Preview tab has no Pull request pane beside it to say so (styles.css shows
+// the chip on touch only). sidebar/pull-request-scope.ts handles Back.
+function renderPathLine(detail: PullRequestDetail): void {
+  const pr = detail.summary;
+  const picked = pullRequestStore.scopedNumber() === pr.number;
+  const branch = pullRequestStore.state.branch;
+  const html = `#${pr.number}<span class="pr-path-repo"> · ${escapeHtml(detail.repository.owner)}/${escapeHtml(detail.repository.name)}</span>${picked
+    ? `<span class="pr-picked-chip" title="Picked PR, not checked out"><span>Picked</span><span class="sr-only">: not checked out</span><button type="button" class="gh-link-button pr-back-to-branch" data-pr-back-to-branch aria-label="${escapeHtmlAttribute(branch ? `Back to ${branch}` : "Back to this branch")}" title="${escapeHtmlAttribute(`Show the checked-out branch's pull request${branch ? `; ${branch} stays checked out` : ""}`)}">← Back</button></span>`
+    : ""}`;
+  // Unchanged and still there (another preview rewrites the line): kept, so
+  // a focused Back stays focused.
+  if (pathLineHtml === html && previewPathElement.querySelector(".pr-path-repo")) return;
+  pathLineHtml = html;
+  previewPathElement.innerHTML = html;
+}
+let pathLineHtml = "";
 
 // The header's tab counts and GitHub link follow the detail shown. Without
 // one (loading, no credential, an error) the link goes, and in the no-detail
@@ -385,6 +500,10 @@ function syncAvailability(view: Mounted): void {
   renderBanner(view);
   if (!view.detail) return;
   view.composer?.setBlocked(sendBlockedReason(pullRequestStore.state.summary, view.detail.summary));
+  // Readiness turns "last known" while GitHub can't be asked, and back.
+  renderMergeBox(view, view.detail);
+  // Picking this pull request (or going back) changes the header's cue.
+  if (mounted === view) renderPathLine(view.detail);
   renderConversationBar(view);
   view.files?.syncAvailability();
 }
@@ -393,8 +512,38 @@ function syncAvailability(view: Mounted): void {
 // finishing it never needs a detour through Files changed.
 function renderConversationBar(view: Mounted): void {
   const bar = view.root.querySelector<HTMLElement>("[data-pr-conversation-bar]");
-  if (bar && view.detail) renderReviewBar(bar, view.detail, view.repositoryId, { surface: "conversation" });
+  if (bar && view.detail) renderReviewBar(bar, view.detail, view.repositoryId, {
+    surface: "conversation",
+    // Finished from here, the bar goes: focus moves to the Conversation tab.
+    fallbackFocus: activeTabButton,
+  });
+  renderHeaderReview(view);
 }
+
+// The tab shown: where focus goes when the review controls it was on are
+// gone (a review published or discarded, the bar moved).
+const activeTabButton = () => tabControl?.querySelector<HTMLElement>('[data-pr-tab][aria-selected="true"]') ?? null;
+
+// The review button in the tabs row, touch and desktop (diff-review.ts
+// reviewBarShownOn), pinned with it while the diff scrolls.
+function renderHeaderReview(view: Mounted): void {
+  if (!headerReview) return;
+  if (!view.detail || mounted !== view) {
+    headerReview.hidden = true;
+    headerReview.innerHTML = "";
+    return;
+  }
+  renderReviewBar(headerReview, view.detail, view.repositoryId, {
+    surface: "header",
+    tab: view.tab,
+    fallbackFocus: activeTabButton,
+  });
+  syncStickyTop();
+}
+
+// The review button's place follows the mode.
+const relayout = () => { if (mounted?.detail) syncAvailability(mounted); };
+onUiModeChange(relayout);
 
 // Stale data (rate-limited or unreachable) stays visible under a banner that
 // says how old it is, with Retry (mockup 6): for the branch's pull request
@@ -464,12 +613,15 @@ function mountConversation(view: Mounted, detail: PullRequestDetail): void {
   const composer = createComposer({
     tabs: true,
     rows: 4,
-    placeholder: `Leave a comment on #${detail.summary.number} as ${detail.viewer}…`,
+    // Said before typing: unlike line comments, this one isn't held for a
+    // review.
+    placeholder: `Comment on #${detail.summary.number} — posts immediately`,
+    label: `Comment on #${detail.summary.number} as ${detail.viewer} (posts immediately)`,
     submitLabel: "Comment",
     draftName: `your comment on #${detail.summary.number}`,
     note: "Comments post immediately; line comments go into your pending review.",
     draft: { target: { repositoryId: view.repositoryId, number: view.number }, location: { kind: "conversation" } },
-    alreadySent: text => draftAlreadySent({ kind: "conversation" }, text, detail),
+    sentAgainst: () => view.detail ?? detail,
     blockedReason: sendBlockedReason(pullRequestStore.state.summary, detail.summary),
     send: async body => {
       const next = await githubApi.comment({ repository: view.repositoryId, number: view.number }, body);
@@ -499,8 +651,9 @@ function renderTimeline(view: Mounted, detail: PullRequestDetail): void {
   renderMergeBox(view, detail);
   for (const button of timeline.querySelectorAll<HTMLButtonElement>("[data-view-in-diff]")) {
     button.addEventListener("click", () => {
-      showTab("files");
-      view.files?.reveal({ threadId: button.dataset.viewInDiff });
+      const threadId = button.dataset.viewInDiff!;
+      showTab("files", { anchor: { thread: threadId } });
+      view.files?.reveal({ threadId });
     });
   }
 }
@@ -511,20 +664,28 @@ function renderMergeBox(view: Mounted, detail: PullRequestDetail): void {
   const box = view.root.querySelector<HTMLElement>("[data-pr-merge-box]");
   if (!box) return;
   const pr = detail.summary;
-  const readiness = mergeReadinessView(pr, detail.mergeReadiness);
-  box.className = `pr-event pr-merge-box is-${readiness.tone}`;
-  box.innerHTML = `<span class="pr-merge-box-icon" aria-hidden="true">${readiness.tone === "ready" ? "✓" : readiness.tone === "blocked" ? "!" : "●"}</span>
+  const summary = pullRequestStore.state.summary;
+  const readiness = mergeReadinessView(pr, detail.mergeReadiness, summary && staleNotice(summary) ? clockTime(summary.checkedAt) : null);
+  // Stale: dimmed, and no merge-green, as the pane shows it.
+  box.className = `pr-event pr-merge-box is-${readiness.tone}${readiness.stale ? " is-stale" : ""}`;
+  // Rewritten only when it says something new: a focused link stays.
+  const html = `<span class="pr-merge-box-icon" aria-hidden="true">${readiness.tone === "ready" ? "✓" : readiness.tone === "blocked" ? "!" : "●"}</span>
     <div class="pr-event-main pr-card">
       <div class="pr-card-body">
-        <h3 class="pr-merge-box-title">${escapeHtml(readiness.tone === "blocked" ? "Merging is blocked" : readiness.headline)}</h3>
+        <h3 class="pr-merge-box-title">${escapeHtml(readiness.tone === "blocked" && !readiness.stale ? "Merging is blocked" : readiness.headline)}</h3>
         ${pr.state === "OPEN" ? `<p class="pr-merge-box-facts">${reviewDecisionBadge(pr.reviewDecision)} <span>${checksSummaryHtml(pr.checks)}</span></p>` : ""}
         ${readiness.reasons.length ? `<ul class="pr-merge-box-reasons">${readiness.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}
         ${readiness.pendingNote && pr.state === "OPEN" ? `<p class="pr-merge-box-pending">${escapeHtml(readiness.pendingNote)}</p>` : ""}
         ${readiness.notes.length ? `<p class="pr-muted">${readiness.notes.map(escapeHtml).join(" ")}</p>` : ""}
-        ${pr.state === "OPEN" ? `<p>${externalLink(pr.url, "Merge on GitHub", `gh-button${readiness.tone === "ready" ? " gh-button-merge" : ""}`)}</p><p class="pr-muted pr-merge-box-note">uatu doesn't merge: GitHub handles merge queues, rulesets and stacked pull requests.</p>` : ""}
+        ${pr.state === "OPEN" ? `<p>${mergeLinkHtml(pr.url, readiness.tone === "ready" && !readiness.stale)}</p><p class="pr-muted pr-merge-box-note">uatu doesn't merge: GitHub handles merge queues, rulesets and stacked pull requests.</p>` : ""}
       </div>
     </div>`;
+  if (mergeBoxHtml.get(box) !== html) {
+    mergeBoxHtml.set(box, html);
+    box.innerHTML = html;
+  }
 }
+const mergeBoxHtml = new WeakMap<HTMLElement, string>();
 
 function eventHtml(author: string, header: string, bodyHtml: string, aside: string, extraClass = ""): string {
   return `<article class="pr-event ${extraClass}">
@@ -564,7 +725,7 @@ function threadSummaryHtml(thread: ReviewThread): string {
         <span class="pr-muted">${placed ? `line ${thread.line}` : "outdated"}</span>
         <span class="pr-thread-summary-aside">
           ${thread.isResolved ? `<span class="gh-pill">Resolved</span>` : `<span class="gh-pill gh-pill-attention">Unresolved</span>`}
-          <span class="pr-muted">${replies} ${replies === 1 ? "reply" : "replies"}</span>
+          ${replies > 0 ? `<span class="pr-muted">${replies} ${replies === 1 ? "reply" : "replies"}</span>` : ""}
           ${placed ? `· <button type="button" class="gh-link-button" data-view-in-diff="${escapeHtmlAttribute(thread.id)}">View in diff →</button>` : ""}
         </span>
       </div>
@@ -576,22 +737,26 @@ function threadSummaryHtml(thread: ReviewThread): string {
 // No detail could be read (no credential, unknown PR, GitHub down with no
 // last result). The title says so, and the body gives the next step.
 function renderUnavailable(view: Mounted, error: unknown): void {
-  previewTitleElement.textContent = "Pull request unavailable";
+  // The header keeps naming the pull request; the card below says why it
+  // can't be shown (said once: the Pull request pane keeps to one line).
+  previewTitleElement.textContent = `Pull request #${view.number}`;
   const summary = pullRequestStore.state.summary;
   const repository = summary?.repository ? `${summary.repository.owner}/${summary.repository.name}` : "";
-  const branch = pullRequestStore.state.branch;
   const noCredential = error instanceof GithubRequestError && error.status === 401;
-  previewPathElement.textContent = [branch, repository].filter(Boolean).join(" · ") || `#${view.number}`;
-  view.root.querySelector<HTMLElement>("[data-pr-meta]")!.innerHTML = noCredential ? `<span>GitHub not connected</span>${mockNotice(Boolean(summary?.mock))}` : "";
+  previewPathElement.textContent = [`#${view.number}`, repository, noCredential ? "GitHub not connected" : "unavailable"].filter(Boolean).join(" · ");
+  pathLineHtml = "";
+  view.root.querySelector<HTMLElement>("[data-pr-meta]")!.innerHTML = noCredential ? mockNotice(Boolean(summary?.mock)) : "";
   // What was shown (and its composers) goes: it can't be refreshed or sent.
   view.detail = null;
   view.files = null;
   view.composer = null;
   setHeaderDetail(null, { tabs: false });
+  renderHeaderReview(view);
   renderBanner(view);
+  syncJumpButton(view);
   for (const tab of ["conversation", "files"] as const) {
     const panel = view.root.querySelector<HTMLElement>(`[data-pr-panel="${tab}"]`)!;
-    panel.innerHTML = noCredential ? connectGithubHtml("card") : `<div class="gh-state-card gh-state-card-danger">
+    panel.innerHTML = noCredential ? connectGithubHtml("card", githubWorkspaceName()) : `<div class="gh-state-card gh-state-card-danger">
       <p class="gh-state-card-eyebrow">Pull request #${view.number}</p>
       <h3>Couldn't load this pull request</h3>
       <p>${escapeHtml(errorMessage(error))}</p>
@@ -602,24 +767,7 @@ function renderUnavailable(view: Mounted, error: unknown): void {
   syncTabs(view);
 }
 
-// The "connect GitHub" guidance, shared with the Pull request pane.
-export function connectGithubHtml(variant: "card" | "compact"): string {
-  const workspace = appState.repositories.find(repository => repository.metadata.status === "git")?.label ?? "this workspace";
-  const settings = isHubPage()
-    ? externalLink(hubUrl("/settings#credentials-pane"), "Open Hub Settings → Credentials", "gh-button gh-button-primary")
-    : `<p class="pr-muted">Outside a Hub, sign in with <code>gh auth login</code> and restart this session.</p>`;
-  if (variant === "compact") {
-    return `<div class="gh-connect gh-connect-compact">
-        <h3>GitHub isn't connected for this workspace</h3>
-        <p>uatu reads and reviews pull requests through the GitHub CLI credential assigned to <strong>${escapeHtml(workspace)}</strong>. None is assigned yet.</p>
-        ${settings}
-      </div>`;
-  }
-  return `<div class="gh-connect">
-      <h3>Connect GitHub to review pull requests here</h3>
-      <p>Assign a credential with GitHub CLI access to this workspace. uatu runs <code>gh</code> with it to read the pull request and post comments and reviews. Nothing is stored in the worktree.</p>
-      <div class="gh-breadcrumb" aria-label="Where to assign it">${["Hub", "Settings", "Credentials", "Add HTTPS or provider token", `Workspace assignments: ${workspace}`]
-        .map(step => `<span class="gh-breadcrumb-step">${escapeHtml(step)}</span>`).join(`<span class="gh-breadcrumb-separator" aria-hidden="true">›</span>`)}</div>
-      <div class="gh-connect-actions">${settings}<span class="pr-muted">Child worktrees inherit the assignment from <strong>${escapeHtml(workspace)}</strong>.</span></div>
-    </div>`;
+// The workspace a GitHub credential is assigned to, for the connect guidance.
+export function githubWorkspaceName(): string {
+  return appState.repositories.find(repository => repository.metadata.status === "git")?.label ?? "this workspace";
 }

@@ -241,6 +241,8 @@ export type DiffReviewOptions<T> = {
   annotations: DiffReviewAnnotation<T>[];
   renderAnnotation: (annotation: DiffReviewAnnotation<T>) => HTMLElement;
   onStartComment: (position: { side: DiffAnnotationSide; lineNumber: number }) => void;
+  // A tap on a line's code opens its composer too (touch).
+  rowTap?: () => boolean;
 };
 // Replaces the annotations on the rendered diff in place (no new FileDiff),
 // so posting a comment keeps the reader's scroll position.
@@ -250,7 +252,7 @@ export type DiffReviewHandle<T> = {
   clearSelection: () => void;
   // The keyboard path (src/preview/diff-review-lines.ts): the diff's lines,
   // and focus on one line's number.
-  lines: () => (ReviewLine & { text: string })[];
+  lines: () => (ReviewLine & { text: string; changed: boolean })[];
   focusLine: (line: ReviewLine) => boolean;
   focusedLine: () => ReviewLine | null;
   // Scrolls every code column back to its start (a thread revealed in Split
@@ -275,7 +277,51 @@ const COMPACT_NUMBERS_CSS = `
 [data-column-number] { font-size: var(--uatu-diff-number-size, inherit); }
 [data-line] { padding-inline: var(--uatu-diff-line-pad, 1ch); }
 [data-indicators=bars] [data-line-type][data-column-number]::before { width: var(--uatu-diff-bar-width, 4px); }
-[data-gutter-utility-slot] { display: var(--uatu-diff-gutter-utility, flex); }`;
+[data-gutter-utility-slot] { display: var(--uatu-diff-gutter-utility, flex); }
+[data-separator=line-info], [data-separator=line-info-basic], [data-separator=metadata] { height: var(--uatu-diff-separator-height, 32px); }
+/* Wrapped lines (Wrap on): the code's own indentation stays on the first
+   row with the text after it (an indented line breaks inside its text
+   rather than after its leading whitespace, which used to leave an empty
+   first row), and continuation rows hang 2ch past that indentation.
+   --uatu-indent is the line's leading whitespace, set per line by
+   markIndentedLines after every render. */
+[data-overflow=wrap] [data-line] {
+  padding-left: calc(var(--uatu-diff-line-pad, 1ch) + var(--uatu-indent, 0ch) + 2ch);
+  text-indent: calc(-1 * (var(--uatu-indent, 0ch) + 2ch));
+}
+[data-overflow=wrap] [data-line][data-uatu-indented] { word-break: break-all; }`;
+
+// The leading whitespace of one line, in columns (a tab is `tabSize`).
+export function leadingColumns(text: string, tabSize = 4): number {
+  let columns = 0;
+  for (const character of text) {
+    if (character === " ") columns += 1;
+    else if (character === "\t") columns += tabSize - (columns % tabSize);
+    else break;
+  }
+  return columns;
+}
+
+// Marks every rendered line with its indentation (see the wrap rules above).
+// Runs after each Pierre render: a re-render replaces the lines.
+function markIndentedLines(host: HTMLElement): void {
+  const root = host.querySelector("diffs-container")?.shadowRoot;
+  if (!root) return;
+  let tabSize: number | null = null;
+  for (const line of root.querySelectorAll<HTMLElement>("[data-line]")) {
+    const text = line.textContent ?? "";
+    if (text === "" || (text[0] !== " " && text[0] !== "\t")) {
+      if (line.hasAttribute("data-uatu-indented")) {
+        line.removeAttribute("data-uatu-indented");
+        line.style.removeProperty("--uatu-indent");
+      }
+      continue;
+    }
+    tabSize ??= Number.parseInt(getComputedStyle(line).tabSize, 10) || 4;
+    line.setAttribute("data-uatu-indented", "");
+    line.style.setProperty("--uatu-indent", `${leadingColumns(text, tabSize)}ch`);
+  }
+}
 
 // Inside Pierre's shadow root: the line-number buttons' focus ring. Custom
 // properties inherit through the shadow boundary.
@@ -312,7 +358,7 @@ export async function renderReviewDiff<T>(
   const body = document.createElement("div");
   body.className = "uatu-diff-body";
   host.appendChild(body);
-  const keys = attachReviewLineKeys(body, () => options.diffStyle === "split", file.path);
+  const keys = attachReviewLineKeys(body, () => options.diffStyle === "split", file.path, options.review.rowTap);
   const handle = await renderWithPierre(body, payload, plainText ? null : file.languageHint, options.diffStyle, options.wrap, plainText, options.review, keys.decorate);
   if (!handle) return null;
   keys.decorate();
@@ -357,8 +403,11 @@ async function renderWithPierre<T = undefined>(
         enableGutterUtility: true,
         onGutterUtilityClick: range => review.onStartComment({ side: range.endSide ?? range.side ?? "additions", lineNumber: range.end }),
         onLineNumberClick: props => review.onStartComment({ side: props.annotationSide, lineNumber: props.lineNumber }),
-        onPostRender: () => afterRender?.(),
       } : {}),
+      onPostRender: () => {
+        if (wrap) markIndentedLines(host);
+        afterRender?.();
+      },
       unsafeCSS: review ? COMPACT_NUMBERS_CSS + REVIEW_CSS : COMPACT_NUMBERS_CSS,
       // Dual theme + system themeType: Pierre emits both palettes and
       // switches on `prefers-color-scheme` itself, so an OS scheme flip
@@ -419,6 +468,7 @@ async function renderWithPierre<T = undefined>(
       }
       diff.render({ fileDiff, containerWrapper: host });
     }
+    if (wrap) markIndentedLines(host);
     return review
       ? {
           // setLineAnnotations only stages the data; rerender() applies it.

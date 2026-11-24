@@ -2944,7 +2944,9 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 /* Pull request scope (sidebar/pull-request-scope.ts): a picked PR's files
    replace the toolbar and the workspace tree. The workspace tree's host
    carries the library's inline display, hence !important. */
-[data-pane-id="files"][data-files-scope] :is(.files-toolbar, #recent-files, #tree-empty-message) { display: none; }
+/* A picked pull request's files: the workspace tree's filters and Files
+   options (ignored files, file types) don't apply, so they go too. */
+[data-pane-id="files"][data-files-scope] :is(.files-toolbar, #recent-files, #tree-empty-message, .files-options) { display: none; }
 [data-pane-id="files"][data-files-scope] #tree { display: none !important; }
 .pr-scope:not([hidden]) { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .pr-scope-bar {
@@ -2959,8 +2961,14 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 .pr-scope-title { flex: 1 1 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
 .pr-scope-bar .gh-mock-label { flex: 0 0 auto; }
 .pr-scope-bar .pr-back-to-branch { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
-/* The pane's and the scope bar's way back: one control, touch-sized. */
+/* The pane's and the scope bar's way back: one control, touch-sized. In the
+   scope bar on touch it is "← Back" (its name stays whole), so the tag, the
+   title and the way back share one row. */
 html[data-ui-mode="touch"] .pr-back-to-branch { min-height: 44px; }
+html[data-ui-mode="touch"] .pr-scope-bar { padding-block: 0; }
+html[data-ui-mode="touch"] .pr-scope-bar .pr-back-rest {
+  position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
+}
 .pr-scope-status { flex-basis: 100%; color: var(--danger); }
 /* Said once per screen: while the Pull request pane is on screen it carries
    the way back and the stale-data line, so the scope bar keeps only its
@@ -4952,6 +4960,12 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
 .uatu-diff-toolbar {
   margin: 0.5rem 0.75rem 0;
 }
+/* The layout toggle and, for a file the current pull request changes,
+   "Review this file in #n" (preview/pr-file-link.ts): one row. */
+.uatu-diff-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; }
+.uatu-diff-header > .uatu-diff-pr-link { margin: 0.5rem 0.75rem 0; color: light-dark(#0550ae, #79c0ff); font-size: 0.8rem; font-weight: 600; text-decoration: none; }
+.uatu-diff-header > .uatu-diff-pr-link:hover { text-decoration: underline; }
+html[data-ui-mode="touch"] .uatu-diff-header > .uatu-diff-pr-link { display: inline-flex; align-items: center; min-height: 44px; margin-block: 0; }
 .preview-shell > .uatu-layout-toolbar {
   align-self: flex-start;
   /* Top offset clears the pinned preview-header's blurred fade edge;
@@ -8413,6 +8427,18 @@ html[data-ui-mode="touch"] .touch-tab-bar {
   border-top: 1px solid var(--border-soft);
 }
 
+/* A short touch screen (a phone in landscape): a slim bar of icons. Each
+   tab's tap box still reaches 44px, upwards over the bar's edge; the labels
+   stay the tabs' names. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] { --tab-bar-height: 40px; }
+  html[data-ui-mode="touch"] .touch-tab-label {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
+  }
+  html[data-ui-mode="touch"] .touch-tab::before { content: ""; position: absolute; inset: -4px 0 0; }
+  html[data-ui-mode="touch"] .touch-tab-badge { top: 0.35rem; }
+}
+
 /* The tablist inside the <nav> landmark lays the tabs out. */
 .touch-tab-list {
   display: flex;
@@ -8493,6 +8519,19 @@ html[data-ui-mode="touch"] .mode-glyph-desktop {
 
 html[data-ui-mode="desktop"] .mode-glyph-touch {
   display: block;
+}
+
+/* A narrow fine-pointer window (the sidebar stacked above the preview) can
+   switch to touch mode too; once in touch mode the toggle stays in the
+   Files tab whatever the pointer, so the way back is never gone. */
+html[data-ui-mode="touch"] #ui-mode-toggle {
+  display: inline-flex;
+}
+
+@media (max-width: 900px) {
+  html[data-ui-mode] #ui-mode-toggle {
+    display: inline-flex;
+  }
 }
 
 @media (pointer: coarse) {
@@ -8619,15 +8658,20 @@ html[data-ui-mode="touch"] .pane-resizer {
    ::before covers the row, so a tap anywhere on it except the actions and
    the header's own links toggles the pane. Desktop keeps its headers, the
    − / + button and the resizers. */
+/* Each header is exactly its 44px tap row, its hairline included: the panes
+   lose their own top border here, so a folded pane is 44px, not 46. */
 html[data-ui-mode="touch"] .pane-header {
   position: relative;
   box-sizing: border-box;
+  height: 44px;
   min-height: 44px;
-  padding: 0 0.15rem 0 0.75rem;
-  gap: 0.35rem;
+  padding: 0 0.1rem 0 0.6rem;
+  gap: 0.3rem;
   touch-action: manipulation;
 }
-html[data-ui-mode="touch"] .pane-header h2 { flex: 0 0 auto; max-width: 60%; font-size: 0.82rem; }
+html[data-ui-mode="touch"] .sidebar-pane { border-top: 0; }
+html[data-ui-mode="touch"] .pane-stack { border-top: 1px solid var(--border-soft); }
+html[data-ui-mode="touch"] .pane-header h2 { flex: 0 0 auto; max-width: 60%; font-size: 0.78rem; }
 html[data-ui-mode="touch"] [data-pane-collapse] { display: none; }
 html[data-ui-mode="touch"] .pane-action { width: 40px; height: 44px; font-size: 1rem; }
 html[data-ui-mode="touch"] .files-options-trigger { min-width: 40px; min-height: 44px; }
@@ -8711,6 +8755,32 @@ html[data-ui-mode="touch"] .follow-switch { min-height: 44px; }
 /* Under the brand: the workspace switcher, then the pane stack. */
 html[data-ui-mode="touch"] .sidebar-hub-row { padding-top: 0.5rem; }
 html[data-ui-mode="touch"] .sidebar-body { margin-top: 0.5rem; }
+
+/* A short touch screen (a phone in landscape, about 390px tall): the brand
+   collapses to one slim row (a small logo, the name, the status; the build
+   badge goes), and the workspace switcher sits beside it instead of under
+   it, so the expanded pane keeps most of the Files tab. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"][data-active-tab="files"] .sidebar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: 0.75rem;
+    padding-top: calc(env(safe-area-inset-top) + 0.25rem);
+  }
+  html[data-ui-mode="touch"] .sidebar-header { grid-column: 1; grid-row: 1; min-height: 44px; }
+  html[data-ui-mode="touch"] .sidebar-hub-row { grid-column: 2; grid-row: 1; padding: 0; }
+  html[data-ui-mode="touch"] .sidebar-hub-row .hub-toggle-button { min-height: 40px; }
+  html[data-ui-mode="touch"] :is(.sidebar-body, .sidebar-terminal-row) { grid-column: 1 / -1; }
+  html[data-ui-mode="touch"] .sidebar-body { grid-row: 2; align-self: stretch; margin-top: 0.25rem; }
+  html[data-ui-mode="touch"] .brand { gap: 0.45rem; }
+  html[data-ui-mode="touch"] .brand-logo { width: 28px; height: 28px; }
+  html[data-ui-mode="touch"] .brand-text { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0 0.6rem; }
+  html[data-ui-mode="touch"] .brand-wordmark { font-size: 1.05rem; }
+  html[data-ui-mode="touch"] .build-badge { display: none; }
+  html[data-ui-mode="touch"] .connection-error { flex-basis: 100%; }
+}
 
 /* Preview surface: the main-stack as-is, hidden while another tab is
    active. The terminal panel escapes this via position: fixed, so only the
@@ -11506,7 +11576,9 @@ html[data-ui-mode="touch"] #pr-view-control .view-segment { min-height: 44px; di
 .view-segment.is-active .pr-tab-count { color: var(--accent); }
 
 .pr-muted { color: var(--text-subtle); }
-.gh-add { color: var(--success-strong); font-variant-numeric: tabular-nums; }
+/* Darker than --success-strong in light: the counts sit on tinted file
+   headers (--surface-track) too, and must reach 4.5:1 there. */
+.gh-add { color: light-dark(#116329, #3fb950); font-variant-numeric: tabular-nums; }
 .gh-del { color: var(--danger); font-variant-numeric: tabular-nums; margin-left: 0.25rem; }
 .gh-ref {
   padding: 0.05rem 0.35rem;
@@ -11542,10 +11614,14 @@ html[data-ui-mode="touch"] #pr-view-control .view-segment { min-height: 44px; di
   white-space: nowrap;
 }
 .gh-state::before { content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: currentColor; opacity: 0.85; }
-.gh-state-open { background: var(--success-strong); }
-.gh-state-merged { background: var(--gh-merged); }
-.gh-state-closed { background: var(--danger); }
-.gh-state-draft { background: var(--text-subtle); }
+/* White text: dark mode's --success-strong is too light for it (2.5:1);
+   GitHub's own open green reaches 4.6:1. */
+.gh-state-open { background: light-dark(#1a7f37, #238636); }
+/* The same for the other states: dark mode's text tones are too light for
+   white text, GitHub's badge fills reach 4.6:1. */
+.gh-state-merged { background: light-dark(#8250df, #8957e5); }
+.gh-state-closed { background: light-dark(#cf222e, #da3633); }
+.gh-state-draft { background: light-dark(#57606a, #6e7681); }
 
 .gh-pill {
   display: inline-flex;
@@ -11628,8 +11704,11 @@ html[data-ui-mode="touch"] #pr-view-control .view-segment { min-height: 44px; di
 .gh-button:disabled { opacity: 0.55; cursor: not-allowed; }
 .gh-button-primary { border-color: transparent; background: var(--chat-send-fill); color: #fff; }
 .gh-button-primary:hover:not(:disabled) { background: var(--accent); }
-.gh-button-merge { border-color: transparent; background: var(--success-strong); color: #fff; }
-.gh-button-merge:hover:not(:disabled) { background: var(--success); }
+/* White on the merge green reaches 4.5:1 in both themes (dark mode's
+   --success-strong is too light for white text), hover included. */
+:root { --gh-merge-fill: light-dark(#1a7f37, #238636); --gh-merge-fill-hover: light-dark(#116329, #1a7f37); }
+.gh-button-merge { border-color: transparent; background: var(--gh-merge-fill); color: #fff; }
+.gh-button-merge:hover:not(:disabled) { background: var(--gh-merge-fill-hover); }
 .gh-button-danger { border-color: transparent; background: var(--danger); color: #fff; }
 .gh-button-danger:hover:not(:disabled) { filter: brightness(1.08); background: var(--danger); }
 .gh-button-quiet { border-color: transparent; background: transparent; color: var(--text-subtle); }
@@ -11735,13 +11814,22 @@ textarea.gh-input { resize: vertical; min-height: 4rem; }
 
 /* --- Pull request pane --------------------------------------------------- */
 
-.pull-request-pane-body { font-size: 0.82rem; }
+/* The pinned top row sticks at the pane's top edge, not under its padding:
+   --pr-pane-pad-top is the body's top padding, which the row's negative
+   `top` cancels, so nothing scrolled shows above it. */
+.pull-request-pane-body { --pr-pane-pad-top: 0.55rem; padding-top: var(--pr-pane-pad-top); font-size: 0.82rem; }
 .pr-pane-meta { display: inline-flex; align-items: center; gap: 0.35rem; }
 .pr-pane-number { color: var(--accent); font-weight: 600; text-decoration: none; }
 .pr-pane-number:hover { text-decoration: underline; }
 #pull-request-refresh.is-spinning { animation: pr-spin 0.9s linear infinite; }
 @keyframes pr-spin { to { transform: rotate(360deg); } }
-.pr-pane.is-stale { opacity: 0.72; }
+/* Stale data is dimmed row by row, never on the pane itself: opacity there
+   would make a stacking context that traps the floating Details panel under
+   the preview (and dims it). The pinned top row keeps its opaque background,
+   so only its contents dim. */
+.pr-pane.is-stale > :not(.pr-pane-pin, .pr-pane-details),
+.pr-pane.is-stale > .pr-pane-pin > .pr-pane-top > *,
+.pr-pane.is-stale > .pr-pane-details:not(.is-floating) { opacity: 0.72; }
 /* A picked pull request (not the checked-out branch's own) says so, with the
    way back. */
 .pr-pane-scope {
@@ -11754,36 +11842,65 @@ textarea.gh-input { resize: vertical; min-height: 4rem; }
 /* Small text on the tinted note: darker than --accent to reach 4.5:1. */
 .pr-pane-scope .pr-back-to-branch { color: light-dark(#0550ae, #79c0ff); font-size: inherit; }
 html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.15rem; }
+/* Back is a real target: 24px on desktop, 44px on touch (the touch rule
+   with the scope bar's). */
+.pr-pane-scope .pr-back-to-branch { min-height: 24px; padding-inline: 0.15rem; }
+.pr-pane-pending-short { display: none; }
+/* A short touch screen (a phone in landscape): a picked pull request's note
+   is "Picked · ← Back" beside the top row, and the pending note keeps to its
+   advice (Finish review has the count), so the actions stay in the pane. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .pr-pane.is-picked > .pr-pane-pin { display: flex; flex-wrap: wrap; align-items: center; column-gap: 0.5rem; }
+  html[data-ui-mode="touch"] .pr-pane-pin > .pr-pane-scope { flex: 0 0 auto; margin: 0; }
+  html[data-ui-mode="touch"] .pr-pane-pin > .pr-pane-top { flex: 1 1 0; min-width: 0; }
+  html[data-ui-mode="touch"] :is(.pr-pane-scope-rest, .pr-pane-scope .pr-back-rest, .pr-pane-pending-full) {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
+  }
+  html[data-ui-mode="touch"] .pr-pane-pending-short { display: inline; }
+  html[data-ui-mode="touch"] .pr-pane-scope .pr-back-to-branch { min-height: 44px; margin-block: -6px; }
+}
 /* A picked pull request's way back takes a row: the title gives up its
    second line so the summary and the actions still fit a short pane (the
    Files scope bar and the preview carry it in full). */
-.pr-pane.is-picked .pr-pane-title { -webkit-line-clamp: 1; }
+.pr-pane.is-picked .pr-pane-title-text { -webkit-line-clamp: 1; }
+/* Touch: the expanded pane has the room; two lines, as the preview has. */
+html[data-ui-mode="touch"] .pr-pane.is-picked .pr-pane-title-text { -webkit-line-clamp: 2; }
+html[data-ui-mode="touch"] .pr-scope-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.3; }
 .pr-pane-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.45rem; min-width: 0; }
-/* One line beside Details, never wrapped: a long review decision gives way
-   with an ellipsis (it is spelled out under Details → Reviewers). */
-.pr-pane-top > .pr-pane-row { flex: 1 1 auto; flex-wrap: nowrap; overflow: hidden; }
+/* Beside Details, spelled out in full: tight spacing keeps the state and
+   the longest decision ("Changes requested") on one line in a 300px
+   sidebar; narrower, the decision wraps under the state, never cut. */
+.pr-pane-top > .pr-pane-row { flex: 1 1 auto; flex-wrap: wrap; gap: 0.2rem 0.25rem; }
 .pr-pane-top > .pr-pane-row > * { flex: 0 0 auto; }
-.pr-pane-top > .pr-pane-row > .gh-pill { flex: 0 1 auto; display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* The top row (state, number, decision, Details) stays pinned while the pane
-   scrolls, so the pull request is always named and Details always in reach.
-   Opaque: rows scroll under it. */
-.pr-pane-top {
+.pr-pane-top > .pr-pane-row > .gh-state { padding-inline: 0.4rem; gap: 0.2rem; }
+.pr-pane-top > .pr-pane-row > .gh-pill { padding-inline: 0.35rem; }
+/* The top row (state, decision, Details), under a picked pull request's
+   note and its Back, stays pinned while the pane scrolls, so the pull request
+   is always named and Details and the way back always in reach. Opaque: rows
+   scroll under it. */
+.pr-pane-pin {
   position: sticky;
-  top: 0;
+  top: calc(-1 * var(--pr-pane-pad-top, 0px));
   z-index: 2;
+  background: var(--surface);
+}
+/* First in the pane: it covers the body's top padding too, so nothing
+   scrolled shows above it. */
+.pull-request-pane-body > .pr-pane:first-child > .pr-pane-pin {
+  padding-top: var(--pr-pane-pad-top, 0px);
+  margin-top: calc(-1 * var(--pr-pane-pad-top, 0px));
+}
+.pr-pane-top {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.2rem;
   padding: 0.1rem 0;
   background: var(--surface);
 }
 .pr-pane-repo { margin-left: 0.4rem; color: var(--text-subtle); font-size: 0.78rem; }
 .pr-pane-title {
+  position: relative;
   display: block;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
   margin: 0.3rem 0 0.2rem;
   color: var(--text-strong);
   font-size: 0.92rem;
@@ -11792,6 +11909,14 @@ html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.
   text-decoration: none;
 }
 .pr-pane-title:hover { color: var(--accent); }
+/* The clamp is on the text, so the link's box (and a touch tap box around
+   it) never shows a clipped extra line. */
+.pr-pane-title-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 /* Always in view: checks and the first merge blocker on one line. */
 .pr-pane-status {
   display: -webkit-box;
@@ -11805,6 +11930,7 @@ html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.
 }
 .pr-pane-status.is-blocked > span:last-child { color: var(--gh-attention-fg); }
 .pr-pane-status.is-ready > span:last-child { color: var(--success-strong); font-weight: 600; }
+.pr-pane-status.is-stale > span:last-child { color: var(--text-subtle); font-weight: 400; }
 .pr-pane-pending { margin: 0 0 0.3rem; color: var(--gh-attention-fg); font-size: 0.76rem; line-height: 1.35; }
 /* In flow right under the summary (not pinned): nothing in the pane can
    scroll under them, and a short pane still shows them. */
@@ -11816,7 +11942,7 @@ html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.
   flex: 0 0 auto;
   margin-left: auto;
   white-space: nowrap;
-  padding: 0.2rem 0 0.2rem 0.4rem;
+  padding: 0.2rem 0 0.2rem 0.15rem;
   border: 0;
   background: none;
   color: var(--text-subtle);
@@ -11830,9 +11956,6 @@ html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.
 .pr-pane-stats { color: var(--text-subtle); margin-bottom: 0.2rem; }
 .pr-pane-stats a { color: inherit; }
 .pr-pane-readiness p { margin: 0 0 0.2rem; font-size: 0.76rem; line-height: 1.35; }
-.pr-pane-readiness-headline { font-weight: 600; }
-.pr-pane-readiness.is-blocked .pr-pane-readiness-headline { color: var(--gh-attention-fg); }
-.pr-pane-readiness.is-ready .pr-pane-readiness-headline { color: var(--success-strong); }
 .pr-pane-reasons { margin: 0 0 0.3rem; padding-left: 1.1rem; font-size: 0.76rem; line-height: 1.35; }
 .pr-pane-checks { margin: 0.1rem 0 0.4rem; padding: 0; list-style: none; }
 .pr-pane-checks li { display: flex; align-items: center; gap: 0.35rem; padding: 0.12rem 0; }
@@ -11867,7 +11990,7 @@ html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.
 html[data-ui-mode="touch"] .pr-pane-repo { display: none; }
 html[data-ui-mode="touch"] .pr-pane-title { margin: 0.15rem 0 0.1rem; }
 /* A slim pinned top row: Details is 36px tall, its tap box 44px. */
-html[data-ui-mode="touch"] .pull-request-pane-body { padding: 0.1rem 0.75rem 0.4rem; }
+html[data-ui-mode="touch"] .pull-request-pane-body { --pr-pane-pad-top: 0.1rem; padding: var(--pr-pane-pad-top) 0.75rem 0.4rem; }
 html[data-ui-mode="touch"] .pr-pane-details-toggle { position: relative; min-height: 36px; }
 html[data-ui-mode="touch"] .pr-pane-details-toggle::after { content: ""; position: absolute; inset: -4px 0; }
 .pr-pane-mock {
@@ -11886,6 +12009,9 @@ html[data-ui-mode="touch"] .pr-pane-details-toggle::after { content: ""; positio
 /* --- Pull request preview ------------------------------------------------ */
 
 #preview .pr-view { max-width: 980px; }
+/* Files changed: the header names the pull request and the summary line
+   has its counts, so the state / author / branches band is Conversation's. */
+.pr-view[data-pr-tab="files"] > .pr-view-meta { display: none; }
 .pr-view-meta {
   display: flex;
   flex-wrap: wrap;
@@ -11920,11 +12046,18 @@ html[data-ui-mode="touch"] .pr-pane-details-toggle::after { content: ""; positio
 .pr-merge-box.is-ready > .pr-merge-box-icon { background: var(--success-strong); color: #fff; }
 .pr-merge-box.is-blocked > .pr-merge-box-icon { background: var(--gh-attention-soft); color: var(--gh-attention-fg); }
 .pr-merge-box-title { margin: 0 0 0.35rem; font-size: 1rem; }
+/* Last known, not current (GitHub can't be asked): dimmed, no tone colour,
+   as the pane's stale status line. */
+.pr-merge-box.is-stale > .pr-merge-box-icon { background: var(--surface-muted); color: var(--text-subtle); }
+.pr-merge-box.is-stale .pr-card { opacity: 0.78; }
+.pr-merge-box.is-stale .pr-merge-box-title { color: var(--text-subtle); font-weight: 600; }
 .pr-merge-box-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .pr-merge-box-reasons { margin: 0.3rem 0; padding-left: 1.2rem; }
 .pr-merge-box-pending { color: var(--gh-attention-fg); font-weight: 600; }
 #preview .pr-merge-box a.gh-button { text-decoration: none; }
-#preview .pr-merge-box a.gh-button-merge { color: #fff; }
+/* The Markdown sheet's `.markdown-body a` would clear the fill. */
+#preview .pr-merge-box a.gh-button-merge { color: #fff; background: var(--gh-merge-fill); }
+#preview .pr-merge-box a.gh-button-merge:hover { background: var(--gh-merge-fill-hover); }
 html[data-ui-mode="touch"] .pr-merge-box > .pr-merge-box-icon { display: none; }
 .pr-timeline { position: relative; }
 .pr-timeline::before {
@@ -11976,6 +12109,9 @@ html[data-ui-mode="touch"] .pr-merge-box > .pr-merge-box-icon { display: none; }
   background: var(--surface-subtle);
 }
 .pr-thread-summary-aside { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-left: auto; }
+/* On the thread's tinted head the accent falls short of 4.5:1; the darker
+   link blue (lighter in dark mode) doesn't. */
+.pr-thread-summary [data-view-in-diff] { color: light-dark(#0550ae, #79c0ff); }
 #preview .pr-thread-summary-line {
   margin: 0;
   padding: 0.35rem 0.7rem;
@@ -12097,53 +12233,102 @@ html[data-ui-mode="touch"] .pr-review-bar.is-active .gh-button { min-height: 44p
 .pr-review-bar.is-active .pr-review-bar-text { color: var(--text-strong); }
 .pr-review-bar-actions { display: inline-flex; gap: 0.45rem; margin-left: auto; }
 .pr-review-bar kbd { padding: 0 0.3rem; border: 1px solid var(--border-medium); border-radius: 0.25rem; font-size: 0.8em; }
+/* One line under the review bar: the counts and base ← head. */
 .pr-files-toolbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.4rem 0.5rem;
   margin: 0 0 0.6rem;
   color: var(--text-subtle);
   font-size: 0.82rem;
 }
-.pr-file-index { flex: 1 1 20rem; min-width: 0; }
-.pr-files-summary { cursor: pointer; }
-.pr-files-summary-toggle { color: var(--accent); font-weight: 600; }
-.pr-file-index nav {
-  display: grid;
-  gap: 0.1rem;
-  margin: 0.5rem 0 0.4rem;
-  padding: 0.4rem;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.55rem;
-  font-size: 0.82rem;
-}
-.pr-file-index-item {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.2rem 0.4rem;
-  border-radius: 0.35rem;
-  color: var(--text-strong);
-  text-decoration: none;
-}
-.pr-file-index-item:hover { background: var(--surface-subtle); }
-.pr-file-index-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.8rem; }
-.pr-file { margin: 0 0 1rem; border: 1px solid var(--border-medium); border-radius: 0.6rem; overflow: hidden; }
+#preview .pr-files-summary { flex: 1 1 16rem; min-width: 0; margin: 0; }
+.pr-files-summary strong { color: var(--text-strong); }
+.pr-files-refs { white-space: nowrap; }
+/* `clip`, not `hidden`: the file's header stays pinned while its diff
+   scrolls (a scroll container would hold it in place). */
+.pr-file { margin: 0 0 1rem; border: 1px solid var(--border-medium); border-radius: 0.6rem; overflow: clip; }
+/* The file's name stays in view while its diff scrolls: pinned under the
+   preview header and an active review bar. One row: the toggle (path,
+   counts, marks), then Jump to file and Comment on a line. */
 .pr-file-header {
+  position: sticky;
+  top: calc(var(--pr-sticky-top, 0px) + var(--pr-review-bar-height, 0px));
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.8rem;
+  gap: 0.25rem;
+  padding: 0.2rem 0.4rem 0.2rem 0.8rem;
   background: var(--surface-subtle);
   border-bottom: 1px solid var(--border-soft);
-  cursor: pointer;
   font-size: 0.86rem;
 }
-.pr-file-path { font-family: var(--font-mono, ui-monospace, monospace); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-.pr-file-badges { display: inline-flex; gap: 0.3rem; margin-left: auto; }
+.pr-file.is-collapsed > .pr-file-header { border-bottom: 0; }
+.pr-file-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 2rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pr-file-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0.3rem; }
+.pr-file-chevron::before { content: "▾"; color: var(--text-subtle); }
+.pr-file.is-collapsed .pr-file-chevron::before { content: "▸"; }
+/* One line; when it must be shortened, the start goes (rtl with an ltr
+   isolate), so the file name stays. */
+.pr-file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 600;
+}
+.pr-file-toggle > .gh-pill,
+.pr-file-counts { flex: 0 0 auto; }
+.pr-file-badges { display: inline-flex; flex: 0 0 auto; gap: 0.3rem; margin-left: auto; }
+.pr-file-actions { display: inline-flex; flex: 0 0 auto; gap: 0.1rem; }
+.pr-file-action {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  background: none;
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+.pr-file-action:hover { border-color: var(--border-medium); background: var(--surface); color: var(--text-strong); }
+.pr-file-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pr-icon { display: block; flex: 0 0 auto; }
+.pr-file-body[hidden] { display: none; }
 #preview .pr-file-diff { margin: 0; border: 0; border-radius: 0; }
+/* Jump to file: every file, in tree order. */
+.pr-jump-list { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border-medium); border-radius: 0.55rem; max-height: min(26rem, 60dvh); overflow: auto; }
+.pr-jump-list li + li { border-top: 1px solid var(--border-soft); }
+.pr-jump-item {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: 2.4rem; padding: 0.35rem 0.75rem;
+  border: 0; background: none; color: var(--text-strong); font: inherit; font-size: 0.84rem; text-align: left; cursor: pointer;
+}
+.pr-jump-item:hover { background: var(--surface-subtle); }
+.pr-jump-item[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.pr-jump-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pr-jump-path { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, monospace); }
+.pr-jump-counts { flex: 0 0 auto; white-space: nowrap; }
 
 .pr-thread,
 .pr-inline-composer {
@@ -12164,13 +12349,15 @@ html[data-ui-mode="touch"] .pr-review-bar.is-active .gh-button { min-height: 44p
   overflow: hidden;
 }
 .pr-thread.is-pending { border-color: var(--gh-attention-border); }
-/* Jumps and focus scrolling stop below the pinned preview header and review
-   bar (diff-review.ts measures both). */
+/* Jumps and focus scrolling stop below everything pinned over the pull
+   request: the preview header, an active review bar and, on Files changed,
+   a file's header (pull-request-view.ts measures them into --pr-pinned, the
+   scroll inset of whichever element scrolls). A file lands with its own
+   header right under the rest. */
+html[data-ui-mode][data-preview-kind="pull-request"] { --preview-scroll-inset: calc(var(--pr-pinned, 8.5rem) + 0.5rem); }
 .pr-thread,
-.pr-inline-composer,
-.pr-file {
-  scroll-margin-top: calc(var(--pr-sticky-top, 0px) + var(--pr-review-bar-height, 0px) + 0.75rem);
-}
+.pr-inline-composer { scroll-margin-top: 0.25rem; }
+.pr-file { scroll-margin-top: calc(-1 * var(--pr-file-header-height, 0px)); }
 .pr-thread.is-flash { box-shadow: 0 0 0 3px var(--accent); transition: box-shadow 0.4s ease; }
 .pr-thread:focus { outline: none; }
 .pr-thread:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -12178,16 +12365,6 @@ html[data-ui-mode="touch"] .pr-review-bar.is-active .gh-button { min-height: 44p
   .pr-thread.is-flash { transition: none; }
   #pull-request-refresh.is-spinning { animation: none; }
 }
-/* "Comment on a line…": the full-size way into inline review where line
-   numbers are too small to aim at (touch, phone widths). */
-.pr-file-tools { display: none; }
-html[data-ui-mode="touch"] .pr-file-tools {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0.35rem 0.5rem;
-  border-bottom: 1px solid var(--border-soft);
-}
-html[data-ui-mode="touch"] .pr-file-tools .gh-button { min-height: 44px; }
 .pr-composer-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; min-width: 0; max-width: 100%; }
 .pr-composer-line select {
   min-width: 0;
@@ -12238,10 +12415,12 @@ html[data-ui-mode="touch"] .pr-composer-line select { min-height: 44px; max-widt
 .pr-inline-composer .pr-composer-box { border-color: var(--gh-attention-border); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06); }
 
 .pr-toast.is-error { border-left: 4px solid var(--danger); }
+/* Toasts never take focus or taps (review-dialogs.ts showToast); they go on
+   their timeout. Desktop and tall touch screens: above the tab bar. */
 .pr-toast {
   position: fixed;
   left: 50%;
-  bottom: calc(1.25rem + var(--tab-bar-height, 0px));
+  bottom: calc(1.25rem + var(--pr-toast-offset, 0px));
   z-index: 3000;
   transform: translateX(-50%);
   max-width: min(36rem, calc(100vw - 2rem));
@@ -12251,6 +12430,25 @@ html[data-ui-mode="touch"] .pr-composer-line select { min-height: 44px; max-widt
   color: var(--surface);
   font-size: 0.86rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+html[data-ui-mode="touch"] .pr-toast { bottom: calc(var(--tab-bar-total) + 0.75rem + var(--pr-toast-offset, 0px)); }
+/* While a pull request composer has focus on touch (the soft keyboard is
+   up), the bottom tab bar steps aside, as it does for the chat input, so the
+   keyboard leaves the composer room; blur brings it back. What measures the
+   bar (tabBarBottomInset) reads 0 then, and the page's scroll padding and
+   the toasts drop its height too. */
+html[data-ui-mode="touch"]:has(.pr-composer-input:focus) .touch-tab-bar { display: none; }
+html[data-ui-mode="touch"]:has(.pr-composer-input:focus) { scroll-padding-bottom: 0.5rem; }
+html[data-ui-mode="touch"]:has(.pr-composer-input:focus) .pr-toast { bottom: calc(0.75rem + var(--pr-toast-offset, 0px)); }
+/* A short touch screen has no rows to spare over the diff: one compact line
+   at the top, over the pinned header, never over the code. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .pr-toast {
+    top: calc(env(safe-area-inset-top) + 0.3rem + var(--pr-toast-offset, 0px)); bottom: auto;
+    max-width: min(32rem, calc(100vw - 6rem)); padding: 0.35rem 0.75rem; font-size: 0.78rem; line-height: 1.3;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  }
 }
 
 /* --- Dialogs ------------------------------------------------------------- */
@@ -12267,11 +12465,18 @@ html[data-ui-mode="touch"] .pr-composer-line select { min-height: 44px; max-widt
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
 }
 .gh-dialog-wide { width: min(46rem, calc(100vw - 1.5rem)); }
+/* Anchored at the top, not centred: what a choice adds (a fork's notice, a
+   lookup) grows the picker downward instead of moving it under the pointer. */
+html:not([data-ui-mode="touch"]) .gh-dialog-wide[open] { margin-top: min(8dvh, 4rem); margin-bottom: auto; }
 .gh-dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
-.gh-dialog-body { padding: 1.4rem 1.5rem 0; font-size: 0.9rem; line-height: 1.5; }
+/* Whatever takes focus or is scrolled to stays above the pinned footer
+   (review-dialogs.ts measures it into --gh-dialog-footer-height). */
+.gh-dialog { scroll-padding-bottom: calc(var(--gh-dialog-footer-height, 0px) + 0.5rem); }
+.gh-dialog-body { --gh-dialog-pad-top: 1.4rem; padding: var(--gh-dialog-pad-top) 1.5rem 0; font-size: 0.9rem; line-height: 1.5; }
 .gh-dialog-title { margin: 0 0 0.35rem; font-size: 1.3rem; font-weight: 700; }
 .gh-dialog-sub { margin: 0 0 1rem; color: var(--text-subtle); }
 .gh-dialog-label { display: block; margin: 0.9rem 0 0.35rem; font-weight: 700; }
+.gh-dialog-label-need { color: var(--text-subtle); font-size: 0.84rem; font-weight: 400; }
 .gh-dialog-section {
   margin: 1.1rem 0 0.5rem;
   color: var(--text-subtle);
@@ -12310,6 +12515,33 @@ html[data-ui-mode="touch"] .pr-composer-line select { min-height: 44px; max-widt
 .gh-dialog-actions { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
 .gh-dialog-actions .gh-button { min-height: 2.4rem; padding: 0.4rem 1rem; font-size: 0.9rem; }
 .gh-choice-list { display: grid; gap: 0.5rem; margin: 0.8rem 0 0; }
+/* The review dialog's head (its number and the PR's title) stays pinned
+   while the dialog scrolls, so an update further down (a comment added to
+   the review, an edit) never leaves it unnamed; what is focused or scrolled
+   to stays clear of it (review-dialogs.ts measures --gh-dialog-head-height). */
+.gh-review-dialog { scroll-padding-top: calc(var(--gh-dialog-head-height, 0px) + 0.5rem); }
+.gh-review-dialog .gh-dialog-head {
+  position: sticky; top: 0; z-index: 1;
+  margin-top: calc(-1 * var(--gh-dialog-pad-top, 0px)); padding: var(--gh-dialog-pad-top, 0px) 0 0.5rem;
+  background: var(--surface);
+}
+.gh-review-dialog .gh-dialog-head .gh-dialog-sub { margin: 0; }
+html[data-ui-mode="touch"] .gh-review-dialog .gh-dialog-sub { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+/* A short screen (a phone in landscape): the three verdicts come first,
+   right under the pinned head, one compact row each, so all three are in
+   view without scrolling; the summary and the pending list follow. */
+@media (max-height: 500px) {
+  .gh-review-dialog .gh-dialog-body { display: flex; flex-direction: column; }
+  .gh-review-dialog .gh-dialog-head { order: -2; padding-bottom: 0.3rem; }
+  .gh-review-dialog .gh-dialog-head .gh-dialog-sub { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.8rem; }
+  .gh-review-dialog .gh-dialog-body > * { min-width: 0; }
+  .gh-review-dialog .gh-choice-list { order: -1; grid-template-columns: minmax(0, 1fr); gap: 0.3rem; margin: 0.1rem 0 0; }
+  .gh-review-dialog .gh-choice { align-items: center; min-height: 44px; box-sizing: border-box; padding: 0.25rem 0.7rem; }
+  .gh-review-dialog .gh-choice input { margin-top: 0; }
+  .gh-review-dialog .gh-choice > span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gh-review-dialog .gh-choice-description::before { content: " · "; }
+  .gh-review-dialog .gh-choice-description { font-size: 0.8rem; }
+}
 .gh-choice {
   display: flex;
   align-items: flex-start;
@@ -12382,6 +12614,9 @@ html[data-ui-mode="touch"] .gh-pending-actions .gh-link-button { min-height: 44p
   border-radius: 0.6rem;
   max-height: min(22rem, 50dvh);
   overflow: auto;
+  /* The containing block of the rows' sr-only text: without it that text
+     escapes the list's clip and makes the whole dialog scroll. */
+  position: relative;
 }
 .gh-pr-row {
   display: flex;
@@ -12416,24 +12651,143 @@ html[data-ui-mode="touch"] #pr-view-github { min-width: 44px; min-height: 44px; 
 html[data-ui-mode="touch"] :is(.pr-view, .pull-request-pane-body, .gh-dialog, #pr-scope) .gh-link-button,
 html[data-ui-mode="touch"] .pr-thread-reply-placeholder,
 html[data-ui-mode="touch"] .pr-composer-tabs button,
-html[data-ui-mode="touch"] :is(.pr-pane-number, .gh-pill-button, .pr-pane-elsewhere a, .gh-pending-location, .pr-file-index-item),
+/* The header's pending-review pill stays a compact pill; its 44px tap box
+   is a pseudo-element over the header row (the meta stretches to the row so
+   nothing clips it). */
+html[data-ui-mode="touch"] .pane-header :is(.pane-meta, .pr-pane-meta) { align-self: stretch; }
+html[data-ui-mode="touch"] .pane-header .gh-pill-button { position: relative; }
+html[data-ui-mode="touch"] .pane-header .gh-pill-button::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: max(calc(100% + 12px), 44px); height: 44px; transform: translate(-50%, -50%);
+}
+html[data-ui-mode="touch"] :is(.pr-pane-number, .pr-pane-elsewhere a, .gh-pending-location),
 html[data-ui-mode="touch"] .pr-pane-mock select,
 html[data-ui-mode="touch"] .gh-chip {
   display: inline-flex; align-items: center; min-height: 44px;
 }
-html[data-ui-mode="touch"] .pr-pane-title { min-height: 44px; }
+/* The title's tap box is at least 44px tall without making the title row
+   taller: a one-line title leaves no gap under it. */
+html[data-ui-mode="touch"] .pr-pane-title::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%; height: max(100%, 44px); transform: translateY(-50%);
+}
 /* The "N files" link inside the stats sentence: a 44px tap box that leaves
    the line's height alone. */
 html[data-ui-mode="touch"] .pr-pane-stats a { display: inline-block; padding: 14px 0; margin: -14px 0; }
-html[data-ui-mode="touch"] :is(.pr-file-header, .pr-files-summary) { min-height: 44px; box-sizing: border-box; }
-html[data-ui-mode="touch"] .pr-files-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.3rem; }
-html[data-ui-mode="touch"] .pr-file-index-item { display: flex; }
+/* A file's header on touch: the toggle and both icon buttons are 44px tap
+   boxes in a 44px row. */
+html[data-ui-mode="touch"] .pr-file-header { min-height: 44px; padding-block: 0; box-sizing: border-box; }
+html[data-ui-mode="touch"] .pr-file-toggle { min-height: 44px; }
+html[data-ui-mode="touch"] .pr-file-action { width: 44px; height: 44px; }
+html[data-ui-mode="touch"] .pr-jump-item { min-height: 44px; }
+.pr-applies-now { display: none; }
+html[data-ui-mode="touch"] .pr-applies-now { display: inline; align-self: center; color: var(--text-subtle); font-size: 0.74rem; white-space: nowrap; }
+/* The pull request preview's header on touch: one slim row (number, then
+   the title, shortened) over the tabs. The repository is in the Files
+   tab's workspace row. */
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header { padding-block: 0.4rem; row-gap: 0.3rem; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading { display: flex; align-items: baseline; gap: 0.45rem; min-width: 0; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading .eyebrow { display: none; }
+/* Up to two lines of title; a tap shows the rest (pull-request-view.ts). */
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-title {
+  flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; font-size: 1rem; line-height: 1.35;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere;
+}
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-title[data-expanded] { -webkit-line-clamp: unset; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-meta { order: -1; flex: 0 0 auto; margin: 0; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .pr-path-repo { display: none; }
+/* A picked pull request (not the checked-out branch's) says so in the same
+   row on touch, where no Pull request pane is beside it: "Picked · ← Back".
+   Back's tap box is 44px tall without making the row taller. */
+.pr-picked-chip { display: none; }
+html[data-ui-mode="touch"] .pr-picked-chip {
+  display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.4rem; padding: 0 0 0 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-soft)); border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--text-strong); font-family: var(--font-sans, system-ui, sans-serif); font-size: 0.72rem; white-space: nowrap; word-break: normal;
+}
+html[data-ui-mode="touch"] .pr-picked-chip .pr-back-to-branch {
+  min-height: 44px; margin-block: -0.75rem; padding: 0 0.5rem; color: light-dark(#0550ae, #79c0ff); font-size: inherit;
+}
+/* On a phone the header is two rows: the title row (#n, then the title in
+   up to two lines, with Open on GitHub and the text size buttons at its
+   end) and the slim tabs row (tabs, the review button, Jump to file). A
+   picked pull request's number row keeps its own line for the Picked chip
+   and Back, with the title under it. Scrolled, only the tabs row stays
+   pinned (the rows above scroll away: their height is the negative top),
+   and each file's pinned header is the context. pull-request-view.ts reads
+   the pinned height into --pr-sticky-top. */
+@media (max-width: 640px) {
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header { top: calc(-1 * var(--pr-header-hide, 5rem)); }
+  /* The pinned row keeps to the tabs, the review button and Jump to file:
+     Open on GitHub and the text size buttons sit at the end of the title
+     row, which scrolls away. */
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading {
+    flex-wrap: wrap; align-items: baseline; column-gap: 0.4rem; row-gap: 0.1rem;
+    min-height: 44px; padding-right: var(--pr-heading-actions, 8.5rem); box-sizing: border-box;
+  }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading .preview-meta { flex: 0 0 auto; display: flex; align-items: center; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-title { flex: 1 1 0; min-width: 0; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading:has(.pr-picked-chip) { padding-right: 0; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading:has(.pr-picked-chip) .preview-meta { flex: 1 1 100%; min-height: 44px; padding-right: var(--pr-heading-actions, 8.5rem); box-sizing: border-box; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading:has(.pr-picked-chip) #preview-title { flex: 1 1 100%; }
+  /* The tabs keep their 44px height without the segment's frame around
+     them. */
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-control { padding: 0; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] :is(#pr-view-github, #preview-action-bar) { position: absolute; top: 0.4rem; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-github { right: calc(0.75rem + var(--pr-text-size-width, 4.6rem)); }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-action-bar { right: 0.75rem; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-toolbar { flex-wrap: nowrap; justify-content: space-between; }
+  /* "Files changed" reads "Files" here; its name stays whole. */
+  html[data-ui-mode="touch"] #pr-view-control .pr-tab-long {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
+  }
+  html[data-ui-mode="touch"] #pr-view-control .view-segment { padding-inline: 0.6rem; }
+}
+/* The review button in the tabs row (touch and desktop): Review, or Finish
+   with the pending count while a review is pending. One row, never
+   wrapping. */
+#pr-view-review { display: none; }
+html[data-preview-kind="pull-request"] #pr-view-review:not([hidden]) {
+  display: inline-flex; flex: 0 1 auto; align-items: center; gap: 0.25rem; min-width: 0;
+}
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-review:not([hidden]) { margin-left: auto; }
+#pr-view-review .pr-review-bar-actions { display: inline-flex; gap: 0.25rem; margin: 0; }
+#pr-view-review .gh-button { padding: 0.25rem 0.7rem; white-space: nowrap; }
+html[data-ui-mode="touch"] #pr-view-review .gh-button { min-height: 44px; }
+/* Pending: the count rides on Finish, as a small badge. */
+#pr-view-review .pr-header-review-count {
+  margin-right: 0.15rem; padding: 0 0.35rem; border-radius: 999px; background: color-mix(in srgb, #fff 22%, transparent); font-size: 0.8em; font-weight: 700;
+}
+/* Paused: the buttons say why (title, description); the line itself stays
+   off the pinned row. */
+#pr-view-review .pr-review-bar-reason { display: none; }
+@media (max-width: 359px) {
+  html[data-ui-mode="touch"] #pr-view-control .pr-tab-count { display: none; }
+  #pr-view-review .gh-button { padding-inline: 0.45rem; }
+}
+/* The touch how-to, in the files toolbar: one line and its fold button, or
+   just the button once folded. The button's 44px tap box leaves the line's
+   height alone. */
+.pr-review-hint[hidden] { display: none; }
+.pr-review-hint { display: inline-flex; align-items: center; gap: 0.2rem; min-width: 0; color: var(--text-subtle); }
+.pr-review-hint .pr-icon { display: inline-block; width: 1.05em; height: 1.05em; vertical-align: -0.15em; }
+.pr-review-hint-toggle {
+  display: inline-grid; place-items: center; flex: 0 0 auto; width: 44px; height: 44px; margin: -12px -8px;
+  padding: 0; border: 0; border-radius: 0.4rem; background: none; color: var(--text-subtle); font: inherit; font-size: 1.05rem; cursor: pointer;
+}
+.pr-review-hint.is-folded .pr-review-hint-toggle::before {
+  content: ""; position: absolute; width: 1.35rem; height: 1.35rem; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box;
+}
+.pr-review-hint.is-folded .pr-review-hint-toggle { position: relative; font-size: 0.78rem; font-weight: 700; }
+.pr-review-hint-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -6px; }
+html[data-ui-mode="touch"] .pr-view .pr-review-bar { margin-bottom: 0.4rem; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview { margin-top: 0.3rem; }
+html[data-ui-mode="touch"] .pr-files-toolbar { margin-bottom: 0.5rem; font-size: 0.78rem; }
 /* 16px text in every text control: iOS zooms the page on focus below that
    (the same rule as the Files filter). */
 html[data-ui-mode="touch"] :is(.pr-composer-input, .pr-composer-line select, .gh-input, .pr-pane-mock select) { font-size: 16px; }
 html[data-ui-mode="touch"] .pr-event > .gh-avatar { display: none; }
 html[data-ui-mode="touch"] .pr-timeline::before { display: none; }
-html[data-ui-mode="touch"] .gh-dialog-body { padding: 1.1rem 1rem 0; }
+html[data-ui-mode="touch"] .gh-dialog-body { --gh-dialog-pad-top: 1.1rem; padding: var(--gh-dialog-pad-top) 1rem 0; }
 /* The pull request picker is a full-height sheet on touch: the list takes
    the room between the filters and the pinned footer. */
 html[data-ui-mode="touch"] .gh-dialog-wide[open] {
@@ -12444,6 +12798,28 @@ html[data-ui-mode="touch"] .gh-dialog-wide[open] {
 html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-body { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
 html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-list { flex: 1 1 auto; min-height: 8rem; max-height: none; }
 html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-footer { margin-top: auto; }
+/* On a phone the picker's filter chips are one row that scrolls sideways,
+   and its footer buttons one compact row under the footer's line. */
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-chips { flex: 0 0 auto; gap: 0.3rem; }
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-chip { flex: 0 0 auto; padding-inline: 0.6rem; white-space: nowrap; }
+/* On a phone all four filter chips fit one row: "Review requested" reads
+   "To review" (its full name stays the chip's name), the counts tighten,
+   and on the narrowest screens they wrap to a second row, never cut. */
+.gh-chip-short { display: none; }
+@media (max-width: 480px) {
+  html[data-ui-mode="touch"] .gh-chip-short { display: inline; }
+  html[data-ui-mode="touch"] .gh-chip-full {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
+  }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-chip { padding-inline: 0.55rem; font-size: 0.8rem; }
+}
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-footer { row-gap: 0.35rem; }
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-actions { flex-wrap: nowrap; gap: 0.4rem; }
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-actions .gh-button { flex: 0 1 auto; min-width: 0; padding-inline: 0.65rem; white-space: nowrap; font-size: 0.84rem; }
+@media (max-width: 359px) {
+  html[data-ui-mode="touch"] .gh-dialog-actions .gh-button[data-short-label] { font-size: 0; }
+  html[data-ui-mode="touch"] .gh-dialog-actions .gh-button[data-short-label]::after { content: attr(data-short-label); font-size: 0.84rem; }
+}
 /* Rows stack their badges under the title so more of the list fits; the
    explanation of the two actions gives way to the list (the buttons say
    what they do). */
@@ -12455,13 +12831,59 @@ html[data-ui-mode="touch"] .gh-dialog-footer { padding-bottom: 1rem; }
 html[data-ui-mode="touch"] .gh-dialog-actions { width: 100%; justify-content: flex-end; }
 html[data-ui-mode="touch"] .pr-composer-hint { display: none; }
 
-/* A short touch viewport (a phone in landscape, about 390px tall): the pull
-   request's preview header scrolls away instead of staying pinned, so the
-   pinned review bar and the tab bar leave the diff most of the screen.
-   pull-request-view.ts then pins the review bar at the top. */
+/* Short touch screens (a phone in landscape, about 390px tall): every pull
+   request dialog keeps one scrolling body and a compact one-row footer. The
+   footer stays pinned, and scroll-padding keeps whatever is focused or
+   scrolled to clear of it. The why-not line takes the attribution's place
+   while it has something to say. The picker's list takes the height left
+   between the filters and the footer, so nothing overflows under it. */
 @media (max-height: 500px) {
-  html[data-ui-mode="touch"][data-preview-kind="pull-request"] { --preview-scroll-inset: 4.5rem; }
-  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header { position: relative; top: auto; }
+  html[data-ui-mode="touch"] .gh-dialog:not(.gh-dialog-wide)[open] { max-height: calc(100dvh - 1rem); margin-block: auto; }
+  html[data-ui-mode="touch"] .gh-dialog-body { --gh-dialog-pad-top: 0.7rem; }
+  html[data-ui-mode="touch"] .gh-dialog-title { margin-bottom: 0.2rem; font-size: 1.05rem; }
+  html[data-ui-mode="touch"] .gh-dialog-sub { margin-bottom: 0.4rem; }
+  html[data-ui-mode="touch"] .gh-dialog-label { margin-top: 0.5rem; }
+  html[data-ui-mode="touch"] .gh-dialog-footer { flex-wrap: nowrap; gap: 0.5rem; margin-top: 0.6rem; padding: 0.4rem 0 0.5rem; }
+  html[data-ui-mode="touch"] .gh-dialog-footer > :is(.gh-dialog-attribution, .gh-dialog-reason) {
+    flex: 1 1 0; min-width: 0; order: 0; margin: 0;
+    font-size: 0.78rem; line-height: 1.25; text-align: left;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  }
+  html[data-ui-mode="touch"] .gh-dialog-footer > .gh-dialog-reason:empty,
+  html[data-ui-mode="touch"] .gh-dialog-footer:has(> .gh-dialog-reason:not(:empty)) > .gh-dialog-attribution { display: none; }
+  html[data-ui-mode="touch"] .gh-dialog-actions { flex: 0 0 auto; flex-wrap: nowrap; width: auto; }
+  html[data-ui-mode="touch"] .gh-dialog-actions .gh-button { min-height: 44px; padding: 0.3rem 0.85rem; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-list { flex: 1 1 0; min-height: 0; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-chips { margin: 0.4rem 0; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-search { flex: 0 0 auto; }
+}
+
+/* A short touch viewport (a phone in landscape, about 390px tall): the pull
+   request's preview header is one slim pinned row (title, tabs, the review
+   state, Open on GitHub, text size), so no separate band takes the diff's
+   rows. pull-request-view.ts reads its height into --pr-sticky-top and the
+   whole pinned stack into the scroll inset. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header { top: 0; padding-block: 0; gap: 0.6rem; }
+  /* Opaque, with no frosted falloff over the rows under it. */
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header::before {
+    bottom: 0; background: light-dark(#fbfcfd, #0d1117); -webkit-backdrop-filter: none; backdrop-filter: none; -webkit-mask-image: none; mask-image: none;
+  }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header { border-bottom: 1px solid var(--border-soft); }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-toolbar { gap: 0.3rem; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-control { padding: 0; }
+  /* No card around the pull request: the diff starts right under the bars. */
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview { margin-top: 0; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
+  /* One short line of counts, refs, the hint and the layout. */
+  html[data-ui-mode="touch"] .pr-files-toolbar { margin: 0 0 2px; min-height: 22px; }
+  html[data-ui-mode="touch"] .pr-files-toolbar .view-segment { min-height: 0; padding-block: 0.1rem; font-size: 0.74rem; }
+  /* File headers are 40px rows whose buttons keep 44px tap boxes, reaching
+     4px down over the diff's top gap (the file's top edge clips). */
+  html[data-ui-mode="touch"] .pr-file-header { min-height: 40px; }
+  html[data-ui-mode="touch"] .pr-file-toggle { min-height: 40px; }
+  html[data-ui-mode="touch"] .pr-file-action { position: relative; height: 40px; }
+  html[data-ui-mode="touch"] :is(.pr-file-action, .pr-file-toggle)::after { content: ""; position: absolute; inset: -1px -1px -5px; }
+  html[data-ui-mode="touch"] .pr-file-toggle { position: relative; }
 }
 
 /* Diffs where horizontal space is scarce (touch mode, phone widths): a
@@ -12470,6 +12892,9 @@ html[data-ui-mode="touch"] .pr-composer-hint { display: none; }
    Pierre's shadow root; --diffs-min-number-column-width is Pierre's own. */
 html[data-ui-mode="touch"] diffs-container {
   --uatu-diff-gutter-utility: none;
+  /* Slimmer "N unmodified lines" rows and gaps around them. */
+  --diffs-gap-block: 4px;
+  --uatu-diff-separator-height: 24px;
   --uatu-diff-number-size: 0.7rem;
   --uatu-diff-number-pad-start: 0.7ch;
   --uatu-diff-number-pad-end: 0.5ch;
@@ -12532,6 +12957,7 @@ html[data-ui-mode="touch"] diffs-container {
   .pr-merge-box .pr-card { background: var(--surface-subtle); }
   .pr-merge-box.is-blocked .pr-card { box-shadow: inset 3px 0 0 var(--gh-attention-border); }
   .pr-merge-box.is-ready .pr-card { box-shadow: inset 3px 0 0 var(--success-strong); }
+  .pr-merge-box.is-stale .pr-card { box-shadow: inset 3px 0 0 var(--border-medium); }
   .pr-event-composer { margin-bottom: 0; padding: 0.75rem; border-top: 1px solid var(--border-medium); background: var(--surface-subtle); }
   /* Thread meta: path and line, then state, replies and View in diff. */
   .pr-thread-summary { border-color: var(--border-medium); background: var(--pr-thread-tint); }
@@ -12542,7 +12968,7 @@ html[data-ui-mode="touch"] diffs-container {
 
   .pr-review-bar { padding: 0.5rem 0.6rem; }
   .pr-file { margin: 0 -0.75rem 1.1rem; border-inline: 0; border-radius: 0; }
-  .pr-file-header { padding: 0.45rem 0.75rem; border-bottom-color: var(--border-medium); background: var(--surface-track); }
+  .pr-file-header { padding: 0.45rem 0.25rem 0.45rem 0.75rem; border-bottom-color: var(--border-medium); background: var(--surface-track); }
   .pr-thread { background: var(--pr-thread-tint); }
   /* Comment bodies take their card's tint (the Markdown sheet paints its own). */
   #preview :is(.pr-thread, .pr-thread-summary) .markdown-body { background: transparent; }
@@ -12554,4 +12980,96 @@ html[data-ui-mode="touch"] diffs-container {
 :root {
   --pr-thread-tint: color-mix(in srgb, var(--accent) 5%, var(--surface));
   --pr-thread-head-tint: color-mix(in srgb, var(--accent) 11%, var(--surface));
+}
+
+/* --- Round 4: one review button, Jump to file, pinned headers ------------ */
+
+/* The pinned preview header stays over everything that pins under it (the
+   review bar, each file's header): a file header leaving with its file
+   slides under the tabs row, never over it. */
+html[data-preview-kind="pull-request"] .preview-header { z-index: 6; }
+/* Files changed's facts band may hold nothing (no credential: the card says
+   it). */
+.pr-view-meta:empty { display: none; }
+
+/* Jump to file: one control at the end of the pinned tabs row on Files
+   changed (pull-request-view.ts shows it). Desktop shows its words; touch
+   is a 44px icon button, named "Jump to file (n files)". */
+.pr-view-jump { display: none; }
+html[data-preview-kind="pull-request"] .pr-view-jump:not([hidden]) {
+  display: inline-flex; flex: 0 0 auto; align-items: center; gap: 0.35rem; min-height: 2rem; padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border-medium); border-radius: 0.5rem; background: var(--surface); color: var(--text-strong);
+  font: inherit; font-size: 0.82rem; white-space: nowrap; cursor: pointer;
+}
+html[data-preview-kind="pull-request"] .pr-view-jump:hover { border-color: var(--accent); }
+html[data-preview-kind="pull-request"] .pr-view-jump:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .pr-view-jump:not([hidden]) { justify-content: center; width: 44px; min-height: 44px; padding: 0; }
+html[data-ui-mode="touch"] .pr-view-jump-label { display: none; }
+
+/* A file's Comment button: an icon on desktop (named, with a tooltip); on
+   touch, where no tooltip shows, a short visible label beside it. */
+.pr-file-action-label { display: none; }
+html[data-ui-mode="touch"] .pr-file-action[data-file-comment] { display: inline-flex; gap: 0.3rem; width: auto; padding: 0 0.55rem; color: var(--text-strong); }
+html[data-ui-mode="touch"] .pr-file-action[data-file-comment] .pr-file-action-label { display: inline; font-size: 0.8rem; font-weight: 600; }
+
+/* The viewer's pending reply in a thread: Edit and Discard under it. */
+.pr-pending-reply { border-top: 1px dashed var(--gh-attention-border); }
+.pr-pending-reply-actions { display: flex; justify-content: flex-end; gap: 0.3rem; padding: 0 0.5rem 0.35rem; }
+.pr-pending-reply .pr-pending-edit { padding: 0.4rem 0.5rem; }
+
+/* The review dialog's Pending comments heading, with Discard review… and
+   Add line comments beside it. */
+.gh-dialog-section-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.75rem; margin: 1.1rem 0 0.5rem; }
+.gh-dialog-section-row .gh-dialog-section { margin: 0; }
+.gh-dialog-section-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem; }
+
+/* The pane's one line while the preview shows the connect card. */
+.gh-connect.gh-connect-line { margin: 0.35rem 0; padding: 0.45rem 0.6rem; border: 0; border-left: 3px solid var(--gh-attention-border); border-radius: 0; background: none; font-size: 0.84rem; }
+/* A manual refresh GitHub answered. */
+.pr-pane-updated { margin-left: 0.45rem; color: var(--text-subtle); font-size: 0.72rem; white-space: nowrap; }
+.pr-pane-updated[hidden] { display: none; }
+
+/* The picker's heading, explanation and search: one block in the flow,
+   except on a short touch screen (a phone in landscape), where the heading
+   and the search share one row and the explanation gives way, so at least
+   three results show above the footer. Rows keep their badges beside the
+   title there (the screen is wide). */
+.gh-picker-head { display: contents; }
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head { display: flex; flex: 0 0 auto; align-items: center; gap: 0.75rem; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head .gh-dialog-title { flex: 0 1 auto; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head .gh-dialog-sub { display: none; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head .gh-picker-search { flex: 1 1 18rem; min-width: 12rem; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-chips { margin: 0.3rem 0; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row { flex-direction: row; align-items: center; gap: 0.75rem; padding: 0.35rem 0.75rem; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-aside { flex: 0 0 auto; justify-content: flex-end; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-title { flex-wrap: nowrap; min-width: 0; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-main { min-width: 0; flex: 1 1 auto; }
+}
+
+/* A desktop-layout window narrowed to phone width with a preview open
+   (shell/narrow-layout-offer.ts): one small bar at the bottom, offering
+   touch layout; nothing behind it is blocked. */
+.layout-offer {
+  position: fixed; left: 50%; bottom: max(0.75rem, env(safe-area-inset-bottom)); z-index: 40; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 0.5rem; max-width: calc(100vw - 1.5rem); box-sizing: border-box;
+  padding: 0.4rem 0.45rem 0.4rem 0.8rem; border: 1px solid var(--border-medium); border-radius: 0.7rem;
+  background: var(--surface); color: var(--text-strong); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); font-size: 0.85rem;
+}
+.layout-offer-text { min-width: 0; }
+.layout-offer button {
+  flex: 0 0 auto; min-height: 36px; padding: 0.25rem 0.7rem; border: 1px solid var(--border-medium); border-radius: 0.5rem;
+  background: var(--surface-subtle); color: inherit; font: inherit; cursor: pointer;
+}
+.layout-offer .layout-offer-switch { border-color: var(--accent); background: var(--accent); color: #fff; }
+.layout-offer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Desktop: the Pull request pane's open Details float beside the toggle,
+   whole (scrolling on their own only when the window is too short). */
+.pr-pane-details.is-floating:not([hidden]) {
+  position: fixed; top: var(--pr-details-top, 6rem); left: var(--pr-details-left, 1rem); z-index: 30;
+  width: var(--pr-details-width, 22rem); max-height: var(--pr-details-max-height, 70vh); box-sizing: border-box; overflow: auto;
+  padding: 0.6rem 0.8rem 0.7rem; border: 1px solid var(--border-medium); border-radius: 0.7rem;
+  background: var(--surface); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
 }

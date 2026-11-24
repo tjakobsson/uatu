@@ -141,6 +141,24 @@ describe("PullRequestStore pending reviews elsewhere", () => {
     expect(store.pendingCount(618)).toBe(2);
     expect(store.pendingCount(1)).toBe(0);
   });
+
+  test("keeps the branch's last known pending count once a summary no longer names its pull request", () => {
+    const store = new PullRequestStore();
+    const summary = (status: GithubSummary["status"], pullRequest?: Partial<PullRequestSummary>) => ({
+      status, mock: true, repository: null, viewer: "v", checkedAt: 0, stale: false,
+      ...(pullRequest ? { pullRequest: pullRequest as PullRequestSummary } : {}),
+    }) satisfies GithubSummary;
+    store.applySummary(summary("ready", { number: 642, viewerPendingComments: 2 }));
+    expect(store.pendingElsewhere([])).toEqual([{ number: 642, count: 2 }]);
+    // No pull request for the branch any more, then no credential: still known.
+    store.applySummary(summary("no-pull-request"));
+    expect(store.pendingElsewhere([])).toEqual([{ number: 642, count: 2 }]);
+    store.applySummary(summary("no-credential"));
+    expect(store.pendingElsewhere([])).toEqual([{ number: 642, count: 2 }]);
+    // A finished review is known too.
+    store.applySummary(summary("ready", { number: 642, viewerPendingComments: 0 }));
+    expect(store.pendingElsewhere([])).toEqual([]);
+  });
 });
 
 describe("PullRequestStore retry", () => {
@@ -195,6 +213,9 @@ describe("pull request URLs", () => {
   test("?pr=<n> alone names the workspace's pull request repository", () => {
     expect(pullRequestPreviewParams(new URLSearchParams("pr=642"), repo)).toEqual({ repositoryId: repo, number: 642, tab: "conversation" });
     expect(pullRequestPreviewParams(new URLSearchParams("pr=642&tab=files&file=a.md"), repo)).toEqual({ repositoryId: repo, number: 642, tab: "files", file: "a.md" });
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=642&tab=files&thread=T1"), repo)).toEqual({ repositoryId: repo, number: 642, tab: "files", thread: "T1" });
+    // A thread belongs to Files changed.
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=642&thread=T1"), repo)).toEqual({ repositoryId: repo, number: 642, tab: "conversation" });
   });
   test("older URLs that name the repository keep working", () => {
     expect(pullRequestPreviewParams(new URLSearchParams(`repository=${encodeURIComponent("/other")}&pr=7`), repo)?.repositoryId).toBe("/other");

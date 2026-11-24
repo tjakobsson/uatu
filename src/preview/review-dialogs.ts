@@ -19,7 +19,7 @@ import { branchesHtml, mockNotice } from "../github/present";
 import { bodyLengthCheck, type PendingComment, type PullRequestDetail, type ReviewEvent } from "../shared/github-contract";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { anchorLabel, lineExcerpt } from "./diff-review-lines";
-import { draftAlreadySent, prDrafts, type Draft, type DraftLocation } from "./pr-drafts";
+import { draftAlreadySent, draftKey, matchingComments, prDrafts, type Draft, type DraftLocation } from "./pr-drafts";
 
 type Target = { repositoryId: string; number: number };
 
@@ -58,7 +58,7 @@ export function relocateControl(element: HTMLElement): () => HTMLElement | null 
     .find(candidate => !(candidate as HTMLButtonElement).disabled && candidate.checkVisibility()) ?? null;
 }
 
-function openDialog(label: string, options: OpenOptions = {}): { dialog: HTMLDialogElement; body: HTMLElement; close: () => void; requestClose: () => void } {
+function openDialog(label: string, options: OpenOptions = {}): { dialog: HTMLDialogElement; body: HTMLElement; close: () => void; closeTo: (focus: () => void) => void; returnTarget: () => HTMLElement | null; requestClose: () => void } {
   const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
   const relocated = opener ? relocateControl(opener) : () => null;
   const dialog = document.createElement("dialog");
@@ -68,9 +68,12 @@ function openDialog(label: string, options: OpenOptions = {}): { dialog: HTMLDia
   document.body.append(dialog);
   const entry = options.number === undefined ? null : { number: options.number, label, dialog };
   if (entry) openDialogs.add(entry);
+  // closeTo: the action's own focus target replaces the opener.
+  let focusOnClose: (() => void) | null = null;
   dialog.addEventListener("close", () => {
     if (entry) openDialogs.delete(entry);
     dialog.remove();
+    if (focusOnClose) { focusOnClose(); return; }
     // A nested confirmation hands focus back to the dialog under it. An
     // opener that is gone or now disabled gives way to the fallback.
     focusFirst(opener, relocated, () => options.fallbackFocus?.());
@@ -96,8 +99,44 @@ function openDialog(label: string, options: OpenOptions = {}): { dialog: HTMLDia
   });
   // A click on the backdrop (the dialog element itself) closes it.
   dialog.addEventListener("click", event => { if (event.target === dialog) requestClose(); });
+  trackDialogFooter(dialog);
   dialog.showModal();
-  return { dialog, body: dialog.querySelector<HTMLElement>(".gh-dialog-body")!, close: () => dialog.close(), requestClose };
+  const closeTo = (focus: () => void) => {
+    focusOnClose = focus;
+    dialog.close();
+  };
+  // Where the dialog hands focus back to, for an action that chose another
+  // place first: the opener, found again, else the fallback.
+  const returnTarget = () => [opener, relocated(), options.fallbackFocus?.()]
+    .find((candidate): candidate is HTMLElement => !!candidate?.isConnected && !(candidate as HTMLButtonElement).disabled && candidate.checkVisibility()) ?? null;
+  return { dialog, body: dialog.querySelector<HTMLElement>(".gh-dialog-body")!, close: () => dialog.close(), closeTo, returnTarget, requestClose };
+}
+
+// The pinned footer's height, for the dialog's scroll padding (styles.css):
+// a focused control (Tab to Save in an open edit) or one scrolled to never
+// ends up under it. The footer is re-rendered with the dialog's content, so
+// the dialog's own size changes are what is watched.
+export function trackDialogFooter(dialog: HTMLDialogElement): void {
+  if (typeof ResizeObserver !== "function") return;
+  let last = "";
+  const sync = () => {
+    const height = dialog.querySelector<HTMLElement>(".gh-dialog-footer")?.offsetHeight ?? 0;
+    // A pinned head (the review dialog's) counts at the top the same way.
+    const head = dialog.querySelector<HTMLElement>(".gh-dialog-head");
+    const headHeight = head && getComputedStyle(head).position === "sticky" ? head.offsetHeight : 0;
+    if (`${height}:${headHeight}` === last) return;
+    last = `${height}:${headHeight}`;
+    dialog.style.setProperty("--gh-dialog-footer-height", `${height}px`);
+    dialog.style.setProperty("--gh-dialog-head-height", `${headHeight}px`);
+  };
+  const observer = new ResizeObserver(sync);
+  observer.observe(dialog);
+  const mutations = new MutationObserver(() => {
+    sync();
+    for (const part of dialog.querySelectorAll<HTMLElement>(".gh-dialog-footer, .gh-dialog-head")) observer.observe(part);
+  });
+  mutations.observe(dialog, { childList: true, subtree: true });
+  dialog.addEventListener("close", () => { observer.disconnect(); mutations.disconnect(); }, { once: true });
 }
 
 // Closes every pull request dialog whose PR is not among `shown` (the
@@ -126,6 +165,15 @@ export function focusFirst(...candidates: (HTMLElement | null | undefined | (() 
     if (document.activeElement === element) return true;
   }
   return false;
+}
+
+// A text field whose text was put there for the user (a saved draft, the
+// comment being edited) is focused with the caret after that text, never
+// before it: typing goes on where the text ends. Applied where the field is
+// filled, so every later focus (programmatic or a returning dialog) lands
+// there unless the user has moved the caret.
+export function caretAtEnd(field: Pick<HTMLTextAreaElement, "value" | "setSelectionRange">): void {
+  field.setSelectionRange(field.value.length, field.value.length);
 }
 
 // Opens at the top, whatever the focused control's position: on a phone the
@@ -157,18 +205,49 @@ const plural = (count: number, one: string, many: string) => `${count} ${count =
 
 // A short-lived message for outcomes with no inline place to show them: a
 // write refused from a button outside a composer (`alert`), or a confirmation
-// that a dialog's action went through (`status`).
-export function showToast(text: string, role: "alert" | "status" = "status"): void {
+// that a dialog's action went through (`status`). It never takes focus or
+// taps (focus goes to a stable control where the action happened, chosen by
+// the caller), it is said through a live region that is always in the page,
+// and it goes on its timeout. On a short touch screen it is one compact line
+// over the pinned header, clear of the diff (styles.css).
+export function showToast(text: string, role: "alert" | "status" = "status"): HTMLElement {
+  announce(text, role);
   const toast = document.createElement("div");
   toast.className = `pr-toast${role === "alert" ? " is-error" : ""}`;
-  toast.setAttribute("role", role);
+  // The live region says it; the toast is what sighted users read.
+  toast.setAttribute("aria-hidden", "true");
   toast.textContent = text;
-  // Toasts that overlap in time stack upwards instead of covering each other.
+  // Toasts that overlap in time stack instead of covering each other.
   const below = [...document.querySelectorAll<HTMLElement>(".pr-toast")].reduce((sum, other) => sum + other.offsetHeight + 8, 0);
-  if (below) toast.style.marginBottom = `${below}px`;
+  if (below) toast.style.setProperty("--pr-toast-offset", `${below}px`);
   document.body.append(toast);
   // Long messages stay long enough to be read.
-  setTimeout(() => toast.remove(), role === "alert" || text.length > 90 ? 7000 : 3500);
+  setTimeout(() => toast.remove(), toastDuration(text, role));
+  return toast;
+}
+
+export function toastDuration(text: string, role: "alert" | "status"): number {
+  return role === "alert" || text.length > 90 ? 7000 : 3500;
+}
+
+// One polite and one assertive region, created once: a region added with
+// its text already in it is often not read.
+const liveRegions = new Map<"alert" | "status", HTMLElement>();
+export function announce(text: string, role: "alert" | "status" = "status"): void {
+  let region = liveRegions.get(role);
+  if (!region?.isConnected) {
+    region = document.createElement("div");
+    region.className = "sr-only";
+    region.setAttribute("role", role);
+    region.setAttribute("aria-live", role === "alert" ? "assertive" : "polite");
+    region.dataset.prLive = role;
+    document.body.append(region);
+    liveRegions.set(role, region);
+  }
+  // Cleared first, so the same words twice are said twice.
+  region.textContent = "";
+  const target = region;
+  requestAnimationFrame(() => { target.textContent = text; });
 }
 
 // --- Confirmations -----------------------------------------------------------
@@ -237,11 +316,22 @@ export function confirmResetMockData(pending = 0): Promise<boolean> {
   });
 }
 
-// The one name of the review action everywhere it appears (the Pull request
-// pane, the review bar): start one, or finish the one in progress.
+// The one name of the review button everywhere it appears (the Pull request
+// pane, the review bar, the touch tabs row): it opens the review dialog, to
+// review, or to finish the review in progress.
 export function reviewActionLabel(pending: number): string {
-  return pending > 0 ? `Finish review (${pending})` : "Start review";
+  return pending > 0 ? `Finish review (${pending})` : "Review";
 }
+
+// The review dialog's final button names what it publishes.
+export function submitReviewLabel(choice: ReviewEvent | null): string {
+  return choice === "APPROVE" ? "Publish approval" : choice === "REQUEST_CHANGES" ? "Request changes" : choice === "COMMENT" ? "Post comment review" : "Submit review";
+}
+
+// "Add line comments" in the review dialog: the dialog closes (its summary
+// and verdict stay as drafts) and Files changed opens a composer on the first
+// changed line (pull-request-view.ts listens).
+export const ADD_LINE_COMMENTS_EVENT = "uatu:pull-request-add-line-comments";
 
 // What Finish review starts from when it opens: the saved summary, unless it
 // is only whitespace, and the verdict chosen when the dialog was last
@@ -265,7 +355,7 @@ export function unsentReviewDrafts(
   detail: Pick<PullRequestDetail, "viewer" | "pendingReview" | "timeline" | "files" | "threads">,
 ): UnsentReviewDraft[] {
   return drafts.flatMap(({ location, draft }): UnsentReviewDraft[] => {
-    if (draft.text.trim() === "" || draftAlreadySent(location, draft.text, detail)) return [];
+    if (draft.text.trim() === "" || draftAlreadySent(location, draft, detail)) return [];
     if (location.kind === "inline") {
       if (!detail.files.some(file => file.path === location.path)) return [];
       return [{ location, text: draft.text, where: anchorLabel(location) }];
@@ -278,6 +368,23 @@ export function unsentReviewDrafts(
     return [];
   });
 }
+
+// Unsent drafts the reviewer chose to leave out of the review ("Leave it as
+// a draft"): remembered for this page while the draft's text is the text
+// that was left, so closing and reopening Finish review doesn't ask again,
+// and editing the draft does.
+export function createLeftAsDrafts() {
+  const left = new Map<string, string>();
+  return {
+    leave(target: { repositoryId: string; number: number }, draft: Pick<UnsentReviewDraft, "location" | "text">): void {
+      left.set(draftKey(target, draft.location), draft.text);
+    },
+    has(target: { repositoryId: string; number: number }, draft: Pick<UnsentReviewDraft, "location" | "text">): boolean {
+      return left.get(draftKey(target, draft.location)) === draft.text;
+    },
+  };
+}
+const leftAsDrafts = createLeftAsDrafts();
 
 // --- Submit review ---------------------------------------------------------
 
@@ -300,7 +407,7 @@ export function reviewSubmitReason(input: {
   // Unsent drafts not yet added to the review or left as drafts.
   unsent?: number;
 }): string | null {
-  const empty = input.summary.trim() === "" && input.pendingComments === 0;
+  const blank = input.summary.trim() === "";
   if (input.paused) return input.paused;
   if (input.pr.state !== "OPEN") return `#${input.pr.number} is ${input.pr.state.toLowerCase()}; it can no longer be reviewed.`;
   if (input.editing) return `Save or cancel your edit of the comment on ${input.editing} first.`;
@@ -308,9 +415,28 @@ export function reviewSubmitReason(input: {
   const tooLong = bodyLengthCheck(input.summary.length).tooLong;
   if (tooLong) return `Summary: ${tooLong}`;
   if (!input.choice) return "Choose Comment, Approve or Request changes.";
-  if (input.choice === "COMMENT" && empty) return "Write a summary or add a comment first.";
-  if (input.choice === "REQUEST_CHANGES" && empty) return "Say what needs to change.";
+  if (input.choice === "COMMENT" && blank && input.pendingComments === 0) return "Write a summary or add a line comment first.";
+  if (input.choice === "REQUEST_CHANGES" && blank) return "Say what needs to change in the summary.";
   return null;
+}
+
+// What the summary field asks for, following the verdict and the pending
+// count, by the same rule reviewSubmitReason enforces (and GitHub's): a
+// summary is required to request changes, and for a comment review without
+// line comments; it is optional for an approval, and for a comment review
+// that publishes pending comments.
+export function summaryGuidance(choice: ReviewEvent | null, pendingComments: number): { need: "required" | "optional" | null; placeholder: string } {
+  const lines = pendingComments === 1 ? "your pending comment" : `your ${pendingComments} pending comments`;
+  if (choice === "REQUEST_CHANGES") return { need: "required", placeholder: "Say what needs to change (Markdown)." };
+  if (choice === "APPROVE") return { need: "optional", placeholder: "Optional: add a note to your approval (Markdown)." };
+  if (choice === "COMMENT") {
+    return pendingComments > 0
+      ? { need: "optional", placeholder: `Optional: ${lines} ${pendingComments === 1 ? "is" : "are"} published with it (Markdown).` }
+      : { need: "required", placeholder: "Write your comment (Markdown)." };
+  }
+  return { need: null, placeholder: pendingComments > 0
+    ? "Leave a summary (Markdown). Required to request changes."
+    : "Leave a summary (Markdown). Required to comment or request changes; optional to approve." };
 }
 
 export function openSubmitReviewDialog(target: Target, options: DialogOptions = {}): void {
@@ -323,7 +449,7 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
   const editDirty = () => editing !== null && editText !== null && editText !== editOriginal;
   let editWhere = "";
   const editName = () => `your edit of the comment on ${editWhere}`;
-  const { dialog, body, close, requestClose } = openDialog(`Finish your review of #${target.number}`, {
+  const { dialog, body, close, closeTo, returnTarget, requestClose } = openDialog(`Review #${target.number}`, {
     ...options,
     number: target.number,
     // An unsaved edit of a pending comment asks before it goes, as the
@@ -335,15 +461,15 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
       return true;
     },
   });
-  body.innerHTML = loadingHtml(`Finish your review · #${target.number}`);
+  // Its head (the number and title) stays pinned while it scrolls, and on a
+  // short screen the verdicts come right under it (styles.css).
+  dialog.classList.add("gh-review-dialog");
+  body.innerHTML = loadingHtml(`Review · #${target.number}`);
   // The summary outlives the dialog (Escape, a backdrop click, a reload)
   // until the review is submitted; the verdict only while this page shows
   // the pull request (reviewDialogStart).
   const choiceKey = `${target.repositoryId}#${target.number}`;
   let { summary, choice } = reviewDialogStart(prDrafts.get(draftTarget, { kind: "review" }), keptChoices.get(choiceKey) ?? null);
-  // Unsent drafts the reviewer chose to leave out of this review.
-  const leftAsDrafts = new Set<string>();
-  const draftId = (draft: UnsentReviewDraft) => JSON.stringify(draft.location);
   const save = () => prDrafts.set(draftTarget, { kind: "review" }, summary);
   const startEdit = (comment: PendingComment) => {
     editing = comment.id;
@@ -369,7 +495,7 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
     }
     if (editing && !comments.some(comment => comment.id === editing)) stopEdit();
     const unsent = closed ? [] : unsentReviewDrafts([...prDrafts.list(draftTarget, "inline"), ...prDrafts.list(draftTarget, "reply")], detail);
-    const undecided = unsent.filter(draft => !leftAsDrafts.has(draftId(draft)));
+    const undecided = unsent.filter(draft => !leftAsDrafts.has(draftTarget, draft));
     const one = undecided.length === 1;
     const unsentHtml = undecided.length > 0
       ? `<div class="gh-notice gh-notice-warn gh-unsent" role="group" aria-labelledby="gh-unsent-title" data-unsent>
@@ -384,11 +510,13 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         ? `<p class="gh-dialog-note pr-muted" data-unsent-left>${unsent.length === 1 ? "1 unsent comment stays a draft in Files changed; this review doesn't publish it." : `${unsent.length} unsent comments stay drafts in Files changed; this review doesn't publish them.`}</p>`
         : "";
     body.innerHTML = `
-      <h2 class="gh-dialog-title">${comments.length ? "Finish your review" : "Review"} · #${pr.number}</h2>
-      <p class="gh-dialog-sub">${escapeHtml(pr.title)} — ${branchesHtml(pr)} ${mockNotice(detail.mock)}</p>
+      <div class="gh-dialog-head">
+        <h2 class="gh-dialog-title">${comments.length ? "Finish your review" : "Review"} · #${pr.number}</h2>
+        <p class="gh-dialog-sub" title="${escapeHtmlAttribute(pr.title)}">${escapeHtml(pr.title)} — ${branchesHtml(pr)} ${mockNotice(detail.mock)}</p>
+      </div>
       ${unsentHtml}
-      <label class="gh-dialog-label" for="gh-review-summary">Summary</label>
-      <textarea id="gh-review-summary" class="gh-input" rows="3" placeholder="Leave a summary (Markdown). Optional for Approve.">${escapeHtml(summary)}</textarea>
+      <label class="gh-dialog-label" for="gh-review-summary">Summary <span class="gh-dialog-label-need" data-summary-need></span></label>
+      <textarea id="gh-review-summary" class="gh-input" rows="3">${escapeHtml(summary)}</textarea>
       <p class="gh-field-counter" data-summary-counter aria-live="polite" hidden></p>
       <div class="gh-choice-list" role="radiogroup" aria-label="Review type">
         ${REVIEW_CHOICES.map(item => {
@@ -399,8 +527,14 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
           </label>`;
         }).join("")}
       </div>
-      <h3 class="gh-dialog-section">Pending comments · ${comments.length}</h3>
-      ${comments.length === 0 ? `<p class="pr-muted gh-dialog-empty">No pending comments. The review publishes the summary only.</p>` : `<ul class="gh-pending-list">
+      <div class="gh-dialog-section-row">
+        <h3 class="gh-dialog-section">Pending comments · ${comments.length}</h3>
+        <span class="gh-dialog-section-actions">
+          ${comments.length > 0 ? `<button type="button" class="gh-link-button" data-review-discard aria-label="Discard your pending review (${plural(comments.length, "comment", "comments")})">Discard review…</button>` : ""}
+          ${closed ? "" : `<button type="button" class="gh-button" data-review-add-lines title="Close this dialog and comment on lines in Files changed; your summary and verdict are kept">Add line comments</button>`}
+        </span>
+      </div>
+      ${comments.length === 0 ? `<p class="pr-muted gh-dialog-empty">No pending comments. The review publishes the summary only, or add line comments first.</p>` : `<ul class="gh-pending-list">
         ${comments.map(comment => {
           const where = anchorLabel(comment);
           const excerpt = lineExcerpt(detail.files, comment);
@@ -423,14 +557,16 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         <span class="gh-dialog-attribution">As <strong>@${escapeHtml(detail.viewer)}</strong> · publishes ${plural(comments.length, "comment", "comments")}</span>
         <span class="gh-dialog-actions">
           <button type="button" class="gh-button" data-dialog-cancel>Cancel</button>
-          <button type="button" class="gh-button gh-button-primary" data-review-submit>Submit review</button>
+          <button type="button" class="gh-button gh-button-primary" data-review-submit>${escapeHtml(submitReviewLabel(choice))}</button>
         </span>
       </div>`;
 
     const textarea = body.querySelector<HTMLTextAreaElement>("#gh-review-summary")!;
+    for (const field of body.querySelectorAll<HTMLTextAreaElement>("textarea")) caretAtEnd(field);
     const submit = body.querySelector<HTMLButtonElement>("[data-review-submit]")!;
     const reason = body.querySelector<HTMLElement>("[data-submit-reason]")!;
     const summaryCounter = body.querySelector<HTMLElement>("[data-summary-counter]")!;
+    const summaryNeed = body.querySelector<HTMLElement>("[data-summary-need]")!;
     const errorLine = body.querySelector<HTMLElement>(".gh-dialog-error")!;
     const edited = editing ? comments.find(comment => comment.id === editing) : undefined;
     const sync = () => {
@@ -439,7 +575,12 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         editing: edited ? anchorLabel(edited) : null, unsent: undecided.length,
       });
       submit.disabled = why !== null;
+      if (submit.textContent !== "Submitting…") submit.textContent = submitReviewLabel(choice);
       reason.textContent = why ?? "";
+      // The field says what it needs for the chosen verdict.
+      const guidance = summaryGuidance(choice, comments.length);
+      textarea.placeholder = guidance.placeholder;
+      summaryNeed.textContent = guidance.need === null ? "" : `(${guidance.need})`;
       const length = bodyLengthCheck(summary.length);
       summaryCounter.hidden = length.counter === null;
       summaryCounter.textContent = length.counter ?? "";
@@ -480,6 +621,13 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         startEdit(comment);
         render(detail, "editing");
       });
+      // ⌘/Ctrl+Enter saves, as it does in the composers.
+      row.querySelector<HTMLTextAreaElement>("[data-pending-text]")?.addEventListener("keydown", event => {
+        if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+        event.preventDefault();
+        const save = row.querySelector<HTMLButtonElement>("[data-pending-save]");
+        if (save && !save.disabled) save.click();
+      });
       row.querySelector<HTMLTextAreaElement>("[data-pending-text]")?.addEventListener("input", event => {
         editText = (event.target as HTMLTextAreaElement).value;
         prDrafts.set(draftTarget, { kind: "edit", commentId: id }, editText === editOriginal ? "" : editText);
@@ -515,8 +663,22 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         } catch (error) { showError(errorLine, error); }
       });
     }
+    body.querySelector("[data-review-add-lines]")?.addEventListener("click", () => {
+      // The summary is saved as typed and the verdict is kept for this page;
+      // an open edit stays a draft and reopens with the dialog.
+      closeTo(() => document.dispatchEvent(new CustomEvent(ADD_LINE_COMMENTS_EVENT, { detail: { repositoryId: target.repositoryId, number: pr.number } })));
+    });
+    body.querySelector("[data-review-discard]")?.addEventListener("click", async () => {
+      if (!(await confirmDiscardReview(comments.length, pr.number))) return;
+      try {
+        const next = await githubApi.discardReview({ repository: target.repositoryId, number: pr.number });
+        stopEdit();
+        pullRequestStore.applyDetail(next);
+        render(next, "summary");
+      } catch (error) { showError(errorLine, error); }
+    });
     body.querySelector("[data-unsent-leave]")?.addEventListener("click", () => {
-      for (const draft of undecided) leftAsDrafts.add(draftId(draft));
+      for (const draft of undecided) leftAsDrafts.leave(draftTarget, draft);
       render(detail, "unsent");
     });
     body.querySelector<HTMLButtonElement>("[data-unsent-add]")?.addEventListener("click", async event => {
@@ -529,6 +691,8 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         // One at a time, each draft dropped the moment GitHub has it.
         for (const draft of undecided) {
           const location = draft.location;
+          // Marked first, as a composer's send is: a reload mid-way drops it.
+          prDrafts.markSending(draftTarget, location, draft.text, matchingComments(location, draft.text, latest));
           latest = location.kind === "inline"
             ? await githubApi.createThread(where, { headOid: latest.summary.headRefOid, path: location.path, line: location.line, side: location.side, body: draft.text })
             : await githubApi.reply(where, location.threadId, draft.text);
@@ -553,10 +717,17 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
         keptChoices.delete(choiceKey);
         pullRequestStore.applyDetail(next);
         const verdict = REVIEW_CHOICES.find(item => item.event === choice)!.label;
-        close();
-        showToast(`Review submitted on #${pr.number}: ${verdict}${comments.length ? `, ${plural(comments.length, "comment", "comments")} published` : ""}.`);
+        // Every entry point (the pane, the review bar, the tabs row) and
+        // every device: the outcome is announced, and focus
+        // goes back where the dialog came from, or its stable fallback (the
+        // review bar or the tabs row, the pane's review button), without
+        // scrolling the page.
+        closeTo(() => {
+          showToast(`Review submitted on #${pr.number}: ${verdict}${comments.length ? `, ${plural(comments.length, "comment", "comments")} published` : ""}.`);
+          returnTarget()?.focus({ preventScroll: true });
+        });
       } catch (error) {
-        submit.textContent = "Submit review";
+        submit.textContent = submitReviewLabel(choice);
         showError(errorLine, error);
         sync();
       }
@@ -564,7 +735,14 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
     sync();
     // Never onto Submit (it publishes): the choice that is left, else the
     // summary (Cancel on touch, where the keyboard would cover the facts).
-    if (focus === "unsent") focusFirst(body.querySelector<HTMLElement>("[data-unsent-add]"), touchMode() ? body.querySelector<HTMLElement>("[data-dialog-cancel]") : textarea);
+    // After the unsent comments were added or left, the dialog stays where
+    // it was (its head is pinned) instead of jumping to the focused control.
+    if (focus === "unsent") {
+      const scroll = dialog.scrollTop;
+      const next = body.querySelector<HTMLElement>("[data-unsent-add]") ?? (touchMode() ? body.querySelector<HTMLElement>("[data-dialog-cancel]") : textarea);
+      next?.focus({ preventScroll: true });
+      dialog.scrollTop = scroll;
+    }
     else if (focus === "editing") body.querySelector<HTMLTextAreaElement>("[data-pending-text]")?.focus();
     else if (focus === "list") (body.querySelector<HTMLElement>("[data-pending-edit]") ?? textarea).focus();
     // On touch the keyboard would cover the verdicts and the pending list:
@@ -581,7 +759,7 @@ export function openSubmitReviewDialog(target: Target, options: DialogOptions = 
     if (kept) startEdit(kept);
     render(detail, kept ? "editing" : "summary");
   }, error => {
-    body.innerHTML = failureHtml(`Finish your review · #${target.number}`, error);
+    body.innerHTML = failureHtml(`Review · #${target.number}`, error);
     body.querySelector("[data-dialog-cancel]")!.addEventListener("click", close);
   });
 }

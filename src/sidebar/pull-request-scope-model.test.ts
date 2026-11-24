@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { PullRequestDetail } from "../shared/github-contract";
-import { pullRequestFileDecoration, pullRequestFileRows } from "./pull-request-scope-model";
+import { pullRequestFileDecoration, pullRequestFileRows, changeOverviewDifference } from "./pull-request-scope-model";
 
 function detail(): PullRequestDetail {
   const file = (path: string, status: "added" | "modified" | "removed", additions: number, deletions: number) =>
@@ -32,5 +32,19 @@ describe("pullRequestFileDecoration", () => {
     expect(pullRequestFileDecoration(a!).text).toBe("💬1 · +3 −1");
     expect(pullRequestFileDecoration(added!).text).toBe("✎1 · +5 −0");
     expect(pullRequestFileDecoration(a!).title).toBe("3 added, 1 deleted lines, 1 open thread");
+  });
+});
+
+describe("changeOverviewDifference", () => {
+  const base = { branch: "feat/x", picked: null, pullRequest: { number: 7, headRefOid: "abcdef1234" }, dirty: false, commitShort: "abcdef1", compareTarget: "base" as const };
+  test("nothing to say while Change Overview compares what the pull request does", () => {
+    expect(changeOverviewDifference(base)).toBeNull();
+    expect(changeOverviewDifference({ ...base, pullRequest: null })).toBeNull();
+  });
+  test("says why it differs: a pick, another HEAD, uncommitted changes, Since last commit", () => {
+    expect(changeOverviewDifference({ ...base, picked: 9 })).toContain("not the picked pull request #9");
+    expect(changeOverviewDifference({ ...base, commitShort: "1234567" })).toContain("checked-out commit 1234567 isn't the pull request's head abcdef1");
+    expect(changeOverviewDifference({ ...base, dirty: true })).toContain("uncommitted changes");
+    expect(changeOverviewDifference({ ...base, compareTarget: "last-commit" })).toContain("last commit");
   });
 });

@@ -52,7 +52,7 @@ Tasks marked **(provisional: Q1)** or **(provisional: Q2)** depend on the open s
 ## 7. Phase 6: Merge readiness and link-out
 
 - [ ] 7.1 Read merge readiness (D11) into the detail payload: `mergeable`, `mergeStateStatus`, every blocking reason, the allowed merge methods and `deleteBranchOnMerge`, mapped by a pure function. Verify table tests over state, draft, mergeable, `mergeStateStatus`, unknown values and permission, and that no route or service method can merge.
-- [ ] 7.2 Show readiness read-only in the Pull request pane's summary and details and at the end of Conversation, with the pending-comments note and a prominent `Merge on GitHub ↗` link to the pull request. Verify `tests/e2e/pull-request-read.e2e.ts` covers ready, each blocked reason, pending comments, merged and closed, in desktop and touch modes.
+- [ ] 7.2 Show readiness read-only in the Pull request pane's summary and details and at the end of Conversation, with the pending-comments note and a link to the pull request: a prominent `Merge on GitHub ↗` when ready, else a secondary `View on GitHub ↗`. Verify `tests/e2e/pull-request-read.e2e.ts` covers ready, each blocked reason, pending comments, merged and closed, in desktop and touch modes.
 - [ ] 7.3 Document that Uatu shows readiness and links to GitHub for merging, and why. Verify the docs match the shipped copy.
 
 ## 8. Acceptance and handoff

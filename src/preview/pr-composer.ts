@@ -1,13 +1,16 @@
 // The pull request surfaces' one Markdown composer: a textarea, an optional
 // Write / Preview toggle (Preview renders through the session's sanitized
-// Markdown renderer), a submit button that names its action, and an inline
+// Markdown renderer; its tabs are named "Write comment" and "Preview
+// comment", apart from the touch tab bar's Preview), a submit button that names its action, and an inline
 // error line. ⌘/Ctrl+Enter submits.
 //
 // Unsent text is never lost: with a `draft` location the text is saved as it
 // is typed (src/preview/pr-drafts.ts) and restored by the next composer for
 // the same place, a re-render or a reload included; the draft is dropped the
-// moment GitHub takes the text (sendThenClearDraft), and a restored draft
-// GitHub already holds (`alreadySent`) is dropped instead of reopened.
+// moment GitHub takes the text (sendThenClearDraft). A send marks the draft
+// first (markSending), so a restored draft whose send GitHub took before the
+// page went away is dropped instead of reopened (`sentAgainst`); the same
+// words typed again after an earlier comment are kept.
 // Once GitHub takes the text the composer is back on an empty Write tab.
 // Cancel or Escape with changed text asks first. While GitHub can't take
 // writes (`setBlocked`) the reason replaces the note and only sending waits;
@@ -19,16 +22,18 @@ import { errorMessage } from "../github/pull-request-store";
 import { bodyLengthCheck } from "../shared/github-contract";
 import { escapeHtml } from "../shared/html";
 import { detectIsMac } from "../terminal/clipboard";
-import { prDrafts, sendThenClearDraft, type DraftLocation } from "./pr-drafts";
-import { confirmDiscardDraft } from "./review-dialogs";
+import type { PullRequestDetail } from "../shared/github-contract";
+import { draftAlreadySent, matchingComments, prDrafts, sendThenClearDraft, type DraftLocation } from "./pr-drafts";
+import { caretAtEnd, confirmDiscardDraft } from "./review-dialogs";
 
 export type ComposerOptions = {
   placeholder: string;
   // The textarea's accessible name, when the placeholder alone lacks context.
   label?: string;
   submitLabel: string;
-  // Left of the buttons: what submitting does.
-  note?: string;
+  // Left of the buttons: what submitting does. A function is read again on
+  // every refresh(), so the note follows the page (a pending count).
+  note?: string | (() => string);
   tabs?: boolean;
   // Header line above the textarea (inline composers). A node is used as is.
   heading?: string | HTMLElement;
@@ -38,8 +43,9 @@ export type ComposerOptions = {
   draft?: { target: { repositoryId: string; number: number }; location: DraftLocation };
   // Names the draft in the discard prompt ("your comment on a.md:4 (new)").
   draftName?: string;
-  // A restored draft GitHub already holds is dropped, not reopened.
-  alreadySent?: (text: string) => boolean;
+  // The pull request as the page now knows it: what a restored draft is
+  // checked against (draftAlreadySent), and what a send's mark records.
+  sentAgainst?: () => Pick<PullRequestDetail, "viewer" | "pendingReview" | "timeline">;
   // The text to start from when no draft is saved (an edit's current body).
   initialText?: string;
   autofocus?: boolean;
@@ -59,6 +65,8 @@ export type Composer = {
   value: () => string;
   focus: () => void;
   setBlocked: (reason: string | null) => void;
+  // Re-reads a function note.
+  refresh: () => void;
   // Asks before dropping unsent text; resolves true when the composer may go.
   requestClose: () => Promise<boolean>;
 };
@@ -76,6 +84,15 @@ export function tabKeyIndex(index: number, key: string, count: number): number |
   }
 }
 
+// What Preview shows for the text: a message without asking the server
+// (nothing to preview, or past GitHub's length limit), else a render.
+export function previewPlan(text: string): { kind: "empty" | "too-long"; message: string } | { kind: "render" } {
+  if (text.trim() === "") return { kind: "empty", message: "Nothing to preview." };
+  const tooLong = bodyLengthCheck(text.length).tooLong;
+  if (tooLong) return { kind: "too-long", message: `${tooLong} Shorten it to preview.` };
+  return { kind: "render" };
+}
+
 // "⌘↵" on a Mac, "Ctrl+Enter" elsewhere.
 export function submitShortcutLabel(isMac = detectIsMac()): string {
   return isMac ? "⌘↵" : "Ctrl+Enter";
@@ -88,8 +105,8 @@ export function createComposer(options: ComposerOptions): Composer {
   element.innerHTML = `
     ${options.heading ? `<div class="pr-composer-heading"><span data-composer-heading></span><span class="pr-composer-hint">${escapeHtml(hint)}</span></div>` : ""}
     ${options.tabs ? `<div class="pr-composer-tabs" role="tablist" aria-label="Write or preview">
-      <button type="button" role="tab" aria-selected="true" tabindex="0" data-composer-tab="write">Write</button>
-      <button type="button" role="tab" aria-selected="false" tabindex="-1" data-composer-tab="preview">Preview</button>
+      <button type="button" role="tab" aria-selected="true" tabindex="0" data-composer-tab="write" aria-label="Write comment">Write</button>
+      <button type="button" role="tab" aria-selected="false" tabindex="-1" data-composer-tab="preview" aria-label="Preview comment">Preview</button>
       <span class="pr-composer-hint">Markdown · ${escapeHtml(submitShortcutLabel())} ${escapeHtml(options.shortcutAction ?? "to submit")}</span>
     </div>` : ""}
     <textarea class="pr-composer-input" rows="${options.rows ?? 3}" aria-label="${escapeHtml(options.label ?? options.placeholder)}" placeholder="${escapeHtml(options.placeholder)}"></textarea>
@@ -114,19 +131,22 @@ export function createComposer(options: ComposerOptions): Composer {
   const counter = element.querySelector<HTMLElement>(".pr-composer-counter")!;
   const draft = options.draft;
   const initial = options.initialText ?? "";
-  let saved = draft ? prDrafts.text(draft.target, draft.location) : "";
-  if (saved && options.alreadySent?.(saved)) {
-    if (draft) prDrafts.clear(draft.target, draft.location);
+  const restored = draft ? prDrafts.get(draft.target, draft.location) : null;
+  let saved = restored?.text ?? "";
+  if (draft && restored && options.sentAgainst && draftAlreadySent(draft.location, restored, options.sentAgainst())) {
+    prDrafts.clear(draft.target, draft.location);
     saved = "";
   }
   textarea.value = saved || initial;
+  // A restored draft or an edit's text: focus lands after it.
+  caretAtEnd(textarea);
   let busy = false;
   let blocked = options.blockedReason ?? null;
   let error: string | null = null;
 
   const renderNote = () => {
     const length = bodyLengthCheck(textarea.value.length);
-    const text = busy ? "Posting…" : error ?? blocked ?? length.tooLong ?? options.note ?? "";
+    const text = busy ? "Posting…" : error ?? blocked ?? length.tooLong ?? (typeof options.note === "function" ? options.note() : options.note) ?? "";
     note.textContent = text;
     note.classList.toggle("is-error", !busy && (error !== null || blocked !== null || length.tooLong !== null));
     counter.hidden = length.counter === null;
@@ -153,6 +173,9 @@ export function createComposer(options: ComposerOptions): Composer {
     sync();
     const body = textarea.value;
     let sent = false;
+    // This attempt, recorded before it starts: if the page goes away while
+    // GitHub takes it, the reloaded draft is recognised as sent.
+    if (draft && options.sentAgainst) prDrafts.markSending(draft.target, draft.location, body, matchingComments(draft.location, body, options.sentAgainst()));
     try {
       await sendThenClearDraft(() => options.send(body), () => {
         if (draft) prDrafts.clear(draft.target, draft.location);
@@ -163,6 +186,8 @@ export function createComposer(options: ComposerOptions): Composer {
       });
     } catch (failure) {
       error = errorMessage(failure);
+      // Not sent: the draft stays, without the attempt's mark.
+      if (draft) prDrafts.set(draft.target, draft.location, textarea.value);
     } finally {
       busy = false;
       sync();
@@ -190,11 +215,14 @@ export function createComposer(options: ComposerOptions): Composer {
       event.preventDefault();
       void run();
     }
-    if (event.key === "Escape" && options.onCancel) {
-      event.preventDefault();
-      event.stopPropagation();
-      void cancel();
-    }
+  });
+  // Escape anywhere in the composer (the text, its line picker, its tabs and
+  // buttons) cancels it, asking first when there is text.
+  element.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !options.onCancel || event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void cancel();
   });
   element.querySelector("[data-composer-cancel]")?.addEventListener("click", () => void cancel());
 
@@ -232,8 +260,11 @@ export function createComposer(options: ComposerOptions): Composer {
         if (event.detail > 0) textarea.focus();
         return;
       }
-      if (textarea.value.trim() === "") {
-        preview.innerHTML = `<p class="pr-muted">Nothing to preview.</p>`;
+      const plan = previewPlan(textarea.value);
+      if (plan.kind !== "render") {
+        // Nothing to render, or more than GitHub takes: said at once, with
+        // no request.
+        preview.innerHTML = `<p class="pr-muted${plan.kind === "too-long" ? " is-error" : ""}">${escapeHtml(plan.message)}</p>`;
         return;
       }
       preview.innerHTML = `<p class="pr-muted">Rendering…</p>`;
@@ -247,13 +278,14 @@ export function createComposer(options: ComposerOptions): Composer {
   }
   if (options.autofocus) queueMicrotask(() => {
     textarea.focus();
-    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    caretAtEnd(textarea);
   });
   return {
     element,
     textarea,
     value: () => textarea.value,
     focus: () => textarea.focus(),
+    refresh: sync,
     setBlocked: reason => {
       if (reason === blocked) return;
       blocked = reason;

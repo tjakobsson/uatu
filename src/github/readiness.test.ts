@@ -13,7 +13,15 @@ describe("mergeReadinessView", () => {
       reasons: [],
       notes: ["Merges by squash or rebase.", "GitHub deletes the head branch after merging."],
       pendingNote: null,
+      stale: false,
     });
+  });
+
+  test("while GitHub can't be asked, the last verdict is qualified with its time", () => {
+    expect(mergeReadinessView(open, readiness, "09:41")).toMatchObject({ tone: "ready", stale: true, headline: "Last known: ready to merge · as of 09:41" });
+    expect(mergeReadinessView(open, { ...readiness, mergeable: false, blockers: ["a", "b"] }, "09:41"))
+      .toMatchObject({ tone: "blocked", stale: true, headline: "Last known: blocked · as of 09:41", reasons: ["a", "b"] });
+    expect(mergeReadinessView({ ...open, state: "MERGED" }, readiness, "09:41")).toMatchObject({ headline: "Merged on GitHub", stale: false });
   });
 
   test("a blocked pull request names its first reason and counts the rest", () => {

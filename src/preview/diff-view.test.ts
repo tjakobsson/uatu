@@ -9,6 +9,7 @@ import {
   __highlighterLoadedForTests,
   __resetDiffViewCachesForTests,
   diffRenderTier,
+  leadingColumns,
   prepareDiffRender,
   prewarmDiffView,
   renderDocumentDiff,
@@ -266,3 +267,14 @@ function largePatchByBytes(): string {
   const filler = "x".repeat(DIFF_MAX_BYTES);
   return `diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n+${filler}\n`;
 }
+
+describe("leadingColumns", () => {
+  test("counts a wrapped line's indentation, tabs to the next stop", () => {
+    expect(leadingColumns("  expect(x)")).toBe(2);
+    expect(leadingColumns("\tfoo", 4)).toBe(4);
+    expect(leadingColumns("  \tfoo", 4)).toBe(4);
+    expect(leadingColumns(" \t foo", 8)).toBe(9);
+    expect(leadingColumns("foo  ")).toBe(0);
+    expect(leadingColumns("")).toBe(0);
+  });
+});

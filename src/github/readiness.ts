@@ -32,6 +32,9 @@ export type ReadinessView = {
   notes: string[];
   // Set while the viewer has pending review comments on this pull request.
   pendingNote: string | null;
+  // GitHub can't be asked now (rate-limited, unreachable): the verdict is
+  // the last one read, and the headline says so with its time.
+  stale: boolean;
 };
 
 const METHOD_NAMES: Record<MergeMethod, string> = { MERGE: "merge commit", SQUASH: "squash", REBASE: "rebase" };
@@ -48,27 +51,37 @@ export function pendingCommentsNote(pending: number): string | null {
   return `You have ${pending} pending ${pending === 1 ? "comment" : "comments"} — finish your review before merging on GitHub.`;
 }
 
+// `lastKnownAt` ("09:41"): GitHub can't be asked now, so a ready or blocked
+// verdict is qualified in place, "Last known: ready to merge · as of 09:41",
+// never shown as current. A stale "blocked" heading stays short; the reasons
+// are the bullets under it.
 export function mergeReadinessView(
   pr: Pick<PullRequestSummary, "state" | "isCrossRepository" | "headOwner" | "viewerPendingComments">,
   readiness: MergeReadiness | null,
+  lastKnownAt: string | null = null,
 ): ReadinessView {
-  if (pr.state === "MERGED") return { tone: "merged", headline: "Merged on GitHub", reasons: [], notes: [], pendingNote: null };
-  if (pr.state === "CLOSED") return { tone: "closed", headline: "Closed without merging", reasons: [], notes: [], pendingNote: null };
+  if (pr.state === "MERGED") return { tone: "merged", headline: "Merged on GitHub", reasons: [], notes: [], pendingNote: null, stale: false };
+  if (pr.state === "CLOSED") return { tone: "closed", headline: "Closed without merging", reasons: [], notes: [], pendingNote: null, stale: false };
   const pendingNote = pendingCommentsNote(pr.viewerPendingComments);
-  if (!readiness) return { tone: "unknown", headline: "Reading merge readiness…", reasons: [], notes: [], pendingNote };
+  if (!readiness) return { tone: "unknown", headline: lastKnownAt ? "Merge readiness unknown: GitHub can't be reached" : "Reading merge readiness…", reasons: [], notes: [], pendingNote, stale: lastKnownAt !== null };
   const notes = [
     mergeMethodsText(readiness.allowedMethods),
     pr.isCrossRepository
       ? `The head branch lives in ${pr.headOwner}'s fork and stays there.`
       : readiness.deleteBranchOnMerge ? "GitHub deletes the head branch after merging." : "GitHub keeps the head branch after merging.",
   ];
-  if (readiness.mergeable) return { tone: "ready", headline: "Ready to merge on GitHub", reasons: [], notes, pendingNote };
+  const stale = lastKnownAt !== null;
+  if (readiness.mergeable) {
+    return { tone: "ready", headline: stale ? `Last known: ready to merge · as of ${lastKnownAt}` : "Ready to merge on GitHub", reasons: [], notes, pendingNote, stale };
+  }
   const reasons = readiness.blockers.length ? readiness.blockers : ["GitHub hasn't said why."];
+  const first = `${reasons[0]}${reasons.length > 1 ? ` (+${reasons.length - 1} more)` : ""}`;
   return {
     tone: "blocked",
-    headline: `Blocked: ${reasons[0]}${reasons.length > 1 ? ` (+${reasons.length - 1} more)` : ""}`,
+    headline: stale ? `Last known: blocked · as of ${lastKnownAt}` : `Blocked: ${first}`,
     reasons,
     notes,
     pendingNote,
+    stale,
   };
 }

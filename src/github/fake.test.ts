@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { countLineChanges, FakeGithubService } from "./fake";
+import { countLineChanges, FakeGithubService, reviewBlockers } from "./fake";
 import { GithubError } from "./error";
 import { githubServiceFromEnvironment } from "./service";
 
@@ -77,7 +77,7 @@ describe("FakeGithubService", () => {
     expect(detail.summary.reviewDecision).toBe("APPROVED");
     expect(detail.threads.find(thread => thread.id === "thread-checks-source")?.comments.at(-1)?.body).toBe("Thanks");
     const created = detail.threads.find(thread => thread.path === "docs/pr-review.md" && thread.line === 9);
-    expect(created?.lineText).toContain("Click `+`");
+    expect(created?.lineText).toContain("Click or tap a line");
     const review = detail.timeline.at(-1);
     expect(review?.kind === "review" && review.threadIds).toEqual([created!.id]);
   });
@@ -103,9 +103,13 @@ describe("FakeGithubService", () => {
     expect((await refusal(() => service.addReviewThread(REPO, 642, { headOid: head, path: "README.md", line: 999, side: "RIGHT", body: "x" }))).httpStatus).toBe(422);
   });
 
-  test("a review needs a type and, except Approve, a summary or comments; own PRs only take comments", async () => {
+  test("a review needs a type; Request changes a summary, Comment a summary or comments; own PRs only take comments", async () => {
     const { service } = fake();
     expect((await refusal(() => service.submitReview(REPO, 642, { event: "COMMENT", body: " " }))).httpStatus).toBe(422);
+    // GitHub's rule: pending line comments don't stand in for a change request's summary.
+    const head = (await service.pullRequest(REPO, 642)).summary.headRefOid;
+    await service.addReviewThread(REPO, 642, { headOid: head, path: "README.md", line: 1, side: "RIGHT", body: "x" });
+    expect((await refusal(() => service.submitReview(REPO, 642, { event: "REQUEST_CHANGES", body: "" }))).message).toContain("what needs to change");
     expect((await refusal(() => service.submitReview(REPO, 627, { event: "APPROVE", body: "" }))).message).toContain("your own pull request");
   });
 
@@ -128,6 +132,20 @@ describe("FakeGithubService", () => {
     advance(2 * 60_000);
     detail = await service.pullRequest(REPO, 642);
     expect(detail.mergeReadiness).toMatchObject({ mergeable: true, blockers: [] });
+  });
+
+  test("a change request and missing approvals are both listed", async () => {
+    expect(reviewBlockers(["CHANGES_REQUESTED", "APPROVED"], 2, "main")).toEqual([
+      "Changes were requested; that reviewer must approve.",
+      "main requires 2 approving reviews.",
+    ]);
+    expect(reviewBlockers(["APPROVED", "APPROVED"], 2, "main")).toEqual([]);
+    expect(reviewBlockers(["CHANGES_REQUESTED", "APPROVED", "APPROVED"], 2, "main")).toEqual(["Changes were requested; that reviewer must approve."]);
+    // Through the fake: Request changes keeps the approvals blocker.
+    const { service } = fake();
+    await service.submitReview(REPO, 642, { event: "REQUEST_CHANGES", body: "Please split this." });
+    const detail = await service.pullRequest(REPO, 642);
+    expect(detail.mergeReadiness.blockers.slice(0, 2)).toEqual(["Changes were requested; that reviewer must approve.", "main requires 2 approving reviews."]);
     expect(detail.summary.state).toBe("OPEN");
     expect("merge" in service).toBe(false);
   });

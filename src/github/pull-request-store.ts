@@ -55,8 +55,10 @@ export type PullRequestPreviewParams = {
   repositoryId: string;
   number: number;
   tab?: "conversation" | "files";
-  // A file to scroll to on Files changed.
+  // A file to scroll to on Files changed, or a review thread to scroll to
+  // and focus there (it wins over a file).
   file?: string;
+  thread?: string;
 };
 
 // `?pr=<n>` names a pull request of the workspace's pull request repository
@@ -70,7 +72,8 @@ export function pullRequestPreviewParams(params: URLSearchParams, defaultReposit
   if (!repositoryId || !pr || !/^\d{1,9}$/.test(pr) || Number(pr) < 1) return null;
   const tab = params.get("tab") === "files" ? "files" : "conversation";
   const file = tab === "files" ? params.get("file") ?? undefined : undefined;
-  return { repositoryId, number: Number(pr), tab, ...(file ? { file } : {}) };
+  const thread = tab === "files" ? params.get("thread") ?? undefined : undefined;
+  return { repositoryId, number: Number(pr), tab, ...(file ? { file } : {}), ...(thread ? { thread } : {}) };
 }
 
 export const FOCUS_REFRESH_MS = 15_000;
@@ -90,6 +93,10 @@ export class PullRequestStore {
   // The viewer's pending comment counts from the last open-PR list, for the
   // pull requests whose detail this page hasn't read.
   private readonly listedPending = new Map<number, number>();
+  // The last pending count each summary reported for its pull request: kept
+  // when a later summary no longer names it (no pull request for the branch,
+  // no credential), so the reminder stays where the count is known.
+  private readonly knownPending = new Map<number, number>();
   // Page-local: the URL's `?pr=` restores it on reload and Back/Forward.
   private selected: number | null = null;
   private readonly listeners = new Set<Listener>();
@@ -159,6 +166,7 @@ export class PullRequestStore {
     this.state = { ...this.state, repositoryId: repository?.id ?? null, branch: repository?.metadata.branch ?? null };
     if (repositoryChanged) {
       this.details.clear();
+      this.knownPending.clear();
       // The first snapshot keeps a pick the URL made during boot.
       if (previousRepositoryId !== null) this.selected = null;
       this.state = { ...this.state, summary: null, enabled: null, error: null };
@@ -176,7 +184,7 @@ export class PullRequestStore {
   // The viewer's pending review comments on pull requests other than
   // `except`, from the details read so far and the last open-PR list.
   pendingElsewhere(except: readonly (number | null)[]): { number: number; count: number }[] {
-    const counts = new Map(this.listedPending);
+    const counts = new Map([...this.knownPending, ...this.listedPending]);
     for (const [number, detail] of this.details) counts.set(number, detail.pendingReview?.comments.length ?? 0);
     const branch = this.state.summary?.pullRequest;
     if (branch) counts.set(branch.number, branch.viewerPendingComments);
@@ -241,6 +249,7 @@ export class PullRequestStore {
   // pull request, so only a real pick of another pull request scopes.
   applySummary(summary: GithubSummary): void {
     if (summary.pullRequest && this.selected === summary.pullRequest.number) this.selected = null;
+    if (summary.pullRequest) this.knownPending.set(summary.pullRequest.number, summary.pullRequest.viewerPendingComments);
     const retry = retryAfterSummary(this.state.retry, this.state.summary?.status ?? null, summary.status);
     this.state = { ...this.state, enabled: true, summary, loading: false, error: null, retry };
   }
@@ -259,6 +268,7 @@ export class PullRequestStore {
   // it is the summary's pull request (pending count, reviewers, state).
   applyDetail(detail: PullRequestDetail): void {
     this.details.set(detail.summary.number, detail);
+    this.knownPending.set(detail.summary.number, detail.pendingReview?.comments.length ?? 0);
     if (this.state.summary?.pullRequest?.number === detail.summary.number) {
       this.state = { ...this.state, summary: { ...this.state.summary, pullRequest: detail.summary } };
     }

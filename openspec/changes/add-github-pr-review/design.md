@@ -202,6 +202,7 @@ Rules:
 
 - New inline threads require the pending review's `commit.oid` to equal the current head. A pending review started on an older commit must be submitted or discarded first; replies are still allowed. GitHub's exact anchoring of new threads in an older-commit review is not something Uatu should depend on.
 - Own PR: Approve and Request changes are disabled when `viewer.login == author.login` (GitHub refuses them anyway).
+- Summary: GitHub requires a body for Request changes, and for Comment unless the review carries line comments; Approve needs none. The review dialog, its field's `(required)` / `(optional)` guidance and placeholder, and the fake enforce that one rule.
 - Body limit: 65,536 characters, checked before calling GitHub.
 - Concurrency: one write at a time per PR in the child. Overlapping submits answer 409.
 
@@ -219,7 +220,7 @@ Uatu does not merge (owner decision). On 2026-10-01 GitHub made its async merge 
 
 - **Readiness** comes from the detail payload: `repository { mergeCommitAllowed, squashMergeAllowed, rebaseMergeAllowed, deleteBranchOnMerge }` and `pullRequest { state, isDraft, mergeable, mergeStateStatus }`, normalized to `mergeReadiness { mergeable, blockers[], allowedMethods[], deleteBranchOnMerge }`. `blockers` lists every reason GitHub would refuse now (draft, conflicts, changes requested, required reviews, failing or running required checks, behind the base, mergeability still computing), most important first. Unknown `mergeStateStatus` values map to a generic blocker, never a throw.
 - **Shown** read-only in two places: the Pull request pane's always-visible summary line (checks count and the first blocker, with a count of the rest) and its details (every reason, the merge methods, whether GitHub deletes the head branch), and at the end of Conversation, where GitHub has its merge box. When the viewer has pending review comments, readiness says `You have N pending comments — finish your review before merging on GitHub.`
-- **Merging** is a prominent `Merge on GitHub ↗` link to the pull request's GitHub page, highlighted when it is ready. No route, service method or dialog merges, deletes a branch on GitHub, or touches a local branch, remote-tracking ref or worktree.
+- **Merging** is a link to the pull request's GitHub page: a prominent `Merge on GitHub ↗` when it is ready, otherwise a secondary `View on GitHub ↗` (merging is blocked, so the link is for reading). No route, service method or dialog merges, deletes a branch on GitHub, or touches a local branch, remote-tracking ref or worktree.
 - *Revisit* merging from Uatu on the async merge API once GitHub Enterprise Server has it and merge queues and stacks are understood there.
 
 ### D12. Opening any PR as a Hub worktree

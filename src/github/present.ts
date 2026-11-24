@@ -87,6 +87,18 @@ export function externalLink(href: string, label: string, className = "gh-extern
   return `<a class="${className}" href="${escapeHtmlAttribute(href)}" target="_blank" rel="noopener noreferrer"${title ? ` title="${escapeHtmlAttribute(title)}"` : ""}>${escapeHtml(label)} <span aria-hidden="true">↗</span>${NEW_TAB_NOTE}</a>`;
 }
 
+// The pull request's link to GitHub where merging would be: "Merge on
+// GitHub ↗" as the primary (merge-green) action only while GitHub says it
+// can merge; otherwise a secondary "View on GitHub ↗", since merging is
+// blocked (or not known) and the link is for reading. uatu never merges.
+export function mergeLinkLabel(ready: boolean): string {
+  return ready ? "Merge on GitHub" : "View on GitHub";
+}
+export function mergeLinkHtml(href: string, ready: boolean, extraClass = ""): string {
+  return externalLink(href, mergeLinkLabel(ready), `gh-button${ready ? " gh-button-merge" : ""}${extraClass ? ` ${extraClass}` : ""}`,
+    ready ? "Merging happens on GitHub, which handles merge queues, rulesets and stacked pull requests" : "Merging is blocked; GitHub shows why");
+}
+
 export const NEW_TAB_NOTE = `<span class="sr-only"> (opens in a new tab)</span>`;
 
 // The "this is fake" label every surface shows while the fake answers.
