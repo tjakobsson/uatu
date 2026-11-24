@@ -119,29 +119,10 @@ export const LIVE_KEEPALIVE_MS = 15_000;
 export const LIVE_OPEN_FRAME = ": open\n\n";
 export const LIVE_KEEPALIVE_FRAME = ": keepalive\n\n";
 
-// The child-side internal routes the hub subscribes to (hub-to-child
-// protocol; never proxied to browsers). Paths are relative to the child's
-// base path.
-export const CHILD_DOCUMENT_EVENTS_PATH = "/api/events";
-export const CHILD_INVENTORY_EVENTS_PATH = "/api/chat/conversations/events";
-export function childConversationEventsPath(conversationId: string): string {
-  return `/api/chat/conversations/${encodeURIComponent(conversationId)}/events`;
-}
-// Workspace activity summary stream (task 1.1): opening comment, then
-// `event: activity` with internal data {working, awaiting, unresolved} on every change (the first
-// one immediately), 15 s keepalives.
-export const CHILD_ACTIVITY_PATH = "/api/activity";
-export const CHILD_NOTIFICATIONS_PATH = "/api/chat/notifications/events";
-export const CHILD_ACTIVITY_EVENT = "activity";
-// The child's conversation stream opens with this event, whose data names
-// the cursor its live events follow: `{ "cursor": "<replay cursor>" }`. A
-// subscriber that asked for no cursor — the hub's broker opening a shared
-// stream — learns where the stream begins from it.
-export const CHILD_CONVERSATION_OPEN_EVENT = "open";
-
-// Child-response metadata, never a public event/body field. The native event
-// at this cursor is followed by a separate, same-cursor visual resync.
-export const CHILD_CONVERSATION_REPLAY_RESYNC_HEADER = "x-uatu-chat-replay-resync-cursor";
+// The internal session routes the Hub's broker subscribes to, their event
+// names and the replay-resync header are private to the Hub and the workspace
+// session; they are declared in src/session-contract/, which the browser
+// never imports.
 
 export function liveSubscriptionsPath(streamId: string): string {
   return `${LIVE_STREAM_PATH}/${encodeURIComponent(streamId)}/subscriptions`;

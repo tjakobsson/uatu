@@ -5,6 +5,8 @@
 
 import crypto from "node:crypto";
 
+import { PAGE_ORIGIN_HEADER } from "../session-contract/headers";
+
 export const TERMINAL_COOKIE_PREFIX = "uatu_term";
 // One-year Max-Age. The cookie expires earlier in practice — every uatu
 // restart rotates the in-memory token, leaving the cookie stale until the
@@ -83,13 +85,6 @@ export function readCookie(header: string | null, name: string): string {
   return "";
 }
 
-// Same-origin GETs never carry an Origin header (browsers only attach it to
-// WebSocket upgrades, POSTs, and cross-origin requests), so the terminal
-// client ships the page's origin in this custom header when probing — the
-// only way the probe can see the address the browser is REALLY on when an
-// intermediary rewrites Host. Client-asserted, but the probe is diagnostic
-// only: lying buys a wrong diagnosis of your own connection, nothing more.
-export const PAGE_ORIGIN_HEADER = "X-Uatu-Page-Origin";
 
 // GET /api/auth probe: three verdicts, mirroring the WebSocket upgrade gate
 // so the client can classify a close-before-open failure (the browser

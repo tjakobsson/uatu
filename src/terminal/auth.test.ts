@@ -1,7 +1,7 @@
+import { PAGE_ORIGIN_HEADER } from "../session-contract/headers";
 import { describe, expect, it } from "bun:test";
 
 import {
-  PAGE_ORIGIN_HEADER,
   TERMINAL_COOKIE_MAX_AGE,
   TERMINAL_COOKIE_PREFIX,
   authProbeResponse,

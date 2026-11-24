@@ -17,7 +17,7 @@ import { AttachmentStoreError } from "../chat/attachment-store";
 import { OperationOutcomeUnknownError, BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { createWatchedVisualReader, VISUAL_CSP } from "../chat/visual-store";
 import { encodeReplayCursor } from "../chat/replay";
-import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
+import { type NotificationFrame } from "../chat/notification-feed";
 import { WorkerEvidenceError } from "../chat/worker-dismissal-evidence";
 import { HistoryChangedError } from "../chat/history-reuse";
 import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
@@ -40,11 +40,22 @@ import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { joinBasePath, stripBasePath } from "../shared/base-path";
 import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
-import { CHILD_POLICY_HEADER, CHAT_ACTION_BODY_BYTES, isChildPolicyAction, type readChildPolicyBootstrap } from "../hub/child-policy";
-import { CHAT_OPERATION_RECEIPT_HEADER, validChatOperationReceipt } from "../shared/chat-operation-receipt";
+import { CHAT_OPERATION_RECEIPT_HEADER, SESSION_REPLAY_RESYNC_HEADER, validChatOperationReceipt } from "../session-contract/headers";
+import {
+  SESSION_ACCOUNTS_CHANGED_PATH,
+  SESSION_ACTIVITY_EVENT,
+  SESSION_ACTIVITY_PATH,
+  SESSION_CONVERSATION_EVENTS_ROUTE,
+  SESSION_CONVERSATION_OPEN_EVENT,
+  SESSION_DOCUMENT_EVENTS_PATH,
+  SESSION_INVENTORY_EVENTS_PATH,
+  SESSION_NOTIFICATIONS_PATH,
+  SESSION_POLICY_PROOF_PATH,
+  SESSION_WORKER_EVIDENCE_ROUTE,
+} from "../session-contract/paths";
+import { CHILD_POLICY_HEADER, CHAT_ACTION_BODY_BYTES, isChildPolicyAction, type readChildPolicyBootstrap } from "../session-contract/policy";
 import type { ChatActionContext } from "../chat/types";
 import { SideGenerationUnsupportedError } from "../chat/adapter";
-import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
 import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
@@ -175,7 +186,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
       : buildE2ERoutes(deps, p);
 
   return {
-    [p("/api/internal/hub-policy-proof")]: {
+    [p(SESSION_POLICY_PROOF_PATH)]: {
       POST: async (request: Request) => {
         if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response(null, { status: 403 });
         if (!deps.childPolicy || !request.body) return new Response(null, { status: 503 });
@@ -443,7 +454,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         }
       },
     },
-    [p("/api/events")]: {
+    [p(SESSION_DOCUMENT_EVENTS_PATH)]: {
       GET: (request: Request) => {
         const context = requestContext(request);
         if (context instanceof Response) return context;
@@ -616,7 +627,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     // title, or count crosses here. The current summary is sent at once, then
     // again only when it changes. No stream metrics: the hub's broker holds
     // one of these per workspace and owns that picture.
-    [p(CHILD_ACTIVITY_PATH)]: {
+    [p(SESSION_ACTIVITY_PATH)]: {
       GET: async (request: Request) => {
         const rejected = authenticated(request);
         if (rejected) return rejected;
@@ -662,7 +673,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   const data = JSON.stringify({ working: summary.working === true, awaiting: summary.awaiting === true, unresolved: summary.unresolved === true });
                   if (data === sent) continue;
                   sent = data;
-                  controller.enqueue(encoder.encode(`event: ${CHILD_ACTIVITY_EVENT}\ndata: ${data}\n\n`));
+                  controller.enqueue(encoder.encode(`event: ${SESSION_ACTIVITY_EVENT}\ndata: ${data}\n\n`));
                   return;
                 }
               } catch {
@@ -689,7 +700,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         }
       },
     },
-    [p(CHILD_NOTIFICATIONS_PATH)]: {
+    [p(SESSION_NOTIFICATIONS_PATH)]: {
       GET: (request: Request) => {
         const rejected = authenticated(request);
         if (rejected) return rejected;
@@ -750,7 +761,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     // Hub → child only: a login change made through the Hub's Agent accounts.
     // Behind the mutation gate like retry, since it replays a removal on the
     // workspace's own agent server.
-    [p("/api/chat/accounts-changed")]: {
+    [p(SESSION_ACCOUNTS_CHANGED_PATH)]: {
       POST: async (request: Request) => {
         const rejected = mutationGate(request);
         if (rejected) return rejected;
@@ -817,7 +828,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     },
     // Static route must precede the conversation identity route so "events"
     // is never interpreted as a conversation id.
-    [p("/api/chat/conversations/events")]: {
+    [p(SESSION_INVENTORY_EVENTS_PATH)]: {
       GET: async (request: Request) => {
         const rejected = authenticated(request);
         if (rejected) return rejected;
@@ -898,7 +909,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         }
       },
     },
-    [p("/api/chat/conversations/:conversationId/worker-evidence")]: {
+    [p(SESSION_WORKER_EVIDENCE_ROUTE)]: {
       GET: async (request: RouteRequest) => {
         const rejected = authenticated(request);
         if (rejected) return rejected;
@@ -935,7 +946,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return run(() => deps.chatService.renameConversation(id, requestId, title));
       }),
     },
-    [p("/api/chat/conversations/:conversationId/events")]: {
+    [p(SESSION_CONVERSATION_EVENTS_ROUTE)]: {
       GET: async (request: RouteRequest) => {
         const rejected = authenticated(request);
         if (rejected) return rejected;
@@ -987,7 +998,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
               // hub's broker opening a shared stream — learns where the stream begins,
               // so it can catch up a later subscriber whose cursor is older instead of
               // skipping it past the gap.
-              controller.enqueue(encoder.encode(`event: ${CHILD_CONVERSATION_OPEN_EVENT}\ndata: ${JSON.stringify({ cursor: snapshot.cursor })}\n\n`));
+              controller.enqueue(encoder.encode(`event: ${SESSION_CONVERSATION_OPEN_EVENT}\ndata: ${JSON.stringify({ cursor: snapshot.cursor })}\n\n`));
             },
             async pull(controller) {
               try {
@@ -1026,7 +1037,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
               "x-accel-buffering": "no",
               // Child transport metadata only: no public JSON/event change.
               // The hint cannot name another snapshot or conversation cursor.
-              ...(replayVisualResyncCursor === snapshot.cursor ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: replayVisualResyncCursor } : {}),
+              ...(replayVisualResyncCursor === snapshot.cursor ? { [SESSION_REPLAY_RESYNC_HEADER]: replayVisualResyncCursor } : {}),
             },
           });
         } catch (error) {
@@ -1585,10 +1596,9 @@ function buildE2ERoutes(deps: E2ERouteDeps, p: (path: string) => string) {
       // only by Bun.serve's hostname binding; not a real auth bypass — only
       // present in the e2e build.
       GET: () => {
-        const session = getSession();
         return Response.json({
-          token: session.getTerminalToken(),
-          enabled: session.isTerminalEnabled(),
+          token: deps.getWorkspaceCredential(),
+          enabled: getSession().isTerminalEnabled(),
         });
       },
     },

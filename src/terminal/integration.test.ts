@@ -5,6 +5,7 @@
 // NOT exercise the PTY backend itself — `terminal-backend.test.ts` covers
 // that — so these tests don't require node-pty to spawn shells.
 
+import { PAGE_ORIGIN_HEADER } from "../session-contract/headers";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import {
@@ -13,7 +14,6 @@ import {
   formatTerminalCookie,
   hasValidTerminalCredentials,
   isAllowedOrigin,
-  PAGE_ORIGIN_HEADER,
   terminalCookieName,
 } from "./auth";
 import { handleTerminalSessionsRoute } from "./sessions-route";

@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { closeSync, writeSync } from "node:fs";
-import { createChildPolicyAuthority } from "./child-policy";
-import { sendChildPolicyDescriptor } from "./child-policy-bootstrap";
+import { createChildPolicyAuthority } from "./policy";
+import { sendChildPolicyDescriptor } from "./bootstrap";
 
 test("private descriptor is consumed and closed before tool descendants while lifetime stdin stays open", async () => {
   const authority = createChildPolicyAuthority("project", "/s/project/");
-  const modulePath = new URL("./child-policy-bootstrap.ts", import.meta.url).pathname;
+  const modulePath = new URL("./bootstrap.ts", import.meta.url).pathname;
   const script = `import {consumeChildPolicyDescriptor} from ${JSON.stringify(modulePath)};
     import {fstatSync} from 'node:fs'; const before=fstatSync(3); let closed=false;
     const policy = await consumeChildPolicyDescriptor(3, 1000);
@@ -35,7 +35,7 @@ test("an old or non-consuming child never receives secret material", async () =>
 });
 
 test("missing, malformed and timed-out private bootstrap returns unavailable without printing payloads", async () => {
-  const modulePath = new URL("./child-policy-bootstrap.ts", import.meta.url).pathname;
+  const modulePath = new URL("./bootstrap.ts", import.meta.url).pathname;
   for (const input of [null, "malformed-private-data\n", ""]) {
     const child = Bun.spawn([process.execPath, "-e", `import {consumeChildPolicyDescriptor} from ${JSON.stringify(modulePath)}; console.log((await consumeChildPolicyDescriptor(3, 30)) === null ? 'unavailable' : 'trusted');`], {
       stdio: ["pipe", "pipe", "pipe", ...(input === null ? [] : ["socket-fd" as const])],

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { testRunningSession } from "../../tests/contracts/session-link";
 import { hashPassword, hubCookieName, HubSessionStore } from "./auth";
 import type { RunningSession, SessionBackend } from "./backend";
 import type { HubConfig } from "./config";
@@ -179,18 +180,16 @@ const backend: SessionBackend = {
     backendControl.starts.push(workspace.id);
     if (backendControl.gate) await backendControl.gate;
     if (!existsSync(workspace.path)) backendControl.startedInMissingFolder = true;
-    return {
+    return testRunningSession({
       workspaceId: workspace.id,
-      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath,
-      endpoint: { hostname: "127.0.0.1", port: 1 },
+      port: 1,
       token: null,
-      exited: new Promise<number | null>(() => {}),
       async stop() {
         if (backendControl.stopFailures.has(workspace.id)) throw new Error("simulated stop failure");
         await backendControl.onStop?.(workspace.id);
       },
-    };
+    });
   },
 };
 

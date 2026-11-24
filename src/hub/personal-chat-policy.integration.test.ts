@@ -17,7 +17,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 async function fixture(trusted = true) {
   const root = await mkdtemp(path.join(os.tmpdir(), "uatu-personal-policy-"));
   const script = path.join(root, "child.ts");
-  const bootstrapModule = new URL("./child-policy-bootstrap.ts", import.meta.url).pathname;
+  const bootstrapModule = new URL("../session-contract/bootstrap.ts", import.meta.url).pathname;
   await writeFile(script, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
     const policy = ${trusted ? "await consumeChildPolicyDescriptor()" : "null"}; let n=0;
     const server=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){

@@ -1,5 +1,6 @@
+import { SESSION_NOTIFICATIONS_PATH } from "../session-contract/paths";
 import { createHash, randomUUID } from "node:crypto";
-import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
+import type { NotificationFrame } from "../chat/notification-feed";
 import { NOTIFICATION_HOLD_LIMIT_MS, NOTIFICATION_LIFETIME_MS, type AgentNotification } from "../chat/notifications";
 import type { LiveUpstreamSource } from "./live-broker";
 import { SseFrameParser } from "./live-sse";
@@ -299,7 +300,7 @@ export class HubNotifications {
     while (!signal.aborted) {
       try {
         const cursor = this.options.store.snapshot().cursors[workspaceId];
-        const response = await this.options.source.open({ workspaceId, path: `${CHILD_NOTIFICATIONS_PATH}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, signal });
+        const response = await this.options.source.open({ workspaceId, path: `${SESSION_NOTIFICATIONS_PATH}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, signal });
         if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error("notification feed unavailable"); }
         const reader = response.body.getReader();
         const parser = new SseFrameParser();

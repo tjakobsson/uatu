@@ -1,18 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession } from "./backend";
 import { createAccountChangeNotifier } from "./agent-account-propagation";
 
 function running(workspaceId: string, port: number): RunningSession {
-  return {
+  return testRunningSession({
     workspaceId,
-    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-    basePath: `/s/${workspaceId}/`,
-    endpoint: { hostname: "127.0.0.1", port },
+    port,
     token: `tok-${workspaceId}`,
-    exited: new Promise<number | null>(() => undefined),
-    stop: async () => undefined,
-  };
+  });
 }
 
 describe("account change notification", () => {

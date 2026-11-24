@@ -1,46 +1,45 @@
-// Reverse-proxy plumbing between the hub's public origin and a session
-// child's loopback endpoint. Three transports cross here:
+// Reverse-proxy plumbing between the hub's public origin and a workspace
+// session's loopback endpoint. Three transports cross here:
 //
 //   - plain HTTP: streamed request/response bodies, no buffering
 //   - SSE: same path — the response body is a stream we never accumulate
 //   - WebSocket: the hub accepts the browser-side upgrade and opens its own
-//     client socket to the child, piping messages and close codes both ways
+//     client socket to the session, piping messages and close codes both ways
 //
-// The child was spawned with --base-path /s/<id>/, so proxied paths are
+// The session was started with --base-path /s/<id>/, so proxied paths are
 // forwarded VERBATIM — no stripping. The hub is a trusted intermediary: it
 // has already authenticated the browser and validated its Origin against the
 // hub's own host, so it forwards loopback-shaped Host/Origin headers and the
-// child's localhost origin gate holds without modification (design D6).
+// session's localhost origin gate holds without modification (design D6).
 //
-// Token brokering (design D6): the child's per-session token is appended as
-// the `t` query parameter on proxied requests, so the child's terminal
-// credential checks pass without the token ever reaching a browser. The
-// child ignores `t` on routes that don't read it.
+// Addressing and trust come from the session link (src/session-contract/):
+// it builds the session URL with the Hub-held token applied as `t`, so the
+// session's credential checks pass without the token ever reaching a
+// browser, shapes the forwarded headers, and signs chat policy. What the
+// proxy does with a path is the contract's classification.
 
 import type { ServerWebSocket } from "bun";
-import { CHAT_OPERATION_RECEIPT_HEADER } from "../shared/chat-operation-receipt";
+import { CHAT_OPERATION_RECEIPT_HEADER, HOP_BY_HOP_HEADERS } from "../session-contract/headers";
+import type { SessionLink } from "../session-contract/link";
+import { classifySessionRequest, sessionSuffix, snapshotConversationSegment } from "../session-contract/paths";
+import { CHAT_ACTION_BODY_BYTES, CHILD_POLICY_HEADER, type VerifiedChatPolicy } from "../session-contract/policy";
 import { HubOperationReceipts } from "./operation-receipts";
 
 import type { RunningSession } from "./backend";
-import { signSessionChatPolicy } from "./backend";
-import { CHAT_ACTION_BODY_BYTES, CHILD_POLICY_HEADER, isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
 
 // No principal or policy crosses this degraded channel. Tokens are operation
 // identifiers only, unguessable by another Hub account or workspace caller.
-// Per-running-child keys live only in this Hub's memory, never in credentials.
-const degradedReceipts = new WeakMap<RunningSession, HubOperationReceipts>();
-function degradedReceiptState(session: RunningSession) {
-  let state = degradedReceipts.get(session);
+// Per-running-session keys live only in this Hub's memory, never in
+// credentials. Hub state rather than contract, so it is kept here, keyed by
+// the session's link.
+const degradedReceipts = new WeakMap<SessionLink, HubOperationReceipts>();
+function degradedReceiptState(link: SessionLink) {
+  let state = degradedReceipts.get(link);
   if (!state) {
     state = new HubOperationReceipts();
-    degradedReceipts.set(session, state);
+    degradedReceipts.set(link, state);
   }
   return state;
-}
-
-export function isLocalDiscardAction(method: string, pathname: string, basePath: string): boolean {
-  return method === "POST" && pathname.startsWith(basePath)
-    && /^api\/chat\/conversations\/[^/]+\/queue\/[^/]+\/discard-unconfirmed$/.test(pathname.slice(basePath.length));
 }
 
 // Structural subset of Bun.Server the bridge needs for the handshake.
@@ -48,86 +47,18 @@ export type UpgradableServer = {
   upgrade(request: Request, options?: { data?: unknown }): boolean;
 };
 
-// Hop-by-hop headers never forwarded in either direction (RFC 9110 §7.6.1).
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "host",
-]);
-
-export function childOrigin(session: RunningSession): string {
-  return `http://${session.endpoint.hostname}:${session.endpoint.port}`;
-}
-
-// Headers for a request the HUB ITSELF originates against a child (the live
-// broker's upstream subscriptions): the same loopback shaping a proxied
-// browser request gets, without a browser request to copy from. The child's
-// localhost origin gate sees its own origin; identity encoding keeps the
-// child's SSE bytes as-is.
-export function childRequestHeaders(session: RunningSession): Headers {
-  const headers = new Headers();
-  headers.set("host", `${session.endpoint.hostname}:${session.endpoint.port}`);
-  headers.set("accept", "text/event-stream");
-  headers.set("accept-encoding", "identity");
-  headers.set("origin", childOrigin(session));
-  return headers;
-}
-
-// Builds the child-side URL for a proxied request: same (prefixed) path and
-// query against the loopback endpoint, with the brokered token applied.
-// Applied means OVERWRITTEN, not merely filled in: a browser-supplied `?t=`
-// is at best a stale value the SPA captured earlier and at worst arbitrary —
-// preserving it would make the child reject credentials the hub is supposed
-// to broker, stranding the user at a token prompt for a token that is never
-// exposed to them.
-export function childUrlFor(session: RunningSession, requestUrl: URL): URL {
-  const target = new URL(requestUrl.pathname + requestUrl.search, childOrigin(session));
-  if (session.token) {
-    target.searchParams.set("t", session.token);
-  }
-  return target;
-}
-
-function forwardedHeaders(request: Request, session: RunningSession): Headers {
-  const headers = new Headers();
-  for (const [name, value] of request.headers) {
-    if (HOP_BY_HOP.has(name.toLowerCase())) continue;
-    if (name.toLowerCase().startsWith("x-uatu-hub-")) continue;
-    headers.set(name, value);
-  }
-  headers.set("host", `${session.endpoint.hostname}:${session.endpoint.port}`);
-  // Identity encoding from the child: the loopback hop gains nothing from
-  // compression, and an unencoded upstream body means its Content-Length
-  // stays truthful after fetch() — which we then pass through, so fronting
-  // proxies (tailscale serve, Caddy, nginx) see length-known responses
-  // instead of unknown-length chunked streams.
-  headers.set("accept-encoding", "identity");
-  // Loopback-shape the Origin so the child's localhost origin gate holds;
-  // the hub validated the caller's real Origin (when present) before
-  // proxying. Injected even when absent: browsers always send Origin on
-  // cross-origin and mutating requests, so an Origin-less request is a
-  // native client the hub has already authenticated — mirroring the
-  // WebSocket bridge, which injects the loopback Origin unconditionally.
-  headers.set("origin", childOrigin(session));
-  return headers;
-}
-
 export async function proxyHttp(request: Request, session: RunningSession, policy?: VerifiedChatPolicy,
   observeSnapshot?: (conversationId: string, value: unknown) => void): Promise<Response> {
+  const { link } = session;
   const requestUrl = new URL(request.url);
-  const target = childUrlFor(session, requestUrl);
+  const target = link.url(requestUrl);
   const transport = classifyProxyTransport(requestUrl.pathname);
-  const requestHeaders = forwardedHeaders(request, session);
+  const requestHeaders = link.forwardHeaders(request);
   let requestBody: BodyInit | null = request.body;
   let policyUnavailable = false;
-  const localDiscard = isLocalDiscardAction(request.method, requestUrl.pathname, session.basePath);
-  if (policy && (localDiscard || isChildPolicyAction(request.method, requestUrl.pathname, session.basePath))) {
+  const pathClass = classifySessionRequest(request.method, requestUrl.pathname, link.basePath);
+  const localDiscard = pathClass === "local-discard";
+  if (policy && (localDiscard || pathClass === "policy-action")) {
     const reader = request.body?.getReader();
     let text = "";
     try {
@@ -153,12 +84,12 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
         && typeof body.requestId === "string" && body.requestId.length > 0 && body.requestId.length <= 512
         && !/[\u0000-\u001f\u007f]/.test(body.requestId)) {
         try {
-          const scoped = await degradedReceiptState(session).identify({ principal: policy.principal, method: request.method, pathname: requestUrl.pathname, requestId: body.requestId }, false);
+          const scoped = await degradedReceiptState(link).identify({ principal: policy.principal, method: request.method, pathname: requestUrl.pathname, requestId: body.requestId }, false);
           text = JSON.stringify({ ...body, requestId: scoped.token });
         } catch { return Response.json({ error: "operation receipt capacity unavailable" }, { status: 503, headers: { "cache-control": "no-store" } }); }
       }
     } else {
-      const envelope = signSessionChatPolicy(session, { method: request.method, pathname: requestUrl.pathname, body: text }, policy);
+      const envelope = link.sign({ method: request.method, pathname: requestUrl.pathname, body: text }, policy);
       if (envelope) requestHeaders.set(CHILD_POLICY_HEADER, envelope);
       else {
         policyUnavailable = policy.autoBackgroundOnSteer || policy.unavailable === true;
@@ -168,7 +99,7 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
         let body: unknown;
         try { body = JSON.parse(text); } catch { /* The child's closed validator owns body refusal. */ }
         if (body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") {
-          const state = degradedReceiptState(session);
+          const state = degradedReceiptState(link);
           try {
             const first = await state.identify({ principal: policy.principal, method: request.method, pathname: requestUrl.pathname, requestId: body.requestId }, policyUnavailable);
             requestHeaders.set(CHAT_OPERATION_RECEIPT_HEADER, first.token);
@@ -227,16 +158,16 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
   statusCategory = statusCategoryOf(upstream.status);
   // Media must stay byte-for-byte even if a child supplies a compressible
   // MIME type. Honor no-transform for other representations as well.
-  const noTransform = requestUrl.pathname === `${session.basePath}api/media`
+  const noTransform = pathClass === "media"
     || /(?:^|,)\s*no-transform\s*(?:,|$)/i.test(upstream.headers.get("cache-control") ?? "");
   // Bounded tap on the existing response body, not a tee/background reader:
   // observes history/initial snapshots without changing bytes or backpressure.
   // Oversized/invalid content is simply not trusted for retirement.
-  const snapshotPath = request.method === "GET" && requestUrl.pathname.startsWith(session.basePath)
-    ? /^api\/chat\/conversations\/([^/]+)$/.exec(requestUrl.pathname.slice(session.basePath.length)) : null;
-  if (observeSnapshot && snapshotPath && upstream.ok && upstream.body && upstream.headers.get("content-type")?.includes("application/json")) {
+  const snapshotSegment = pathClass === "conversation-snapshot"
+    ? snapshotConversationSegment(sessionSuffix(requestUrl.pathname, link.basePath)!) : null;
+  if (observeSnapshot && snapshotSegment !== null && upstream.ok && upstream.body && upstream.headers.get("content-type")?.includes("application/json")) {
     let conversationId: string | null = null;
-    try { conversationId = decodeURIComponent(snapshotPath[1]!); } catch { /* Child owns malformed-route refusal. */ }
+    try { conversationId = decodeURIComponent(snapshotSegment); } catch { /* Child owns malformed-route refusal. */ }
     if (conversationId !== null) {
       const id = conversationId; const chunks: Uint8Array[] = []; let bytes = 0; let oversized = false;
       const tap = new TransformStream<Uint8Array, Uint8Array>({
@@ -293,7 +224,7 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
     && upstream.headers.get("content-encoding")?.toLowerCase() !== "identity";
   for (const [name, value] of upstream.headers) {
     const lower = name.toLowerCase();
-    if (HOP_BY_HOP.has(lower)) continue;
+    if (HOP_BY_HOP_HEADERS.has(lower)) continue;
     if (lower === "content-encoding") continue;
     if (lower === "content-length" && upstreamEncoded) continue;
     headers.set(name, value);
@@ -480,12 +411,13 @@ export class WebSocketBridge {
   private closed: { code: number; reason: string } | null = null;
 
   constructor(session: RunningSession, requestUrl: URL) {
-    const target = childUrlFor(session, requestUrl);
+    const { link } = session;
+    const target = link.url(requestUrl);
     target.protocol = "ws:";
     this.child = new WebSocket(target, {
       headers: {
         // The child's origin gate compares Origin against its own Host.
-        origin: childOrigin(session),
+        origin: link.origin,
       },
     } as unknown as string[]);
     this.child.binaryType = "arraybuffer";

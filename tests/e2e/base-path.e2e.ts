@@ -22,6 +22,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 
+import { createReadyLineScanner } from "../../src/session-contract/spawn";
 import { revealTreeRow, treeRow } from "./tree-helpers";
 
 const BASE_PATH = "/s/e2e/";
@@ -48,13 +49,12 @@ test.beforeAll(async () => {
 
   sessionUrl = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("uatu serve did not print a URL within 30s")), 30_000);
-    let buffered = "";
+    const scanner = createReadyLineScanner();
     child!.stdout!.on("data", (chunk: Buffer) => {
-      buffered += chunk.toString();
-      const match = buffered.match(/http:\/\/[^\s]+/);
-      if (match) {
+      const ready = scanner.push(chunk.toString());
+      if (ready) {
         clearTimeout(timeout);
-        resolve(match[0]);
+        resolve(ready.text);
       }
     });
     child!.on("error", reject);
