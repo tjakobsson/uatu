@@ -22,6 +22,8 @@
 //   hang-initialize      present: `initialize` never answers
 //   fail-thought-level   present: setting `thought_level` fails
 //   no-final-usage       present: a run's last prompt answers without `usage`
+//   fail-run-end         present: the prompt carrying a run fails at its end (-32603)
+//   auth-run-end         present: the same, for a login that expired (-32000)
 //   hold-end             present: a run does not end until it is removed
 //   hold-take-in         present: a steer is taken into the run only once it is removed
 //   refuse-next-steer    present: the next steer is refused, and the flag removed
@@ -135,6 +137,8 @@ const substitute = <T>(value: T, cwd: string): T => JSON.parse(JSON.stringify(va
 type PromptResult = { stopReason: string; usage?: Record<string, number> };
 type Run = {
   resolve: (result: PromptResult) => void;
+  // Fails the prompt that carries the run.
+  reject: (error: unknown) => void;
   cancelled: boolean;
   cancelWaiters: Array<() => void>;
   steerWaiters: Array<() => void>;
@@ -272,11 +276,12 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   if (!running) record();
   if (running) {
     // A steer: the earlier prompt ends now, and this one carries the run.
-    return new Promise<PromptResult>(resolve => {
+    return new Promise<PromptResult>((resolve, reject) => {
       const takeIn = () => {
         record();
         const previous = running.resolve;
         running.resolve = resolve;
+        running.reject = reject;
         previous({ stopReason: "end_turn", ...(running.pendingSteerUsage ? { usage: running.pendingSteerUsage } : {}) });
         running.steersTaken += 1;
         for (const waiter of running.steerWaiters.splice(0)) waiter();
@@ -287,14 +292,15 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   }
   const name = text.match(/^(\w+):/)?.[1];
   const script = fixture.scripts[name && fixture.scripts[name] ? name : "text"]!;
-  return new Promise<PromptResult>(resolve => {
-    const run: Run = { resolve, cancelled: false, cancelWaiters: [], steerWaiters: [], steersTaken: 0, promptWaiters: [] };
+  return new Promise<PromptResult>((resolve, reject) => {
+    const run: Run = { resolve, reject, cancelled: false, cancelWaiters: [], steerWaiters: [], steersTaken: 0, promptWaiters: [] };
     runs.set(params.sessionId, run);
     void perform(params.sessionId, script, run, client).then(result => {
       runs.delete(params.sessionId);
       run.resolve(result);
     }, error => {
       runs.delete(params.sessionId);
+      if (error instanceof RequestError) { run.reject(error); return; }
       console.error(error);
       run.resolve({ stopReason: "end_turn" });
     });
@@ -356,6 +362,8 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
   }
   // The run's end waits for the gate, so a prompt taken in meanwhile stays unanswered.
   while (flag("hold-end") && !run.cancelled) await Bun.sleep(5);
+  if (flag("fail-run-end")) throw new RequestError(-32603, "Antigravity failed while answering");
+  if (flag("auth-run-end")) throw new RequestError(-32000, "Authentication required");
   return { stopReason: script.stopReason, ...usage };
 }
 

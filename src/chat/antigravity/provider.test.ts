@@ -610,6 +610,35 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(users).toEqual([`message:${first.messageId}`, ...accepted.map(confirmation => `message:${confirmation.messageId}`)]);
     });
 
+    for (const failure of ["fail-run-end", "auth-run-end"] as const) test(`a steer whose own prompt fails after agy answered part of it fails the turn and keeps its row with the reply (${failure === "auth-run-end" ? "login expired" : "error"})`, async () => {
+      const { fake, provider, waitFor, upserts, ended, statuses, events } = await setup();
+      const session = await provider.createSession("a");
+      await fake.setFlag(failure, true);
+      await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      const confirmation = await sent.confirmation;
+      expect(confirmation.outcome).toBe("accepted");
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["failed"]);
+      // What a client shows: the provider's rows, by time (a logged-out read would show the transcript instead).
+      let browser: ChatProjection = { conversationId: session.id, generation: "g", sequence: 0, cursor: "", status: "running", items: [], queued: [], acceptedDrafts: [], queueRevision: 0, configurationRevision: 0 };
+      let sequence = 0;
+      for (const event of events) for (const update of event.updates) {
+        if (update.kind === "upsert") browser = applyChatEvent(browser, { type: "item.upsert", conversationId: session.id, generation: "g", sequence: ++sequence, item: update.item }).projection;
+      }
+      const ids = browser.items.filter(item => item.type === "user_message" || item.type === "assistant_message" && item.markdown !== "").map(item => item.id);
+      const row = `message:${(confirmation as { messageId: string }).messageId}`;
+      expect(ids.indexOf(row)).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf(row)).toBeLessThan(ids.findIndex(id => /\.a2\.1$/.test(id)));
+      if (failure === "auth-run-end") {
+        expect(provider.loginState()).toBe("missing");
+        expect(upserts(session.id).some(item => item.type === "notice" && item.code === "login-failed")).toBe(true);
+      } else {
+        expect(events.flatMap(event => event.updates).findLast(update => update.kind === "status")).toEqual(expect.objectContaining({ message: expect.stringContaining("Antigravity failed while answering") }));
+      }
+    });
+
     test("a steer agy refuses settles as refused with its reason, publishes no row, and leaves the turn running to its end", async () => {
       const { fake, provider, waitFor, upserts, statuses, ended } = await setup();
       const session = await provider.createSession("a");

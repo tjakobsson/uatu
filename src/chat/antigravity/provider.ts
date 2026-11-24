@@ -524,7 +524,12 @@ export class AntigravityProvider implements ChatProvider {
     if (steer.position === undefined && taken) this.placeSteer(conversation, steer);
     if (!outcome) return;
     const { result, error } = outcome;
-    if (result && result.stopReason !== "cancelled") {
+    // Taken in and answered in part: agy streamed for it after it took it
+    // in, so an error now is the steered part failing, not a refusal. Its
+    // row stays with the reply, and the turn fails with that error (a
+    // missing login shows the login notice).
+    const answered = steer.position !== undefined && (memory.blockCount > 0 || conversation.items.at(-1)?.id !== steer.after);
+    if (result && result.stopReason !== "cancelled" || error !== undefined && answered) {
       steer.decided = "accepted";
       if (steer.position === undefined) this.placeSteer(conversation, steer);
       const position = steer.position!;
@@ -538,6 +543,7 @@ export class AntigravityProvider implements ChatProvider {
       this.publish({ conversationId: conversation.sessionId, updates: [{ kind: "upsert", item: user }], outcome: "handled", eventType: "session/prompt" });
       steer.confirm({ outcome: "accepted", messageId: userMessageId(memory, position), createdAt });
     } else if (error !== undefined && rpcErrorCode(error) !== undefined) {
+      // Only an error before agy answered any of it is a refusal.
       steer.decided = "refused";
       // Taken in with nothing numbered after it: give its position back.
       if (steer.position !== undefined && memory.userCount === steer.position && memory.blockCount === 0) memory.userCount -= 1;

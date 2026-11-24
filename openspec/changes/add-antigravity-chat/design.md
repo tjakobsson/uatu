@@ -250,9 +250,13 @@ agent in commit 2, before the Antigravity provider exists):
   showed no other), so the earlier prompt ending proves nothing: it can end
   on its own, be cancelled, hit its token limit or fail on its login just
   before agy refuses the steer. Only the steer's own answer counts. A result
-  other than `cancelled` means agy took it. An error answer is a definite
-  refusal, and the earlier prompt's end, held meanwhile, is then reported as
-  it came. A `cancelled` result or the connection ending is an unknown
+  other than `cancelled` means agy took it. An error answer before agy
+  streamed anything for the steer is a definite refusal, and the earlier
+  prompt's end, held meanwhile, is then reported as it came. An error after
+  agy took the steer in and began answering it is the steered part failing:
+  the steer's row stays with its reply, and the turn fails with that error
+  (a missing login also marks the login missing and shows the login notice,
+  D5). A `cancelled` result or the connection ending is an unknown
   outcome: unconfirmed, never resent. A steer is therefore confirmed only
   when its own prompt is answered, usually when the turn carrying it ends.
   Waiting for that must block nothing: the provider answers the steer at
