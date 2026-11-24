@@ -194,7 +194,10 @@ The model picker is built from the session's config options: the model
 family option gives the models, and `thought_level` gives each model's
 variants. When agy offers only legacy model ids, ids that share a family and
 differ by a level suffix (such as `gemini-4-neon-low`) are folded into one
-model with variants. Modes come from the session's modes: default, accept
+model with variants, and a choice is applied by selecting the legacy id
+(`session/set_model`, outside the stable ACP methods). When agy offers config
+options but no legacy ids, the thinking levels the options advertise belong to
+the current model. Modes come from the session's modes: default, accept
 edits, and plan. After every `session/new`, `session/load` or resume, the
 provider reapplies the conversation's stored model, thinking level and mode
 before the next prompt, because agy resets a loaded session to its default.

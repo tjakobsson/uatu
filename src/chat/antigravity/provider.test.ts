@@ -348,6 +348,26 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await provider.getConversationConfiguration(session.id)).toEqual({ model: { providerId: "antigravity", modelId: "gemini-4-argon" }, variant: "low", mode: "plan" });
     });
 
+    test("with only legacy model ids, a chosen model and level are applied by selecting the legacy id", async () => {
+      const { fake, provider, run } = await setup();
+      await fake.setFlag("legacy-only", true);
+      const session = await provider.createSession("a");
+      expect((await provider.listModels()).find(model => model.selection.modelId === "gemini-4-argon")?.variants).toEqual(["low", "medium", "high"]);
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-argon" }, "low");
+      await run(session.id, "Say hello");
+      const log = await fake.log();
+      expect(log.filter(entry => entry.method === "session/set_model").map(entry => entry.params!.modelId)).toEqual(["gemini-4-argon-low"]);
+      expect(log.filter(entry => entry.method === "session/set_config_option")).toEqual([]);
+      expect((await fake.sessions())[0]).toEqual(expect.objectContaining({ model: "gemini-4-argon", thoughtLevel: "low" }));
+    });
+
+    test("without legacy ids, the thinking levels config options advertise are offered for the current model", async () => {
+      const { fake, provider } = await setup();
+      await fake.setFlag("no-legacy-models", true);
+      await provider.createSession("a");
+      expect((await provider.listModels()).find(model => model.selection.modelId === "gemini-4-neon")?.variants).toEqual(["low", "medium", "high", "xhigh"]);
+    });
+
     test("a variant the model does not offer is refused", async () => {
       const { provider } = await setup();
       const session = await provider.createSession("a");

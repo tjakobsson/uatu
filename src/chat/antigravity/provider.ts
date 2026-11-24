@@ -12,7 +12,7 @@ import { PushQueue } from "../push-queue";
 import { provisionalTurn, type ChatTurnToken } from "../turn-liveness";
 import { LOGIN_FAILED_NOTICE_CODE, type ChatAgent, type ChatCapability, type ChatCommand, type ChatLoginState, type ChatMode, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionRequest, type TokenUsage } from "../types";
 import { ConversationNotFoundError } from "../workspace";
-import { catalogFromSession, variantFor, type AcpCatalog } from "./catalog";
+import { catalogFromSession, legacyModelId, variantFor, type AcpCatalog } from "./catalog";
 import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./connection";
 import { ANTIGRAVITY_AGENT } from "./descriptor";
 import { ANTIGRAVITY_PRICES } from "./prices";
@@ -686,11 +686,20 @@ export class AntigravityProvider implements ChatProvider {
     const sessionId = conversation.sessionId;
     let applied = conversation.applied ?? {};
     const modelChanged = model !== undefined && applied.model?.modelId !== model.modelId;
-    if (modelChanged) {
+    if (model && this.catalog?.selection === "legacy") {
+      // No config options: the legacy id names the model and its level (D7).
+      if (modelChanged || applied.variant !== variant) {
+        const legacyId = legacyModelId(this.catalog, model.modelId, variant);
+        if (!legacyId) throw new UnsupportedVariantSelectionError(`Antigravity offers no model id for ${model.modelId}`);
+        await process.agent.request<unknown>("session/set_model", { sessionId, modelId: legacyId });
+        applied = { ...applied, model, ...(variant ? { variant } : {}) };
+        if (!variant) delete applied.variant;
+      }
+    } else if (modelChanged) {
       const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "model", value: model.modelId });
       applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
     }
-    if (variant && (modelChanged || applied.variant !== variant)) {
+    if (this.catalog?.selection !== "legacy" && variant && (modelChanged || applied.variant !== variant)) {
       const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "thought_level", value: variant });
       applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
     }

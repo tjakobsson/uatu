@@ -9,6 +9,10 @@ const LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
 export type AcpCatalog = {
   models: ChatModel[];
   modes: ChatMode[];
+  // How a model and thinking level are applied: through config options, or
+  // (when agy offers only legacy model ids) by selecting the legacy id.
+  selection: "config" | "legacy";
+  legacyIds: string[];
   // What the answering session runs: agy's default for a new or loaded one.
   current: ConversationConfiguration;
 };
@@ -43,6 +47,7 @@ export function catalogFromSession(answer: unknown, imageInput: boolean): AcpCat
   const levelNames = new Set([...LEVELS, ...options(value?.configOptions, "thought_level").map(option => option.value)]);
   const levelOf = (id: string, family: string) => id.startsWith(`${family}-`) && levelNames.has(id.slice(family.length + 1)) ? id.slice(family.length + 1) : undefined;
   let families = options(value?.configOptions, "model");
+  const selection: AcpCatalog["selection"] = families.length ? "config" : "legacy";
   if (families.length === 0) {
     const seen = new Map<string, string>();
     for (const model of legacy) {
@@ -60,8 +65,12 @@ export function catalogFromSession(answer: unknown, imageInput: boolean): AcpCat
     }
   }
   const order = (level: string) => { const index = LEVELS.indexOf(level); return index < 0 ? LEVELS.length : index; };
+  // Without legacy ids, the thinking levels config options advertise belong
+  // to the model they are current for.
+  const advertised = options(value?.configOptions, "thought_level").map(option => option.value);
   const models: ChatModel[] = families.map(family => {
-    const variants = legacy.flatMap(model => { const level = levelOf(model.id, family.value); return level ? [level] : []; })
+    const fromLegacy = legacy.flatMap(model => { const level = levelOf(model.id, family.value); return level ? [level] : []; });
+    const variants = (fromLegacy.length || legacy.length ? fromLegacy : family.value === current.model?.modelId ? advertised : [])
       .sort((a, b) => order(a) - order(b));
     return {
       selection: { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: family.value },
@@ -76,6 +85,8 @@ export function catalogFromSession(answer: unknown, imageInput: boolean): AcpCat
   const currentMode = typeof modes?.currentModeId === "string" ? modes.currentModeId : undefined;
   return {
     models,
+    selection,
+    legacyIds: legacy.map(model => model.id),
     modes: (Array.isArray(modes?.availableModes) ? modes.availableModes : []).flatMap(entry => {
       const mode = record(entry);
       return typeof mode?.id === "string" ? [{ name: mode.id, description: typeof mode.description === "string" ? mode.description : typeof mode.name === "string" ? mode.name : mode.id, ...(mode.id === currentMode ? { default: true } : {}) }] : [];
@@ -88,4 +99,12 @@ export function catalogFromSession(answer: unknown, imageInput: boolean): AcpCat
 export function variantFor(catalog: AcpCatalog | undefined, modelId: string, variant: string | undefined): string | undefined {
   const model = catalog?.models.find(candidate => candidate.selection.modelId === modelId);
   return variant && model?.variants?.includes(variant) ? variant : undefined;
+}
+
+/** The legacy model id that selects a family at a thinking level, when agy offers one. */
+export function legacyModelId(catalog: AcpCatalog, modelId: string, variant: string | undefined): string | undefined {
+  const ids = new Set(catalog.legacyIds);
+  if (variant && ids.has(`${modelId}-${variant}`)) return `${modelId}-${variant}`;
+  if (ids.has(modelId)) return modelId;
+  return catalog.legacyIds.find(id => id.startsWith(`${modelId}-`));
 }

@@ -18,6 +18,9 @@
 //   hang-initialize      present: `initialize` never answers
 //   slow-config          present: `session/set_config_option` answers after 300 ms
 //   fail-load            present: `session/load` fails after sending its replay
+//   legacy-only          present: no config options; models are chosen by legacy
+//                        id through `session/set_model`
+//   no-legacy-models     present: session answers carry no legacy model list
 //   hang-list            present: `session/list` never answers
 //   orphan-child         present: each process starts a `sleep 30` worker in its
 //                        group, its pid in `orphans`
@@ -109,7 +112,11 @@ function legacyModels(session: { model: string; thoughtLevel: string }) {
   const levels = levelsOf(session.model);
   return { currentModelId: levels.length ? `${session.model}-${session.thoughtLevel}` : session.model, availableModels };
 }
-const sessionAnswer = (session: StoredSession) => ({ modes: { ...fixture.modes, currentModeId: session.mode }, models: legacyModels(session), configOptions: configOptions(session) });
+const sessionAnswer = (session: StoredSession) => ({
+  modes: { ...fixture.modes, currentModeId: session.mode },
+  ...(flag("no-legacy-models") ? {} : { models: legacyModels(session) }),
+  ...(flag("legacy-only") ? {} : { configOptions: configOptions(session) }),
+});
 const substitute = <T>(value: T, cwd: string): T => JSON.parse(JSON.stringify(value).replaceAll("{cwd}", cwd)) as T;
 
 type PromptResult = { stopReason: string; usage?: Record<string, number> };
@@ -177,6 +184,7 @@ app.onRequest(methods.agent.session.load, async ({ params, client }) => {
 
 app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
   log({ method: "session/set_config_option", params });
+  if (flag("legacy-only")) throw RequestError.methodNotFound("session/set_config_option");
   if (flag("slow-config")) await Bun.sleep(300);
   let answer: ReturnType<typeof configOptions> = [];
   updateSession(params.sessionId, session => {
@@ -187,6 +195,19 @@ app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
     answer = configOptions(session);
   });
   return { configOptions: answer } as never;
+});
+
+// agy's legacy model selection, outside the stable ACP methods.
+app.onRequest("session/set_model", (value: unknown) => value as { sessionId: string; modelId: string }, ({ params }) => {
+  log({ method: "session/set_model", params });
+  const family = fixture.models.find(model => params.modelId === model.value || model.levels.some(level => params.modelId === `${model.value}-${level}`));
+  if (!family) throw new RequestError(-32602, `unknown model ${params.modelId}`);
+  updateSession(params.sessionId, session => {
+    session.model = family.value;
+    const level = params.modelId.slice(family.value.length + 1);
+    if (level) session.thoughtLevel = level;
+  });
+  return {};
 });
 
 app.onRequest(methods.agent.session.setMode, ({ params }) => {
