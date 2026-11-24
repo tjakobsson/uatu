@@ -91,7 +91,7 @@ unstable schema types and is read defensively (D10).
   dependencies.
 - Alternative: drive agy's interactive interface or its own output formats.
   Rejected: undocumented, and it has no permission brokering.
-- Risk gate: commit 1 proves the SDK and `zod` bundle into `dist/uatu`
+- Risk gate: the SDK and `zod` must bundle into `dist/uatu`
   (`bun run build` and `bun run smoke`).
 
 ### D2. One process per live conversation, plus a listing process
@@ -328,9 +328,11 @@ use a personal plan. There is no UI notice (decided).
 
 ### D13. Coverage report
 
-`scripts/agent-coverage.ts` gains `extractAntigravity()`. It reads the
-installed ACP package's `schema/meta.json` for agent and client methods, and
-the session update discriminants from the package's schema. It fails loudly,
+`scripts/agent-coverage.ts` gains `extractAntigravity()`. The installed ACP
+package (2.9.1) ships no `schema/meta.json`, so it reads the agent and client
+methods from the package's exported `AGENT_METHODS` and `CLIENT_METHODS`, and
+the session update discriminants from its `schema/v1/schema.json`
+(`$defs.SessionUpdate`). It fails loudly,
 naming the file, if an axis yields nothing. The probes feed each kind through
 the Antigravity normalizer. `src/chat/antigravity/sdk-coverage.ts` gives
 reasons for ignored entries (for example, the client file-system and terminal

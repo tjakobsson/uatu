@@ -20,8 +20,11 @@ commit that passes `bun run test:ci` on its own.
 ## 1. Add the ACP package (commit 1)
 
 - [x] 1.1 Get explicit approval to install `@agentclientprotocol/sdk` (2.x, pinned exactly) and its `zod` peer, then install them. Verify that `package.json` and `bun.lock` change only for these two packages.
-- [ ] 1.2 Verify that `bun run check:licenses` and `bun run audit` pass with the new packages.
-- [x] 1.3 Prove that both packages bundle into the compiled binary with a minimal import of `client`, `ndJsonStream` and `schema/meta.json`. Verify that `bun run build` and `bun run smoke` pass. If they fail, stop and decide the fallback before group 2.
+- [x] 1.2 Verify that `bun run check:licenses` and `bun run audit` pass with the new packages. Recorded: `check:licenses` passed after commit 1; `bun run audit` (run with the owner's approval, as it reads the npm registry) reported no moderate-or-higher advisories, with only a low KaTeX advisory that predates this change.
+- [x] 1.3 Prove that both packages bundle into the compiled binary. Verify that `bun run build` and `bun run smoke` pass. If they fail, stop and decide the fallback before group 2. Recorded:
+  - The package ships no `schema/meta.json`. It ships `schema/v1/schema.json` and `schema.unstable.json` (and v2 equivalents) and exports `AGENT_METHODS`, `CLIENT_METHODS` and `methods`, which is what the coverage extractor uses (D13).
+  - Before group 2, an uncommitted probe in `src/cli.ts` imported `client`, `ndJsonStream`, `AGENT_METHODS` and `schema/v1/schema.json`; the built binary ran it, and `bun run smoke` passed. The probe was removed, so commit 1's tree had no ACP import on the binary's graph.
+  - The committed proof is later: `src/chat/registered-agents.ts` (group 3) puts the ACP client on `src/cli.ts`'s import graph. At `af3b5a71`, `bun run build` and `bun run smoke` passed, and the binary contains the SDK's own strings (for example "ACP connection closed").
 
 ## 2. The `immediate-steering` capability (commit 2)
 
