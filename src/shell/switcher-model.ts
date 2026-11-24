@@ -10,6 +10,7 @@
 // both the Hub's part (hub-nav.ts) and the switcher can use it.
 
 import { pullRequestLocalBranch, type GithubRepositoryRef, type PullRequestListItem, type PullRequestSummary } from "../shared/github-contract";
+import { worktreeFolderName } from "../shared/worktree-branches";
 
 // --- The button and the chip ------------------------------------------------
 
@@ -121,7 +122,9 @@ export function pullRequestRowName(item: PullRequestListItem, facts: PullRequest
 // The worktree folder and branch a pull request would be checked out as.
 export function pullRequestCheckout(item: Pick<PullRequestListItem, "number" | "headRefName" | "isCrossRepository">, repositoryName: string): { branch: string; folder: string; folderName: string } {
   const branch = pullRequestLocalBranch(item);
-  const folderName = branch.replace(/[^A-Za-z0-9._-]+/g, "-");
+  // The Hub's own folder rule, so the preview names the folder the Hub
+  // creates (unless that one is taken and it disambiguates).
+  const folderName = worktreeFolderName(branch);
   return { branch, folderName, folder: `${repositoryName}.worktrees/${folderName}` };
 }
 

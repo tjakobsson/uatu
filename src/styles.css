@@ -1560,6 +1560,101 @@ html:not([data-ui-mode="touch"]) .switcher-lists > .switcher-head {
   background: var(--surface-subtle);
 }
 
+/* A checkout being created from a pull request: listed at once, not
+   enterable until ready; a failure keeps its row with Retry. */
+.switcher-creating {
+  margin-top: 0.5rem;
+}
+
+.switcher-creating[hidden] {
+  display: none;
+}
+
+.switcher-creating-row {
+  cursor: default;
+}
+
+.switcher-creating-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-height: 44px;
+  justify-content: center;
+}
+
+.switcher-creating-retry {
+  min-height: 44px;
+  flex: none;
+}
+
+.switcher-choice.is-pending {
+  cursor: default;
+}
+
+.switcher-choice.is-pending:hover {
+  background: var(--surface);
+}
+
+.switcher-choice.is-pending .switcher-spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  box-sizing: border-box;
+  animation: switcher-spin 0.9s linear infinite;
+}
+
+/* The notice that a worktree created from a pull request is ready. You stay
+   where you are; Go to is the offer. */
+.switcher-ready {
+  position: fixed;
+  z-index: 60;
+  left: 50%;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: min(32rem, calc(100vw - 2rem));
+  padding: 0.6rem 0.6rem 0.6rem 1rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+}
+
+.switcher-ready[hidden] {
+  display: none;
+}
+
+.switcher-ready-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.switcher-ready-note {
+  display: block;
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+}
+
+html[data-ui-mode="touch"] .switcher-ready {
+  bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switcher-choice.is-pending .switcher-spinner {
+    animation: none;
+  }
+}
+
 .switcher-choice.is-default {
   border: 2px solid var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, var(--surface));

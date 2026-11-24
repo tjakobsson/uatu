@@ -199,6 +199,9 @@ export type PullRequestListItem = {
 export type PullRequestList = {
   mock: boolean;
   repository: GithubRepositoryRef;
+  // The local name of the remote that is this GitHub repository (design
+  // D3), which a pull request checkout fetches from. Absent: "origin".
+  remote?: string;
   viewer: string;
   pullRequests: PullRequestListItem[];
 };
