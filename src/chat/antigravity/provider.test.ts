@@ -341,6 +341,21 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(statuses(session.id)).toEqual(["interrupted", "completed"]);
     });
 
+    test("an unexpected exit drops the conversation's history, so the next read loads it again", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      await run(session.id, "Say hello");
+      await provider.listMessages(session.id, { limit: 100 });
+      const pids = (await Bun.file(path.join(fake.stateDirectory, "pids")).text()).split("\n").filter(Boolean).map(Number);
+      for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+      for (let i = 0; i < 400 && await fake.running() > 0; i++) await Bun.sleep(5);
+      for (let i = 0; i < 400 && (provider as unknown as { conversations: Map<string, { seeded: boolean }> }).conversations.get(session.id)!.seeded; i++) await Bun.sleep(5);
+      const loadsBefore = (await fake.log()).filter(entry => entry.method === "session/load").length;
+      const users = (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
+      expect((await fake.log()).filter(entry => entry.method === "session/load").length).toBe(loadsBefore + 1);
+      expect(users).toHaveLength(1);
+    });
+
     test("a permission left open when the process ends is abandoned, and the turn fails in that conversation", async () => {
       const { fake, provider, pendingPermission, ended, statuses, upserts } = await setup();
       const session = await provider.createSession("a");

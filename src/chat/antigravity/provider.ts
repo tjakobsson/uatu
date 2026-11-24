@@ -287,7 +287,14 @@ export class AntigravityProvider implements ChatProvider {
 
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
     const conversation = this.conversation(sessionId);
-    if (!conversation.seeded) {
+    if (this.login === "missing" && !conversation.turn) {
+      // Logged out, the transcript is the only history (D10), reread on every
+      // read: never a replay seeded earlier, and nothing once the file is gone.
+      if (!await this.seedFromTranscript(conversation)) {
+        this.forgetHistory(conversation);
+        throw new Error("Antigravity is not logged in, and agy keeps no transcript of this conversation to read. Run agy and sign in.");
+      }
+    } else if (!conversation.seeded) {
       conversation.holds += 1;
       try { await this.ensureProcess(conversation); }
       catch (error) {
@@ -736,9 +743,13 @@ export class AntigravityProvider implements ChatProvider {
   /** History from the transcript alone, when agy cannot load the conversation. */
   private async seedFromTranscript(conversation: Conversation): Promise<boolean> {
     const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
-    if (!("steps" in read) || conversation.seeded) return conversation.seeded;
+    if (!("steps" in read)) return false;
     const items = historyFromTranscript(read.steps, conversation.sessionId, this.now());
+    // The same transcript gives the same history, so cursors stay valid
+    // between reads; a changed one is another history.
+    conversation.version = `transcript:${Bun.hash(JSON.stringify(read.steps))}`;
     conversation.items.splice(0, conversation.items.length, ...items);
+    conversation.accounting.splice(0);
     const memory = conversation.memory;
     memory.userCount = items.filter(item => item.type === "user_message").length;
     memory.blockCount = 0;
@@ -774,6 +785,9 @@ export class AntigravityProvider implements ChatProvider {
       this.interactions.abandon(conversation.sessionId, "The Antigravity process ended before the user answered.");
       const turn = conversation.turn;
       if (turn) this.endTurn(conversation, turn, "failed", exitMessage(process));
+      // As on release: the history went with the process, and the next read
+      // loads it again rather than serving rows that may have shifted.
+      this.forgetHistory(conversation);
     });
   }
 
@@ -805,6 +819,7 @@ export class AntigravityProvider implements ChatProvider {
 
   private forgetHistory(conversation: Conversation): void {
     conversation.seeded = false;
+    conversation.fromTranscript = undefined;
     conversation.items.splice(0);
     conversation.accounting.splice(0);
     conversation.version = randomUUID();

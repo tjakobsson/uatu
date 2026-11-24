@@ -139,6 +139,23 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
     finally { writer.kill(); await writer.exited; }
   });
 
+  test("while logged out every read comes from the transcript alone, never from replay read earlier, and not at all once it is gone", async () => {
+    const file = await placeTranscript();
+    const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, homeDirectory: home, prices });
+    try {
+      const signedIn = (await provider.listMessages(sessionId, { limit: 500 })).items;
+      expect(signedIn.some(item => item.id === "tool:call_read_1")).toBe(true);
+      await fake.setFlag("auth-missing", true);
+      await provider.listSessions();
+      expect(provider.loginState()).toBe("missing");
+      const loggedOut = (await provider.listMessages(sessionId, { limit: 500 })).items;
+      expect(loggedOut.some(item => item.id === "tool:call_read_1")).toBe(false);
+      expect(loggedOut.some(item => item.id.includes(".transcript."))).toBe(true);
+      await Bun.$`rm -f ${file}`.quiet();
+      await expect(provider.listMessages(sessionId, { limit: 500 })).rejects.toThrow("Antigravity is not logged in");
+    } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
+  });
+
   test("reading the transcript leaves it byte-identical", async () => {
     const file = await placeTranscript();
     const digest = async () => createHash("sha256").update(await readFile(file)).digest("hex");
