@@ -587,12 +587,20 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
     });
 
     test("a second steer can be sent while the first awaits confirmation, and both are confirmed in order", async () => {
-      const { provider, waitFor, upserts, ended, statuses, prompts } = await setup();
+      const { fake, provider, waitFor, upserts, ended, statuses, prompts } = await setup();
       const session = await provider.createSession("a");
       const first = await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      // The run cannot end, so nothing answers the first steer until the second is taken in.
+      await fake.setFlag("hold-end", true);
       const one = await provider.prompt(session.id, { id: "s1", text: "One", delivery: "steer" }) as { messageId: string; confirmation: Promise<SteerConfirmation> };
+      let oneSettled = false;
+      void one.confirmation.then(() => { oneSettled = true; });
+      await waitFor(() => upserts(session.id).some(item => item.type === "assistant_message" && item.markdown.startsWith("The command printed")), "the first steer's answer");
+      expect(oneSettled).toBe(false);
       const two = await provider.prompt(session.id, { id: "s2", text: "Two", delivery: "steer" }) as { messageId: string; confirmation: Promise<SteerConfirmation> };
+      expect((await one.confirmation).outcome).toBe("accepted");
+      await fake.setFlag("hold-end", false);
       const accepted = [await one.confirmation, await two.confirmation] as Array<Extract<SteerConfirmation, { outcome: "accepted" }>>;
       expect(accepted.map(confirmation => confirmation.outcome)).toEqual(["accepted", "accepted"]);
       await ended(session.id);

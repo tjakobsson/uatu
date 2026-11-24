@@ -22,6 +22,7 @@
 //   hang-initialize      present: `initialize` never answers
 //   fail-thought-level   present: setting `thought_level` fails
 //   no-final-usage       present: a run's last prompt answers without `usage`
+//   hold-end             present: a run does not end until it is removed
 //   hold-take-in         present: a steer is taken into the run only once it is removed
 //   refuse-next-steer    present: the next steer is refused, and the flag removed
 //   hold-config          present: `session/set_config_option` and `session/set_mode`
@@ -353,6 +354,8 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       return cancelled();
     }
   }
+  // The run's end waits for the gate, so a prompt taken in meanwhile stays unanswered.
+  while (flag("hold-end") && !run.cancelled) await Bun.sleep(5);
   return { stopReason: script.stopReason, ...usage };
 }
 
