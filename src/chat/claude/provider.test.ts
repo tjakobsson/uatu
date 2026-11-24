@@ -13,7 +13,7 @@ import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
 import { CHAT_TEXT_SEAL, CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
 import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE } from "../visual-identity";
-import { SIGTERM_GRACE_MS } from "../../hub/backend";
+import { SIGTERM_GRACE_MS } from "../../session-contract/spawn";
 import { ClaudeProvider, SDK_CLOSE_BUDGET_MS, SHUTDOWN_FLUSH_MARGIN_MS, SHUTDOWN_GRACE_MS, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
