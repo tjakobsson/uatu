@@ -5,7 +5,7 @@ import { AutomaticBackgroundNotices, actionOrigin, automaticBackgroundNote } fro
 import { newRequestId } from "./ids";
 import { addAcceptedDraft, confirmAcceptedDraft, dropQueuedMessage, markDraftUnconfirmed, noteQueuedMessage, projectionFromSnapshot, removeAcceptedDraft, type ChatProjection } from "./projection";
 import { localHistoryOperation, parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, STEER_REFUSED_NOTICE_CODE, isLiveConversationStatus } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, isLiveConversationStatus, steerRefusedRequestId } from "./types";
 import type { AutomaticBackgroundFeedback, ChatCapability, ChatCommand, ChatEvent, ConversationConfiguration, ConversationSnapshot, MessageAttachment, MessageDelivery, QueuedMessage, ReversibleHistoryResult } from "./types";
 
 export type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
@@ -132,7 +132,8 @@ export class Composer {
     if (event.type === "conversation.status") this.statusChanged(event.conversationId, event.status);
     if (!applied) return;
     if (event.type === "conversation.queue" && (event.change.kind === "removed" || event.change.kind === "delivered")) this.terminal(event.conversationId, event.change.messageId);
-    if (event.type === "item.upsert" && event.item.type === "notice" && event.item.code === STEER_REFUSED_NOTICE_CODE && event.item.requestId) this.steerRefused(event.conversationId, event.item.requestId, event.item.message);
+    const refused = event.type === "item.upsert" ? steerRefusedRequestId(event.item) : undefined;
+    if (refused && event.type === "item.upsert" && event.item.type === "notice") this.steerRefused(event.conversationId, refused, event.item.message);
     if (event.type === "conversation.queue" || event.type === "item.upsert") this.update(event.conversationId, current => this.protect(current));
   }
   checkedSnapshot(id: string, snapshot: ConversationSnapshot, pending?: { id: string; action: PendingQueueAction }): ConversationSnapshot {

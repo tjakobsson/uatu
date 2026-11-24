@@ -582,9 +582,6 @@ export type NoticeItem = TimelineItemBase & {
   code?: string;
   // When a rate-limit notice's window resets, as a timestamp.
   resetsAt?: number;
-  // The submission a notice answers (a refused immediate steer), so the
-  // submitting client can return its draft.
-  requestId?: string;
 };
 
 /**
@@ -606,8 +603,21 @@ export const RATE_LIMIT_ITEM_ID = "notice:rate-limit";
  * retired when it finishes.
  */
 export const LOGIN_FAILED_NOTICE_CODE = "login-failed";
-/** An immediate steer the agent refused after it was sent; carries the submission's requestId. */
+/**
+ * An immediate steer the agent refused after it was sent. The published
+ * notice has no field for the submission, so the item id names it:
+ * `notice:steer-refused:<requestId>` (add-antigravity-chat D9).
+ */
 export const STEER_REFUSED_NOTICE_CODE = "steer-refused";
+const STEER_REFUSED_NOTICE_PREFIX = `notice:${STEER_REFUSED_NOTICE_CODE}:`;
+export function steerRefusedNotice(requestId: string, reason: string, createdAt: number): NoticeItem {
+  return { id: `${STEER_REFUSED_NOTICE_PREFIX}${requestId}`, type: "notice", createdAt, level: "warning", code: STEER_REFUSED_NOTICE_CODE, message: reason };
+}
+/** The submission a steer-refused notice answers, or undefined for any other item. */
+export function steerRefusedRequestId(item: ConversationItem): string | undefined {
+  if (item.type !== "notice" || item.code !== STEER_REFUSED_NOTICE_CODE || !item.id.startsWith(STEER_REFUSED_NOTICE_PREFIX)) return undefined;
+  return item.id.slice(STEER_REFUSED_NOTICE_PREFIX.length) || undefined;
+}
 export const REAUTHENTICATING_NOTICE_CODE = "reauthenticating";
 
 /**

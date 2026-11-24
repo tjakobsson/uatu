@@ -16765,7 +16765,7 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
       confirmations[1]!({ outcome: "refused", reason: "agy did not take it" });
       await waitUntil(() => adapter.projectionForTests("session").items().some(item => item.type === "notice"));
       expect(await userRows()).toEqual([expect.objectContaining({ id: `message:${first.messageId}`, requestId: "r-1", text: "first steer" })]);
-      expect(adapter.projectionForTests("session").items().find(item => item.type === "notice")).toEqual(expect.objectContaining({ code: "steer-refused", requestId: "r-2", message: "agy did not take it" }));
+      expect(adapter.projectionForTests("session").items().find(item => item.type === "notice")).toEqual(expect.objectContaining({ id: "notice:steer-refused:r-2", code: "steer-refused", message: "agy did not take it" }));
       // A retry of the same request is the cached answer, never a resend.
       expect(await steer("r-1", "first steer")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
       expect(provider.prompts.filter(prompt => prompt.delivery === "steer")).toHaveLength(2);

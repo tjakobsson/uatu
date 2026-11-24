@@ -92,6 +92,17 @@ describe("API contract structure", () => {
     expect(previous(legacy)).toBe(true);
     expect(previous(unmanaged)).toBe(false);
   });
+  test("a steer-refused notice fits the closed notice schema and names its request through its id", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const { steerRefusedNotice, steerRefusedRequestId } = await import("../src/chat/types");
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(spec.components.schemas.ConversationItem, spec.components.schemas));
+    const notice = steerRefusedNotice("request-7", "agy did not take it", 1);
+    expect(validate(notice), JSON.stringify(validate.errors)).toBe(true);
+    expect(parseConversationItem(notice)).toEqual(notice);
+    expect(steerRefusedRequestId(notice)).toBe("request-7");
+    expect(steerRefusedRequestId({ ...notice, code: "login-failed" })).toBeUndefined();
+  });
   test("withheld outcomes agree across closed worker schemas and deny dismissal", async () => {
     const { parseConversationItem, parseChatEvent } = await import("../src/chat/validation");
     const { workerDismissalEvidence } = await import("../src/chat/worker-dismissal-evidence");

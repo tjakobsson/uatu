@@ -1124,12 +1124,21 @@ delivery puts a steer in the transcript. One bound covers both owners:
 An agent declaring `immediate-steering` instead of `steering`
 (`add-antigravity-chat` D9) has no inbox and no Steer entries. A busy steer goes
 straight to `provider.prompt` with `delivery: "steer"` and no configuration,
-under the steer admission bound; its user row goes in at acceptance. Any
-provider rejection other than `OperationOutcomeUnknownError` is a definite
-refusal (`SteerRefusedError`, answered as a 409 `steer-refused` carrying the
-agent's reason) that publishes nothing, so the composer restores the draft;
-an unknown outcome stays in the receipt and is never resent. The provider reports the turn's end once, after the steered part, so
-held messages still wait for the carried turn.
+under the steer admission bound. A provider that knows the outcome at once
+answers it there: acceptance puts the user row in, and any rejection other
+than `OperationOutcomeUnknownError` is a definite refusal (`SteerRefusedError`,
+answered as a 409 `steer-refused` carrying the agent's reason) that publishes
+nothing, so the composer restores the draft. A provider that learns the
+outcome later (Antigravity, whose steer is confirmed only by its own prompt's
+answer) returns a confirmation promise: the adapter answers the client
+`awaitingConfirmation` and frees the admission lane at once, and the client
+keeps the steer as an unconfirmed draft. When the confirmation settles,
+acceptance puts the row in, carrying the request id, which settles the draft;
+a refusal upserts the notice `notice:steer-refused:<requestId>` (code
+`steer-refused`, the agent's reason as its message), which returns the draft
+to the composer; an unknown outcome leaves the draft unconfirmed. Nothing is
+ever resent. The provider reports the turn's end once, after the steered
+part, so held messages still wait for the carried turn.
 
 Paused held messages reflect dormancy/revert. Pending steers stay paused after
 an idle/interrupted/completed transition until a later wake supersedes it.

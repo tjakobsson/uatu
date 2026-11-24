@@ -87,12 +87,16 @@ manage, so it has no Agent accounts entry.
   runtime dependencies) and its `zod` peer. Installing them needs explicit
   approval, followed by `bun run check:licenses` and a check that both bundle
   into `dist/uatu`.
-- **API contract**: no new wire shapes. Antigravity reuses the existing
+- **API contract**: no new published schema. Antigravity reuses the existing
   conversation, status, usage and cost payloads, and its conversation ids are
   `antigravity:<sessionId>`. `immediate-steering` is a new name in the open
   capability list, which clients already tolerate, and steers reuse the
-  existing `steer` delivery value. Commit 2 confirms this against the
-  compatibility gate.
+  existing `steer` delivery value. A refused steer is a notice with the new
+  `code` value `steer-refused`, whose item id names the request; `code` and
+  `id` are open strings, so the change is additive and documented in the API
+  changelog. The prompt route's `awaitingConfirmation` answer is on the
+  workspace route the Hub proxies, outside the public contract. Commit 2
+  confirms this against the compatibility gate.
 - **Policy**: Google's terms restrict third-party use of `agy` under consumer
   plans. The docs state this, and users decide whether to use a personal
   plan (design D12).

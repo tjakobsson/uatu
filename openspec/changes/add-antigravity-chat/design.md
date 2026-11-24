@@ -259,9 +259,13 @@ agent in commit 2, before the Antigravity provider exists):
   follow-up goes into the dock and stays editable, and a second steer can be
   sent. The client keeps the steer as an unconfirmed draft. Acceptance puts
   its row, carrying the request id, where it was sent, which settles the
-  draft; a refusal adds a `steer-refused` notice naming the request, which
-  returns the draft to the composer with agy's reason; an unknown outcome
-  leaves the draft unconfirmed, never resent.
+  draft; a refusal adds a `steer-refused` notice, which returns the draft to
+  the composer with agy's reason; an unknown outcome leaves the draft
+  unconfirmed, never resent. The published notice schema is closed and has
+  no request field, so the notice's id names the request
+  (`notice:steer-refused:<requestId>`): a new `code` value and an id in an
+  existing open string, additive under `api/CONVENTIONS.md`, with no
+  revision change.
 - The provider publishes no status, and no completion signal, for the earlier
   prompt's end, so the adapter keeps the conversation running, sends no
   completion notification and does not drain the held queue. The seam's

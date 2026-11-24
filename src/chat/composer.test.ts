@@ -751,7 +751,7 @@ test("immediate steering: a steer awaiting confirmation is kept unconfirmed, set
   f.context.write(applied.projection); f.composer.observe(row, applied.outcome === "applied");
   expect(f.projection().acceptedDrafts.map(draft => draft.text)).toEqual(["Refused later"]);
   // A refusal naming the second returns it to the composer with the reason.
-  const refusal = { type: "item.upsert" as const, conversationId: "one", generation: "g", sequence: 2, item: { id: `notice:steer-refused:${second}`, type: "notice" as const, createdAt: 2, level: "warning" as const, code: "steer-refused", message: "agy did not take it", requestId: second } };
+  const refusal = { type: "item.upsert" as const, conversationId: "one", generation: "g", sequence: 2, item: { id: `notice:steer-refused:${second}`, type: "notice" as const, createdAt: 2, level: "warning" as const, code: "steer-refused", message: "agy did not take it" } };
   const refused = applyChatEvent(f.projection(), refusal);
   f.context.write(refused.projection); f.composer.observe(refusal, refused.outcome === "applied");
   expect(f.projection().acceptedDrafts).toEqual([]);

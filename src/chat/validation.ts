@@ -508,12 +508,11 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalString(record.message, "turn status message");
       break;
     case "notice":
-      expectKeys(record, ["id", "type", "createdAt", "level", "message", "code", "resetsAt", "requestId"], type);
+      expectKeys(record, ["id", "type", "createdAt", "level", "message", "code", "resetsAt"], type);
       expectOneOf(record.level, ["info", "warning", "error"], "notice level");
       expectNonEmptyString(record.message, "notice message");
       if (record.code !== undefined) expectIdentity(record.code, "notice code");
       expectOptionalTimestamp(record.resetsAt, "notice resetsAt");
-      if (record.requestId !== undefined) expectNonEmptyString(record.requestId, "notice requestId");
       break;
     case "context_report": {
       expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan", "session", "contextKey", "window"], type);

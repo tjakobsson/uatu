@@ -16,7 +16,7 @@ import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { isLiveConversationStatus, STEER_REFUSED_NOTICE_CODE } from "./types";
+import { isLiveConversationStatus, steerRefusedNotice } from "./types";
 import { OPENCODE_TEXT_START_FALLBACK, type OpenCodeTextStart } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TURN, CHAT_TURN_CONTINUES, isTerminalStatus, withRetainedReplyFacts, type ChatStatusLiveness, type ChatTurnIdentity, type ChatTurnToken } from "./turn-liveness";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
@@ -3696,9 +3696,7 @@ export class ChatAdapter {
         if (this.disposed) return;
         const current = this.projection(conversationId);
         if (confirmation.outcome === "accepted") this.recordImmediateSteer(current, confirmation, input);
-        else if (confirmation.outcome === "refused") {
-          current.upsert({ id: `notice:steer-refused:${input.requestId}`, type: "notice", createdAt: Date.now(), level: "warning", code: STEER_REFUSED_NOTICE_CODE, message: confirmation.reason, requestId: input.requestId });
-        }
+        else if (confirmation.outcome === "refused") current.upsert(steerRefusedNotice(input.requestId, confirmation.reason, Date.now()));
       });
       return { messageId: accepted.messageId, awaitingConfirmation: true };
     }
