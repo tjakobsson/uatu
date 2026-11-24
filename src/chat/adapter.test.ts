@@ -14886,6 +14886,81 @@ describe("workspace activity summary", () => {
     await errAdapter.dispose();
     await errPump;
   });
+
+  test("an unseen recovered worker child moved out while parent-miss verification is in flight is fenced and never seeded running", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-inflight-child");
+    const unseenChild = { ...fixtureSession("c-unseen-moved"), parentId: parent.id };
+    // Only the parent was ever listed/projected; unseenChild is known solely via parent's recovered workerChildren.
+    provider.sessions = [parent];
+    provider.reconcileBackgroundTasks = async id => id === parent.id ? [{
+      id: `task:${unseenChild.id}`,
+      type: "background_task",
+      taskId: unseenChild.id,
+      taskType: "agent",
+      childConversationId: unseenChild.id,
+      description: "Unseen worker",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has(`background.recovery:${parent.id}`));
+    await tasks.get(`background.recovery:${parent.id}`);
+    expect(adapter.activity().working).toBe(true);
+
+    // Parent is now missing; parent lookup triggers deferred child verification.
+    let resolveChildLookup!: (session: ProviderSession | null) => void;
+    provider.getSession = async id => {
+      if (id === parent.id) return null;
+      if (id === unseenChild.id) return new Promise<ProviderSession | null>(resolve => { resolveChildLookup = resolve; });
+      return null;
+    };
+    const parentMiss = adapter.getConversation(parent.id).catch(() => undefined);
+    await waitUntil(() => resolveChildLookup !== undefined);
+
+    // While child verification is in flight, the pump observes session.moved out for unseenChild.
+    const childMoveOutDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: unseenChild.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: unseenChild.id, directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await childMoveOutDone;
+
+    // Older local child lookup resolves afterwards; must be fenced and never seed running.
+    resolveChildLookup(unseenChild);
+    await parentMiss;
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests(unseenChild.id).status).toBe("idle");
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {

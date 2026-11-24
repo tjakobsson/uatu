@@ -2694,54 +2694,68 @@ export class ChatAdapter {
     visited = new Set<string>(),
   ): Promise<void> {
     visited.add(parentId);
-    for (const [childId, statusBaseline] of recoveredWorkerChildren) {
-      if (this.disposed || signal?.aborted) return;
-      if (visited.has(childId)) continue;
-      visited.add(childId);
-      const existingStatus = this.projections.get(childId)?.status;
-      if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
-        || existingStatus === "completed" || existingStatus === "failed" || existingStatus === "interrupted") continue;
-      if (presentIds?.has(childId)) {
-        const stop = this.stoppingTurns.get(childId);
-        if (stop) stop.activeProbeBaseline = statusBaseline;
-        else this.seedProbedRunning(childId, statusBaseline, true);
-        continue;
-      }
-      const started = ++this.presenceClock;
-      try {
-        const session = await this.provider.getSession(childId);
+    for (const [childId] of recoveredWorkerChildren) this.beginActiveProbe(childId);
+    try {
+      for (const [childId, statusBaseline] of recoveredWorkerChildren) {
         if (this.disposed || signal?.aborted) return;
-        const inWorkspace = Boolean(session && await this.isInWorkspace(session, false));
-        if (this.disposed || signal?.aborted) return;
-        if (inWorkspace && session) {
-          if (this.absenceSequence(childId) > started || this.settledTurns.has(childId)) continue;
-          this.refreshConfirmedPresence(session, started);
+        if (visited.has(childId)) continue;
+        visited.add(childId);
+        const existingStatus = this.projections.get(childId)?.status;
+        if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
+          || existingStatus === "completed" || existingStatus === "failed" || existingStatus === "interrupted") continue;
+        if (presentIds?.has(childId)) {
           const stop = this.stoppingTurns.get(childId);
           if (stop) stop.activeProbeBaseline = statusBaseline;
           else this.seedProbedRunning(childId, statusBaseline, true);
-        } else if (this.presenceSequence(childId) <= started) {
-          const nested = this.forgetMissingSession(childId, started);
-          if (nested.length > 0) await this.reconcileRecoveredWorkerChildren(childId, nested, signal, presentIds, visited);
+          continue;
         }
-      } catch {
-        // Keep recovered worker activity when a transient provider error prevents
-        // verification so subsequent healthy refreshes/reconnects can reconcile it.
-        if (!this.disposed && !signal?.aborted && this.absenceSequence(childId) <= started && !this.settledTurns.has(childId)) {
-          const stop = this.stoppingTurns.get(childId);
-          if (stop) stop.activeProbeBaseline = statusBaseline;
-          else this.seedProbedRunning(childId, statusBaseline, true);
+        const started = ++this.presenceClock;
+        try {
+          const session = await this.provider.getSession(childId);
+          if (this.disposed || signal?.aborted) return;
+          const inWorkspace = Boolean(session && await this.isInWorkspace(session, false));
+          if (this.disposed || signal?.aborted) return;
+          if (inWorkspace && session) {
+            if (this.absenceSequence(childId) > started || this.settledTurns.has(childId)) continue;
+            this.refreshConfirmedPresence(session, started);
+            if (this.statusSequence(childId) !== statusBaseline) continue;
+            const stop = this.stoppingTurns.get(childId);
+            if (stop) stop.activeProbeBaseline = statusBaseline;
+            else this.seedProbedRunning(childId, statusBaseline, true);
+          } else if (this.presenceSequence(childId) <= started) {
+            const nested = this.forgetMissingSession(childId, started);
+            if (nested.length > 0) await this.reconcileRecoveredWorkerChildren(childId, nested, signal, presentIds, visited);
+          }
+        } catch {
+          // Keep recovered worker activity when a transient provider error prevents
+          // verification so subsequent healthy refreshes/reconnects can reconcile it.
+          if (!this.disposed && !signal?.aborted
+            && this.absenceSequence(childId) <= started
+            && this.statusSequence(childId) === statusBaseline
+            && !this.settledTurns.has(childId)) {
+            const stop = this.stoppingTurns.get(childId);
+            if (stop) stop.activeProbeBaseline = statusBaseline;
+            else this.seedProbedRunning(childId, statusBaseline, true);
+          }
         }
       }
+    } finally {
+      for (const [childId] of recoveredWorkerChildren) this.endActiveProbe(childId);
     }
   }
 
   private async reconcileMovedChildren(parentId: string, signal?: AbortSignal, recoveredWorkerChildren: ReadonlyArray<readonly [string, number]> = []): Promise<void> {
-    const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
-    const visited = new Set<string>([parentId]);
-    const { retained, forgotten } = await this.verifyTrackedSessions(descendants, signal, undefined, visited);
-    for (const id of forgotten) visited.add(id);
-    if (recoveredWorkerChildren.length > 0) {
-      await this.reconcileRecoveredWorkerChildren(parentId, recoveredWorkerChildren, signal, retained, visited);
+    for (const [childId] of recoveredWorkerChildren) this.beginActiveProbe(childId);
+    try {
+      const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
+      const visited = new Set<string>([parentId]);
+      const { retained, forgotten } = await this.verifyTrackedSessions(descendants, signal, undefined, visited);
+      for (const id of forgotten) visited.add(id);
+      if (recoveredWorkerChildren.length > 0) {
+        await this.reconcileRecoveredWorkerChildren(parentId, recoveredWorkerChildren, signal, retained, visited);
+      }
+    } finally {
+      for (const [childId] of recoveredWorkerChildren) this.endActiveProbe(childId);
     }
   }
 
@@ -2760,12 +2774,22 @@ export class ChatAdapter {
     }
   }
 
+  private beginActiveProbe(id: string): void {
+    this.activeSessionProbes.set(id, (this.activeSessionProbes.get(id) ?? 0) + 1);
+  }
+
+  private endActiveProbe(id: string): void {
+    const remaining = (this.activeSessionProbes.get(id) ?? 1) - 1;
+    if (remaining <= 0) this.activeSessionProbes.delete(id);
+    else this.activeSessionProbes.set(id, remaining);
+  }
+
   private async syncActiveSessions(candidateIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
     if (!this.provider.listActiveSessions || candidateIds.size === 0 || this.disposed || signal?.aborted) return;
     const baselines = new Map<string, number>();
     for (const id of candidateIds) {
       baselines.set(id, this.statusSequence(id));
-      this.activeSessionProbes.set(id, (this.activeSessionProbes.get(id) ?? 0) + 1);
+      this.beginActiveProbe(id);
     }
     try {
       let activeIds: string[];
@@ -2788,11 +2812,7 @@ export class ChatAdapter {
         this.seedProbedRunning(id, baseline);
       }
     } finally {
-      for (const id of candidateIds) {
-        const remaining = (this.activeSessionProbes.get(id) ?? 1) - 1;
-        if (remaining <= 0) this.activeSessionProbes.delete(id);
-        else this.activeSessionProbes.set(id, remaining);
-      }
+      for (const id of candidateIds) this.endActiveProbe(id);
     }
   }
 
@@ -7356,15 +7376,20 @@ export class ChatAdapter {
       };
       if (!inWorkspace) return finishMovedOut();
       const moveInStarted = ++this.presenceClock;
+      this.beginActiveProbe(lifecycle.id);
       let confirmed: ProviderSession | null | undefined;
       try {
-        confirmed = await this.provider.getSession(lifecycle.id);
-      } catch {
-        confirmed = undefined;
-      }
-      if (confirmed === null || (confirmed !== undefined && !await this.isInWorkspace(confirmed, false))) {
-        if (this.presenceSequence(lifecycle.id) <= moveInStarted) this.forgetActivity(lifecycle.id, moveInStarted);
-        return finishMovedOut();
+        try {
+          confirmed = await this.provider.getSession(lifecycle.id);
+        } catch {
+          confirmed = undefined;
+        }
+        if (confirmed === null || (confirmed !== undefined && !await this.isInWorkspace(confirmed, false))) {
+          if (this.presenceSequence(lifecycle.id) <= moveInStarted) this.forgetActivity(lifecycle.id, moveInStarted);
+          return finishMovedOut();
+        }
+      } finally {
+        this.endActiveProbe(lifecycle.id);
       }
       if (this.absenceSequence(lifecycle.id) > moveInStarted) {
         return false;
