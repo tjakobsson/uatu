@@ -133,7 +133,7 @@ Tapping a pull request row SHALL never act on the tap alone when there is a choi
 #### Scenario: Check out as a worktree
 - **WHEN** the user chooses Check out as a worktree… for #639
 - **THEN** one confirmation shows the folder and branch, with the source and credentials under `More details`, a fork's pull request adds `From a fork: uatu won't push back to it.`, and `Create worktree` is followed by `You stay here and get a notice when it's ready.`
-- **AND** while GitHub data is mocked, Create worktree says plainly that nothing was created and offers to view #639 here
+- **AND** when the Hub serves worktree operations, Create worktree creates it (see "Checking out a pull request keeps you where you are"); without them, mocked GitHub data makes Create worktree say plainly that nothing was created and offer to view #639 here
 
 #### Scenario: Already checked out
 - **WHEN** the user taps #636, checked out as `fix/pane-heights`
@@ -146,6 +146,19 @@ Tapping a pull request row SHALL never act on the tap alone when there is a choi
 #### Scenario: Stepping back
 - **WHEN** the choice step is open and the user presses Escape or its back control
 - **THEN** the lists return; a second Escape closes the switcher
+
+### Requirement: Checking out a pull request keeps you where you are
+Create worktree SHALL create the checkout through the Hub's worktree operations: a fork's pull request on `pr/<n>` from `refs/pull/<n>/head`, a same-repository one on its head branch. The user SHALL stay where they are. The new checkout SHALL be listed under Checkouts at once as `Creating…` and SHALL not be enterable until ready. The pull request's row SHALL read `Checking out…`, so it cannot be started twice. Closing the switcher SHALL cancel nothing.
+
+#### Scenario: Ready
+- **WHEN** the user chooses Create worktree for #639 and the Hub creates `pr/639`
+- **THEN** the switcher returns to its lists with `pr/639 · Creating…` under Checkouts and `Checking out…` on #639's row
+- **AND** once it is ready, a notice says `pr/639 is ready.` and offers Go to, which starts the stopped checkout and opens it, and #639's row then leads to Go to its worktree
+- **AND** when an existing `pr/639` was checked out as it was and is not at the pull request's head, the notice says so
+
+#### Scenario: Failure
+- **WHEN** the Hub refuses or fails the checkout
+- **THEN** the row stays as `Couldn't create · Retry`, the pull request's step shows the reason with a Retry card, a live region says `Couldn't create pr/639.` and the reason, and Retry tries again
 
 ### Requirement: One Viewing strip says what Files and Preview show
 While a pull request other than the checked-out branch's own is viewed, one accent-tinted strip SHALL read `Viewing #<n>` with `← Back to <branch>` at its right edge. It SHALL be the only such notice: the Pull request pane, the preview header and the Files scope bar carry none of their own.

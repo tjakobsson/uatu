@@ -484,6 +484,34 @@ topic without touching the page's own document or conversation selection. Design
 model, provenance, parent credential inheritance) is in
 `openspec/changes/archive/2026-09-20-add-git-worktree-workspaces/design.md`.
 
+Creation has four modes: `new-branch`, `existing-local`, `remote-tracking`
+and `pull-request` (design D12 of `openspec/changes/add-github-pr-review/`).
+A pull request is named by number and by one of the repository's configured
+remotes; the Hub never calls GitHub. Inside the repository's fence,
+`fetchPullRequestHead` (`worktree-fetch.ts`) fetches `refs/pull/<n>/head`
+alone, with the parent's credential policy and the same prompt-free
+environment as Fetch remote branches. The fetch writes into an
+operation-scoped scratch ref under `refs/uatu/`, which is read back and
+deleted; it writes no branch and no `FETCH_HEAD`. A ref the remote does not
+publish is `ref-unavailable` (a wrong number, or a remote that is not the pull
+request's GitHub repository), and nothing is journaled. The checkout is on
+local branch `pr/<n>` (`pullRequestWorktreeBranch` in
+`shared/worktree-branches.ts`; the folder follows the usual
+`<main>.worktrees/pr-<n>` rule). A new `pr/<n>` is made after the journal
+reaches `creating`: first `branch.pr/<n>.remote` and `.merge` (so `git pull`
+follows the pull request and the child's detection finds it), then
+`git branch --no-track` at the fetched commit, then the ordinary `git worktree
+add`. A crash after the upstream is written leaves only configuration. A
+crash after the branch leaves a `pr/<n>` with exactly that upstream, which the
+retry reuses. An existing `pr/<n>` with exactly that upstream is checked out
+as it is, never reset or fast-forwarded, and the result's `pullRequestHead`
+lets the client say when it differs. Any other `pr/<n>` is `branch-exists`.
+Such a checkout is read-only in practice: its upstream is a pull ref, so
+pushes do not reach the fork. A same-repository pull request needs no new
+mode. The client runs `fetch`, then checks out the head branch with
+`existing-local` when it exists locally, else `remote-tracking` on
+`<remote>/<head>`, which keeps it pushable.
+
 Deletion's safety inspection (`inspectRemovalSafety` in `worktree-delete.ts`)
 returns the first blocker in a fixed order — identity, Git lock, nested linked
 worktree, Git operation markers, then submodules and nested repositories: the
@@ -1442,7 +1470,7 @@ The GitHub pull request surfaces follow `openspec/changes/add-github-pr-review/`
 | Composer (Write / Preview, ⌘/Ctrl+Enter, confirm before discarding text) and its page-local drafts | `src/preview/pr-composer.ts`, `src/preview/pr-drafts.ts` |
 | Whether GitHub takes writes now, and the stale-data wording every surface shares | `src/github/availability.ts` |
 | Submit review and discard dialogs (focus returns to the opener, found again after a re-render; footer pinned, and the review dialog's head too, its verdicts first on a short screen; the summary's required / optional guidance follows `summaryGuidance`, the same rule as `reviewSubmitReason`; a dialog closes when its PR leaves the screen; Finish review asks about line comments typed but not added) | `src/preview/review-dialogs.ts` |
-| The workspace switcher's Pull requests (also opened at that section by the pane header's search button and the no-PR state's "Browse pull requests…"): the heading names the repository (`Pull requests · octo-org/uatu`), a compact selector when the workspace has more than one Git repository (`pullRequestStore.chooseRepository`, page-local; a `?repository=` pull request URL chooses it too); the open-PR list with an `Open ▾` filter menu, the first three then "Show all n", two-line rows with Viewing / Checked out marks; a number or URL of this repository makes its row active or looks it up, another repository's URL is refused; without a credential one line of connect guidance. A row asks how to open it: View here, or Check out as a worktree… (simulated); Go to its worktree when already checked out. See "The workspace switcher" below | `src/shell/switcher.ts`, `src/shell/switcher-model.ts` |
+| The workspace switcher's Pull requests (also opened at that section by the pane header's search button and the no-PR state's "Browse pull requests…"): the heading names the repository (`Pull requests · octo-org/uatu`), a compact selector when the workspace has more than one Git repository (`pullRequestStore.chooseRepository`, page-local; a `?repository=` pull request URL chooses it too); the open-PR list with an `Open ▾` filter menu, the first three then "Show all n", two-line rows with Viewing / Checked out marks; a number or URL of this repository makes its row active or looks it up, another repository's URL is refused; without a credential one line of connect guidance. A row asks how to open it: View here, or Check out as a worktree…; Go to its worktree when already checked out. See "The workspace switcher" below | `src/shell/switcher.ts`, `src/shell/switcher-model.ts` |
 | The "connect GitHub" guidance the preview, the pane and the switcher share | `src/github/connect.ts` |
 | Files pane's PR scope: a viewed PR's changed files as a tree, each opening its diff, under a bar naming it | `src/sidebar/pull-request-scope.ts`, `src/sidebar/pull-request-scope-model.ts` |
 | Touch mode's pane stack as an accordion: one expanded pane (a per-device preference, `uatu:touch-expanded-pane`, kept apart from the desktop stack's collapsed flags and heights) takes the stack (the Pull request pane at most, sized to its content); each title is a toggle button over its header row; `revealPane` expands a pane in either mode; a folded Pull request header shows `#n · review state` | `src/sidebar/panes.ts` |
@@ -1464,7 +1492,7 @@ The workspace's *current* pull request is the checked-out branch's own unless an
 | Pure rules: spoken names, pull request lines and order, one search, the number/URL parsing and lookup text | `src/shell/switcher-model.ts` |
 | The Viewing strips `#viewing-strip-files` / `#viewing-strip-preview` (touch; the preview one also on desktop with the sidebar collapsed; none on a short screen) | `src/shell/switcher.ts`, `src/styles.css` |
 
-A real checkout from a pull request (the *Creating…* row and the ready notice) waits for the Hub's `pull-request` create mode and the real transport; until then Check out as a worktree… ends in a "Simulated" result.
+Check out as a worktree… then Create worktree creates the checkout through the Hub's worktree family. The Hub part offers `worktreeSource()`, the published family's path and the main checkout. A fork's pull request is one `pull-request` creation. A same-repository one is `fetch` and then its head branch. The client half is `src/shell/pull-request-checkout.ts`. The remote is the list's `remote`, or `origin` when the session does not name one. You stay where you are. The new checkout is listed under Checkouts as `Creating…` in `#switcher-creating`, and the pull request's row reads `Checking out…`, so it cannot start twice. Closing the dialog cancels nothing. On success the Hub list is re-read, and the `#switcher-ready` notice says `<branch> is ready.` and offers Go to. A stopped checkout starts first. A failure stays on its row as `Couldn't create · Retry`. The pull request's step shows the reason and a Retry card. Without the Hub's worktree service (`worktreeApi` absent), mocked GitHub data still ends in the labelled "Simulated" result.
 
 uatu never merges (design D11): the pane and the end of Conversation show GitHub's merge readiness read-only, and "Merge on GitHub ↗" links to the pull request. Refresh is event-driven with no timer (design D6): a branch or HEAD change, a PR view opening, returning to the page (focus or visibility, at most every 15 s), the user's own writes, manual refresh and Retry.
 
