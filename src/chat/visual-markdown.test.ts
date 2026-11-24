@@ -518,4 +518,9 @@ describe("agent visual Markdown", () => {
       expect(prepareChatVisualMarkdown(source, true).html).not.toMatch(/<img\b/i);
     }
   });
+
+  test("marks Mermaid fenced code blocks as Markdown code blocks in chat because chat renders them as copyable code", () => {
+    const { html } = prepareChatVisualMarkdown("```mermaid\ngraph TD\n  A-->B\n```\n", false);
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="language-mermaid">');
+  });
 });

@@ -2,7 +2,7 @@ import { fromHtml } from "hast-util-from-html";
 import { defaultSchema, sanitize, type Schema } from "hast-util-sanitize";
 import { toHtml } from "hast-util-to-html";
 import hljs from "highlight.js/lib/common";
-import { micromark } from "micromark";
+import { compile, parse, postprocess, preprocess } from "micromark";
 import { frontmatter, frontmatterHtml } from "micromark-extension-frontmatter";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
 
@@ -12,9 +12,20 @@ import {
   parseSimpleToml,
   parseSimpleYaml,
 } from "../document/metadata";
+import { MARKDOWN_CODE_ATTRIBUTE } from "../shared/code-copy";
 import { markExternalAnchors } from "./external-links";
 
-const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?)<\/code><\/pre>/g;
+declare module "micromark-util-types" {
+  interface TokenTypeMap { markdownCodeOrigin: "markdownCodeOrigin" }
+}
+declare module "hast" {
+  interface ElementData { markdownCodeBlock?: boolean }
+}
+
+const CODE_BLOCK_PATTERN = new RegExp(
+  `<pre((?:\\s+${MARKDOWN_CODE_ATTRIBUTE}(?:="")?)?)><code(?:\\s+class="language-([^"]+)")?>([\\s\\S]*?)<\\/code><\\/pre>`,
+  "g",
+);
 
 export const SYNTAX_HIGHLIGHT_BYTES_LIMIT = 1_048_576;
 
@@ -74,16 +85,121 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   // pass the original source through so micromark sees the leading delimiter
   // it knows how to consume; downstream we only surface metadata when our own
   // parser succeeded.
-  const rawHtml = micromark(source, {
-    allowDangerousHtml: true,
-    extensions: [gfm(), frontmatter(["yaml", "toml"])],
-    htmlExtensions: [gfmHtml(), frontmatterHtml(["yaml", "toml"])],
-  });
+  const { html: rawHtml, preOffsets } = compileMarkedMarkdown(source);
 
   const tree = fromHtml(rawHtml, { fragment: true });
+  markMarkdownCodeBlocks(tree, preOffsets);
   const safe = sanitize(tree, markdownSanitizeSchema);
+  if (safe.type === "root") applyMarkdownCodeAttribute(safe);
   markExternalAnchors(safe);
   return { html: highlightCodeBlocks(toHtml(safe)), metadata };
+}
+
+type HtmlNode = ReturnType<typeof fromHtml>["children"][number];
+type MarkdownEvent = ReturnType<typeof postprocess>[number];
+
+function compileMarkedMarkdown(source: string): { html: string; preOffsets: Set<number> } {
+  const events = postprocess(
+    parse({ extensions: [gfm(), frontmatter(["yaml", "toml"])] })
+      .document()
+      .write(preprocess()(source, undefined, true)),
+  );
+  // Lone UTF-16 surrogates cannot be produced by Markdown entity decoding
+  // (which replaces surrogate code points with U+FFFD), and scanning `source`
+  // guarantees the sentinel never collides with literal input. Stripping it
+  // before `fromHtml` records exact `<pre>` offsets (including across reordered
+  // GFM footnote buffers) without ever passing a marker to the HTML parser.
+  let suffix = 0;
+  let sentinel = `\uD800uatu-pre-${suffix}\uD801`;
+  while (source.includes(sentinel)) {
+    suffix += 1;
+    sentinel = `\uD800uatu-pre-${suffix}\uD801`;
+  }
+
+  const wrapped: MarkdownEvent[] = [];
+  const wrappers = new Map<MarkdownEvent[1], MarkdownEvent[1]>();
+  for (const [event, token, context] of events) {
+    if (event === "enter" && (token.type === "codeFenced" || token.type === "codeIndented")) {
+      const wrapper = { ...token, type: "markdownCodeOrigin" as const };
+      wrappers.set(token, wrapper);
+      wrapped.push(["enter", wrapper, context]);
+    }
+    wrapped.push([event, token, context]);
+    if (event === "exit" && wrappers.has(token)) {
+      wrapped.push(["exit", wrappers.get(token)!, context]);
+    }
+  }
+  const markedHtml = compile({
+    allowDangerousHtml: true,
+    htmlExtensions: [gfmHtml(), frontmatterHtml(["yaml", "toml"]), {
+      enter: {
+        markdownCodeOrigin() {
+          this.lineEndingIfNeeded();
+          this.buffer();
+        },
+      },
+      exit: {
+        markdownCodeOrigin() {
+          let chunk = this.resume();
+          const position = chunk.indexOf("<pre");
+          if (position !== -1) {
+            chunk = `${chunk.slice(0, position)}${sentinel}${chunk.slice(position)}`;
+          }
+          const lastWasTag = this.getData("lastWasTag");
+          this.raw(chunk);
+          this.setData("lastWasTag", lastWasTag);
+        },
+      },
+    }],
+  })(wrapped);
+
+  const preOffsets = new Set<number>();
+  if (!markedHtml.includes(sentinel)) return { html: markedHtml, preOffsets };
+  const parts: string[] = [];
+  let cursor = 0;
+  let cleanLength = 0;
+  while (true) {
+    const index = markedHtml.indexOf(sentinel, cursor);
+    if (index === -1) break;
+    const segment = markedHtml.slice(cursor, index);
+    parts.push(segment);
+    cleanLength += segment.length;
+    preOffsets.add(cleanLength);
+    cursor = index + sentinel.length;
+  }
+  parts.push(markedHtml.slice(cursor));
+  return { html: parts.join(""), preOffsets };
+}
+
+function markMarkdownCodeBlocks(parent: { children: HtmlNode[] }, preOffsets: ReadonlySet<number>): void {
+  if (preOffsets.size === 0) return;
+  for (const node of parent.children) {
+    if (node.type !== "element") continue;
+    const offset = node.position?.start.offset;
+    if (node.tagName === "pre" && offset !== undefined && preOffsets.has(offset)) {
+      node.data ??= { position: {} };
+      node.data.markdownCodeBlock = true;
+    }
+    markMarkdownCodeBlocks(node, preOffsets);
+  }
+}
+
+function isMermaidPre(node: HtmlNode): boolean {
+  if (node.type !== "element" || node.tagName !== "pre") return false;
+  const code = node.children.find(child => child.type === "element" && child.tagName === "code");
+  return code?.type === "element"
+    && Array.isArray(code.properties.className)
+    && code.properties.className.some(name => String(name) === "language-mermaid");
+}
+
+function applyMarkdownCodeAttribute(parent: { children: HtmlNode[] }): void {
+  for (const node of parent.children) {
+    if (node.type !== "element") continue;
+    if (node.tagName === "pre" && node.data?.markdownCodeBlock && !isMermaidPre(node)) {
+      node.properties[MARKDOWN_CODE_ATTRIBUTE] = true;
+    }
+    applyMarkdownCodeAttribute(node);
+  }
 }
 
 function extractMarkdownMetadata(source: string): DocumentMetadata | undefined {
@@ -102,7 +218,7 @@ function extractMarkdownMetadata(source: string): DocumentMetadata | undefined {
 }
 
 export function highlightCodeBlocks(html: string): string {
-  return html.replaceAll(CODE_BLOCK_PATTERN, (match, language: string | undefined, body: string) => {
+  return html.replaceAll(CODE_BLOCK_PATTERN, (match, preAttrs: string, language: string | undefined, body: string) => {
     if (language === "mermaid") {
       return match;
     }
@@ -113,7 +229,7 @@ export function highlightCodeBlocks(html: string): string {
       ? ` class="hljs language-${escapeAttribute(highlighted.language)}"`
       : ' class="hljs"';
 
-    return `<pre><code${classAttribute}>${highlighted.value}</code></pre>`;
+    return `<pre${preAttrs}><code${classAttribute}>${highlighted.value}</code></pre>`;
   });
 }
 

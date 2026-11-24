@@ -7,12 +7,13 @@ import { gfm, gfmHtml } from "micromark-extension-gfm";
 
 import { markExternalAnchors } from "../render/external-links";
 import { highlightCodeBlocks, markdownSanitizeSchema } from "../render/markdown";
+import { MARKDOWN_CODE_ATTRIBUTE } from "../shared/code-copy";
 import { measureChatWork } from "./performance";
 import type { ChatVisualInput } from "./visual-types";
 
 type HtmlNode = ReturnType<typeof fromHtml>["children"][number];
 type MarkdownEvent = ReturnType<typeof postprocess>[number];
-type Origin = { offset: number; complete?: boolean; svg?: { source: string; complete: boolean; provisional?: boolean } };
+type Origin = { offset: number; complete?: boolean; codeBlock?: boolean; svg?: { source: string; complete: boolean; provisional?: boolean } };
 declare module "micromark-util-types" {
   interface TokenTypeMap { chatVisualOrigin: "chatVisualOrigin" }
 }
@@ -131,6 +132,7 @@ function prepareUncached(source: string, key: string, presentation: boolean): Ca
           const code = node.children.length === 1 && node.children[0]?.type === "element" && node.children[0].tagName === "code"
             ? node.children[0] : node;
           code.children = [{ type: "text", value: code.children.map(child => child.type === "text" ? child.value : toHtml(child)).join("") }];
+          if (origin?.codeBlock) node.properties[MARKDOWN_CODE_ATTRIBUTE] = true;
           return node;
         }
         visit(node);
@@ -243,7 +245,7 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
       // ordinary source (e.g. ```label inside SVG text). Its line ending or
       // authoritative text completion, not this transient parse, seals it.
       const provisional = block.closingEnd !== undefined && /^[\t ]*$/.test(source.slice(block.closingEnd));
-      fenceOrigins.set(wrappers.get(token)!, { offset: block.offset, ...(block.svg ? { svg: {
+      fenceOrigins.set(wrappers.get(token)!, { offset: block.offset, codeBlock: true, ...(block.svg ? { svg: {
         source: block.parts.join(""), complete: block.fences === 2 && !provisional, ...(provisional ? { provisional: true } : {}),
       } } : {}) });
       block = undefined;
@@ -332,6 +334,7 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
           const provisionalReference = unfinishedDefinition || following === "" || following === "(" || following === "[";
           if (position !== -1) html = annotate(html, position + tag.length + 1, fenceOrigins.get(token) ?? {
             offset: original.start.offset!,
+            ...(original.type === "codeIndented" ? { codeBlock: true } : {}),
             ...(original.type === "image" ? { complete: inlineImages.has(original) || !provisionalReference } : {}),
           });
         }
