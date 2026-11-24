@@ -36,6 +36,7 @@ Activating the switcher SHALL open one labelled modal dialog titled `Switch`: a 
 - **THEN** the card reads `Working in uatu · feat/view-pr`, then `Viewing #618` with `← Back` (named `Back to feat/view-pr`) and the muted line `Not checked out · terminal stays on feat/view-pr`
 - **AND** with nothing viewed the Viewing block is absent
 - **AND** when the viewed pull request is from another of the workspace's Git repositories than its first, the Viewing line names that repository, like `Viewing octo-org/docs #12`
+- **AND** `Working in` always names the checkout, where the terminal and agent run, and so does `terminal stays on`: with another repository picked for pull requests, they still name the workspace's first repository and its branch, and the picked repository shows only in `Pull requests · owner/repo` and the Viewing line
 - **AND** while the current session is stopped the card reads `Working in … · Stopped` with Start, which starts the session in place without navigating
 
 #### Scenario: One search over both lists

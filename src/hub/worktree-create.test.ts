@@ -563,7 +563,7 @@ describe("pull request checkouts (pull-request mode)", () => {
     for (const existingUpstream of [{}, { remote: "fork", merge: "refs/pull/57/head" }, { remote: "origin", merge: "refs/heads/main" }]) {
       const refused = await rejection(planFor({ refs: { local: ["main", "pr/57"], remote: [] }, pullRequest: { headOid: HEAD, existingUpstream } }));
       expect(refused.code).toBe("branch-exists");
-      expect(refused.message).toBe("A branch named pr/57 already exists and does not track pull request #57 on origin. Nothing was reset; rename or delete that branch, then try again.");
+      expect(refused.message).toBe("A branch named pr/57 already exists and does not track pull request #57 on origin. Nothing was reset. Delete or rename the local branch pr/57, or set its upstream to refs/pull/57/head on origin, then try again.");
     }
   });
 

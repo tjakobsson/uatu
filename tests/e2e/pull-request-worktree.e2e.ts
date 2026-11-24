@@ -73,26 +73,65 @@ test("a fork's and a same-repository pull request become worktrees; you stay, th
   await step.getByRole("button", { name: "Check out #639 as a worktree…" }).click();
   await expect(step).toContainText("prs.worktrees/pr-639");
   await expect(step).toContainText("From a fork: uatu won't push back to it.");
+  await expect(step).toContainText("pull/639/head from the base repository (origin)");
   await expect(step).not.toContainText("Simulated");
   await captureScreenshot(page, info, "pull-request-worktree-confirm");
+  // The Hub's answer waits until the in-progress rows have been checked.
+  let release!: () => void;
+  const released = new Promise<void>(resolve => { release = resolve; });
+  const createRequests: unknown[] = [];
+  await page.route("**/api/hub/worktrees/create", async route => {
+    createRequests.push(route.request().postDataJSON());
+    await released;
+    await route.continue();
+  });
   await step.getByRole("button", { name: "Create worktree" }).click();
 
-  // You stay here; the notice offers Go to once the Hub has created it.
+  // You stay here, back on the lists: Creating… under Checkouts, Checking
+  // out… on the pull request's row.
+  const menu = page.locator("#hub-menu");
+  await expect(step).toBeHidden();
+  await expect(menu).toBeVisible();
+  await expect.poll(() => createRequests).toEqual([{ sourceWorkspaceId: workspace.id, mode: "pull-request", pullRequest: { number: 639, remote: "origin" } }]);
+  const creating = page.locator('#switcher-creating [data-creating-row="639"]');
+  await expect(creating).toContainText("pr/639");
+  await expect(creating).toContainText("Creating…");
+  await expect(page.locator('#switcher-pull-requests [data-pr-row="639"]')).toContainText("Checking out…");
+  // Choosing it again cannot start it twice: only View here, and why.
+  await page.locator('#switcher-pull-requests [data-pr-row="639"]').click();
+  await expect(step.locator("[data-choice]")).toHaveCount(1);
+  await expect(step.locator("[data-choice]")).toHaveAttribute("data-choice", "view");
+  await expect(step).toContainText("Checking out…");
+  // Closing the dialog cancels nothing.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  // Released, the route lets this and every later creation through.
+  release();
+
+  // The notice offers Go to once the Hub has created it.
   const notice = page.locator("#switcher-ready");
   await expect(notice).toContainText("pr/639 is ready.");
   expect(new URL(page.url()).pathname.startsWith(`/s/${workspace.id}/`)).toBe(true);
+  expect(createRequests).toHaveLength(1);
   await captureScreenshot(page, info, "pull-request-worktree-ready");
   const fork = (await inventory(page, workspace.id)).checkouts.find(checkout => checkout.branch === "pr/639")!;
   expect(fork.sourceRef).toBe("refs/pull/639/head");
   expect(await git(fork.path, ["rev-parse", "HEAD"])).toBe(heads.fork);
   expect(await git(workspace.path, ["config", "--get", "branch.pr/639.merge"])).toBe("refs/pull/639/head");
 
-  // Checked out now: the pull request offers Go to its worktree first.
+  // Checked out now: no Creating… row; the pull request offers Go to its
+  // worktree first and View here second, and Go to moves there.
   await choosePullRequest(page, 639);
-  await expect(step.locator("[data-choice]").first()).toHaveAttribute("aria-label", "Go to its worktree, pr/639");
-  await page.keyboard.press("Escape");
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#hub-menu")).toBeHidden();
+  await expect(page.locator("#switcher-creating [data-creating-row]")).toHaveCount(0);
+  const choices = step.locator("[data-choice]");
+  await expect(choices).toHaveCount(2);
+  await expect(choices.first()).toHaveAttribute("aria-label", "Go to its worktree, pr/639");
+  await expect(choices.last()).toHaveAttribute("aria-label", "View #639 here");
+  await choices.first().click();
+  await expect(page).toHaveURL(new RegExp(`/s/${fork.workspaceId}/`), { timeout: 30_000 });
+  await page.goto(workspace.sessionUrl);
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
   // The same repository's pull request: its own head branch, pushable.
   await choosePullRequest(page, 636);
@@ -125,8 +164,20 @@ test("a pull request whose head the remote does not have stays on its row as Cou
   await step.getByRole("button", { name: "Create worktree" }).click();
   const row = page.locator('#switcher-creating [data-creating-row="627"]');
   await expect(row).toContainText("Couldn't create");
+  await expect(page.locator("#switcher-live")).toContainText("Couldn't create docs/worktree-cleanup.");
   await row.locator("[data-creating-open]").click();
   await expect(step).toContainText("origin has no branch docs/worktree-cleanup. It may have been deleted or renamed; nothing was created.");
-  await expect(step.getByRole("button", { name: "Retry checking out #627 as a worktree" })).toBeVisible();
+  const choices = step.locator("[data-choice]");
+  await expect(choices).toHaveCount(2);
+  await expect(choices.first()).toHaveAttribute("data-choice", "view");
+  const retry = step.getByRole("button", { name: "Retry checking out #627 as a worktree" });
+  await expect(retry).toBeVisible();
+  // Retry asks the Hub again and goes back to the lists, where the row says
+  // how it went.
+  const asked = page.waitForRequest(request => request.method() === "POST" && /\/api\/hub\/worktrees\/(fetch|create)$/.test(new URL(request.url()).pathname));
+  await retry.click();
+  await asked;
+  await expect(step).toBeHidden();
+  await expect(row).toContainText("Couldn't create");
   expect((await inventory(page, workspace.id)).checkouts.some(checkout => checkout.branch === "docs/worktree-cleanup")).toBe(false);
 });

@@ -25,7 +25,7 @@ The pull request view, for the checked-out branch's pull request or any other op
 - **THEN** the composer keeps the text and shows the reason, and nothing is shown as posted
 
 ### Requirement: Inline comments and replies accumulate in a pending review
-New inline comments and replies to existing review threads SHALL be added to the viewer's pending review on GitHub, creating one if none exists. Pending comments SHALL be shown as pending, SHALL survive reloads, and SHALL be the same pending review the viewer sees on github.com. The reviewer SHALL be able to delete a pending comment.
+New inline comments and replies to existing review threads SHALL be added to the viewer's pending review on GitHub, creating one if none exists. Pending comments SHALL be shown as pending, SHALL survive reloads, and SHALL be the same pending review the viewer sees on github.com. The reviewer SHALL be able to edit and delete a pending comment or reply, and to resolve and unresolve a review thread.
 
 #### Scenario: First inline comment starts a pending review
 - **WHEN** the viewer has no pending review and adds an inline comment

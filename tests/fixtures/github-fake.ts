@@ -32,7 +32,12 @@ type PullRequestRecord = Json & {
   pending: PendingReview | null;
 };
 
-export type FakeGitHubOptions = { now?: () => number };
+export type FakeGitHubOptions = {
+  now?: () => number;
+  // Other repositories of the same owner it answers too, with the same
+  // pull requests (a workspace with two GitHub repositories).
+  siblings?: readonly string[];
+};
 
 export class FakeGitHub implements GitHubTransport {
   readonly calls: GitHubRequest[] = [];
@@ -47,9 +52,11 @@ export class FakeGitHub implements GitHubTransport {
   private checksForbidden = false;
   private readonly enterpriseHosts = new Set<string>();
   private readonly now: () => number;
+  private readonly names: ReadonlySet<string>;
 
   constructor(options: FakeGitHubOptions = {}) {
     this.now = options.now ?? Date.now;
+    this.names = new Set([seed.name, ...options.siblings ?? []]);
     this.reset();
   }
 
@@ -136,7 +143,7 @@ export class FakeGitHub implements GitHubTransport {
       return this.answer(200, { data: { viewer: { login: this.viewer }, repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: `Could not resolve to a Repository with the name '${this.owner}/${this.name}'.` }] });
     }
     const variables = request.variables;
-    if (variables.owner !== undefined && (variables.owner !== this.owner || variables.name !== this.name)) {
+    if (variables.owner !== undefined && !this.serves(variables.owner, variables.name)) {
       return this.answer(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository." }] });
     }
     const handler = this.handlers[request.operation];
@@ -277,11 +284,15 @@ export class FakeGitHub implements GitHubTransport {
     return this.answer(403, { message: "API rate limit exceeded for user ID 1." }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset });
   }
 
+  private serves(owner: unknown, name: unknown): boolean {
+    return owner === this.owner && typeof name === "string" && this.names.has(name);
+  }
+
   private rest(request: Extract<GitHubRequest, { kind: "rest" }>): GitHubResponse {
     if (request.operation !== "UatuPullRequestFiles") throw new Error(`FakeGitHub: unknown operation ${request.operation}`);
     const match = /^repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/files\?per_page=(\d+)&page=(\d+)$/.exec(request.path);
     if (!match) throw new Error(`FakeGitHub: unexpected path ${request.path}`);
-    if (match[1] !== this.owner || match[2] !== this.name) return this.answer(404, { message: "Not Found" });
+    if (!this.serves(match[1], match[2])) return this.answer(404, { message: "Not Found" });
     const pr = this.pullRequests.get(Number(match[3]));
     if (!pr) return this.answer(404, { message: "Not Found" });
     const perPage = Number(match[4]);

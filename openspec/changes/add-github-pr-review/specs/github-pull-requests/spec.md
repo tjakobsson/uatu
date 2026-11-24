@@ -39,8 +39,9 @@ The server SHALL reach GitHub only through the GitHub CLI available to the works
 Each repository's GitHub summary SHALL carry one status: `ready`, `no-pull-request`, `not-github`, `gh-missing`, `no-credential`, `no-access`, `rate-limited`, or `unavailable`. Every status other than `ready` and `no-pull-request` SHALL show a plain explanation and the next step. Last known pull request data SHALL stay visible, marked stale, during `rate-limited` and `unavailable`.
 
 #### Scenario: GitHub CLI is missing or too old
-- **WHEN** the GitHub CLI is not on the session's path or is older than the supported minimum version
-- **THEN** the status is `gh-missing` and the explanation names the minimum version and how to install it
+- **WHEN** a repository's remote is on `github.com` and the GitHub CLI is not installed (not on the session's path) or is older than the supported minimum version
+- **THEN** the status is `gh-missing`, not `not-github`, and the explanation names the minimum version and how to install it
+- **AND** a host other than `github.com` can be confirmed as GitHub only through the GitHub CLI, so without it that remote is `not-github`
 
 #### Scenario: No credential in a Hub workspace
 - **WHEN** the session runs under a Hub and the GitHub CLI is not authenticated for the repository's host
@@ -149,6 +150,7 @@ When a repository has a detected pull request, the workspace SHALL show it witho
 #### Scenario: Several repositories in one workspace
 - **WHEN** a workspace has two repositories and only one has a detected pull request
 - **THEN** that repository's pull request is shown labeled with the repository name, alongside the other repository's status
+- **AND** the Pull request pane's header names the repository beside the number, compactly (`acme/widgets #42`), whenever the workspace has more than one Git repository or the pull request is from another repository than the working one; a long name is cut at its end and the number stays whole
 
 #### Scenario: No pull request
 - **WHEN** no pull request is detected or the repository is not on GitHub

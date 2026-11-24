@@ -24,6 +24,7 @@ A Hub workspace SHALL be able to open any open pull request for review in a link
 #### Scenario: Name taken by an unrelated branch
 - **WHEN** local branch `pr/57` exists with a different upstream, or none
 - **THEN** creation is refused without reset or force, and the error says `A branch named pr/57 already exists and does not track pull request #57 on origin.`
+- **AND** it says how to fix it: delete or rename the local branch `pr/57`, or set its upstream to `refs/pull/57/head` on `origin`
 
 #### Scenario: Interrupted creation
 - **WHEN** the Hub stops after `pr/57` was made and before its checkout
@@ -39,7 +40,8 @@ The `pull-request` mode SHALL accept only a positive pull request number and the
 
 #### Scenario: Pull request head does not exist
 - **WHEN** the remote has no `refs/pull/<number>/head`
-- **THEN** no branch or checkout is created and the error says the pull request was not found on the remote, and that the remote may not be the pull request's GitHub repository
+- **THEN** no branch or checkout is created and the error says the pull request was not found on the remote, and to check the number and that the remote is the pull request's GitHub repository
+- **AND** a remote that is not on GitHub at all gets the same message
 
 #### Scenario: Not available outside a Hub
 - **WHEN** the workspace is not served by a Hub

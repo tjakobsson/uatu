@@ -257,10 +257,16 @@ function offered(): boolean {
   return hub !== null || pullRequestStore.state.enabled === true;
 }
 
+// Where the page works: the Hub's checkout, else the session's own (the
+// workspace's first repository), never the repository picked for pull
+// requests, which shows only in their heading and the Viewing line.
 function currentFacts(): SwitcherHubFacts {
   if (hub) return hub.facts();
-  const branch = pullRequestStore.state.branch;
-  const repository = pullRequestStore.state.summary?.repository?.name ?? null;
+  const working = pullRequestStore.workingRepository();
+  const branch = working ? working.branch : pullRequestStore.state.branch;
+  const repository = working
+    ? working.github?.split("/").pop() ?? (pullRequestStore.repositories().length > 1 ? working.label : null)
+    : pullRequestStore.state.summary?.repository?.name ?? null;
   return {
     repository,
     name: branch ?? "Branch unknown",
@@ -277,9 +283,15 @@ function viewingNumber(): number | null {
   return pullRequestStore.scopedNumber();
 }
 
-// The checked-out branch, as Back names it.
+// The checked-out branch, as Back names it: the pull request repository's,
+// whose own pull request Back shows.
 function branchName(): string {
   return pullRequestStore.state.branch ?? currentFacts().name;
+}
+
+// The branch the terminal and agent stay on while a pull request is viewed.
+function workingBranch(): string {
+  return pullRequestStore.workingRepository()?.branch ?? branchName();
 }
 
 // --- The chrome: chip, button, strips -----------------------------------------
@@ -704,7 +716,7 @@ function renderStatus(panel: HTMLElement): void {
         <span class="switcher-status-value">${pullRequestStore.otherRepositoryChosen() ? `<span class="switcher-status-repo">${escapeHtml(repositoryLabel(pullRequestStore.state.repositoryId))}</span> ` : ""}<strong>#${viewing}</strong></span>
         <button type="button" class="gh-link-button switcher-status-back" data-switcher-status-back aria-label="${escapeHtmlAttribute(`Back to ${branch}`)}">← Back</button>
       </div>
-      <p class="switcher-status-note">Not checked out · terminal stays on ${escapeHtml(branch)}</p>
+      <p class="switcher-status-note">Not checked out · terminal stays on ${escapeHtml(workingBranch())}</p>
     </div>` : ""}`;
   if (status.dataset.html === html) return;
   status.dataset.html = html;
@@ -1194,7 +1206,7 @@ function viewHere(number: number): void {
   if (!repositoryId) return;
   closeSwitcher({ restoreFocus: false });
   document.dispatchEvent(new CustomEvent<OpenPullRequestDetail>(OPEN_PULL_REQUEST_EVENT, { detail: { repositoryId, number } }));
-  if (number !== pullRequestStore.branchNumber()) announce(`Viewing #${number}. Terminal and agent stay on ${branchName()}.`);
+  if (number !== pullRequestStore.branchNumber()) announce(`Viewing #${number}. Terminal and agent stay on ${workingBranch()}.`);
 }
 
 function stepBack(): void {
@@ -1261,7 +1273,6 @@ function choiceCard(choice: string, title: string, label: string, lines: string[
 function renderStep(element: HTMLElement, step: Step): void {
   element.hidden = false;
   const pr = step.pr;
-  const branch = branchName();
   const repository = hub?.repositoryName() ?? workspaceName();
   const checkout = pullRequestCheckout(pr, repository);
   const head = (title: string) => `<div class="switcher-head switcher-step-head">
@@ -1269,7 +1280,7 @@ function renderStep(element: HTMLElement, step: Step): void {
       <h2 id="switcher-step-title" class="switcher-title">${title}</h2>
       <button type="button" class="switcher-icon-button" data-switcher-close aria-label="Close"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
     </div>`;
-  const viewLines = [`Opens in Files and Preview, from GitHub`, `Terminal and agent stay on ${escapeHtml(branch)}`];
+  const viewLines = [`Opens in Files and Preview, from GitHub`, `Terminal and agent stay on ${escapeHtml(workingBranch())}`];
   if (step.kind === "choice") {
     const found = hubForPullRequests()?.findCheckout(pullRequestLocalBranch(pr)) ?? null;
     const view = choiceCard("view", "View here", `View #${pr.number} here`, viewLines, { primary: found === null });

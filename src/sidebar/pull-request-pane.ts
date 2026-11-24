@@ -265,6 +265,16 @@ async function runScenario(input: Parameters<typeof githubApi.setScenario>[0]): 
   }
 }
 
+// The repository the header names beside the number (`octo-org/docs #12`)
+// when the number alone could be another repository's: the workspace has
+// more than one Git repository, which also covers pull requests picked from
+// another repository than the working one.
+function repositoryBesideNumber(): string | null {
+  if (pullRequestStore.repositories().length < 2) return null;
+  const repository = pullRequestStore.state.summary?.repository;
+  return repository ? `${repository.owner}/${repository.name}` : null;
+}
+
 // What the folded pane's header says beside the number (touch mode's
 // accordion; styles.css shows it only while the pane is folded).
 function collapsedSummary(pr: PullRequestSummary): string {
@@ -416,7 +426,8 @@ function renderPaneContent(): void {
   const pending = pr?.viewerPendingComments ?? 0;
   const pendingLabel = `Finish review (${pending} pending ${pending === 1 ? "comment" : "comments"})`;
   const paused = githubWritesPausedReason(summary);
-  setMeta(pr ? `<a href="${escapeHtmlAttribute(previewHref(pr.number))}" data-pr-open="${pr.number}" class="pr-pane-number">#${pr.number}</a><span class="pane-collapsed-summary">· ${escapeHtml(collapsedSummary(pr))}</span>${pending && pr.state === "OPEN" ? `<button type="button" class="gh-pill gh-pill-attention gh-pill-xs gh-pill-button" data-pr-action="review" title="${escapeHtmlAttribute(paused ? `${pendingLabel}: ${paused}` : pendingLabel)}" aria-label="${escapeHtmlAttribute(pendingLabel)}"${paused ? ` disabled aria-describedby="pr-pane-paused"` : ""}><span aria-hidden="true">✎ ${pending}</span></button>` : ""}` : "");
+  const repository = repositoryBesideNumber();
+  setMeta(pr ? `<a href="${escapeHtmlAttribute(previewHref(pr.number))}" data-pr-open="${pr.number}" class="pr-pane-number">${repository ? `<span class="pr-pane-repo" title="${escapeHtmlAttribute(repository)}">${escapeHtml(repository)}</span> ` : ""}#${pr.number}</a><span class="pane-collapsed-summary">· ${escapeHtml(collapsedSummary(pr))}</span>${pending && pr.state === "OPEN" ? `<button type="button" class="gh-pill gh-pill-attention gh-pill-xs gh-pill-button" data-pr-action="review" title="${escapeHtmlAttribute(paused ? `${pendingLabel}: ${paused}` : pendingLabel)}" aria-label="${escapeHtmlAttribute(pendingLabel)}"${paused ? ` disabled aria-describedby="pr-pane-paused"` : ""}><span aria-hidden="true">✎ ${pending}</span></button>` : ""}` : "");
   const stale = summary.status === "rate-limited" || summary.status === "unavailable";
   // No credential: nothing can be read. The preview, when it shows a pull
   // request, holds the full guidance; the pane says it in one line then.

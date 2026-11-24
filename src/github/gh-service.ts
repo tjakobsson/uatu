@@ -658,7 +658,7 @@ export class GhGithubService implements GithubService {
     options: { anyState?: boolean },
     run: (pre: WritePrecondition, context: Context, state: RepositoryState) => Promise<void>,
   ): Promise<PullRequestDetail> {
-    if (this.options.mode !== "full") throw new GithubError(403, "This session reads GitHub only (its GitHub setting is read), so nothing can be sent.");
+    if (this.options.mode !== "full") throw new GithubError(403, "This session reads GitHub only, so nothing can be sent. Start it with UATU_GITHUB=full to send.");
     // Taken before anything is awaited, so overlapping writes can't both pass.
     const state = this.state(repositoryId);
     if (state.writing.has(number)) throw new GithubError(409, `Another change to #${number} is still being sent.`);

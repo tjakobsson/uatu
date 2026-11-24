@@ -164,7 +164,7 @@ function planPullRequest(
   if (exists) {
     const upstream = facts.existingUpstream;
     if (upstream?.remote !== remote || upstream.merge !== headRef) {
-      refuse("branch-exists", `A branch named ${branch} already exists and does not track pull request #${number} on ${remote}. Nothing was reset; rename or delete that branch, then try again.`);
+      refuse("branch-exists", `A branch named ${branch} already exists and does not track pull request #${number} on ${remote}. Nothing was reset. Delete or rename the local branch ${branch}, or set its upstream to ${headRef} on ${remote}, then try again.`);
     }
   }
   const checkoutOid = exists ? facts.existingOid : facts.headOid;

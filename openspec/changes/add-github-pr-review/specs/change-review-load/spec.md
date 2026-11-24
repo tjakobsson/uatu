@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
-### Requirement: A detected pull request supplies the base
-When a repository's checked-out branch has a detected pull request, the `base` target SHALL measure from the merge base of HEAD and the pull request's base: GitHub's base commit when it exists locally, otherwise the local remote-tracking base branch, marked possibly stale. The anchor SHALL name `<remote>/<baseRefName>`. Without either ref, the default resolution SHALL apply, flagged.
+### Requirement: An open pull request supplies the base
+When a repository's checked-out branch has an open pull request, the `base` target SHALL measure from the merge base of HEAD and the pull request's base: GitHub's base commit when it exists locally, otherwise the local remote-tracking base branch, marked possibly stale. The anchor SHALL name `<remote>/<baseRefName>`. Without either ref, the default resolution SHALL apply, flagged.
 
 #### Scenario: Pull request into a release branch
 - **WHEN** the checked-out branch has an open pull request with base `release/2.0`, GitHub's base commit exists locally, and the compare target is `base`
@@ -21,11 +21,15 @@ When a repository's checked-out branch has a detected pull request, the `base` t
 - **THEN** changed files are measured against `HEAD` as before
 
 #### Scenario: Pull request goes away
-- **WHEN** the branch is switched to one without a pull request
+- **WHEN** the branch is switched to one without an open pull request
 - **THEN** the next repository update uses the default base resolution again
 
+#### Scenario: A merged or closed pull request supplies no base
+- **WHEN** the pull request detected for the checked-out branch is merged or closed
+- **THEN** the `base` target uses the default base resolution
+
 ### Requirement: Fetching pull request refs is explicit and narrow
-The fetch action SHALL run only when the user activates it. It SHALL fetch the pull request's head (`refs/pull/<n>/head` on the base repository's remote) into the private ref `refs/uatu/pull/<n>/head` and object storage, and fetch the base branch only when a comparison or the base revision needs it. It MUST NOT change the working tree, the index, any local branch, or any remote-tracking ref. Uatu SHALL keep at most 20 `refs/uatu/pull/*` refs per repository, pruning the oldest first.
+The fetch action SHALL run only when the user activates it. It SHALL fetch the pull request's head (`refs/pull/<n>/head` on the base repository's remote) into the private ref `refs/uatu/pull/<n>/head` and object storage, and fetch the base branch only when a comparison or the base revision needs it. It MUST NOT change the working tree, the index, any local branch, or any remote-tracking ref. Uatu SHALL keep at most 20 `refs/uatu/pull/*` refs per repository, pruned at each fetch.
 
 #### Scenario: Fetching a pull request's head
 - **WHEN** the user activates Fetch for pull request #42 (the file view's card, All files, or Change Overview's fetch action)
@@ -38,7 +42,7 @@ The fetch action SHALL run only when the user activates it. It SHALL fetch the p
 
 #### Scenario: The private refs stay bounded and out of the way
 - **WHEN** heads of more than 20 pull requests of one repository have been fetched
-- **THEN** the oldest `refs/uatu/pull/<n>/head` refs are deleted until 20 remain, and a merged or closed pull request's ref is deleted when the reviewer leaves it
+- **THEN** at the next successful fetch, the refs of pull requests read as merged or closed are deleted, then the oldest by their head commit's committer date until at most 20 remain; the ref just fetched is never deleted
 - **AND** the refs are outside every refspec, so `git fetch --prune` leaves them alone; they show in `git log --all` and are shared by the repository's linked worktrees
 
 #### Scenario: A shallow repository

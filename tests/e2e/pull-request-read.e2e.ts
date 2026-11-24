@@ -37,6 +37,25 @@ const detailsToggle = (page: Page) => page.locator("[data-pr-details-toggle]");
 const conversation = (page: Page) => page.locator("#pr-panel-conversation");
 const banner = (page: Page) => page.locator("#preview [data-pr-banner]");
 const param = (page: Page, name: string) => new URL(page.url()).searchParams.get(name);
+const paneNumber = (page: Page) => page.locator("#pull-request-pane-meta .pr-pane-number");
+
+// The pane's header with a repository beside the number: the name whole,
+// the number and every shown header action inside the header and taking its
+// own click.
+async function expectHeaderWhole(page: Page): Promise<void> {
+  const header = page.locator('[data-pane-id="pull-request"] > .pane-header');
+  const fit = await header.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    const repo = element.querySelector<HTMLElement>(".pr-pane-repo")!;
+    const inside = [...element.querySelectorAll<HTMLElement>(".pr-pane-number, .pane-actions > button")].every(control => {
+      const rect = control.getBoundingClientRect();
+      return rect.width === 0 || (rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5);
+    });
+    return { repoWhole: repo.scrollWidth <= repo.clientWidth + 1, inside };
+  });
+  expect(fit).toEqual({ repoWhole: true, inside: true });
+  for (const control of [paneNumber(page), ...await header.locator(".pane-actions > button:visible").all()]) expect(await centreMiss(control)).toBeNull();
+}
 
 test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
@@ -160,7 +179,8 @@ test.describe("desktop", () => {
     await expect(connect.getByRole("heading", { name: "GitHub isn't connected for this workspace" })).toBeVisible();
     await expect(connect).toContainText("gh auth login");
     await openPullRequest(page, "pr=642").catch(() => undefined);
-    await expect(page.locator("#preview-path")).toHaveText("#642 · GitHub not connected");
+    // The repository is named when the summary that said so arrived first.
+    await expect(page.locator("#preview-path")).toHaveText(/^#642 · (octo-org\/uatu · )?GitHub not connected$/);
     const card = page.locator("#preview .gh-connect").first();
     await expect(card).toContainText("Connect GitHub to review pull requests here");
     await expect(card).toContainText("Outside a Hub, sign in with gh auth login and restart this session.");
@@ -297,9 +317,12 @@ test.describe("desktop", () => {
   // Two Git repositories in one workspace, on the real service: the
   // workspace's repository is acme/widgets with #42 as its branch's pull
   // request; the second, docs-site, has no GitHub remote.
-  test("two repositories: the pane follows the chosen one, a URL naming the other says it isn't on GitHub, and focus stays in the switcher", async ({ page, request }) => {
+  test("two repositories: the pane names the repository beside the number and follows the chosen one, a URL naming the other says it isn't on GitHub, and focus stays in the switcher", async ({ page, request }) => {
     await ownPullRequest(page, request, {}, { secondRepository: true });
-    await expect(page.locator('[data-pane-id="pull-request"] > .pane-header')).toContainText("Pull request #42");
+    // With two repositories the number alone is ambiguous: `acme/widgets #42`.
+    await expect(page.locator('[data-pane-id="pull-request"] > .pane-header')).toContainText("Pull request acme/widgets #42");
+    await expect(paneNumber(page)).toHaveAccessibleName("acme/widgets #42");
+    await expectHeaderWhole(page);
     await expect(page.locator("#change-overview")).toContainText("docs-site");
 
     await page.locator("#pull-request-browse").click();
@@ -326,7 +349,7 @@ test.describe("desktop", () => {
     await expect(toggle).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(page.locator("#hub-menu")).toBeHidden();
-    await expect(page.locator('[data-pane-id="pull-request"] > .pane-header')).toContainText("Pull request #42");
+    await expect(page.locator('[data-pane-id="pull-request"] > .pane-header')).toContainText("Pull request acme/widgets #42");
 
     // The other repository's pull request URL says why there is nothing.
     await page.goto(`/?repository=${encodeURIComponent(await repositoryId(page, 1))}&pr=42`);
@@ -335,6 +358,70 @@ test.describe("desktop", () => {
     // And the workspace's own repository's URL shows #42 again.
     await page.goto(`/?repository=${encodeURIComponent(await repositoryId(page, 0))}&pr=42`);
     await expect(page.locator("#preview-path")).toHaveText("#42 · acme/widgets");
+  });
+
+  // Both repositories on GitHub: docs-site is acme/docs, which the transport
+  // fake answers with the same pull requests.
+  test("two repositories on GitHub: the other's pull request is named with its repository in the pane and the Viewing line, and Working in stays on the checkout", async ({ page, request }, testInfo) => {
+    await ownPullRequest(page, request, {}, { secondRepository: "github" });
+    await expect(paneNumber(page)).toHaveText("acme/widgets #42");
+    const chip = page.locator("#hub-toggle");
+    await expect(chip).toHaveAccessibleName("Switch. Working in widgets, feature/login.");
+
+    await page.locator("#pull-request-browse").click();
+    const toggle = page.locator('[data-switcher-menu-toggle="repository"]');
+    await toggle.click();
+    await page.locator('[data-switcher-menu="repository"] [role=menuitemradio]').last().click();
+    await expect(toggle).toHaveAccessibleName("Repository: acme/docs. Choose another");
+    await expect(page.locator("#switcher-pull-requests-heading")).toContainText("acme/docs");
+    // The picked repository is not where you work.
+    await expect(page.locator("#switcher-status")).toHaveText(/^\s*Working in\s*widgets\s*·\s*feature\/login\s*$/);
+    // Outside a Hub a row views the pull request here.
+    await page.locator('#switcher-pull-requests [data-pr-row="42"]').click();
+    await expect(page.locator("#hub-menu")).toBeHidden();
+    await expect.poll(() => param(page, "pr")).toBe("42");
+    await expect(page.locator("#preview-path")).toHaveText("#42 · acme/docs");
+    await expect(paneNumber(page)).toHaveText("acme/docs #42");
+    await expectHeaderWhole(page);
+    await expect(chip).toHaveAccessibleName("Switch. Working in widgets, feature/login. Viewing pull request 42.");
+
+    await chip.click();
+    const viewing = page.locator("#switcher-status .switcher-status-viewing");
+    await expect(page.locator("#switcher-status .switcher-status-row").first()).toHaveText(/Working in\s*widgets\s*·\s*feature\/login/);
+    await expect(viewing).toContainText(/Viewing\s*acme\/docs\s*#42/);
+    await expect(viewing).toContainText("Not checked out · terminal stays on feature/login");
+    await captureScreenshot(page, testInfo, "pr-read-two-repositories");
+  });
+
+  test("outside a Hub the switcher holds the status card and Pull requests: the first three, Show all, the marks, and a row views the pull request here", async ({ page, request }) => {
+    await resetGithub(page, request);
+    await openPullRequest(page, "pr=639");
+    await page.locator("#hub-toggle").click();
+    const menu = page.locator("#hub-menu");
+    const rows = page.locator("#switcher-pull-requests [role=option]");
+    await expect(rows).toHaveCount(3);
+    // No Hub: no Checkouts and no footer.
+    await expect(page.locator("#switcher-checkouts-section")).toBeHidden();
+    await expect(page.locator("#switcher-footer")).toBeHidden();
+    await expect(page.locator("#switcher-status")).toContainText("Not checked out · terminal stays on feature/review-load");
+    // The viewed pull request is tinted with an eye; the branch's own is
+    // checked out here.
+    const viewed = page.locator('#switcher-pull-requests [data-pr-row="639"]');
+    await expect(viewed).toHaveClass(/is-viewing/);
+    await expect(viewed).toHaveAccessibleName(/Viewing/);
+    await expect(viewed.locator(".switcher-row-line2")).toContainText("Fork");
+    const own = page.locator('#switcher-pull-requests [data-pr-row="642"]');
+    await expect(own.locator(".switcher-row-mark.is-checked-out")).toHaveCount(1);
+    await expect(own).toHaveAccessibleName(/Checked out/);
+
+    await page.locator("[data-switcher-show-all]").click();
+    await expect(rows).toHaveCount(6);
+    // A row views it here at once: no choice step.
+    await page.locator('#switcher-pull-requests [data-pr-row="636"]').click();
+    await expect(menu).toBeHidden();
+    await expect(page.locator("#switcher-step")).toBeHidden();
+    await expect.poll(() => param(page, "pr")).toBe("636");
+    await expect(page.locator("#preview-title")).toHaveText("fix(sidebar): restore pane heights after reload");
   });
 });
 
@@ -377,6 +464,31 @@ test.describe("touch", () => {
     await page.locator("#pr-tab-files").click();
     await expect(page.locator("#pr-panel-files diffs-container").first()).toBeVisible();
     await expect.poll(() => param(page, "tab")).toBe("files");
+  });
+
+  test("two repositories on a phone: the pane's header names the repository beside the number, whole, and Working in stays on the checkout", async ({ page, request }, testInfo) => {
+    await ownPullRequest(page, request, {}, { secondRepository: "github" });
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await openPullRequestPane(page);
+    await expect(paneNumber(page)).toHaveText("acme/widgets #42");
+    await expectHeaderWhole(page);
+    await expectTouchTarget(paneNumber(page), "the pull request's number", { width: 0, height: 44 });
+
+    // The other repository's pull request, chosen in the switcher.
+    await page.locator("#pull-request-browse").click();
+    const toggle = page.locator('[data-switcher-menu-toggle="repository"]');
+    await toggle.click();
+    await page.locator('[data-switcher-menu="repository"] [role=menuitemradio]').last().click();
+    await expect(toggle).toHaveAccessibleName("Repository: acme/docs. Choose another");
+    await expect(page.locator("#switcher-status")).toHaveText(/^\s*Working in\s*widgets\s*·\s*feature\/login\s*$/);
+    await page.locator('#switcher-pull-requests [data-pr-row="42"]').click();
+    await expect(page.locator("#hub-menu")).toBeHidden();
+    await expect.poll(() => param(page, "pr")).toBe("42");
+    await expect(page.locator("#switcher-button")).toHaveAccessibleName("Switch. Working in widgets, feature/login. Viewing pull request 42.");
+    await openPullRequestPane(page);
+    await expect(paneNumber(page)).toHaveText("acme/docs #42");
+    await expectHeaderWhole(page);
+    await captureScreenshot(page, testInfo, "pr-read-touch-two-repositories");
   });
 
   test("no credential and rate-limited on a phone: the pane and the view say so", async ({ page, request }) => {

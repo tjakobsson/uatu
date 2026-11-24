@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 16 / Workspace 37 - Unreleased (pull request compare base)
+
+Compatibility: additive
+
+### Changes
+
+- `RepositorySnapshot.base.mode` can be `pull-request`: the checked-out branch's open pull request supplies the `base` compare target, measured from GitHub's base commit when it is local, else from the local remote-tracking base branch.
+- `RepositorySnapshot.base` gains `pullRequest: { number, ref, state }`, where `ref` names `<remote>/<baseRefName>` and `state` is `exact`, `stale` or `missing`. `mode` is `pull-request` for `exact` and `stale`; `missing` keeps the default resolution's mode. A merged or closed pull request supplies no base.
+- `RepositorySnapshot.base` is an open object, so neither revision changes.
+
+### Migration
+
+None. Clients that branch on `base.mode` should treat an unknown mode like the default resolution and may label `pull-request` from `base.pullRequest`.
+
 ## Hub 16 / Workspace 37 - Unreleased (pull request worktrees)
 
 Compatibility: breaking (Hub schema); additive (accepted requests)

@@ -7,7 +7,7 @@ Uatu already shows a branch's changed files, per-file diffs and commit history, 
 - Detect the GitHub pull request for each repository's checked-out branch and show it automatically: number, title, state or draft, review decision, checks, requested reviewers and a link to GitHub.
 - Add a URL-addressable pull request view that renders the PR description and conversation with the existing sanitized GitHub-flavored Markdown renderer.
 - Where these live in the UI is not settled. A separate UX review will choose between a sidebar pane with its own preview target, a view mode, and a workspace "review mode", and will decide where "open any PR" is offered. The specs describe behavior without fixing the surface; `design.md` records the options.
-- While a pull request is detected, measure the `base` compare target against the PR's base branch (`baseRefName` and GitHub's base commit) instead of the repository's default branch. Changed files, the compare anchor and the per-file Diff view all follow it. `last-commit` is unchanged.
+- While the checked-out branch has an open pull request, measure the `base` compare target against the PR's base branch (`baseRefName` and GitHub's base commit) instead of the repository's default branch. Changed files, the compare anchor and the per-file Diff view all follow it. `last-commit` is unchanged.
 - List the repository's open pull requests and open any of them for review in its own Hub worktree. Same-repository PRs use their real head branch; PRs from forks get a local `pr/<number>` branch fetched from `refs/pull/<number>/head`. This adds a `pull-request` creation mode to the Hub worktree API.
 - Add top-level conversation comments.
 - Add inline comments on the Diff view and replies to existing review threads. Both accumulate in the viewer's pending review on GitHub, as they do on github.com. Inline comments are offered only when the displayed diff is exactly the PR's diff at its head commit; otherwise Uatu explains why and never guesses a line.
@@ -20,11 +20,11 @@ Uatu already shows a branch's changed files, per-file diffs and commit history, 
 ### New Capabilities
 
 - `github-pull-requests`: GitHub repository and credential resolution, pull request detection for the checked-out branch, the automatic summary, read-only merge readiness with the link to merge on GitHub, the open-PR list, the URL-addressable pull request view, event-driven refresh, status and error states, and safe rendering of GitHub content.
-- `pull-request-review`: conversation comments, inline comments and thread replies in a GitHub pending review, editing pending comments, keeping pending reviews and unsent text in sight, the rule for anchoring inline comments to the PR head, review submission, and action attribution.
+- `pull-request-review`: conversation comments, inline comments and thread replies in a GitHub pending review, editing pending comments, resolving and unresolving threads, keeping pending reviews and unsent text in sight, the rule for anchoring inline comments to the PR head, review submission, and action attribution.
 
 ### Modified Capabilities
 
-- `change-review-load`: a detected pull request supplies the `base` compare target and its anchor.
+- `change-review-load`: an open pull request supplies the `base` compare target and its anchor.
 - `document-diff-view`: the base-resolution order gains the pull request base ahead of the repository default.
 - `git-worktree-workspaces`: a pull request can be opened as a Hub worktree through a new creation mode, including PRs from forks.
 

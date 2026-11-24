@@ -275,7 +275,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
     let workspaceRoutes!: ReturnType<typeof buildRoutes>;
     // GitHub pull requests through the session's own `gh` (UATU_GITHUB =
-    // off | read | full, default full), or the in-memory fake with
+    // off | read | full, default read), or the in-memory fake with
     // UATU_GITHUB_FAKE=1. Null with `off`: every /api/github/* route answers
     // 404 (src/github/service.ts).
     const github = githubServiceFromEnvironment(process.env, {

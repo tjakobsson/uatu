@@ -212,6 +212,14 @@ export class PullRequestStore {
     return repositoryId === null ? null : this.githubNames.get(repositoryId) ?? null;
   }
 
+  // The checkout the page works in, where the terminal and agent run: the
+  // workspace's first Git repository and its branch, whichever repository
+  // the pull requests are picked from. Null before the snapshots arrive.
+  workingRepository(): { id: string; label: string; branch: string | null; github: string | null } | null {
+    const first = pullRequestRepository(this.snapshots);
+    return first ? { id: first.id, label: first.label, branch: first.metadata.branch ?? null, github: this.githubNames.get(first.id) ?? null } : null;
+  }
+
   // Whether the pull request repository is another than the workspace's
   // first: the status card names it beside a viewed pull request then.
   otherRepositoryChosen(): boolean {

@@ -11,11 +11,12 @@
 //   when the process opts in with UATU_GITHUB_FAKE=1.
 //
 // The kill switch is one setting, UATU_GITHUB = off | read | full (default
-// full): `off` answers null, so every /api/github/* route answers 404 and the
-// browser shows no pull request surface; `read` serves pull requests and
-// refuses every write (the summary says `readOnly`); `full` also sends
-// comments and reviews. It applies to the fake too, except that the fake has
-// no read-only mode.
+// read until the manual acceptance passes): `off` answers null, so every
+// /api/github/* route answers 404 and the browser shows no pull request
+// surface; `read` serves pull requests and refuses every write (the summary
+// says `readOnly`); `full` also sends comments and reviews. It applies to the
+// fake too, except that the fake has no read-only mode: the demo stays
+// interactive.
 //
 // A pull request's file contents (the file view, design D5) come through the
 // same seam as bytes: `pullRequestBlob` answers a path at the head or base
@@ -103,11 +104,12 @@ export const GITHUB_FAKE_SCENARIO_ENV = "UATU_GITHUB_FAKE_SCENARIO";
 
 export type GithubSetting = "off" | "read" | "full";
 
-// Unset means full. A value uatu doesn't know turns GitHub off rather than
+// Unset means read: writes are opt-in (UATU_GITHUB=full) until the manual
+// acceptance passes. A value uatu doesn't know turns GitHub off rather than
 // guessing at what was meant.
 export function githubSetting(env: Record<string, string | undefined> = process.env): GithubSetting {
   const value = env[GITHUB_SETTING_ENV]?.trim().toLowerCase();
-  if (value === undefined || value === "") return "full";
+  if (value === undefined || value === "") return "read";
   return value === "read" || value === "full" ? value : "off";
 }
 

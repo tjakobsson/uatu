@@ -17,6 +17,16 @@ describe("FakeGitHub", () => {
     expect(fake.operations()).toEqual(["UatuPullRequestSummary"]);
   });
 
+  test("a sibling repository answers the same pull requests; any other is not found", async () => {
+    const api = new GitHubApi(new FakeGitHub({ siblings: ["docs"] }));
+    const docs = await api.graphql<{ repository: { pullRequest: { number: number } } }>("github.com", summary, { ...vars, name: "docs" });
+    expect(docs.data.repository.pullRequest.number).toBe(42);
+    const other = await api.graphql<{ repository: unknown }>("github.com", summary, { ...vars, name: "gadgets" });
+    expect(other.data.repository).toBeNull();
+    const files = await api.rest<unknown[]>("github.com", "UatuPullRequestFiles", "repos/acme/docs/pulls/42/files?per_page=100&page=1");
+    expect(files.json.length).toBeGreaterThan(0);
+  });
+
   test("an unknown operation throws instead of answering empty data", async () => {
     await expect(new FakeGitHub().request({ kind: "graphql", host: "github.com", operation: "UatuSomethingNew", query: "q", variables: {} })).rejects.toThrow(/unknown operation/);
     await expect(new FakeGitHub().request({ kind: "rest", host: "github.com", operation: "UatuOther", path: "repos/acme/widgets" })).rejects.toThrow(/unknown operation/);

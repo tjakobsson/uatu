@@ -386,8 +386,9 @@ describe("writes (design D9)", () => {
 });
 
 describe("the kill switch and selection", () => {
-  test("UATU_GITHUB is off, read or full (default); anything else is off", () => {
-    expect(githubSetting({})).toBe("full");
+  test("UATU_GITHUB is off, read (default) or full; anything else is off", () => {
+    expect(githubSetting({})).toBe("read");
+    expect(githubSetting({ UATU_GITHUB: "" })).toBe("read");
     expect(githubSetting({ UATU_GITHUB: "read" })).toBe("read");
     expect(githubSetting({ UATU_GITHUB: " FULL " })).toBe("full");
     expect(githubSetting({ UATU_GITHUB: "off" })).toBe("off");

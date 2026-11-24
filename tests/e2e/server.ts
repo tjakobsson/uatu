@@ -344,8 +344,10 @@ async function handleE2EReset(request: Request): Promise<Response> {
     github?: boolean | string;
     // A second watched root beside the workspace: a separate Git repository
     // named `docs-site` (in the OS temp directory), so the session has two
-    // repositories. Needs `git: true`.
-    secondRepository?: boolean;
+    // repositories. Needs `git: true`. `"github"` also gives it `origin` at
+    // github.com/acme/docs, which the transport fake answers with the same
+    // pull requests as acme/widgets (with `github: "transport"`).
+    secondRepository?: boolean | "github";
   } = {};
   try {
     const text = await request.text();
@@ -445,9 +447,10 @@ async function handleE2EReset(request: Request): Promise<Response> {
     await initE2EGitRepository();
   }
   if (body.git && body.secondRepository) secondRepositoryRoot = await initSecondRepository();
+  if (secondRepositoryRoot && body.secondRepository === "github") await safeGit(secondRepositoryRoot, ["remote", "add", "origin", "git@github.com:acme/docs.git"]);
   if (body.github === "transport") {
     await safeGit(activeWorkspaceRoot, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
-    e2eGithubTransport = new FakeGitHub();
+    e2eGithubTransport = new FakeGitHub({ siblings: body.secondRepository === "github" ? ["docs"] : [] });
     e2eGithub = new GhGithubService({
       api: new GitHubApi(e2eGithubTransport),
       mode: "full",

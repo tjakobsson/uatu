@@ -95,8 +95,10 @@ test.describe("desktop", () => {
     expect(await lineOne(groups.nth(1).locator("[role=option]"))).toEqual(["beacon", "feat/search"]);
     await expect(groups.nth(0).locator('[data-workspace-id="feature-alpha"]')).toHaveAccessibleName("feature/alpha, Stopped. Start and go to checkout");
 
-    // Pull requests: the repository named, the first three, then Show all.
+    // Pull requests: the repository named, as plain text with one Git
+    // repository, the first three, then Show all.
     await expect(page.locator("#switcher-pull-requests-heading")).toHaveText(/^Pull requests\s*·\s*octo-org\/uatu$/);
+    await expect(page.locator('[data-switcher-menu-toggle="repository"]')).toHaveCount(0);
     await expect(prRows(page)).toHaveCount(3);
     const showAll = page.locator("[data-switcher-show-all]");
     await expect(showAll).toHaveText("Show all 6");
@@ -114,6 +116,9 @@ test.describe("desktop", () => {
     await openSwitcher(page);
 
     await search(page).fill("beacon");
+    // Searching folds the status card away.
+    await expect(menu(page)).toHaveAttribute("data-searching", "");
+    await expect(page.locator("#switcher-status")).toBeHidden();
     await expect(page.locator("#switcher-checkouts .switcher-repo-heading")).toHaveText(["beacon"]);
     expect(await lineOne(checkoutRows(page))).toEqual(["beacon", "feat/search"]);
     await expect(prRows(page)).toHaveCount(0);
@@ -126,6 +131,13 @@ test.describe("desktop", () => {
     await expect(checkoutRows(page)).toHaveCount(0);
     await expect(prRows(page)).toHaveCount(1);
     await expect(page.locator('#switcher-pull-requests [data-pr-row="639"]')).toBeVisible();
+    // Enter on the active row of the results acts on it.
+    await page.keyboard.press("ArrowDown");
+    await expect(search(page)).toHaveAttribute("aria-activedescendant", "switcher-pr-639");
+    await page.keyboard.press("Enter");
+    await expect(step(page).getByRole("button", { name: "View #639 here" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(step(page)).toBeHidden();
 
     // A number not in the open list is looked up once, after typing settles.
     await search(page).fill("");
@@ -139,6 +151,8 @@ test.describe("desktop", () => {
     expect(lookups.every(number => number === "630"), `lookups: ${lookups.join(", ")}`).toBe(true);
     await search(page).fill("");
     await expect(checkoutRows(page)).toHaveCount(4);
+    await expect(menu(page)).not.toHaveAttribute("data-searching");
+    await expect(page.locator("#switcher-status")).toBeVisible();
   });
 
   test("the filter menu: Open ▾ lists four choices; Mine and Review requested narrow the list; the choice is named on the toggle", async ({ hub, hubContext }) => {
@@ -209,9 +223,13 @@ test.describe("desktop", () => {
     const row = page.locator('#switcher-pull-requests [data-pr-row="636"]');
     await expect(row).toHaveAccessibleName(/Checked out/);
     await row.click();
-    const first = step(page).locator("[data-choice]").first();
-    await expect(first).toHaveAttribute("aria-label", "Go to its worktree, fix/pane-heights");
-    await expect(first).toBeFocused();
+    const choices = step(page).locator("[data-choice]");
+    await expect(choices).toHaveCount(2);
+    await expect(choices.first()).toHaveAttribute("aria-label", "Go to its worktree, fix/pane-heights");
+    await expect(choices.first()).toContainText("Opens fix/pane-heights");
+    await expect(choices.first()).toBeFocused();
+    // View here comes second.
+    await expect(choices.last()).toHaveAttribute("aria-label", "View #636 here");
   });
 
   test("the keyboard: Enter opens on the combobox, arrows move through both lists, Escape steps back then closes onto the chip", async ({ hub, hubContext }) => {

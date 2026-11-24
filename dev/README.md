@@ -49,12 +49,12 @@ the sessions like the flag above:
 
 | Variable | Values | Effect |
 |---|---|---|
-| `UATU_GITHUB` | `full` (default), `read`, `off` | `full` reads pull requests and sends comments and reviews; `read` reads only (every write is refused and sending says why); `off` turns pull requests off (every `/api/github/*` route answers 404). Any other value means `off`. `off` also wins over `UATU_GITHUB_FAKE`. |
-| `UATU_GITHUB_FAKE` | `1` | The in-memory fake instead of GitHub. |
+| `UATU_GITHUB` | `read` (default), `full`, `off` | `read` reads pull requests only (every write is refused and sending says why); `full` also sends comments and reviews; `off` turns pull requests off (every `/api/github/*` route answers 404). Any other value means `off`. `off` also wins over `UATU_GITHUB_FAKE`. The default is `read` until the manual acceptance against real GitHub passes. |
+| `UATU_GITHUB_FAKE` | `1` | The in-memory fake instead of GitHub. It has no read-only mode, so `--github-fake` keeps its writes. |
 | `UATU_GITHUB_FAKE_SCENARIO` | a scenario name | The fake's starting scenario. |
 
-For example, `UATU_GITHUB=read bun run dev` starts a dev hub whose sessions
-read GitHub but never post.
+For example, `UATU_GITHUB=full bun run dev` starts a dev hub whose sessions
+send comments and reviews; plain `bun run dev` reads GitHub but never posts.
 
 Ctrl+C stops the hub, and the hub stops its session children. Add more
 folders from the dashboard. To start over, stop the hub and delete

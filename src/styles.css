@@ -12860,6 +12860,10 @@ textarea.gh-input { resize: vertical; min-height: 4rem; }
 .pr-pane-meta { display: inline-flex; align-items: center; gap: 0.35rem; }
 .pr-pane-number { color: var(--accent); font-weight: 600; text-decoration: none; }
 .pr-pane-number:hover { text-decoration: underline; }
+/* `octo-org/docs #12` with several repositories: the name gives way, cut at
+   its end, and the number stays whole. */
+.pr-pane-number:has(.pr-pane-repo) { display: inline-flex; align-items: baseline; gap: 0.3em; min-width: 0; white-space: nowrap; }
+.pr-pane-repo { min-width: 0; max-width: 10em; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 #pull-request-refresh.is-spinning { animation: pr-spin 0.9s linear infinite; }
 @keyframes pr-spin { to { transform: rotate(360deg); } }
 /* Stale data is dimmed row by row, never on the pane itself: opacity there

@@ -6,7 +6,7 @@ The preview pane SHALL expose Diff for only the selected file's hunks against th
 
 #### Scenario: Compare targets select the review base without unrelated hunks
 - **WHEN** compare target is `base`
-- **THEN** the base SHALL be the detected pull request's base when the repository's checked-out branch has a pull request whose base is available locally
+- **THEN** the base SHALL be the pull request's base when the repository's checked-out branch has an open pull request whose base is available locally
 - **AND** otherwise the base SHALL resolve automatically in order `origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`, falling back to staged/unstaged changes against `HEAD` when no remote base resolves
 - **WHEN** target is `last-commit`
 - **THEN** selected-file comparison SHALL be against `HEAD` for staged/unstaged changes

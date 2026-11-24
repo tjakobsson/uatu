@@ -24,7 +24,7 @@ See `proposal.md` for motivation and scope. The behavior contract is in this cha
 
 **Non-Goals:**
 
-- Resolving or unresolving threads, reactions, editing posted comments, editing PR metadata (title, labels, assignees, reviewers), requesting reviewers, and closing or reopening PRs.
+- Reactions, editing or deleting submitted comments, editing PR metadata (title, labels, assignees, reviewers), requesting reviewers, and closing or reopening PRs. Resolving and unresolving threads and editing pending comments are in scope (D18).
 - Authoring suggested-change blocks. They render as code blocks.
 - Merging of any kind (merge, squash, rebase, auto-merge, merge queues, admin bypass) and deleting branches on GitHub. Uatu shows merge readiness read-only and links to the pull request on GitHub (D11).
 - Pushing to fork branches from a `pr/<number>` checkout, including "maintainers can modify".
@@ -198,7 +198,9 @@ Refresh is event-driven; there is no timer (owner decision). A timer spends the 
 - While rate-limited or unavailable, the last detail and list are answered as they were.
 - The open-PR list is cached 30 s.
 
-**Kill switch.** One setting, `UATU_GITHUB = off | read | full`, read once at session start. Unset means `full`; an unknown value means `off`. `off` serves no routes (404). `read` refuses every write with 403 and marks summaries `readOnly`. `UATU_GITHUB_FAKE=1` selects the fake unless the setting is `off`.
+**Kill switch.** One setting, `UATU_GITHUB = off | read | full`, read once at session start. Unset means `read` until the manual acceptance (task 8.2) passes, so sending comments and reviews is opt-in with `UATU_GITHUB=full`; an unknown value means `off`. `off` serves no routes (404). `read` refuses every write with 403 and marks summaries `readOnly`, and sending says to start the session with `UATU_GITHUB=full`. `UATU_GITHUB_FAKE=1` selects the fake unless the setting is `off`; the fake has no read-only mode, so the demo (`bun run dev --github-fake`, the demo and UX-loop scripts) keeps its writes. The e2e harness builds the real service with `mode: "full"` explicitly.
+
+**Settings: the environment variable only.** `UATU_GITHUB` is the one setting: no `.uatu.json` key and no Hub Settings control. Set on the Hub, it applies to every workspace. YAGNI: revisit when a user needs per-workspace control.
 
 ### D7. PR base override for `base` comparisons
 
@@ -218,7 +220,7 @@ git -c fetch.fsckObjects=true fetch --no-tags <remote> +refs/pull/<n>/head:refs/
 
 `refs/pull/<n>/head` lives in the base repository, so forks work the same way. The base branch (`+refs/heads/<base>:refs/remotes/<remote>/<base>`) is fetched only when a comparison or the file view's base revision needs a base commit that isn't local. A shallow repository fetches with `--depth=1`. The fetch runs with the session's Git credentials and `GIT_TERMINAL_PROMPT=0`, never touches the working tree, the index, local branches or remote-tracking refs other than the base's, and never runs automatically.
 
-`refs/uatu/*` sits outside every refspec, so `fetch --prune` leaves it alone. The namespace is the owner's choice (Q4 of the file view design): the refs show in `git log --all` and to agents in the terminal, and are shared by linked worktrees, and Uatu keeps at most 20 per repository, pruning the oldest first and a merged or closed pull request's ref when the reviewer leaves it. The earlier note that fetch-refs could be dropped unless D8 returned no longer applies: the file view needs it.
+`refs/uatu/*` sits outside every refspec, so `fetch --prune` leaves it alone. The namespace is the owner's choice (Q4 of the file view design): the refs show in `git log --all` and to agents in the terminal, and are shared by linked worktrees, and Uatu keeps at most 20 per repository. Pruning runs at each successful fetch: merged or closed pull requests' refs are deleted, then the oldest by their head commit's committer date until at most 20 remain. The earlier note that fetch-refs could be dropped unless D8 returned no longer applies: the file view needs it.
 
 *Alternative:* fetch automatically when the base is missing. Rejected: the child otherwise only observes repositories, and silent network fetches with credentials should be a user decision.
 
@@ -312,6 +314,13 @@ Rules:
 - Body limit: 65,536 characters, checked before calling GitHub.
 - Concurrency: one write at a time per PR in the child. Overlapping submits answer 409.
 
+### D18. Resolving threads and editing pending comments
+
+Both stay, tested by the project owner through the UX loops; they were non-goals in the first draft.
+
+- **Resolve / Unresolve:** `resolveReviewThread` / `unresolveReviewThread` on a review thread in Files changed. It applies at once, outside the pending review. A resolved thread folds unless it holds the viewer's pending reply or unsent text, and offers `Undo` for a few seconds.
+- **Editing a pending comment or reply:** `updatePullRequestReviewComment` on the viewer's pending review only, in Files changed and in Finish review. Submitted comments stay read-only (a non-goal).
+
 ### D10. Inline UI on `@pierre/diffs`
 
 `diff-view.ts` gains optional `review` options. When present, it passes `lineAnnotations` and `renderAnnotation` (threads and pending comments, rendered by `diff-review.ts`), and turns on `enableGutterUtility`/`onGutterUtilityClick` plus `enableLineSelection`/`onLineSelectionEnd` to open the composer, which is itself an annotation at the range's end line. Annotation updates use `setLineAnnotations()`, so posting a comment does not re-render or lose scroll.
@@ -338,6 +347,8 @@ Wherever the open-PR list ends up (Q2), it offers **Review in worktree** only in
 - **Same-repository PR:** the client runs the existing worktree fetch, then sends the existing `remote-tracking` request for `<remote>/<headRefName>` against the repository's main workspace, or `existing-local` when a local branch of that name already exists (checked out as it is). No Hub change is needed, and the branch can be pushed to normally.
 - **Fork PR:** new mode `{ mode: "pull-request", pullRequest: { number, remote } }`. The Hub validates that the number is a positive integer and that `remote` is configured in the parent. It then fetches `refs/pull/<n>/head` with the parent's credentials through `worktree-fetch.ts`'s environment. If `pr/<n>` does not exist, it creates the branch at the fetched commit and sets `branch.pr/<n>.remote=<remote>` and `branch.pr/<n>.merge=refs/pull/<n>/head`, so `git pull` updates it and detection finds it (D4). An existing `pr/<n>` with that exact upstream is checked out as-is (never reset); any other existing `pr/<n>` is a conflict. The recorded creation origin is `refs/pull/<n>/head`.
   - *As built:* the fetch writes `refs/pull/<n>/head` into an operation-scoped scratch ref under `refs/uatu/` (no branch, no `FETCH_HEAD`), reads the commit back and deletes the ref; a missing ref is `ref-unavailable`, whose message says the remote may not be the pull request's GitHub repository. After the journal reaches `creating`, a new `pr/<n>` gets its `remote`/`merge` configuration first and then `git branch --no-track` at that commit, so a crash leaves at most configuration, or a branch with exactly the upstream the retry reuses. A reused branch is never fast-forwarded; the success result's `pullRequestHead` (12 hex digits, beside `checkout.head`) lets the client say when it differs. The remote must be configured in the repository (checked with a read-only `git config`, before any fetch).
+  - *Refusing a foreign `pr/<n>`:* an existing `pr/<n>` with another upstream, or none, stays refused (`branch-exists`) rather than adopted: it may be somebody's own branch. The message says how to fix it: delete or rename the local branch `pr/<n>`, or set its upstream to `refs/pull/<n>/head` on the remote.
+  - *Known limit, origin unknown after a crash:* when a crash leaves `pr/<n>` made but not checked out, the retry checks that branch out as it is, and a reused branch records no creation origin. The new checkout's provenance then reads `origin unknown` in the Hub's worktree lists, though its upstream still names the pull request. Accepted: it is rare, and nothing is lost.
 
 Naming: `pr/<n>` is unambiguous, cannot collide with a fork's `main` or `patch-1`, and reads clearly in the worktree picker, whose child names are exact branch names. Destinations follow the existing `<main>.worktrees/<safe-branch-folder>` rule. The Hub never calls GitHub: the PR number and remote are all it needs.
 
@@ -371,6 +382,7 @@ The child renders each Markdown body (`body`, never GitHub's `bodyHTML`) with `r
 - The `pull-request` mode on `CreateWorktreeRequest` (and `pullRequestHead` on its result) is a Hub API change: `HUB_API_REVISION` 15 → 16, done with task 4.3.
 - The Hub change goes into `api/openapi.yaml`, `api/contract.json`, `x-uatu-revisions` and `api/CHANGELOG.md` under Unreleased, with examples, and must pass `bun run api:validate`.
 - `BUNDLED_WEB_REVISION` is unchanged: nothing existing is reshaped.
+- The `pull-request` compare-base mode and `CompareBase.pullRequest` (D7) land on the open `RepositorySnapshot.base` object, so no revision changes; `api/CHANGELOG.md` notes them in their own additive entry.
 
 ## Risks / Trade-offs
 

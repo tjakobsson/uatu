@@ -56,15 +56,19 @@ pull requests here** and names the same steps. The pane says **GitHub isn't
 connected for this workspace**, and the switcher **GitHub isn't connected.**,
 each with the way to connect.
 
-### Turning it down or off
+### Sending, read only, or off
 
 `UATU_GITHUB` is read once when a session starts. Set it on the Hub to apply
-it to every workspace.
+it to every workspace; it is the only setting.
+
+Until the manual acceptance against real GitHub passes, sessions read pull
+requests without sending anything by default. Set `UATU_GITHUB=full` to send
+comments and reviews.
 
 | Value | Effect |
 |---|---|
-| unset or `full` | Read pull requests, and send comments and reviews. |
-| `read` | Read only. Composers keep your drafts, and sending says: "This session reads GitHub only (its GitHub setting is read), so nothing can be sent." |
+| unset or `read` | Read only. Composers keep your drafts, and sending says: "This session reads GitHub only, so nothing can be sent. Start it with UATU_GITHUB=full to send." |
+| `full` | Read pull requests, and send comments and reviews. |
 | `off` (or an unknown value) | No pull request surfaces at all. |
 
 ### When GitHub doesn't answer

@@ -301,7 +301,7 @@ describe("a pull request becomes a worktree", () => {
     if (refused.ok) return;
     expect(refused.error).toMatchObject({
       code: "branch-exists",
-      message: "A branch named pr/62 already exists and does not track pull request #62 on origin. Nothing was reset; rename or delete that branch, then try again.",
+      message: "A branch named pr/62 already exists and does not track pull request #62 on origin. Nothing was reset. Delete or rename the local branch pr/62, or set its upstream to refs/pull/62/head on origin, then try again.",
     });
     expect(await git(atlas, ["rev-parse", "pr/62"])).toBe(before);
     expect(await config(atlas, "branch.pr/62.merge")).toBeNull();

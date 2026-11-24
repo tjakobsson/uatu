@@ -82,8 +82,10 @@ credential policy, and never prompts. It never forces or resets a branch:
   checked out as it is. If it is not at the pull request's head, the notice
   says so; pull in its terminal to update it.
 - Any other existing `pr/57` is refused with `A branch named pr/57 already
-  exists and does not track pull request #57 on origin.` Rename or delete
-  that branch, then try again.
+  exists and does not track pull request #57 on origin.` Delete or rename
+  the local branch `pr/57`, or set its upstream to `refs/pull/57/head` on
+  `origin` (`git config branch.pr/57.remote origin` and
+  `git config branch.pr/57.merge refs/pull/57/head`), then try again.
 - A pull request the remote does not publish is refused with `Pull request
   #57 was not found on origin: it has no refs/pull/57/head.` Check the
   number, and that the remote is the pull request's GitHub repository.
