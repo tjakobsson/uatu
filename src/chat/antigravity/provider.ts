@@ -932,8 +932,12 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   private learnCatalog(answer: unknown): void {
-    const catalog = catalogFromSession(answer, this.imageInput === true, id => this.knownModel(id));
-    if (catalog.models.length === 0 && catalog.modes.length === 0) return;
+    const fresh = catalogFromSession(answer, this.imageInput === true, id => this.knownModel(id));
+    if (fresh.models.length === 0 && fresh.modes.length === 0) return;
+    // Config options advertise only the current model's thinking levels:
+    // levels learned earlier for another model stay with it.
+    const learned = new Map((this.catalog?.models ?? []).flatMap(model => model.variants ? [[model.selection.modelId, model.variants] as const] : []));
+    const catalog = fresh.legacyIds.length ? fresh : { ...fresh, models: fresh.models.map(model => model.variants || !learned.has(model.selection.modelId) ? model : { ...model, variants: learned.get(model.selection.modelId)! }) };
     const changed = JSON.stringify(catalog.models) !== JSON.stringify(this.catalog?.models) || JSON.stringify(catalog.modes) !== JSON.stringify(this.catalog?.modes);
     this.catalog = catalog;
     if (changed) this.publish({ updates: [], outcome: "handled", eventType: "catalog", catalogsChanged: true });

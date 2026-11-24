@@ -469,6 +469,19 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect((await fake.sessions())[0]).toEqual(expect.objectContaining({ model: "gemini-4-argon", thoughtLevel: "low" }));
     });
 
+    test("thinking levels learned for one model survive a load that advertises another", async () => {
+      const { fake, provider, run } = await setup();
+      await fake.setFlag("no-legacy-models", true);
+      const session = await provider.createSession("a");
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-argon" }, "low");
+      await run(session.id, "Say hello");
+      // Another session starts on agy's default model, advertising only its levels.
+      await provider.createSession("b");
+      const variants = async (modelId: string) => (await provider.listModels()).find(model => model.selection.modelId === modelId)?.variants;
+      expect(await variants("gemini-4-neon")).toEqual(["low", "medium", "high", "xhigh"]);
+      expect(await variants("gemini-4-argon")).toEqual(["low", "medium", "high"]);
+    });
+
     test("a variant the model does not offer is refused", async () => {
       const { provider } = await setup();
       const session = await provider.createSession("a");
