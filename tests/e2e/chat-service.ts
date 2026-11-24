@@ -407,7 +407,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.attachmentStore.resolve(id);
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], _delivery?: MessageDelivery): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery): Promise<{
     messageId: string;
     pending: boolean;
     delivery: MessageDelivery;
@@ -421,6 +421,22 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { messageId: string; pending: boolean; delivery: MessageDelivery; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
+    // An `immediate-steering` agent takes a busy steer into the running turn
+    // at once, exactly like the adapter: one user row, no dock entry, no
+    // configuration change, and the turn keeps running (add-antigravity-chat D9).
+    if (delivery === "steer" && this.capabilities.includes("immediate-steering") && !this.capabilities.includes("steering")
+      && (conversation.status === "running" || conversation.status === "sending")
+      && !(text.startsWith("/") && (await this.commands()).some(command => text.slice(1).split(/\s/, 1)[0] === command.name))) {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      const messageId = `message-${this.nextId++}`;
+      const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, requestId, ...(attachments?.length ? { attachments } : {}) };
+      this.authoritativeItems.get(id)!.push(item);
+      this.items.get(id)!.set(item.id, item);
+      this.replay.get(id)!.publish({ type: "item.upsert", item });
+      const result = { messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(id) ?? {} };
+      this.receipts.set(key, result);
+      return result;
+    }
     const previousConfiguration = this.configurations.get(id) ?? {};
     const configuration: ConversationConfiguration = {
       ...previousConfiguration,
