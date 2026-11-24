@@ -203,7 +203,12 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
     result.push(item);
   }
   closeTurn(result.at(-1)?.createdAt ?? 0);
-  return { items: result, accounting };
+  // agy's context report stays after the carriers: they sum a turn's
+  // prompts, and the context readout takes the newest.
+  const rest = result.filter(item => item.type !== "context_report");
+  const latest = rest.reduce((at, item) => Math.max(at, item.createdAt), 0);
+  const reports = result.flatMap(item => item.type === "context_report" ? [{ ...item, createdAt: Math.max(item.createdAt, latest) }] : []);
+  return { items: [...rest, ...reports], accounting };
 }
 
 /**

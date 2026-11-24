@@ -65,7 +65,7 @@ type Fixture = {
   commands: Array<{ name: string; description: string; input: null }>;
   scripts: Record<string, Script>;
 };
-type StoredSession = { sessionId: string; cwd: string; title: string | null; updatedAt: string; model: string; thoughtLevel: string; mode: string; replay: Update[] };
+type StoredSession = { sessionId: string; cwd: string; title: string | null; updatedAt: string; model: string; thoughtLevel: string; mode: string; replay: Update[]; usage?: Update };
 
 const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "agy-fixture.json"), "utf8")) as Fixture;
 
@@ -197,6 +197,8 @@ app.onRequest(methods.agent.session.load, async ({ params, client }) => {
   // A loaded session is back on agy's defaults, as the trial showed.
   updateSession(session.sessionId, stored => { stored.model = fixture.defaultModel; stored.thoughtLevel = fixture.defaultThoughtLevel; stored.mode = fixture.modes.currentModeId; });
   for (const update of session.replay) await client.notify(methods.client.session.update, { sessionId: session.sessionId, update } as never);
+  // agy ends a replay with the context's latest used and size.
+  if (session.usage) await client.notify(methods.client.session.update, { sessionId: session.sessionId, update: session.usage } as never);
   if (flag("fail-load")) throw new RequestError(-32603, "Failed to load the conversation");
   setTimeout(() => void client.notify(methods.client.session.update, { sessionId: session.sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: fixture.commands } } as never), 0);
   return sessionAnswer({ ...session, model: fixture.defaultModel, thoughtLevel: fixture.defaultThoughtLevel, mode: fixture.modes.currentModeId }) as never;
@@ -303,6 +305,7 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
     const concrete = substitute(update, cwd);
     await client.notify(methods.client.session.update, { sessionId, update: concrete } as never);
     if (["agent_message_chunk", "agent_thought_chunk"].includes(concrete.sessionUpdate)) updateSession(sessionId, session => { session.replay.push(concrete); });
+    if (concrete.sessionUpdate === "usage_update") updateSession(sessionId, session => { session.usage = concrete; });
     // A tool call replays where it started, in its final state, so a steer
     // taken while it ran replays after it, where the live run showed it.
     if (concrete.sessionUpdate === "tool_call" || concrete.sessionUpdate === "tool_call_update") {

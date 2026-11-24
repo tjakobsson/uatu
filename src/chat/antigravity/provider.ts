@@ -588,7 +588,7 @@ export class AntigravityProvider implements ChatProvider {
     const carrierId = `${conversation.sessionId}.t${turn.userIndex}`;
     const model = memory.model;
     const hasUsage = Object.keys(turn.usage).length > 0;
-    if (hasUsage) updates.push(this.usageCarrier(conversation, carrierId, turn.usage, model, now));
+    if (hasUsage) updates.push(...this.usageCarrier(conversation, carrierId, turn.usage, model, now));
     if (notice) updates.push({ kind: "upsert", item: notice });
     updates.push({ kind: "status", status, ...(message ? { message } : {}) });
     if (conversation.turn === turn) conversation.turn = undefined;
@@ -608,12 +608,22 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   /** A turn's usage carrier, priced from the built-in table (D11), with its accounting. */
-  private usageCarrier(conversation: Conversation, carrierId: string, tokens: TokenUsage, model: ModelSelection | undefined, now: number): NormalizedProviderEvent["updates"][number] {
+  /**
+   * A turn's usage carrier, then agy's context report moved after it. The
+   * carrier sums the turn's prompts, which is no occupancy of the window;
+   * the context readout takes the newest of the two, and agy's own used and
+   * size must stay the newest.
+   */
+  private usageCarrier(conversation: Conversation, carrierId: string, tokens: TokenUsage, model: ModelSelection | undefined, now: number): NormalizedProviderEvent["updates"] {
     // An unpriced model leaves the cost absent, which is not zero.
     const costUsd = priceTurn(tokens, model?.modelId, this.prices);
     const usage: TokenUsage = { ...tokens, ...(costUsd !== undefined ? { costUsd } : {}) };
     conversation.accounting.push({ messageId: carrierId, createdAt: now, usage, ...(model ? { model: model.modelId } : {}) });
-    return { kind: "upsert", item: { id: `usage:${carrierId}`, type: "assistant_message", createdAt: now, markdown: "", usage, ...(model ? { model } : {}) } };
+    const report = conversation.items.find(item => item.type === "context_report");
+    return [
+      { kind: "upsert", item: { id: `usage:${carrierId}`, type: "assistant_message", createdAt: now, markdown: "", usage, ...(model ? { model } : {}) } },
+      ...(report ? [{ kind: "remove" as const, itemId: report.id }, { kind: "upsert" as const, item: { ...report, createdAt: Math.max(report.createdAt, now) } }] : []),
+    ];
   }
 
   private async usageFromTranscript(conversation: Conversation, turn: Turn, carrierId: string, model: ModelSelection | undefined): Promise<void> {
@@ -636,8 +646,8 @@ export class AntigravityProvider implements ChatProvider {
     }
     if (Object.keys(tokens).length === 0) return;
     const recordedModel = recordedModelId ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: transcriptModelFamily(recordedModelId, id => this.knownModel(id)) } : model;
-    const update = this.usageCarrier(conversation, carrierId, tokens, recordedModel, this.now());
-    this.emit(conversation, { updates: [update], outcome: "handled", eventType: "transcript.usage", assistantUsage: { messageId: carrierId, usage: (update as { item: { usage: TokenUsage } }).item.usage } });
+    const updates = this.usageCarrier(conversation, carrierId, tokens, recordedModel, this.now());
+    this.emit(conversation, { updates, outcome: "handled", eventType: "transcript.usage", assistantUsage: { messageId: carrierId, usage: (updates[0] as { item: { usage: TokenUsage } }).item.usage } });
   }
 
   private knownModel(id: string): boolean {

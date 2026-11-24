@@ -12,6 +12,7 @@ import { LazyChatService } from "../service";
 import type { AntigravityPriceTable } from "./pricing";
 import { ChatAdapter } from "../adapter";
 import { applyChatEvent, type ChatProjection } from "../projection";
+import { contextReadout } from "../context-readout";
 import { SIGTERM_GRACE_MS } from "../../session-contract/spawn";
 import { STDIN_CLOSE_GRACE_MS, TERM_GRACE_MS } from "./connection";
 import { AntigravityProvider, type AntigravityProviderOptions } from "./provider";
@@ -856,6 +857,32 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
     });
   });
   describe("cost (D11)", () => {
+    test("the context meter shows agy's reported used and size, live and reopened, not the turn's summed tokens", async () => {
+      const { fake, provider, run, events } = await setup();
+      const session = await provider.createSession("a");
+      await run(session.id, "Say hello");
+      let browser: ChatProjection = { conversationId: session.id, generation: "g", sequence: 0, cursor: "", status: "running", items: [], queued: [], acceptedDrafts: [], queueRevision: 0, configurationRevision: 0 };
+      let sequence = 0;
+      for (const event of events) for (const update of event.updates) {
+        const base = { conversationId: session.id, generation: "g", sequence: ++sequence };
+        if (update.kind === "upsert") browser = applyChatEvent(browser, { ...base, type: "item.upsert", item: update.item }).projection;
+        else if (update.kind === "remove") browser = applyChatEvent(browser, { ...base, type: "item.remove", itemId: update.itemId }).projection;
+      }
+      // The fixture's turn reports 8,886 input tokens, and agy 8,918 of 1,048,576 in context.
+      expect(browser.items.some(item => item.type === "assistant_message" && item.usage?.input === 8886)).toBe(true);
+      expect(contextReadout(browser.items, [], undefined)).toEqual(expect.objectContaining({ used: 8918, limit: 1048576 }));
+      // Reopened, the transcript gives the turn its carrier again.
+      await Bun.write(path.join(fake.stateDirectory, "home", ".gemini", "antigravity-cli", "brain", session.id, ".system_generated", "logs", "transcript.jsonl"), [
+        { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nSay hello\n</USER_REQUEST>" },
+        { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-high", content: "Hello, how can I help you today?", input_tokens: 8886, output_tokens: 32 },
+      ].map(step => JSON.stringify(step)).join("\n"));
+      const reread = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, homeDirectory: path.join(fake.stateDirectory, "home") });
+      cleanups.push(() => reread.dispose());
+      const reopened = [...(await reread.listMessages(session.id, { limit: 100 })).items].sort((left, right) => left.createdAt - right.createdAt);
+      expect(reopened.some(item => item.type === "assistant_message" && item.usage?.input === 8886)).toBe(true);
+      expect(contextReadout(reopened, [], undefined)).toEqual(expect.objectContaining({ used: 8918, limit: 1048576 }));
+    });
+
     const prices: AntigravityPriceTable = { source: "test", snapshot: "2026-11-24", models: { "gemini-4-neon": { input: 1, output: 10, cacheRead: 0.1, from: "test" } }, families: {} };
     const carriers = (upserts: (id: string) => ConversationItem[], sessionId: string) => upserts(sessionId).filter(item => item.id.startsWith("usage:")) as Array<Extract<ConversationItem, { type: "assistant_message" }>>;
 
