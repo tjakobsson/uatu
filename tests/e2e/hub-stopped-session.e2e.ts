@@ -155,7 +155,7 @@ test.describe("desktop", () => {
     await leaveTidy(page, false);
   });
 
-  test("the switcher menu's current row starts the stopped session and stays on the page", async ({ hub, hubContext }, testInfo) => {
+  test("the switcher's status card starts the stopped session and stays on the page", async ({ hub, hubContext }, testInfo) => {
     const page = await openTab(hubContext, hub.workspaces[0]!);
     await stageWork(page, hub.workspaces[0]!, false);
 
@@ -164,14 +164,21 @@ test.describe("desktop", () => {
 
     await openHubMenu(page);
     const menu = page.locator("#hub-menu");
-    const current = menu.locator('.hub-menu-item[href="/s/alpha/"]');
-    await expect(current).toHaveAttribute("aria-current", "true");
-    await expect(current.locator(".hub-menu-state")).toHaveText("stopped");
+    // The current workspace is the status card, never a row.
+    await expect(menu.locator('.hub-menu-item[href="/s/alpha/"]')).toHaveCount(0);
+    const status = menu.locator("#switcher-status");
+    await expect(status).toContainText("Stopped");
     await shot(page, testInfo, "stopped-session-desktop-menu");
 
-    await current.click();
-    await expect(current.locator(".hub-menu-state")).toHaveText("starting…");
+    const start = status.getByRole("button", { name: "Start", exact: true });
+    await start.click();
     await expectRecovered(page);
+    // Running again: the card no longer says Stopped or offers Start.
+    await expect(menu).toBeVisible();
+    await expect(status.locator("[data-switcher-start]")).toHaveCount(0);
+    await expect(status).not.toContainText("Stopped");
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
     await expectWorkKept(page, false);
     // Still this session's page (the previewed document rides the URL).
     expect(page.url().startsWith(hub.workspaces[0]!.sessionUrl)).toBe(true);

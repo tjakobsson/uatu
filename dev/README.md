@@ -24,8 +24,8 @@ bun run dev --github-fake  # also serve MOCKED GitHub pull request data
 ```
 
 `--github-fake` sets `UATU_GITHUB_FAKE=1` for the hub, which its sessions
-inherit. The Pull request pane, the PR preview and the worktree menu's
-"From a pull request…" then work against an in-memory fake
+inherit. The Pull request pane, the PR preview and the workspace
+switcher's Pull requests then work against an in-memory fake
 ([`src/github/fake.ts`](../src/github/fake.ts)) seeded with fictional data
 (`octo-org/uatu`, PR #642, viewer `octo-reviewer`). Comments and reviews
 change only that memory; nothing reaches GitHub, and every surface says the

@@ -113,8 +113,8 @@ for (const browserName of ["chromium", "webkit"] as const) test.describe(`${brow
     const page = await context.newPage();
     await signIn(page, hub);
     await page.goto(`${hub.origin}/s/${hub.workspaces[0].id}/`);
-    await page.getByRole("tab", { name: "Files", exact: true }).tap();
-    const toggle = page.locator("#hub-toggle");
+    // The switcher is the tab bar's button in touch mode.
+    const toggle = page.locator("#switcher-button");
     await toggle.tap();
     const settings = page.locator('#hub-menu a[href="/settings#personal-chat-preferences-pane"]');
     await expect(settings).toBeVisible();

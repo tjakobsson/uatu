@@ -165,7 +165,7 @@ When a repository has a detected pull request, the workspace SHALL show it witho
 - **WHEN** the Pull request pane is the expanded pane of touch mode's accordion
 - **THEN** its details start open, so the pane's height holds the pull request's branches, readiness, checks and reviewers instead of empty space, and the Details toggle still folds them
 - **AND** with less to show than the room (Details folded, no pull request, no credential) the pane is as tall as its content and the folded panes' headers follow right under it, leaving no blank stretch inside the pane
-- **AND** the title shows at most its clamped lines (two on touch, a picked pull request's too), a clipped extra line never shows, a one-line title leaves no gap under it, its full text is its tooltip, and its tap box is still at least 44px tall
+- **AND** the title shows at most its clamped lines (two on touch, a viewed pull request's too), a clipped extra line never shows, a one-line title leaves no gap under it, its full text is its tooltip, and its tap box is still at least 44px tall
 
 #### Scenario: The pane's header on touch
 - **WHEN** the viewer has 1 pending comment and the Pull request pane's header shows on a phone
@@ -183,13 +183,13 @@ When a repository has a detected pull request, the workspace SHALL show it witho
 - **WHEN** the viewer has 1 pending comment on #642 and the pane turns to no pull request for the branch, no credential, or GitHub unreachable
 - **THEN** the pane still says `#642: 1 pending comment` on one line (its link named `Your review of #642`) with a link to its Files changed, wherever the count is known on the page
 
-#### Scenario: A picked pull request on a short screen
-- **WHEN** a picked pull request with a pending comment is shown in the expanded Pull request pane on an 844×390 touch phone
-- **THEN** its note is a compact `Picked · ← Back` beside the state row and the pending note keeps to `Finish your review before merging.`, so Finish review (1) and Merge on GitHub are inside the pane without scrolling; their full words stay their accessible text
+#### Scenario: A viewed pull request on a short screen
+- **WHEN** a viewed pull request with a pending comment is shown in the expanded Pull request pane on an 844×390 touch phone
+- **THEN** the pane carries no note of its own (the switcher button in the bar says `#639`, and the way back is in the switcher) and the pending note keeps to `Finish your review before merging.`, so Finish review (1) and Merge on GitHub are inside the pane without scrolling; their full words stay their accessible text
 
 #### Scenario: The way back stays in reach
-- **WHEN** a picked pull request is shown in the Pull request pane and the pane is scrolled to its end, or Details is opened, on a desktop or a touch device
-- **THEN** the picked note and its `← Back` stay pinned at the top of the pane body with the state row under them, never scrolled out of view
+- **WHEN** a viewed pull request is shown in the Pull request pane and the pane is scrolled to its end, or Details is opened, on a desktop or a touch device
+- **THEN** the way back is outside the pane, never scrolled with it: the switcher chip's `Viewing #639 · ← Back` line on a desktop, and the Viewing strip at the top of the Files tab on touch
 - **AND** Back is at least 24px tall on a desktop and 44px on touch, and is hit at its centre
 
 #### Scenario: No row is cut at the pane's bottom
@@ -242,46 +242,36 @@ Uatu MUST NOT merge pull requests. For a shown pull request it SHALL say, read-o
 - **THEN** the next refresh shows it as Merged, and no local branch, remote-tracking ref or worktree is touched
 
 ### Requirement: Open pull requests can be listed
-The workspace SHALL list the resolved repository's open pull requests on demand, newest update first, bounded to the first 100 with a link to GitHub for the rest. Each row SHALL show number, title, author, draft flag, and checks rollup, and SHALL be filterable by text.
+The workspace SHALL list the resolved repository's open pull requests in the workspace switcher's Pull requests section, newest update first, bounded to the first 100 with a link to GitHub for the rest. Each row SHALL show number, title, author, the draft or fork flag, the checks rollup and the review state, and the list SHALL be filterable by text and by state. There is no separate pull request picker.
 
 #### Scenario: Listing open pull requests
-- **WHEN** the user asks for the repository's open pull requests
-- **THEN** the list loads and shows each open pull request with number, title, author, draft flag, and checks rollup
+- **WHEN** the user opens the switcher in a workspace that serves GitHub data
+- **THEN** Pull requests loads and shows each open pull request as a two-line row: `#number title`, then author, `Draft` or `Fork`, checks and review state
 
 #### Scenario: Filtering the list
-- **WHEN** the user types `login` into the list filter
+- **WHEN** the user types `login` into the switcher's search field
 - **THEN** only pull requests whose number, title, author, or head branch matches remain
+
+#### Scenario: Filtering by menu
+- **WHEN** the user chooses `Review requested` in the `Open ▾` menu with Enter or a tap
+- **THEN** the list keeps the pull requests that request the viewer's review, the heading's control reads `Review requested ▾`, and focus returns to it
 
 #### Scenario: More than 100 open pull requests
 - **WHEN** the repository has 140 open pull requests
-- **THEN** the list shows the 100 most recently updated and a link to the rest on GitHub
+- **THEN** `Show all` lists the 100 most recently updated and a link to the rest on GitHub
 
-#### Scenario: Picking on a phone
-- **WHEN** the user opens the list on a touch device
-- **THEN** it fills the screen, its search field does not take focus (the keyboard would cover the list), and each row's actions sit outside the row, so rows hold no nested controls
-- **AND** all four filter chips are whole, never cut or scrolled out of sight: on a 390px phone they fit one row (`Review requested` reads `To review`, its full name kept as the chip's name), and on a narrower one they wrap to a second row; its footer buttons are one compact row, and at 320px they read `Cancel`, `Worktree…` and `Show here`, named in full
-
-#### Scenario: Opened to create a worktree
-- **WHEN** the user chooses `From a pull request…` in the worktree menu and selects #639
-- **THEN** the list is titled `Create a worktree from a pull request`, `Create worktree…` is the primary action and Enter runs it, with `Show in workspace` beside it
-- **AND** opened from the Pull request pane, `Show in workspace` is the primary action
-
-#### Scenario: Names for the list
-- **WHEN** the list is offered from the Pull request pane's header or its no-pull-request state
-- **THEN** each entry point reads `Browse pull requests…`, and so does the list's title
-- **AND** the worktree menu offers it as `From a pull request…`, beside `New branch / worktree` and `Existing branch`
-
-#### Scenario: Filtering by keyboard
-- **WHEN** the user activates a filter chip with Enter or Space
-- **THEN** the list filters and focus stays on that chip
+#### Scenario: Opening the list from the Pull request pane
+- **WHEN** the user activates the Pull request pane's search control, or `Browse pull requests…` in its no-pull-request state
+- **THEN** the switcher opens with its Pull requests section in view (on a desktop, focus in its search field)
+- **AND** the worktree menu has no `From a pull request…` item: the Pull requests list replaces it
 
 #### Scenario: Arrow keys from the search field
-- **WHEN** the search field is empty, no row is selected, and the user presses ArrowUp (or ArrowDown)
-- **THEN** the last row (or the first) is selected, and further presses move one row, wrapping at both ends
+- **WHEN** the search field is empty, no row is active, and the user presses ArrowUp (or ArrowDown)
+- **THEN** the last row (or the first) of the switcher's lists becomes active, and further presses move one row, wrapping at both ends
 
 #### Scenario: Finding a merged or closed pull request by number
 - **WHEN** the user types `#642` or pastes the pull request's URL, and #642 is merged
-- **THEN** the list says #642 is merged, so it isn't in the open list, after looking it up in any state, and shows it as the one result; the footer's `Show in workspace` acts on it and there is no second set of actions
+- **THEN** the switcher says #642 is merged, so it isn't in the open list, after looking it up in any state, and shows it as the one result, whose row views it here
 
 #### Scenario: Typing a number looks it up once
 - **WHEN** the user types `6`, `3`, `0` (looking for #630, which isn't open)
@@ -289,23 +279,19 @@ The workspace SHALL list the resolved repository's open pull requests on demand,
 
 #### Scenario: A number or URL naming an open pull request
 - **WHEN** the user types `642` or pastes #642's URL, and #642 is open
-- **THEN** #642's row is selected in the list, and the footer acts on it
+- **THEN** #642's row is the active row, and Enter acts on it
 
 #### Scenario: A URL for another repository
 - **WHEN** the user pastes `https://github.com/someone/else/pull/642` in a workspace of `octo-org/uatu`
-- **THEN** the list says `This link is for someone/else, not octo-org/uatu.`, looks nothing up and offers no action; hosts, owners and names compare case-insensitively
+- **THEN** the switcher says `This link is for someone/else, not octo-org/uatu.`, looks nothing up and offers no action; hosts, owners and names compare case-insensitively
 
 #### Scenario: A number that doesn't exist
 - **WHEN** the user types `#99999` and GitHub has no such pull request
 - **THEN** one sentence says `There's no pull request #99999 in octo-org/uatu.`
 
-#### Scenario: Browsing without a credential
-- **WHEN** the user opens Browse pull requests… while GitHub isn't connected for the workspace
-- **THEN** the dialog holds only the explanation and `Open Hub Settings → Credentials` (outside a Hub, the `gh auth login` step) with Close, and no search field, filters or pull request actions
-
-#### Scenario: The dialog stays put
-- **WHEN** the user selects a fork's pull request in the list on desktop and its fork notice appears
-- **THEN** the dialog's top edge doesn't move; it grows downward
+#### Scenario: Listing without a credential
+- **WHEN** the user opens the switcher while GitHub isn't connected for the workspace
+- **THEN** Pull requests is one line of guidance with `Open Hub Settings → Credentials` (outside a Hub, the `gh auth login` step), and no filter or pull request rows
 
 ### Requirement: The pull request view renders the description and conversation
 The pull request view SHALL render the description and the conversation in time order: comments, submitted reviews with their bodies, and review threads with their file path, resolved and outdated flags, and replies. All GitHub-authored Markdown SHALL be rendered with the same sanitizer used for documents. Large conversations SHALL be bounded with a link to GitHub.
@@ -360,7 +346,7 @@ The pull request view SHALL have a same-origin URL naming the pull request numbe
 - **WHEN** the URL names an unknown repository, a pull request that does not exist, or a repository whose GitHub status is not ready
 - **THEN** the view explains why the pull request is unavailable and the sidebar remains usable
 
-#### Scenario: A picked pull request without a credential
+#### Scenario: A viewed pull request without a credential
 - **WHEN** GitHub isn't connected and the user opens `?pr=639`
 - **THEN** the header still names `Pull request #639` (`#639 · <owner>/<repo> · GitHub not connected`), the main card gives the full guidance to connect GitHub, and the Pull request pane says it in one short line with a link to connect, so the message is said once
 
@@ -374,20 +360,18 @@ The pull request view SHALL have a same-origin URL naming the pull request numbe
 - **THEN** it is shown with its full review: conversation comments, and inline comments and replies on its Files changed, which renders GitHub's own diff of that pull request rather than this checkout
 - **AND** when served by a Hub, an offer to open it in its own worktree
 
-### Requirement: A picked pull request becomes the workspace's current one
-Choosing **Show in workspace** for a pull request SHALL make it the workspace's current pull request without checking it out: the Pull request pane and the pull request view SHALL show it, and the Files pane SHALL list its changed files as a tree with review marks and line counts. The pick SHALL be restored by the pull request view's URL, and a visible control SHALL return the workspace to the checked-out branch.
+### Requirement: A viewed pull request is what Files and Preview show
+Choosing **View here** for a pull request SHALL make it what Files and Preview show without fetching or checking anything out: the Pull request pane and the pull request view SHALL show it, and the Files pane SHALL list its changed files as a tree with review marks and line counts. The terminal and agent stay on the checkout. Viewing SHALL be page-local and restored by the pull request view's URL, and one control, **← Back to `<branch>`**, SHALL return Files and Preview to the checkout.
 
-#### Scenario: Showing another pull request
-- **WHEN** the user picks pull request #639 while `feat/view-pr` (#642) is checked out
-- **THEN** the Pull request pane shows #639 with a note that `feat/view-pr` stays checked out, above #639's summary and clear of its actions
-- **AND** the Files pane's heading reads `PR #639 files`, and it lists #639's changed files under a `PR #639` label in place of the workspace tree
-- **AND** on touch the label, #639's title (up to two lines) and `← Back` (named `← Back to feat/view-pr`) share one row
-- **AND** Change Overview is labelled as describing the local branch `feat/view-pr`, not #639
-- **AND** the same `Local branch` label (its tooltip saying why) marks Change Overview whenever its comparison isn't the shown pull request's diff: uncommitted changes, a checked-out commit other than the pull request's head, or Since last commit
-
+#### Scenario: Viewing another pull request
+- **WHEN** the user views pull request #639 while `feat/view-pr` (#642) is checked out
+- **THEN** the Pull request pane shows #639's summary, with no note of its own
+- **AND** the Files pane's heading reads `PR #639 files`, and it lists #639's changed files under a scope bar holding `PR #639` and #639's title (up to two lines on touch) in place of the workspace tree
+- **AND** Change Overview's label reads `⎇ feat/view-pr`, its tooltip saying it describes the local branch, not #639
+- **AND** the same label, reading `Local branch`, marks Change Overview whenever its comparison isn't the shown pull request's diff: uncommitted changes, a checked-out commit other than the pull request's head, or Since last commit
 
 #### Scenario: The Files options act on the workspace tree only
-- **WHEN** a picked pull request's files are shown in the Files pane
+- **WHEN** a viewed pull request's files are shown in the Files pane
 - **THEN** the Files options (ignored files, file types) and the tree's filters are hidden, so nothing changes the workspace tree out of sight, and they are back with the workspace tree
 
 #### Scenario: One file order everywhere
@@ -399,30 +383,30 @@ Choosing **Show in workspace** for a pull request SHALL make it the workspace's 
 - **THEN** the pull request view opens on Files changed, scrolled to that file's diff, and the URL names the file
 
 #### Scenario: Returning to the checked-out branch
-- **WHEN** the user chooses the return control
-- **THEN** the pane shows the branch's pull request (or its no-pull-request state), the Files pane shows the workspace tree, and a preview of the picked pull request gives way to the branch's own
+- **WHEN** the user chooses `← Back to feat/view-pr`
+- **THEN** the pane shows the branch's pull request (or its no-pull-request state), the Files pane shows the workspace tree, and a preview of the viewed pull request gives way to the branch's own
 
 #### Scenario: Touch mode
-- **WHEN** the user picks a pull request on a touch device
+- **WHEN** the user views a pull request on a touch device
 - **THEN** the Preview tab comes forward with the pull request's conversation, the Files tab lists its files one tap away, and picking a file there brings the Preview tab back with that file's diff
 
 #### Scenario: One way back
-- **WHEN** a picked pull request is shown
-- **THEN** the Pull request pane's note offers `← Back to <branch>`, and the Files pane offers the same control only while the Pull request pane is hidden or collapsed, so each screen says it once
-- **AND** on touch, where the Preview tab has no Pull request pane beside it, the preview header's number row carries a compact `Picked · ← Back` chip (named `Picked PR, not checked out`), adding no row; Back returns to the branch's pull request and focuses its heading
+- **WHEN** a viewed pull request is shown
+- **THEN** the only notice is the Viewing strip, `Viewing #639` with `← Back to feat/view-pr`: at the top of the Files and Preview tabs on touch, and on a desktop the switcher chip's second line (the preview shows the strip only while the sidebar is collapsed)
+- **AND** the Pull request pane, the Files scope bar and the preview header carry no Picked note, chip or Back of their own
 
-#### Scenario: Focus after showing a pull request
-- **WHEN** the user shows a pull request from Browse pull requests…, including from a simulated worktree's result, or opens one from the pane while the preview is out of sight (a narrow window stacking the sidebar above the preview, or touch mode's Files tab)
+#### Scenario: Focus after viewing a pull request
+- **WHEN** the user views a pull request from the switcher, including from a simulated worktree's result, or opens one from the pane while the preview is out of sight (a narrow window stacking the sidebar above the preview, or touch mode's Files tab)
 - **THEN** the preview comes into view and its heading takes focus
 
-### Requirement: Only another pull request counts as picked, and browsing is always at hand
-Only a pull request other than the checked-out branch's own SHALL count as picked. The Pull request pane SHALL offer a way to browse the repository's pull requests whatever it shows.
+### Requirement: Only another pull request counts as viewed, and the list is always at hand
+Only a pull request other than the checked-out branch's own SHALL count as viewed. The Pull request pane SHALL offer a way to the repository's pull requests whatever it shows.
 
-#### Scenario: The branch's own pull request is never a pick
+#### Scenario: The branch's own pull request is never viewed
 - **WHEN** the pull request view shows #642, whose head is the checked-out branch, and GitHub later reports no pull request for the branch
-- **THEN** #642 is not labelled as picked
+- **THEN** #642 is not labelled as viewed
 - **AND** the view says GitHub links no pull request to the branch and #642 is shown only because the address names it
 
 #### Scenario: Browsing from any state
-- **WHEN** the Pull request pane shows the branch's pull request, a picked one, or the branch's no-pull-request state
-- **THEN** its header's Browse pull requests control opens the pull request list
+- **WHEN** the Pull request pane shows the branch's pull request, a viewed one, or the branch's no-pull-request state
+- **THEN** its header's search control opens the switcher at Pull requests

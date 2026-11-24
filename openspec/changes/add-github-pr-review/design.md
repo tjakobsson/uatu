@@ -184,7 +184,7 @@ The write route re-checks the same conditions at request time, using the client'
 
 *Alternative:* translate line numbers through local edits with a diff-of-diffs. Rejected: it fails silently in exactly the cases that matter, and the spec forbids silent misanchoring.
 
-**Scope (owner decision):** D8 governs the per-document Diff view, which shows the local checkout. Files changed in the pull request view renders GitHub's own diff of the PR (the base and head contents GitHub serves), so it is PR-exact by construction for any PR, checked out or not, including one picked with Show in workspace. Inline comments and replies are offered there for every open PR. The write route checks such a request against the PR head, the PR's changed paths and the pending review's commit only; the local-HEAD and clean-file checks apply to requests from the per-document Diff view.
+**Scope (owner decision):** D8 governs the per-document Diff view, which shows the local checkout. Files changed in the pull request view renders GitHub's own diff of the PR (the base and head contents GitHub serves), so it is PR-exact by construction for any PR, checked out or not, including one viewed with View here. Inline comments and replies are offered there for every open PR. The write route checks such a request against the PR head, the PR's changed paths and the pending review's commit only; the local-HEAD and clean-file checks apply to requests from the per-document Diff view.
 
 ### D9. Pending review on GitHub, through GraphQL
 
@@ -288,7 +288,7 @@ The first two are open by the project owner's decision, pending a separate UX re
   - (c) **Workspace "review mode":** a mode that reorganizes the workspace around the PR: file list from the PR, diff-first preview, conversation and review controls together. It fits a review workflow best and is the largest change.
 
   Whichever wins, the server contract (D5), anchoring (D8) and review model (D9) are unchanged. The choice decides the client modules in D1, the URL shape behind the spec's "addressable by URL" requirement, and any `sidebar-shell`/`document-routing` deltas.
-- **Q2. Where "open any PR" lives.** Options:
+- **Q2. Where "open any PR" lives.** Settled by the change `add-workspace-switcher`: the pull request list lives in the workspace switcher's Pull requests section, and the separate picker is retired. The options were:
   - (a) the worktree menu (picker and Hub dashboard dialog), which reopens the approved worktree UX;
   - (b) the PR surface from Q1, as a list of open PRs;
   - (c) the Hub or Navigator, as a repository-level PR list beside workspaces.

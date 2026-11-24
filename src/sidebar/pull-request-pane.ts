@@ -21,10 +21,11 @@
 // scrolls back to its top whenever what it shows changes (another PR,
 // another status), never mid-way into old content.
 //
-// The current pull request is the checked-out branch's own, unless one was
-// picked in "Browse pull requests…" (Show in workspace): then the pane shows the
-// picked one under a note with the way back, and the Files pane lists its
-// files (sidebar/pull-request-scope.ts).
+// The current pull request is the checked-out branch's own, unless another
+// is viewed (View here, in the workspace switcher): then the pane shows the
+// viewed one, and the Files pane lists its files
+// (sidebar/pull-request-scope.ts). The pane carries no note about it: the
+// switcher's chip, button and Viewing strip say it, with the way back.
 //
 // When the session does not serve GitHub data (/api/github/* answers 404)
 // the pane marks itself unavailable and leaves the pane stack and the panels
@@ -59,12 +60,12 @@ import { connectGithubHtml } from "../github/connect";
 import { githubWorkspaceName, revealPullRequestHeading } from "../preview/pull-request-view";
 import { confirmResetMockData, openSubmitReviewDialog, reviewActionLabel } from "../preview/review-dialogs";
 import { reviewMarksByPath } from "../preview/diff-review";
-import { OPEN_PULL_REQUEST_EVENT, openPullRequestPicker, type OpenPullRequestDetail } from "../shell/pull-request-picker";
+import { OPEN_PULL_REQUEST_EVENT, openSwitcher, SHOW_BRANCH_EVENT, type OpenPullRequestDetail, type ShowBranchDetail } from "../shell/switcher";
 import { paneRows, schedulePaneHeightNormalization, setPaneAvailable } from "./panes";
 import { wholeRowTrim } from "./pane-stack";
 import { ensureTreeView } from "./tree-mount";
 import { onSidebarRepositories } from "./shell";
-import { backToBranchHtml, initPullRequestScope, showBranchPullRequest } from "./pull-request-scope";
+import { focusWorkspaceTree, initPullRequestScope, showBranchPullRequest } from "./pull-request-scope";
 
 const paneBody = document.querySelector<HTMLElement>("#pull-request-pane")!;
 const paneMeta = document.querySelector<HTMLElement>("#pull-request-pane-meta")!;
@@ -94,7 +95,7 @@ let retryWas: string | null = null;
 // The summary PR's detail is read once per summary change, for the review
 // counters, the Files pane badges and the dialogs.
 let detailKey = "";
-// The picked pull request whose detail was last requested, and why it failed.
+// The viewed pull request whose detail was last requested, and why it failed.
 let scopedRequested: number | null = null;
 let scopedError: string | null = null;
 
@@ -102,17 +103,33 @@ export function initPullRequestPane(): void {
   pullRequestStore.subscribe(renderPullRequestPane);
   initPullRequestScope();
   onSidebarRepositories(syncPullRequestPane);
-  // "Show in workspace": the PR becomes current and its conversation comes
-  // forward (the Preview tab on touch); its files are in the Files tab, one
-  // tap away.
+  // View here (the switcher): the PR becomes the viewed one and its
+  // conversation comes forward (the Preview tab on touch); its files are in
+  // the Files tab, one tap away.
   document.addEventListener(OPEN_PULL_REQUEST_EVENT, event => {
     const { repositoryId, number } = (event as CustomEvent<OpenPullRequestDetail>).detail;
     activatePullRequestPreview({ repositoryId, number }, { pushHistory: true });
     revealPreviewSurface();
     revealPullRequestHeading({ always: true });
   });
-  // In the header, so it is there whatever the pane shows.
-  browseButton.addEventListener("click", () => openPullRequestPicker({ returnFocus: browseButton }));
+  // ← Back (the switcher's status card, chip or Viewing strip): Files and
+  // Preview show the checkout again; focus lands where the control was.
+  document.addEventListener(SHOW_BRANCH_EVENT, event => {
+    const { focus } = (event as CustomEvent<ShowBranchDetail>).detail;
+    showBranchPullRequest();
+    requestAnimationFrame(() => {
+      if (focus === "tree") focusWorkspaceTree();
+      else if (focus === "heading") {
+        const title = document.querySelector<HTMLElement>("#preview-title");
+        if (!title) return;
+        title.tabIndex = -1;
+        title.focus({ preventScroll: true });
+      }
+    });
+  });
+  // In the header, so it is there whatever the pane shows: the switcher,
+  // at its Pull requests.
+  browseButton.addEventListener("click", () => openSwitcher({ opener: browseButton, section: "pull-requests" }));
   refreshButton.addEventListener("click", () => {
     // Busy, it says so (aria-disabled) but stays focusable: a keyboard
     // Refresh keeps focus on the button through the re-render.
@@ -147,12 +164,6 @@ export function initPullRequestPane(): void {
       if (detailsChoice && !detailsFloat()) requestAnimationFrame(revealDetails);
       return;
     }
-    if (element.closest("[data-pr-back-to-branch]")) {
-      showBranchPullRequest();
-      // The control is gone: focus lands on the branch's pull request.
-      requestAnimationFrame(() => paneBody.querySelector<HTMLElement>(".pr-pane-title")?.focus());
-      return;
-    }
     const pendingOpen = element.closest<HTMLElement>("[data-pr-pending-open]");
     if (pendingOpen) {
       const repositoryId = pullRequestStore.state.repositoryId;
@@ -170,7 +181,7 @@ export function initPullRequestPane(): void {
       scopedError = null;
       void pullRequestStore.retry();
     }
-    if (action === "open-any") openPullRequestPicker({ returnFocus: element.closest("button") ?? undefined });
+    if (action === "open-any") openSwitcher({ opener: element.closest("button") ?? browseButton, section: "pull-requests" });
     if (!repositoryId || !number) return;
     // Focus comes back to the same action, in the same place (the header's
     // pending count or the body's button), after the pane re-renders, or to
@@ -242,7 +253,7 @@ async function runScenario(input: Parameters<typeof githubApi.setScenario>[0]): 
     const mode = appState.previewMode;
     // Reload an open PR preview against the new scenario (the view follows
     // the store). Not a navigation: that would count the shown pull request
-    // as picked once the branch has none.
+    // as viewed once the branch has none.
     if (mode.kind === "pull-request") await pullRequestStore.loadDetail(mode.number, mode.repositoryId).catch(() => undefined);
   } finally {
     scenarioBusy = false;
@@ -404,12 +415,12 @@ function renderPaneContent(): void {
   // request, holds the full guidance; the pane says it in one line then.
   if (summary.status === "no-credential") {
     const variant = appState.previewMode.kind === "pull-request" ? "line" : "compact";
-    paneBody.innerHTML = `${scoped !== null ? scopeNotice() : ""}${connectGithubHtml(variant, githubWorkspaceName())}${pendingElsewhereHtml([])}${scenarioControl()}`;
+    paneBody.innerHTML = `${connectGithubHtml(variant, githubWorkspaceName())}${pendingElsewhereHtml([])}${scenarioControl()}`;
     resetScrollOnChange(`no-credential\n${scoped}\n${variant}`);
     return;
   }
   if (scoped !== null) {
-    const body = pr ? summaryHtml(pr) : scopeNotice() + (scopedError ? stateCard("danger", `Couldn't read pull request #${scoped}`, escapeHtml(scopedError), retryActionsHtml())
+    const body = pr ? summaryHtml(pr) : (scopedError ? stateCard("danger", `Couldn't read pull request #${scoped}`, escapeHtml(scopedError), retryActionsHtml())
       : `<p class="pane-empty">Reading pull request #${scoped}…</p>`);
     paneBody.innerHTML = `${stale ? staleLine(scoped) : ""}${body}${scenarioControl()}`;
   } else {
@@ -453,18 +464,11 @@ function retryActionsHtml(): string {
   return `<button type="button" class="gh-button" data-pr-action="retry"${running ? " disabled" : ""}>${running ? "Retrying…" : "Retry"}</button>${note && !running ? `<span class="pr-muted pr-retry-note">${escapeHtml(note)}</span>` : ""}`;
 }
 
-// The pull request the pane shows: a picked one, else the branch's own.
+// The pull request the pane shows: a viewed one, else the branch's own.
 function currentPullRequest(): PullRequestSummary | null {
   const scoped = pullRequestStore.scopedNumber();
   if (scoped !== null) return pullRequestStore.detail(scoped)?.summary ?? null;
   return pullRequestStore.state.summary?.pullRequest ?? null;
-}
-
-// A picked pull request says so, with the way back, above its summary.
-// (On a short touch screen it is "Picked · ← Back", beside the top row:
-// styles.css.)
-function scopeNotice(): string {
-  return `<div class="pr-pane-scope"><span>Picked<span class="pr-pane-scope-rest"> PR, not checked out.</span></span>${backToBranchHtml()}</div>`;
 }
 
 function previewHref(number: number, tab: "conversation" | "files" = "conversation"): string {
@@ -552,15 +556,13 @@ function summaryHtml(pr: PullRequestSummary): string {
     : pending > 0 ? "Finish your review: publish your pending comments as a comment, approval or change request"
     : "Approve, comment or request changes, with a summary and any line comments";
   // Always in view, even in a short pane: the top row (state, decision and
-  // the Details toggle; the number is in the pane header), and over it a
-  // picked pull request's note with its way back, stay pinned while the
-  // pane scrolls;
+  // the Details toggle; the number is in the pane header) stays pinned while
+  // the pane scrolls;
   // then the title, checks and the first blocker, then the actions. The rest
   // folds under Details. Rows are `data-pane-rows` children: the pane stack
   // sizes the pane to whole rows (sidebar/panes.ts).
-  return `<div class="pr-pane${stale ? " is-stale" : ""}${scoped ? " is-picked" : ""}" data-pane-rows>
+  return `<div class="pr-pane${stale ? " is-stale" : ""}${scoped ? " is-viewed" : ""}" data-pane-rows>
       <div class="pr-pane-pin">
-        ${scoped ? scopeNotice() : ""}
         <div class="pr-pane-top">
           <span class="pr-pane-row">
             ${stateBadge(pr)}
@@ -615,7 +617,7 @@ function scenarioControl(): string {
 }
 
 // Loads the summary PR's detail once per change, then feeds the Files pane
-// its per-file thread / pending badges. A picked PR's detail is read once per
+// its per-file thread / pending badges. A viewed PR's detail is read once per
 // pick (and again on refresh); its writes keep it current.
 function syncDetail(): void {
   syncScopedDetail();
@@ -635,7 +637,7 @@ function syncDetail(): void {
 
 function syncScopedDetail(): void {
   const scoped = pullRequestStore.scopedNumber();
-  // A picked pull request is on screen: focus and Retry re-read it too.
+  // A viewed pull request is on screen: focus and Retry re-read it too.
   pullRequestStore.watch("pane", scoped);
   if (scoped === scopedRequested) return;
   scopedRequested = scoped;

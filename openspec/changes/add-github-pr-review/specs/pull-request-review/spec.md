@@ -85,7 +85,7 @@ The viewer's pending reviews on pull requests other than the one shown SHALL sta
 
 #### Scenario: Files changed on a phone in portrait
 - **WHEN** the reviewer opens Files changed on a 390×844 touch device
-- **THEN** the first diff line is within the top 40% of the screen: the header is a title row (`#642`, then the title in up to two lines, a tap showing the rest, with Open on GitHub and the text size buttons at its end), then the tabs row with no frame around the 44px tabs; a picked pull request keeps a number row for `#639` and `Picked · ← Back`, with the title under it. Files changed leaves out the state / author / branches band that Conversation shows, no review band takes a row, and the counts and base ← head are one line
+- **THEN** the first diff line is within the top 40% of the screen: the header is a title row (`#642`, then the title in up to two lines, a tap showing the rest, with Open on GitHub and the text size buttons at its end), then the tabs row with no frame around the 44px tabs; a viewed pull request has the one Viewing strip above the header and no chip in it. Files changed leaves out the state / author / branches band that Conversation shows, no review band takes a row, and the counts and base ← head are one line
 - **AND** while the files scroll, the title row scrolls away with no sliver left, and only the tabs row (the tabs, the review button and Jump to file), the current file's header and the tab bar stay pinned: at most 120px over the diff
 
 #### Scenario: One file header pinned at a time
@@ -116,9 +116,9 @@ The viewer's pending reviews on pull requests other than the one shown SHALL sta
 - **WHEN** Files changed shows its idle review bar on a desktop
 - **THEN** it says how to comment with the mouse (click a line number, or hover a line and click `+`) and with the keyboard (Tab to a file's line numbers, the arrow keys, then Enter)
 
-#### Scenario: Leaving a picked pull request mid-review
-- **WHEN** the reviewer adds an inline comment on picked pull request #639 and goes back to the checked-out branch
-- **THEN** a notice says the review of #639 is still pending with 1 comment, and the pane and #639's row in the list mark it
+#### Scenario: Leaving a viewed pull request mid-review
+- **WHEN** the reviewer adds an inline comment on viewed pull request #639 and goes back to the checked-out branch
+- **THEN** a notice says the review of #639 is still pending with 1 comment, and the pane and #639's row in the switcher (`✎ 1 pending`) mark it
 
 ### Requirement: Unsent text is kept until GitHub takes it
 Every composer SHALL keep its unsent text across re-renders and reloads and ask before discarding changed text (Cancel, Escape, or a backdrop click). Several lines MAY hold unsent comments at once. A saved draft SHALL be dropped exactly when GitHub accepts the text, before the page updates; after a reload it SHALL count as sent only when a matching comment appeared after its send began.
@@ -178,12 +178,10 @@ A dialog that writes to a pull request SHALL close when the workspace stops show
 - **AND** a short toast shows the same words without ever taking focus or taps, and goes on its timeout; on a short touch screen it is a compact line over the pinned header, never over the diff
 
 #### Scenario: Dialogs on a short touch screen
-- **WHEN** Finish review or Browse pull requests… opens on an 844×390 touch phone in landscape
+- **WHEN** Finish review opens on an 844×390 touch phone in landscape
 - **THEN** the dialog has one scrolling body and a one-row footer at most 64px tall, the why-not line in the attribution's place while it has something to say
-- **AND** the picker's heading and search share one row and its rows keep their badges beside the title, so at least three whole results show above the footer
-- **AND** every control (the summary, each verdict, each button, the search, each filter chip, each row) is hit at its centre once scrolled into view, never under the footer
+- **AND** every control (the summary, each verdict, each button) is hit at its centre once scrolled into view, never under the footer
 - **AND** the review dialog's three verdicts come first, right under its pinned head (the number and the title on one line), one compact 44px row each, all in view without scrolling; the summary and the pending list follow
-- **AND** the picker's filter chips are one row, its list takes the height left above the footer, and its footer buttons are one row
 
 #### Scenario: Focus never under a dialog's footer
 - **WHEN** the reviewer opens Finish review on a 390×844 phone, edits a pending comment and presses Tab to reach Save

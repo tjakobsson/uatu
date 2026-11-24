@@ -31,7 +31,7 @@ The `Files` tab's surface SHALL be the existing sidebar pane stack rendered full
 
 #### Scenario: A short screen keeps the stack for the panes
 - **WHEN** the Files tab is shown on a touch screen 500px tall or less (an 844×390 phone in landscape)
-- **THEN** the brand is one row at most 48px tall (a small logo, the name and the status, no build badge) with the workspace switcher beside it, and the expanded Pull request pane's body keeps at least 140px
+- **THEN** the brand is one row at most 48px tall (a small logo, the name and the status, no build badge; the switcher is the tab bar's button), and the expanded Pull request pane's body keeps at least 140px
 
 #### Scenario: The expanded pane is remembered per device
 - **WHEN** the user expands Change Overview on a phone and reloads

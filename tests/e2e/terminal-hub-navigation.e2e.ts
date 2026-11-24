@@ -222,7 +222,7 @@ test.afterEach(async ({ hub, hubContext }, testInfo) => {
 });
 
 test.describe("terminal survives workspace navigation through the hub", () => {
-  test("selecting the current workspace keeps the page, its panes, and its shells", async ({ hub, hubContext }, testInfo) => {
+  test("opening and closing the switcher keeps the page, its panes, and its shells", async ({ hub, hubContext }, testInfo) => {
     const alpha = byId(hub, "alpha");
     const page = await openSessionTab(hubContext, alpha);
     await openTerminal(page);
@@ -232,12 +232,14 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     expect(paneIds).toHaveLength(1);
     await page.evaluate(() => { (window as unknown as { __uatuMarker: string }).__uatuMarker = "original document"; });
 
+    // The current workspace is the switcher's status card, not a row: there
+    // is nothing to activate that could replace this page.
     await openSwitcher(page);
-    const current = menuEntry(page, "alpha");
-    await expect(current).toHaveAttribute("aria-current", "true");
-    await current.click();
+    await expect(menuEntry(page, "alpha")).toHaveCount(0);
+    await expect(page.locator("#switcher-status")).toContainText("alpha");
+    await page.keyboard.press("Escape");
 
-    // No navigation: the same document, the same URL, the menu closed.
+    // No navigation: the same document, the same URL, the switcher closed.
     await expect(page.locator("#hub-menu")).toBeHidden();
     expect(page.url()).toBe(url);
     expect(await page.evaluate(() => (window as unknown as { __uatuMarker?: string }).__uatuMarker)).toBe("original document");
@@ -248,16 +250,11 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     const sessions = await inventory(hubContext, alpha);
     expect(sessions.map(session => session.id)).toEqual(paneIds);
     expect(sessions[0]!.attached).toBe(true);
-
-    // Keyboard activation follows the same path.
-    await openSwitcher(page);
-    await current.press("Enter");
-    await expect(page.locator("#hub-menu")).toBeHidden();
-    expect(await page.evaluate(() => (window as unknown as { __uatuMarker?: string }).__uatuMarker)).toBe("original document");
   });
 
-  test("an explicit new-tab gesture on the current workspace opens it there and leaves this page intact", async ({ hub, hubContext }) => {
+  test("an explicit new-tab gesture on another checkout opens it there and leaves this page intact", async ({ hub, hubContext }) => {
     const alpha = byId(hub, "alpha");
+    const beta = byId(hub, "beta");
     const page = await openSessionTab(hubContext, alpha);
     await openTerminal(page);
     await typeLine(page, 0, "UATU_NAV=still_here");
@@ -266,16 +263,21 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     await openSwitcher(page);
     // Short and explicit: the gesture opens the tab at once or not at all.
     const opened = hubContext.waitForEvent("page", { timeout: 5_000 });
-    await menuEntry(page, "alpha").click({ modifiers: ["ControlOrMeta"] });
+    await menuEntry(page, "beta").click({ modifiers: ["ControlOrMeta"] });
     const other = await opened;
     // The SPA rewrites the entry to the document it opened, so the session
     // URL is a prefix of what the tab ends on.
-    await expect(other).toHaveURL(sessionUrlPattern(alpha));
+    await expect(other).toHaveURL(sessionUrlPattern(beta));
     // The new tab is its own document with no pane references: it must not
     // claim this tab's shell.
     await expect(other.locator("#connection-state .connection-label")).toHaveText("Connected");
     await expect(other.locator("#terminal-panel")).toBeHidden();
 
+    // The switcher is modal and stays open on this page; close it before
+    // typing into the shell again.
+    await page.bringToFront();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#hub-menu")).toBeHidden();
     expect(await paneSessionIds(page)).toEqual(paneIds);
     await expectShellValue(page, 0, "UATU_NAV", "still_here");
     await other.close();

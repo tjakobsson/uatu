@@ -71,9 +71,15 @@ src/
 │                   touch/desktop mode on <html>; narrow-layout-offer offers touch
 │                   layout to a desktop window narrowed over a preview), desktop-viewport (desktop
 │                   visible rectangle and device safe areas), tab-bar (touch mode's
-│                   bottom Files/Preview/Terminal tabs), worktree-dialog
+│                   bottom Files/Preview/Chat/Terminal tabs), switcher (the
+│                   workspace switcher: the tab bar's fifth button, the
+│                   desktop chip, one dialog saying where you work and what
+│                   you view, its Pull requests and the view-or-check-out
+│                   choice; switcher-model holds its pure rules) + hub-nav
+│                   (the Hub's part: workspace list, live activity, the
+│                   Checkouts rows), worktree-dialog
 │                   (the one client worktree dialog, embedded in both
-│                   hub-nav's picker and the Hub dashboard) + worktree-live
+│                   the switcher's + New and the Hub dashboard) + worktree-live
 │                   (its `worktrees` live-invalidation subscription),
 │                   attention-notice (the in-page "needs your answer"
 │                   notice for other workspaces) — the app-wide chrome and

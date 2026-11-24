@@ -1,23 +1,26 @@
-// Hub workspace switcher — the way back out of a session. When the SPA is
-// served through a uatu hub (base path /s/<id>/, hub APIs answering at the
-// origin root), the sidebar header grows a chip naming the current
-// workspace whose dropdown links to the hub dashboard and to every other
-// workspace. Everywhere else — the desktop wrapper, the e2e harness — the
-// probe fails or the base path is "/", and the control stays hidden with
-// zero cost beyond one fetch in hub-shaped sessions.
+// The Hub's part of the workspace switcher (shell/switcher.ts). When the SPA
+// is served through a uatu hub (base path /s/<id>/, hub APIs answering at
+// the origin root), this reads the Hub's workspace list and the brokered
+// activity, and gives the switcher what it says about them: the status
+// card's facts and Start, the badge, the Checkouts rows (two lines each,
+// ordered by who needs you; the current workspace is the status card, not
+// a row), `+ New` for the current repository, and the footer's Hub links.
+// Everywhere else — the desktop wrapper, the e2e harness — the probe fails
+// or the base path is "/", and nothing registers.
 //
-// The chip and menu are live: the brokered stream's `activity` topic
+// The facts are live: the brokered stream's `activity` topic
 // (shell/live-channel.ts) says, for every workspace the user may access,
 // whether its session is running, whether an agent is working in it,
 // whether an interaction awaits the user, and whether work there finished
-// since this user last viewed its chat. The collapsed chip carries a badge
-// while another workspace is waiting on the user, a distinct one while work
-// finished unviewed, both distinct from mere agent activity; the open menu
-// names each workspace's state and updates in place. Nothing here reveals
-// conversation content or titles — the topic carries four booleans and a
-// workspace id. The one write back is the viewed acknowledgement: while
-// this page has the chat in view and its own workspace reads finished, it
-// tells the hub, which clears the mark for this user on every device.
+// since this user last viewed its chat. The collapsed chip and the touch
+// button carry a badge while another workspace is waiting on the user, a
+// distinct one while work finished unviewed, both distinct from mere agent
+// activity; the open switcher names each workspace's state and updates in
+// place. Nothing here reveals conversation content or titles — the topic
+// carries four booleans and a workspace id. The one write back is the
+// viewed acknowledgement: while this page has the chat in view and its own
+// workspace reads finished, it tells the hub, which clears the mark for
+// this user on every device.
 //
 // The hub API URLs here are deliberately origin-rooted, NOT appUrl()-based:
 // they belong to the hub (outside the session's base path), which is why
@@ -32,9 +35,9 @@ import type { WorkspaceActivity } from "../shared/live-protocol";
 import { AttentionNotices, renderAttentionNotices } from "./attention-notice";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
-import { openWorktreeFork, workspaceIsCheckout, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
-import { openPullRequestPicker, setPullRequestPickerWorktrees } from "./pull-request-picker";
-import { pullRequestStore } from "../github/pull-request-store";
+import { openWorktreeFork, workspaceIsCheckout } from "./worktree-dialog";
+import { closeSwitcher, refreshSwitcher, registerSwitcherHub, type SwitcherHub, type SwitcherHubFacts } from "./switcher";
+import { matchesSearch } from "./switcher-model";
 import { watchWorktreeInventory, WORKTREES_CHANGED_EVENT } from "./worktree-live";
 
 export type HubWorkspaceSummary = {
@@ -153,8 +156,8 @@ export function switcherBadgeLabel(badge: SwitcherBadge): string {
   }
 }
 
-// A menu entry's state text. Running and idle needs no word — the live dot
-// says it — so the column only speaks when there is something to say. The
+// A Checkouts row's state word (line 2). Running and idle needs no word — the
+// live dot says it — so the row only speaks when there is something to say. The
 // running states are exclusive by construction: finished requires neither
 // working nor awaiting. Within one workspace the order is awaiting, working,
 // finished — unlike the chip's ranking across workspaces — because work
@@ -172,12 +175,12 @@ export function workspaceMenuState(
     return { text: workspaceIsCheckout(workspace, workspaces) ? "Missing checkout" : "Missing folder", tone: "stopped" };
   }
   if (workspace.availability === "replaced") return { text: "Identity conflict", tone: "stopped" };
-  if (!workspace.running) return { text: "stopped", tone: "stopped" };
+  if (!workspace.running) return { text: "Stopped", tone: "stopped" };
   const facts = activity.get(workspace.id);
   if (!facts?.running) return null;
-  if (facts.awaiting) return { text: "awaiting you", tone: "awaiting" };
-  if (facts.working) return { text: "working", tone: "working" };
-  if (facts.finished) return { text: "finished", tone: "finished" };
+  if (facts.awaiting) return { text: "Awaiting you", tone: "awaiting" };
+  if (facts.working) return { text: "Working", tone: "working" };
+  if (facts.finished) return { text: "Finished", tone: "finished" };
   return null;
 }
 
@@ -217,62 +220,6 @@ export function currentSessionRunning(workspaces: HubWorkspaceSummary[], current
   return current ? current.running : null;
 }
 
-// Menu order: the current workspace first, then other running sessions,
-// then stopped workspaces, alphabetical within each group.
-export function sortHubWorkspaces(
-  workspaces: HubWorkspaceSummary[],
-  currentId: string | null,
-): HubWorkspaceSummary[] {
-  const rank = (workspace: HubWorkspaceSummary): number => {
-    if (workspace.id === currentId) return 0;
-    return workspace.running ? 1 : 2;
-  };
-  const sorted = [...workspaces].sort((a, b) =>
-    rank(a) - rank(b)
-    || workspaceMenuLabel(a).localeCompare(workspaceMenuLabel(b))
-     || a.id.localeCompare(b.id));
-  const children = new Map<string, HubWorkspaceSummary[]>();
-  for (const workspace of sorted) {
-    if (!workspace.parentId || !workspace.repositoryId) continue;
-    const parent = workspaces.find(candidate => candidate.id === workspace.parentId && !candidate.parentId && candidate.repositoryId === workspace.repositoryId);
-    if (parent) children.set(parent.id, [...(children.get(parent.id) ?? []), workspace]);
-  }
-  const nested = new Set([...children.values()].flat().map(workspace => workspace.id));
-  return sorted.filter(workspace => !nested.has(workspace.id)).flatMap(workspace => [workspace, ...(children.get(workspace.id) ?? [])]);
-}
-
-// The repository family the selector groups by, in the order
-// sortHubWorkspaces already produced: a main checkout that owns a Git
-// repository (the Hub sets createWorktree only for a real `.git` directory)
-// with its registered children beneath it. A workspace with no repository
-// family — no `.git` directory of its own and no parent — stays a plain row,
-// exactly as before.
-export type HubMenuEntry =
-  | { kind: "repository"; main: HubWorkspaceSummary; children: HubWorkspaceSummary[] }
-  | { kind: "plain"; workspace: HubWorkspaceSummary };
-
-export function groupHubWorkspaces(
-  workspaces: HubWorkspaceSummary[],
-  currentId: string | null,
-): HubMenuEntry[] {
-  const sorted = sortHubWorkspaces(workspaces, currentId);
-  const nested = new Set<string>();
-  const entries: HubMenuEntry[] = [];
-  for (const workspace of sorted) {
-    if (nested.has(workspace.id)) continue;
-    const children = workspace.parentId
-      ? []
-      : sorted.filter(candidate => candidate.parentId === workspace.id && candidate.repositoryId === workspace.repositoryId);
-    if (!workspace.parentId && (workspace.createWorktree === true || children.length > 0)) {
-      for (const child of children) nested.add(child.id);
-      entries.push({ kind: "repository", main: workspace, children });
-      continue;
-    }
-    entries.push({ kind: "plain", workspace });
-  }
-  return entries;
-}
-
 // The repository a workspace belongs to: for a child checkout its parent's
 // display name, for a main checkout its own. A workspace outside any
 // repository family has none — which is also what tells the chip it has no
@@ -296,24 +243,6 @@ export function checkoutBranchLabel(workspace: HubWorkspaceSummary): string {
   return workspace.detached ? "Detached HEAD" : workspace.branch || "Branch unknown";
 }
 
-// The one muted provenance line a child row carries, in the picker exactly as
-// in the dashboard and the register list: the shared rule in
-// worktree-dialog.ts, so "External worktree" never reads as "origin unknown".
-export function childProvenanceLabel(workspace: HubWorkspaceSummary): string {
-  return worktreeProvenanceLabel({
-    ...(workspace.ownership === undefined ? {} : { ownership: workspace.ownership }),
-    ...(workspace.sourceRef === undefined ? {} : { sourceRef: workspace.sourceRef }),
-  });
-}
-
-// Signs out by submitting a real form POST, exactly as the hub dashboard's
-// Sign out does, rather than by firing a background request and replacing the
-// page. Two reasons: a native wrapper that owns hub credentials (UatuCode
-// Desktop keeps them in the Keychain) can observe a navigation but not a
-// background fetch, so this is what lets it revoke its own copies; and the
-// page is never replaced before the request that clears the cookie has
-// actually gone out. Same-origin form posts send Origin, satisfying the hub's
-// CSRF check the same way the dashboard's does.
 // Whether a failed switcher start is the locked-credential rejection from
 // credential-context resolution — normal after a Hub restart, when every
 // encrypted assigned credential starts locked. The switcher has no masked
@@ -398,29 +327,6 @@ export async function startWorkspaceSession(workspaceId: string): Promise<Worksp
     return refuse({ ok: false, unlock: true });
   }
   return refuse({ ok: false, unlock: false, message });
-}
-
-// Whether a click on a link is its ordinary same-tab activation — a plain
-// primary click, or a keyboard activation (which dispatches a click with no
-// modifiers) — as opposed to a gesture asking the browser to open the link
-// elsewhere: a modifier held, or a button other than the primary one.
-export function isPlainActivation(event: {
-  button?: number;
-  metaKey?: boolean;
-  ctrlKey?: boolean;
-  shiftKey?: boolean;
-  altKey?: boolean;
-}): boolean {
-  return (event.button ?? 0) === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-}
-
-export function submitHubSignOut(doc: Document): void {
-  const form = doc.createElement("form");
-  form.method = "post";
-  form.action = "/logout";
-  form.hidden = true;
-  doc.body.appendChild(form);
-  form.submit();
 }
 
 export type HubStateSummary = {
@@ -597,12 +503,84 @@ function menuFocusKey(element: Element | null): string | null {
   return href === null ? null : `href:${href}`;
 }
 
+// Where a Checkouts row ranks: who needs you first, stopped and unavailable
+// last (the order Navigator's board uses).
+export function checkoutRank(
+  workspace: HubWorkspaceSummary,
+  activity: WorkspaceActivityMap,
+): number {
+  if (workspace.availability) return 6;
+  if (!workspace.running) return 5;
+  const facts = activity.get(workspace.id);
+  if (facts?.running && facts.awaiting) return 0;
+  if (facts?.running && facts.working) return 1;
+  if (facts?.running && facts.finished) return 2;
+  return 3;
+}
+
+// The Checkouts list: every workspace but the current one (the status card
+// names it), by rank, then by name, then by id.
+export function orderCheckouts(
+  workspaces: HubWorkspaceSummary[],
+  activity: WorkspaceActivityMap,
+  currentId: string | null,
+): HubWorkspaceSummary[] {
+  return workspaces.filter(workspace => workspace.id !== currentId)
+    .map(workspace => ({ workspace, rank: checkoutRank(workspace, activity), name: checkoutName(workspaces, workspace) }))
+    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name) || a.workspace.id.localeCompare(b.workspace.id))
+    .map(entry => entry.workspace);
+}
+
+// A checkout's own name: the repository for a main checkout (one that owns a
+// Git repository or has children), the branch for a worktree, the display
+// name for a workspace outside any repository.
+export function checkoutName(workspaces: readonly HubWorkspaceSummary[], workspace: HubWorkspaceSummary): string {
+  if (workspace.parentId) return checkoutBranchLabel(workspace);
+  return workspace.displayName || workspace.id;
+}
+
+function isRepositoryMain(workspaces: readonly HubWorkspaceSummary[], workspace: HubWorkspaceSummary): boolean {
+  return !workspace.parentId && (workspace.createWorktree === true || workspaces.some(candidate => candidate.parentId === workspace.id));
+}
+
+export type CheckoutRow = {
+  // Line 1: the checkout's pull request, or its name.
+  pullRequest: { number: number; title: string } | null;
+  name: string;
+  // Line 2: muted facts; `state` is the one state word, if any.
+  facts: string[];
+  state: WorkspaceMenuState;
+  // The status mark: a live dot, a hollow one, or a spinner while busy.
+  mark: "live" | "hollow" | "busy";
+};
+
+// What one Checkouts row says (design: "What each row shows"). `mainId` is
+// the current repository's main checkout: a worktree of another repository
+// names that repository on line 2.
+export function checkoutRow(
+  workspaces: HubWorkspaceSummary[],
+  workspace: HubWorkspaceSummary,
+  activity: WorkspaceActivityMap,
+  options: { pullRequest: { number: number; title: string } | null; mainId: string | null },
+): CheckoutRow {
+  const name = checkoutName(workspaces, workspace);
+  const facts: string[] = [];
+  if (workspace.parentId && workspace.parentId !== options.mainId) {
+    const parent = workspaces.find(candidate => candidate.id === workspace.parentId);
+    if (parent) facts.push(parent.displayName || parent.id);
+  }
+  const branch = workspace.parentId || isRepositoryMain(workspaces, workspace) || workspace.branch ? checkoutBranchLabel(workspace) : null;
+  if (branch !== null && (options.pullRequest !== null || branch !== name) && (workspace.branch || workspace.detached || workspace.parentId || isRepositoryMain(workspaces, workspace))) facts.push(branch);
+  const detail = workspaceMenuDetail(workspaces, workspace);
+  if (detail !== null) facts.push(detail);
+  const state = workspaceMenuState(workspace, activity, workspaces);
+  const mark = !workspace.running || workspace.availability ? "hollow" : state?.tone === "working" ? "busy" : "live";
+  return { pullRequest: options.pullRequest, name, facts, state, mark };
+}
+
 export function initHubNav(): void {
   const control = document.querySelector<HTMLDivElement>("#hub-control");
-  const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle");
-  const menu = document.querySelector<HTMLDivElement>("#hub-menu");
-  const label = document.querySelector<HTMLSpanElement>("#hub-current");
-  if (!control || !toggle || !menu || !label) {
+  if (!control) {
     return;
   }
 
@@ -638,335 +616,241 @@ export function initHubNav(): void {
     const current = latest.find(entry => entry.id === currentId);
     return current?.parentId ? latest.find(entry => entry.id === current.parentId) ?? current : current;
   };
-  const isCurrentRepository = (workspace: HubWorkspaceSummary) => workspace.id === mainCheckout()?.id;
-  // The pull request picker matches PR branches against this repository's
-  // checked-out worktrees, to offer "Go to worktree" instead of a duplicate.
-  setPullRequestPickerWorktrees({
-    workspaceName: () => {
-      const main = mainCheckout();
-      return main ? main.displayName || main.id : "this repository";
-    },
-    findWorktree: branch => {
-      const main = mainCheckout();
-      if (!main) return null;
-      const match = latest.find(entry => (entry.id === main.id || entry.parentId === main.id) && entry.branch === branch && !entry.detached);
-      return match ? { label: workspaceMenuLabel(match), href: `/s/${encodeURIComponent(match.id)}/`, current: match.id === currentId } : null;
-    },
-  });
 
-  const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
-  const chipBadge = toggle.querySelector<HTMLSpanElement>("#hub-activity-badge");
-  const baseToggleLabel = toggle.getAttribute("aria-label") ?? "Switch workspace or open the hub dashboard";
-  const updateChip = () => {
-    label.textContent = chipLabel(latest, currentId);
-    // The chip is the only place the repository is named: it says the
-    // repository, then this checkout's branch. A child reads the same shape
-    // as its main checkout, so one line answers both "which repository" and
-    // "which checkout" — a separate title line above would only repeat it.
-    const branchText = chipBranchLabel(latest, currentId);
-    if (branchText !== null) {
-      const branch = document.createElement("span");
-      branch.className = "hub-toggle-branch";
-      branch.textContent = branchText;
-      label.appendChild(branch);
-    }
-    if (chipDot) {
-      chipDot.className = chipDotClass(latest, currentId);
-    }
-    const badge = switcherBadge(latest, activity, currentId);
-    const spoken = switcherBadgeLabel(badge);
-    if (chipBadge) {
-      chipBadge.hidden = badge === null;
-      chipBadge.className = `hub-activity-badge${badge ? ` is-${badge.kind}` : ""}`;
-      chipBadge.textContent = badge?.kind === "awaiting" || badge?.kind === "finished" ? String(badge.count) : "";
-    }
-    // The button's own name is what assistive technology reads; the badge
-    // is decoration over it.
-    toggle.setAttribute("aria-label", spoken ? `${baseToggleLabel}. ${spoken}.` : baseToggleLabel);
-    toggle.title = spoken ? `${baseToggleLabel} — ${spoken}` : baseToggleLabel;
-  };
-
-  // What a stopped row's start is up to, by workspace id: the menu is
+  // What a stopped row's start is up to, by workspace id: the rows are
   // re-rendered whenever the list or the stream changes, so a row's own
   // node cannot carry it. Cleared once the workspace runs.
   const rowStart = new Map<string, "starting" | "unlock" | "failed">();
-  const rowStartWords = { starting: "starting…", unlock: "unlock in Hub…", failed: "start failed" } as const;
+  const rowStartWords = { starting: "Starting…", unlock: "Unlock in Hub…", failed: "Start failed" } as const;
   const menuEntrySignatures = new WeakMap<Element, string>();
 
-  const renderMenu = () => {
-    // Background inventory/activity refresh must not discard keyboard focus or
-    // the anchor of an open fork menu.
-    if (document.querySelector('[role="menu"][aria-label="Create worktree"]')) return;
-    const focusedKey = menu.contains(document.activeElement) ? menuFocusKey(document.activeElement) : null;
-    // The entries are built detached and reconciled into the menu below, so
-    // an entry whose rendering did not change stays the same node: a click,
-    // hover or keyboard focus on it survives a background refresh.
+  // A start of `workspace` from the switcher: a row, the status card, or Go
+  // to its worktree. Only a successful start of ANOTHER workspace navigates:
+  // the current one is already on screen, and its page recovers from the
+  // stream once the session is back (the connection indicator offers the
+  // same start).
+  const startAndGo = (workspace: HubWorkspaceSummary) => {
+    if (rowStart.get(workspace.id) === "starting") return;
+    rowStart.set(workspace.id, "starting");
+    refreshSwitcher();
+    void startWorkspaceSession(workspace.id).then(outcome => {
+      if (outcome.ok) {
+        rowStart.delete(workspace.id);
+        if (workspace.id !== currentId) hubNavigation(`/s/${encodeURIComponent(workspace.id)}/`);
+        refreshSwitcher();
+        return;
+      }
+      rowStart.set(workspace.id, outcome.unlock ? "unlock" : "failed");
+      // The row may have been re-rendered meanwhile; say it on whichever
+      // node the switcher shows now.
+      refreshSwitcher();
+    });
+  };
+
+  // The Checkouts rows. Built detached and reconciled into the list, so a
+  // row whose rendering did not change stays the same node: a click or
+  // press on it survives a background refresh.
+  const renderCheckouts = (container: HTMLElement, query: string, pullRequestFor: (branch: string) => { number: number; title: string } | null) => {
+    const mainId = mainCheckout()?.id ?? null;
     const next: Element[] = [];
-    const add = (node: Element, source: unknown = null) => {
-      next.push(node);
-      menuEntrySignatures.set(node, menuEntrySignature(node, source));
-    };
+    for (const workspace of orderCheckouts(latest, activity, currentId)) {
+      // A pull request names a checkout of this repository only: another
+      // repository's branches are not in this session's list.
+      const inRepository = mainId !== null && (workspace.id === mainId || workspace.parentId === mainId);
+      const pullRequest = inRepository && workspace.branch && !workspace.detached ? pullRequestFor(workspace.branch) : null;
+      const row = checkoutRow(latest, workspace, activity, { pullRequest, mainId });
+      const pending = rowStart.get(workspace.id);
+      if (workspace.running && !workspace.availability) rowStart.delete(workspace.id);
+      const state = !workspace.running && !workspace.availability && pending
+        ? { text: rowStartWords[pending], tone: "stopped" as const }
+        : row.state;
+      const line1 = row.pullRequest ? `#${row.pullRequest.number} ${row.pullRequest.title}` : row.name;
+      if (!matchesSearch([line1, row.name, workspace.branch, workspace.displayName, workspace.id, ...row.facts, state?.text], query)) continue;
 
-    const dashboard = document.createElement("a");
-    dashboard.className = "hub-menu-item";
-    dashboard.href = "/";
-    const dashboardLabel = document.createElement("span");
-    dashboardLabel.className = "hub-menu-label";
-    dashboardLabel.textContent = "Hub dashboard";
-    dashboard.appendChild(dashboardLabel);
-    add(dashboard);
-
-    const settings = document.createElement("a");
-    settings.className = "hub-menu-item";
-    settings.href = "/settings#personal-chat-preferences-pane";
-    const settingsLabel = document.createElement("span");
-    settingsLabel.className = "hub-menu-label";
-    settingsLabel.textContent = "Settings";
-    settings.appendChild(settingsLabel);
-    add(settings);
-
-    if (latest.length > 0) {
-      add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
-    }
-
-    // The fork control of ONE main checkout, which is what a repository's
-    // group header owns: children never have one.
-    const forkButton = (workspace: HubWorkspaceSummary): HTMLButtonElement => {
-      const fork = document.createElement("button");
-      fork.className = "hub-menu-fork";
-      fork.dataset.forkFor = workspace.id;
-      // The one shared glyph (F11), never a second spelling of it here.
-      fork.innerHTML = worktreeForkIcon;
-      fork.setAttribute("aria-label", `Add worktree to ${workspaceMenuLabel(workspace)}`);
-      fork.title = `Add worktree to ${workspaceMenuLabel(workspace)}`;
-      fork.setAttribute("aria-haspopup", "menu");
-      fork.addEventListener("click", () => openWorktreeFork(
-        {
-          // "From a pull request…" opens the pull request picker (titled
-          // for this task) over this session's repository's open PRs, so it
-          // appears only on the fork control of the repository shown here,
-          // and only while the session serves GitHub data.
-          ...(isCurrentRepository(workspace) && pullRequestStore.state.enabled === true ? { extraItems: [{ label: "From a pull request…", run: (returnFocus: HTMLElement) => openPullRequestPicker({ returnFocus, intent: "worktree" }) }] } : {}),
-          // The published family's base path, straight from Hub state —
-          // never a literal, and never relocated under the session's base
-          // path, because the Hub API lives outside it. Read when clicked,
-          // not when built, so a kept header's control never holds a stale
-          // one; the header's signature covers `workspace`, and the
-          // control is only rendered while this is set.
-          api: worktreeApi!,
-          source: {
-            id: workspace.id,
-            name: workspaceMenuLabel(workspace),
-            ...(workspace.authentication === undefined ? {} : { authentication: workspace.authentication }),
-            ...(workspace.signing === undefined ? {} : { signing: workspace.signing }),
-          },
-        },
-        fork,
-        toggle,
-      ));
-      return fork;
-    };
-
-    // One workspace row. `label` lets a repository's own main checkout read
-    // as `main checkout` under the group header that already names the
-    // repository, instead of repeating that name.
-    // A child is NOT indented: the group header above already says which
-    // repository these rows belong to, so every row in the menu shares one
-    // left edge and the eye reads the header, not a tree.
-    const appendWorkspace = (workspace: HubWorkspaceSummary, options: { label?: string } = {}): void => {
       const item = document.createElement("a");
-      item.className = "hub-menu-item";
+      item.className = "hub-menu-item switcher-row";
+      item.id = `switcher-checkout-${workspace.id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", "false");
+      item.tabIndex = -1;
       item.dataset.workspaceId = workspace.id;
       item.href = `/s/${encodeURIComponent(workspace.id)}/`;
-      if (workspace.id === currentId) {
-        item.setAttribute("aria-current", "true");
+      const mark = document.createElement("span");
+      mark.className = row.mark === "busy" ? "indicator-dot switcher-spinner" : `indicator-dot${row.mark === "live" ? " is-live" : " is-hollow"}`;
+      mark.setAttribute("aria-hidden", "true");
+      item.appendChild(mark);
+      const text = document.createElement("span");
+      text.className = "switcher-row-text";
+      const first = document.createElement("span");
+      first.className = "hub-menu-label switcher-row-line1";
+      if (row.pullRequest) {
+        const number = document.createElement("span");
+        number.className = "switcher-row-number";
+        number.textContent = `#${row.pullRequest.number}`;
+        const title = document.createElement("strong");
+        title.textContent = row.pullRequest.title;
+        first.append(number, " ", title);
+      } else {
+        const title = document.createElement("strong");
+        title.textContent = row.name;
+        first.append(title);
       }
-      const dot = document.createElement("span");
-      dot.className = `indicator-dot${workspace.running ? " is-live" : ""}`;
-      dot.setAttribute("aria-hidden", "true");
-      item.appendChild(dot);
-      const itemLabel = document.createElement("span");
-      itemLabel.className = "hub-menu-label";
-      itemLabel.textContent = options.label ?? workspaceMenuLabel(workspace);
-      if (!workspace.parentId && workspace.createWorktree) {
-        const branch = document.createElement("span");
-        branch.className = "hub-menu-branch";
-        branch.textContent = checkoutBranchLabel(workspace);
-        branch.title = `Current checkout: ${branch.textContent}`;
-        itemLabel.appendChild(branch);
+      first.title = line1;
+      text.appendChild(first);
+      const second = document.createElement("span");
+      second.className = "switcher-row-line2";
+      const parts: Node[] = [];
+      for (const fact of row.facts) {
+        const span = document.createElement("span");
+        span.className = "switcher-part";
+        span.textContent = fact;
+        parts.push(span);
       }
-      if (workspace.parentId) {
-        // Ownership first: a tree Uatu did not create says so, instead of
-        // claiming an unknown origin for a branch it never created.
-        const provenance = document.createElement("span");
-        provenance.className = "hub-menu-provenance";
-        provenance.textContent = childProvenanceLabel(workspace);
-        provenance.title = provenance.textContent;
-        itemLabel.appendChild(provenance);
+      if (state) {
+        const span = document.createElement("span");
+        span.className = `hub-menu-state switcher-part is-${state.tone}`;
+        span.textContent = state.text;
+        parts.push(span);
       }
-      item.appendChild(itemLabel);
-      const detail = workspaceMenuDetail(latest, workspace);
-      if (detail !== null) {
-        const detailSpan = document.createElement("span");
-        detailSpan.className = "hub-menu-state";
-        detailSpan.textContent = detail;
-        item.appendChild(detailSpan);
-      }
-      // For the current workspace the word "stopped" and its Start follow
-      // the hub's list, as the connection indicator does — the folded
-      // value (the dot) also goes dark for an unreachable child of a
-      // running session, which a start cannot help.
-      const stopped = workspace.id === currentId ? listedRunning === false : !workspace.running;
-      const menuState = workspaceMenuState(stopped ? { ...workspace, running: false } : { ...workspace, running: true }, activity, latest);
-      if (menuState !== null) {
-        const state = document.createElement("span");
-        state.className = `hub-menu-state is-${menuState.tone}`;
-        state.textContent = menuState.text;
-        item.appendChild(state);
-      }
+      parts.forEach((part, index) => {
+        if (index > 0) {
+          const separator = document.createElement("span");
+          separator.className = "switcher-sep";
+          separator.setAttribute("aria-hidden", "true");
+          separator.textContent = "·";
+          second.appendChild(separator);
+        }
+        second.appendChild(part);
+      });
+      text.appendChild(second);
+      item.appendChild(text);
+      // Both lines and the state in words, then what Enter does.
+      const spokenFirst = row.pullRequest ? `Pull request ${row.pullRequest.number}, ${row.pullRequest.title}` : row.name;
+      const spokenState = state?.tone === "working" ? "Agent working" : state?.text;
+      const action = workspace.availability ? "Not available" : !workspace.running ? "Start and go to checkout" : "Go to checkout";
+      item.setAttribute("aria-label", `${[spokenFirst, ...row.facts, ...(spokenState ? [spokenState] : [])].join(", ")}. ${action}`);
+
       if (workspace.availability) {
         item.setAttribute("aria-disabled", "true");
         item.title = workspace.availability === "missing"
-          ? `${workspaceIsCheckout(workspace, latest) ? "Checkout" : "Folder"} missing. Restore it externally, then reopen the picker to refresh.`
+          ? `${workspaceIsCheckout(workspace, latest) ? "Checkout" : "Folder"} missing. Restore it externally, then reopen the switcher to refresh.`
           : "A different checkout occupies this path. Resolve the identity conflict before opening.";
         item.addEventListener("click", event => event.preventDefault());
-      } else if (!stopped) {
-        rowStart.delete(workspace.id);
-        if (workspace.id === currentId) {
-          // Ordinary activation of the workspace already on screen is a
-          // no-op: the page, its document URL and its terminal connections
-          // stay exactly as they are, and the menu closes as it does on
-          // Escape. Matched on the stable id, never the display name — a
-          // sibling that shares the name is a different workspace. Modified
-          // clicks and middle-click keep the anchor's open-elsewhere
-          // behaviour, which is why the anchor and its href are kept.
-          item.addEventListener("click", event => {
-            if (!isPlainActivation(event)) return;
-            event.preventDefault();
-            close();
-            toggle.focus();
-          });
-        }
-      } else {
-        const state = item.querySelector<HTMLSpanElement>(".hub-menu-state.is-stopped")!;
-        const pending = rowStart.get(workspace.id);
-        if (pending) state.textContent = rowStartWords[pending];
-        // A stopped target's session URL answers 503; Start it instead of
-        // navigating into an unavailable page. Only a successful start of
-        // ANOTHER workspace navigates: the current one is already on
-        // screen, and its page recovers from the stream once the session
-        // is back (the connection indicator offers the same start).
+      } else if (!workspace.running) {
+        // A stopped target's session URL answers 503: Start it, then go.
         item.addEventListener("click", event => {
           event.preventDefault();
-          if (rowStart.get(workspace.id) === "starting") return;
-          rowStart.set(workspace.id, "starting");
-          state.textContent = rowStartWords.starting;
-          void startWorkspaceSession(workspace.id).then(outcome => {
-            if (outcome.ok) {
-              rowStart.delete(workspace.id);
-              if (workspace.id !== currentId) hubNavigation(item.href);
-              return;
-            }
-            rowStart.set(workspace.id, outcome.unlock ? "unlock" : "failed");
-            // The row may have been re-rendered meanwhile; say it on
-            // whichever node the menu shows now.
-            if (!menu.hidden) renderMenu();
-          });
+          startAndGo(workspace);
         });
       }
       // Listeners read the workspace they were built for, so an entry is only
       // kept while that is unchanged too.
-      add(item, workspace);
+      next.push(item);
+      menuEntrySignatures.set(item, menuEntrySignature(item, workspace));
+    }
+    reconcileMenuEntries(container, next, menuEntrySignatures);
+  };
+
+  // `+ New` in the Checkouts heading: the worktree menu of the current
+  // repository's main checkout. Other repositories' forks stay on the Hub
+  // dashboard.
+  let newControl: HTMLButtonElement | null = null;
+  const newButton = (returnFocus: () => HTMLElement): HTMLButtonElement | null => {
+    const main = mainCheckout();
+    if (!worktreeApi || !main?.createWorktree) return null;
+    const name = workspaceMenuLabel(main);
+    const label = `New worktree in ${name}`;
+    if (newControl && newControl.dataset.forkFor === main.id && newControl.getAttribute("aria-label") === label) return newControl;
+    const fork = document.createElement("button");
+    fork.type = "button";
+    fork.className = "hub-menu-fork switcher-new";
+    fork.dataset.forkFor = main.id;
+    fork.innerHTML = `<span aria-hidden="true">+</span> New`;
+    fork.setAttribute("aria-label", label);
+    fork.title = label;
+    fork.setAttribute("aria-haspopup", "menu");
+    fork.setAttribute("aria-expanded", "false");
+    fork.addEventListener("click", () => {
+      const source = mainCheckout();
+      if (!source || !worktreeApi) return;
+      // The menu's items open the worktree dialog; the switcher closes
+      // first, so the dialog is the one dialog on screen and gives focus
+      // back to the control that opened the switcher.
+      const opener = returnFocus();
+      openWorktreeFork(
+        {
+          // The published family's base path, straight from Hub state —
+          // never a literal, and never relocated under the session's base
+          // path, because the Hub API lives outside it. Read when clicked.
+          api: worktreeApi,
+          source: {
+            id: source.id,
+            name: workspaceMenuLabel(source),
+            ...(source.authentication === undefined ? {} : { authentication: source.authentication }),
+            ...(source.signing === undefined ? {} : { signing: source.signing }),
+          },
+        },
+        fork,
+        opener,
+      );
+      document.querySelector('[role="menu"][aria-label="Create worktree"]')?.addEventListener("click", event => {
+        if ((event.target as Element).closest('[role="menuitem"]')) closeSwitcher({ restoreFocus: false });
+      }, { capture: true });
+    });
+    newControl = fork;
+    return fork;
+  };
+
+  const facts = (): SwitcherHubFacts => {
+    const current = latest.find(entry => entry.id === currentId);
+    const repository = repositoryTitle(latest, currentId);
+    const branch = chipBranchLabel(latest, currentId);
+    const badge = switcherBadge(latest, activity, currentId);
+    return {
+      repository,
+      name: branch ?? (current ? workspaceMenuLabel(current) : currentId),
+      branchLike: branch !== null,
+      running: listedRunning,
+      dotClass: chipDotClass(latest, currentId),
+      badge,
+      badgeLabel: switcherBadgeLabel(badge),
+      start: rowStart.get(currentId) ?? null,
     };
-
-    groupHubWorkspaces(latest, currentId).forEach((entry, index) => {
-      if (entry.kind === "plain") {
-        appendWorkspace(entry.workspace);
-        return;
-      }
-      // A repository: a non-interactive header naming it (and owning its one
-      // fork control, at its trailing edge), then its main checkout, then its
-      // children — all on the same left edge. Grouping is explicit
-      // parent/repository identity from Hub state, never a display-name
-      // match. A group that follows anything else is preceded by its own
-      // divider, so the eye lands on the repository boundary before the
-      // rows; the menu's first entry needs none, because the divider under
-      // Hub dashboard is already there.
-      if (index > 0) add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider is-group" }));
-      const header = document.createElement("div");
-      header.className = "hub-menu-group";
-      header.dataset.repository = entry.main.id;
-      const name = document.createElement("span");
-      name.className = "hub-menu-label";
-      name.textContent = entry.main.displayName || entry.main.id;
-      header.appendChild(name);
-      if (worktreeApi && entry.main.createWorktree) header.appendChild(forkButton(entry.main));
-      add(header, entry.main);
-      appendWorkspace(entry.main, { label: "main checkout" });
-      for (const child of entry.children) appendWorkspace(child);
-    });
-
-    add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
-    const signOut = document.createElement("a");
-    signOut.className = "hub-menu-item";
-    signOut.href = "/login";
-    const signOutLabel = document.createElement("span");
-    signOutLabel.className = "hub-menu-label";
-    signOutLabel.textContent = "Sign out";
-    signOut.appendChild(signOutLabel);
-    signOut.addEventListener("click", event => {
-      event.preventDefault();
-      submitHubSignOut(document);
-    });
-    add(signOut);
-    reconcileMenuEntries(menu, next, menuEntrySignatures);
-    // An entry that did change was replaced (or a kept one had to move), and
-    // focus on it went with the old node: put it back on the entry that
-    // stands for the same thing.
-    if (focusedKey !== null && !menu.contains(document.activeElement)) {
-      [...menu.querySelectorAll<HTMLElement>("a, button")].find(item => menuFocusKey(item) === focusedKey)?.focus();
-    }
   };
 
-  // The menu grows with the number of checkouts, and in touch mode it lives
-  // inside a fullscreen, `overflow: hidden` Files pane pinned above the tab
-  // bar — so a repository or two was enough to push its last rows, Sign out
-  // among them, below the visible area with no way to reach them. Bound the
-  // open menu to what is actually visible BELOW its own top edge (which
-  // depends on the header above it, so it is measured rather than guessed)
-  // and let it scroll; the stylesheet owns the scrolling itself, with a
-  // viewport-based fallback for the moment before this runs.
-  const sizeMenu = () => {
-    if (menu.hidden || typeof menu.getBoundingClientRect !== "function") return;
-    const top = menu.getBoundingClientRect().top;
-    // The pane the menu is clipped by, when there is one: in touch mode the
-    // sidebar is fixed above the tab bar, so its bottom is the real limit.
-    const pane = control.closest(".sidebar")?.getBoundingClientRect().bottom;
-    const viewport = window.innerHeight || 0;
-    const bottom = Math.min(viewport || Number.POSITIVE_INFINITY, pane ?? Number.POSITIVE_INFINITY);
-    if (!Number.isFinite(bottom) || !Number.isFinite(top)) return;
-    // Never smaller than a few rows: an unreadable sliver would be worse
-    // than a scroll.
-    menu.style.setProperty("--hub-menu-max-height", `${Math.round(Math.max(160, bottom - top - 16))}px`);
+  const hubPart: SwitcherHub = {
+    facts,
+    renderCheckouts,
+    newControl: newButton,
+    startCurrent: () => {
+      const current = latest.find(entry => entry.id === currentId);
+      if (current) startAndGo(current);
+    },
+    findCheckout: branch => {
+      const main = mainCheckout();
+      if (!main) return null;
+      const match = latest.find(entry => (entry.id === main.id || entry.parentId === main.id) && entry.branch === branch && !entry.detached);
+      if (!match) return null;
+      const state = workspaceMenuState(match, activity, latest);
+      return { id: match.id, label: checkoutBranchLabel(match), current: match.id === currentId, state: state?.text ?? null, tone: state?.tone ?? null };
+    },
+    goTo: id => {
+      const workspace = latest.find(entry => entry.id === id);
+      if (!workspace || workspace.availability) return;
+      if (workspace.running) hubNavigation(`/s/${encodeURIComponent(workspace.id)}/`);
+      else startAndGo(workspace);
+    },
+    repositoryName: () => {
+      const main = mainCheckout();
+      return main ? main.displayName || main.id : "this repository";
+    },
+    canCreateWorktree: () => Boolean(worktreeApi && mainCheckout()?.createWorktree),
+    footerLinks: () => [
+      { label: "Hub dashboard", href: "/" },
+      { label: "Settings", href: "/settings#personal-chat-preferences-pane" },
+    ],
+    refresh: () => { void refreshHubState(); },
   };
-
-  const close = () => {
-    toggle.setAttribute("aria-expanded", "false");
-    menu.hidden = true;
-  };
-
-  // Tab (and the focus restored after a background re-render) must bring its
-  // target into the scrolled menu rather than leave it just out of sight.
-  menu.addEventListener("focusin", event => {
-    const target = event.target;
-    if (target instanceof HTMLElement && typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ block: "nearest" });
-    }
-  });
-
-  // A rotation or a software keyboard changes what is visible under the menu
-  // while it is open.
-  window.addEventListener("resize", sizeMenu);
 
   // Every refresh of the hub list goes through here. The list is the
   // authority on which workspaces exist, so activity for any it no longer
@@ -995,6 +879,7 @@ export function initHubNav(): void {
     const facts = activity.get(currentId);
     const newerRunning = facts?.running === true && (reportedAt.get(currentId) ?? 0) > reportsBefore;
     listedRunning = listed === false && newerRunning ? true : listed;
+    if (listedRunning === true) rowStart.delete(currentId);
     setCurrentSessionRunning(listedRunning);
   };
   // A list answer replaces the folded list, but the stream's word on the
@@ -1035,10 +920,7 @@ export function initHubNav(): void {
     // A rename reaches the notices' labels too.
     if (attention.notices().length) renderNotices();
     applyListedRunning(fresh.workspaces, reportsBefore);
-    updateChip();
-    if (!menu.hidden) {
-      renderMenu();
-    }
+    refreshSwitcher();
     resumeReconcile();
     return true;
   };
@@ -1116,8 +998,7 @@ export function initHubNav(): void {
     latest = state.workspaces;
     applyListedRunning(state.workspaces);
     worktreeApi = state.worktreeApi;
-    updateChip();
-    control.hidden = false;
+    registerSwitcherHub(hubPart);
 
     // A Hub that serves worktree operations publishes inventory
     // invalidations on the page's existing live stream. The real Hub and the
@@ -1178,6 +1059,7 @@ export function initHubNav(): void {
         // session in its table.
         if (facts.running) {
           listedRunning = true;
+          rowStart.delete(currentId);
           setCurrentSessionRunning(true);
         } else {
           reconcileStop();
@@ -1185,10 +1067,7 @@ export function initHubNav(): void {
         if (!facts.finished) viewedPosted = false;
         maybeAcknowledgeViewed();
       }
-      updateChip();
-      if (!menu.hidden) {
-        renderMenu();
-      }
+      refreshSwitcher();
       refreshForUnlisted();
     });
 
@@ -1210,44 +1089,12 @@ export function initHubNav(): void {
 
     // A back/forward-cache restore revives this page exactly as it was —
     // possibly for a session that was stopped in the meantime. Re-fetch so
-    // the chip tells the truth before the user opens the menu.
+    // the chip tells the truth before the user opens the switcher.
     window.addEventListener("pageshow", event => {
       if (!event.persisted) {
         return;
       }
       void refreshHubState();
-    });
-
-    toggle.addEventListener("click", () => {
-      const expanded = toggle.getAttribute("aria-expanded") === "true";
-      if (expanded) {
-        close();
-        return;
-      }
-      renderMenu();
-      toggle.setAttribute("aria-expanded", "true");
-      menu.hidden = false;
-      menu.scrollTop = 0;
-      sizeMenu();
-      // Refresh in the background so the open menu reflects sessions
-      // started or stopped elsewhere; re-render only while still open.
-      void refreshHubState();
-    });
-
-    document.addEventListener("click", event => {
-      if (menu.hidden) {
-        return;
-      }
-      if (event.target instanceof Node && !control.contains(event.target)) {
-        close();
-      }
-    });
-
-    document.addEventListener("keydown", event => {
-      if (event.key === "Escape" && !menu.hidden) {
-        close();
-        toggle.focus();
-      }
     });
   });
 }

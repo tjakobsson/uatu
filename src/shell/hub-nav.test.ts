@@ -9,7 +9,7 @@ import { currentSessionRunningFact, onCurrentSessionRunning, resetCurrentSession
 import {
   applyWorkspaceActivity,
   checkoutBranchLabel,
-  childProvenanceLabel,
+  checkoutRow,
   chipBranchLabel,
   chipLabel,
   chipDotClass,
@@ -17,15 +17,12 @@ import {
   initHubNav,
   installHubNavigationForTests,
   installStopReconcileForTests,
-  isPlainActivation,
-  groupHubWorkspaces,
+  orderCheckouts,
   parseHubState,
   reconcileMenuEntries,
   repositoryTitle,
-  sortHubWorkspaces,
   startFailureNeedsHubUnlock,
   startWorkspaceSession,
-  submitHubSignOut,
   switcherBadge,
   switcherBadgeLabel,
   workspaceIdFromBasePath,
@@ -54,40 +51,65 @@ describe("workspaceIdFromBasePath", () => {
   });
 });
 
-describe("sortHubWorkspaces", () => {
-  test("explicit repository parents override child activity ordering, not display names", () => {
-    const a = { ...summary("a", true, "Same name"), repositoryId: "repo-a" };
-    const b = { ...summary("b", true, "Same name"), repositoryId: "repo-b" };
-    const childA = { ...summary("child-a", false, "Old label"), repositoryId: "repo-a", parentId: "a", branch: "feature/login" };
-    const childB = { ...summary("child-b", true, "Old label"), repositoryId: "repo-b", parentId: "b", branch: "feature/login" };
-    const rows = [childB, childA, b, a];
-    expect(sortHubWorkspaces(rows, "child-a").map(row => row.id)).toEqual(["a", "child-a", "b", "child-b"]);
-    expect(workspaceMenuLabel(childA)).toBe("feature/login");
-    expect(workspaceMenuDetail(rows, childA)).toBeNull();
-    expect(workspaceMenuDetail(rows, a)).toBe("/src/a");
-    expect(parseHubState({ workspaces: rows })?.workspaces[0]).toMatchObject(childB);
-  });
-  test("orders current first, then running, then stopped, alphabetically within groups", () => {
-    const sorted = sortHubWorkspaces(
-      [
-        summary("zeta", false),
-        summary("beta", true),
-        summary("alpha", false),
-        summary("uatu", true),
-        summary("gamma", true),
-      ],
-      "uatu",
-    );
-    expect(sorted.map(workspace => workspace.id)).toEqual(["uatu", "beta", "gamma", "alpha", "zeta"]);
+describe("orderCheckouts", () => {
+  const facts = (running: boolean, working = false, awaiting = false, finished = false) => ({ running, working, awaiting, finished });
+  test("every workspace but the current one, by who needs you: awaiting, working, finished, idle, stopped, unavailable", () => {
+    const rows = [
+      summary("idle", true), summary("stopped", false), summary("uatu", true), summary("awaits", true),
+      summary("busy", true), summary("done", true), { ...summary("gone", false), availability: "missing" as const },
+    ];
+    const activity = new Map([
+      ["awaits", facts(true, true, true)], ["busy", facts(true, true)], ["done", facts(true, false, false, true)], ["idle", facts(true)],
+    ]);
+    expect(orderCheckouts(rows, activity, "uatu").map(row => row.id)).toEqual(["awaits", "busy", "done", "idle", "stopped", "gone"]);
   });
 
-  test("does not mutate the input", () => {
-    const input = [
-      summary("b", false),
-      summary("a", true),
-    ];
-    sortHubWorkspaces(input, null);
+  test("alphabetical by name within a rank, and the input is not mutated", () => {
+    const input = [summary("b", false, "Zed"), summary("a", false, "Alpha")];
+    expect(orderCheckouts(input, new Map(), null).map(row => row.id)).toEqual(["a", "b"]);
     expect(input.map(workspace => workspace.id)).toEqual(["b", "a"]);
+  });
+
+  test("explicit repository parents decide a child's name, never display names", () => {
+    const a = { ...summary("a", true, "Same name"), repositoryId: "repo-a", createWorktree: true, branch: "main" };
+    const childA = { ...summary("child-a", false, "Old label"), repositoryId: "repo-a", parentId: "a", branch: "feature/login" };
+    const rows = [childA, a];
+    expect(workspaceMenuLabel(childA)).toBe("feature/login");
+    expect(workspaceMenuDetail(rows, childA)).toBeNull();
+    expect(parseHubState({ workspaces: rows })?.workspaces[0]).toMatchObject(childA);
+  });
+});
+
+describe("checkoutRow", () => {
+  const main = { ...summary("uatu", true, "uatu"), repositoryId: "r", createWorktree: true, branch: "main" };
+  const child = { ...summary("uatu-x", true, "x"), repositoryId: "r", parentId: "uatu", branch: "fix/pane-heights" };
+  const docs = { ...summary("docs", false, "octo-docs"), repositoryId: "d", createWorktree: true, branch: "main" };
+  const docsChild = { ...summary("docs-y", true, "y"), repositoryId: "d", parentId: "docs", branch: "draft" };
+  const plain = summary("notes", true, "Notes");
+  const all = [main, child, docs, docsChild, plain];
+  const awaiting = new Map([["uatu-x", { running: true, working: true, awaiting: true, finished: false }]]);
+
+  test("a worktree: its pull request, then the branch and one state", () => {
+    expect(checkoutRow(all, child, awaiting, { pullRequest: { number: 636, title: "fix(sidebar): restore pane heights" }, mainId: "uatu" }))
+      .toEqual({ pullRequest: { number: 636, title: "fix(sidebar): restore pane heights" }, name: "fix/pane-heights", facts: ["fix/pane-heights"], state: { text: "Awaiting you", tone: "awaiting" }, mark: "live" });
+  });
+
+  test("a worktree without a pull request is named by its branch, which line 2 doesn't repeat", () => {
+    expect(checkoutRow(all, child, new Map(), { pullRequest: null, mainId: "uatu" })).toMatchObject({ name: "fix/pane-heights", facts: [], state: null });
+  });
+
+  test("a main checkout: the repository, then its branch; stopped is hollow", () => {
+    expect(checkoutRow(all, docs, new Map(), { pullRequest: null, mainId: "uatu" }))
+      .toEqual({ pullRequest: null, name: "octo-docs", facts: ["main"], state: { text: "Stopped", tone: "stopped" }, mark: "hollow" });
+  });
+
+  test("another repository's worktree names that repository; a busy one has a spinner", () => {
+    const busy = new Map([["docs-y", { running: true, working: true, awaiting: false, finished: false }]]);
+    expect(checkoutRow(all, docsChild, busy, { pullRequest: null, mainId: "uatu" })).toMatchObject({ name: "draft", facts: ["octo-docs"], state: { text: "Working", tone: "working" }, mark: "busy" });
+  });
+
+  test("a workspace outside any repository keeps its display name alone", () => {
+    expect(checkoutRow(all, plain, new Map(), { pullRequest: null, mainId: "uatu" })).toMatchObject({ name: "Notes", facts: [], state: null, mark: "live" });
   });
 });
 
@@ -337,7 +359,7 @@ describe("workspace menu labels", () => {
       summary("api", false, "Billing"),
     ];
     expect(workspaceMenuLabel(workspaces[0]!)).toBe("Payments API");
-    expect(sortHubWorkspaces(workspaces, null).map(workspace => workspace.id)).toEqual(["api", "payments-service"]);
+    expect(orderCheckouts(workspaces, new Map(), null).map(workspace => workspace.id)).toEqual(["api", "payments-service"]);
   });
 
   test("duplicate display names get path detail; unique names get none", () => {
@@ -370,45 +392,6 @@ describe("startFailureNeedsHubUnlock", () => {
   test("other failures stay inline in the switcher", () => {
     expect(startFailureNeedsHubUnlock("session for 'repo' failed to start: child exited (code 1)")).toBe(false);
     expect(startFailureNeedsHubUnlock("")).toBe(false);
-  });
-});
-
-describe("submitHubSignOut", () => {
-  // A minimal stand-in for the pieces of Document this touches; the unit
-  // suite runs without a DOM.
-  function fakeDocument() {
-    const form: Record<string, unknown> & { submitted: boolean } = { submitted: false };
-    form.submit = () => {
-      form.submitted = true;
-    };
-    const appended: unknown[] = [];
-    const doc = {
-      createElement: (tag: string) => {
-        form.tag = tag;
-        return form;
-      },
-      body: { appendChild: (node: unknown) => appended.push(node) },
-    };
-    return { doc: doc as unknown as Document, form, appended };
-  }
-
-  test("posts a form to the hub's origin-rooted logout route", () => {
-    const { doc, form } = fakeDocument();
-    submitHubSignOut(doc);
-    expect(form.tag).toBe("form");
-    expect(form.method).toBe("post");
-    // Origin-rooted on purpose: a session lives under /s/<id>/ but the hub's
-    // logout route is at the origin root.
-    expect(form.action).toBe("/logout");
-  });
-
-  test("submits a hidden form attached to the document", () => {
-    const { doc, form, appended } = fakeDocument();
-    submitHubSignOut(doc);
-    // A detached form does not submit, and a visible one would flash.
-    expect(form.hidden).toBe(true);
-    expect(appended).toEqual([form]);
-    expect(form.submitted).toBe(true);
   });
 });
 
@@ -486,9 +469,9 @@ describe("switcher activity", () => {
       ["three", facts(true, false, true, true)],
       ["four", facts(true, true, true, true)],
     ]);
-    expect(workspaceMenuState(summary("two", true), activity, [])).toEqual({ text: "working", tone: "working" });
-    expect(workspaceMenuState(summary("three", true), activity, [])).toEqual({ text: "awaiting you", tone: "awaiting" });
-    expect(workspaceMenuState(summary("four", true), activity, [])).toEqual({ text: "awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("two", true), activity, [])).toEqual({ text: "Working", tone: "working" });
+    expect(workspaceMenuState(summary("three", true), activity, [])).toEqual({ text: "Awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("four", true), activity, [])).toEqual({ text: "Awaiting you", tone: "awaiting" });
     expect(switcherBadge(list, activity, "uatu")).toEqual({ kind: "awaiting", count: 2 });
     activity.delete("three");
     activity.delete("four");
@@ -508,15 +491,15 @@ describe("switcher activity", () => {
     expect(switcherBadgeLabel(null)).toBe("");
   });
 
-  test("menu entries name stopped, awaiting, working, and finished; idle running entries stay quiet", () => {
+  test("Checkouts rows name stopped, awaiting, working, and finished; idle running entries stay quiet", () => {
     const activity = new Map([["a", facts(true, true, true)], ["b", facts(true, true, false)], ["c", facts(true)], ["e", facts(true, false, false, true)]]);
-    expect(workspaceMenuState(summary("a", true), activity, [])).toEqual({ text: "awaiting you", tone: "awaiting" });
-    expect(workspaceMenuState(summary("b", true), activity, [])).toEqual({ text: "working", tone: "working" });
+    expect(workspaceMenuState(summary("a", true), activity, [])).toEqual({ text: "Awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("b", true), activity, [])).toEqual({ text: "Working", tone: "working" });
     expect(workspaceMenuState(summary("c", true), activity, [])).toBeNull();
     expect(workspaceMenuState(summary("d", true), activity, [])).toBeNull();
-    expect(workspaceMenuState(summary("e", true), activity, [])).toEqual({ text: "finished", tone: "finished" });
-    expect(workspaceMenuState(summary("a", false), activity, [])).toEqual({ text: "stopped", tone: "stopped" });
-    expect(workspaceMenuState(summary("e", false), activity, [])).toEqual({ text: "stopped", tone: "stopped" });
+    expect(workspaceMenuState(summary("e", true), activity, [])).toEqual({ text: "Finished", tone: "finished" });
+    expect(workspaceMenuState(summary("a", false), activity, [])).toEqual({ text: "Stopped", tone: "stopped" });
+    expect(workspaceMenuState(summary("e", false), activity, [])).toEqual({ text: "Stopped", tone: "stopped" });
   });
 
   test("an activity update folds its running fact into the hub list without touching other entries", () => {
@@ -601,7 +584,7 @@ describe("initHubNav with the live activity topic", () => {
     const entryState = () => [...menu.querySelectorAll<HTMLElement>(".hub-menu-item")]
       .find(item => item.textContent?.includes("Payments"))
       ?.querySelector<HTMLElement>(".hub-menu-state")?.textContent ?? null;
-    expect(entryState()).toBe("awaiting you");
+    expect(entryState()).toBe("Awaiting you");
     // No conversation content or title reaches the menu.
     expect(menu.textContent).not.toContain("question");
 
@@ -611,10 +594,10 @@ describe("initHubNav with the live activity topic", () => {
     expect(badge.className).toBe("hub-activity-badge is-working");
     expect(badge.textContent).toBe("");
     expect(toggle.getAttribute("aria-label")).toContain("Agents working in 1 workspace");
-    expect(entryState()).toBe("working");
+    expect(entryState()).toBe("Working");
     deliver!("two", { running: true, working: false, awaiting: false });
     expect(badge.hidden).toBe(true);
-    expect(toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
+    expect(toggle.getAttribute("aria-label")).toMatch(/^Switch\. Working in [^.]+\.$/);
     expect(entryState()).toBeNull();
 
     // Work finished there unviewed: an accent count pill, the entry named,
@@ -624,7 +607,7 @@ describe("initHubNav with the live activity topic", () => {
     expect(badge.className).toBe("hub-activity-badge is-finished");
     expect(badge.textContent).toBe("1");
     expect(toggle.getAttribute("aria-label")).toContain("Work finished in 1 workspace");
-    expect(entryState()).toBe("finished");
+    expect(entryState()).toBe("Finished");
     expect([...menu.querySelectorAll<HTMLElement>(".hub-menu-state.is-finished")]).toHaveLength(1);
     deliver!("two", { running: true, working: false, awaiting: false, finished: false });
     expect(badge.hidden).toBe(true);
@@ -857,7 +840,7 @@ describe("initHubNav with the live activity topic", () => {
     expect(page.statuses.slice(statusesBefore)).toEqual(["reconnecting"]);
     expect(page.hub.stateFetches).toBe(fetchesBefore + 1);
     expect(page.badge.hidden).toBe(true);
-    expect(page.toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
+    expect(page.toggle.getAttribute("aria-label")).toMatch(/^Switch\. Working in [^.]+\.$/);
     const entries = hrefs(page.openMenu());
     expect(entries).toContain("/s/two/");
     expect(entries).not.toContain("/s/scratch/");
@@ -954,7 +937,7 @@ describe("initHubNav with the live activity topic", () => {
       const items = page.openMenu();
       expect(hrefs(items)).toContain("/s/three/");
       const scratch = items.find(item => item.getAttribute("href") === "/s/scratch/");
-      expect(scratch?.querySelector(".hub-menu-state")?.textContent).toBe("stopped");
+      expect(scratch?.querySelector(".hub-menu-state")?.textContent).toBe("Stopped");
     });
   }
 
@@ -1052,8 +1035,11 @@ describe("initHubNav with the live activity topic", () => {
     expect(currentSessionRunningFact()).toBe(true);
     expect(page.facts).toEqual([null, true, false, true]);
     expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot is-live");
-    const current = page.menu.querySelector<HTMLElement>('.hub-menu-item[href="/s/uatu/"]')!;
-    expect(current.querySelector(".hub-menu-state.is-stopped")).toBeNull();
+    // The current workspace is the status card, never a row; it no longer
+    // says Stopped or offers Start.
+    expect(page.menu.querySelector('.hub-menu-item[href="/s/uatu/"]')).toBeNull();
+    expect(page.menu.querySelector("#switcher-status")!.textContent).not.toContain("Stopped");
+    expect(page.menu.querySelector("[data-switcher-start]")).toBeNull();
   });
 
   test("a read already on its way that answers stale does not use up the schedule: the reconcile resumes with its own read", async () => {
@@ -1085,7 +1071,7 @@ describe("initHubNav with the live activity topic", () => {
     expect(page.hub.stateFetches).toBe(fetchesBefore + 2);
   });
 
-  test("the current row offers Start only on the hub's word, not on an unreachable child", async () => {
+  test("the status card offers Start only on the hub's word, not on an unreachable child", async () => {
     installStopReconcileForTests([0]);
     const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
     await page.boot([["uatu", idle], ["two", idle]]);
@@ -1097,16 +1083,16 @@ describe("initHubNav with the live activity topic", () => {
     await settle();
     expect(currentSessionRunningFact()).toBe(true);
     const items = page.openMenu();
-    const current = items.find(item => item.getAttribute("href") === "/s/uatu/")!;
-    // Dot dark, like the chip; no "stopped", no Start.
-    expect(current.querySelector(".indicator-dot")!.className).toBe("indicator-dot");
-    expect(current.querySelector(".hub-menu-state.is-stopped")).toBeNull();
-    current.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
-    await settle();
+    // The current workspace is not a row; the card says neither Stopped nor
+    // Start, and the chip's dot is dark.
+    expect(items.some(item => item.getAttribute("href") === "/s/uatu/")).toBe(false);
+    expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot");
+    expect(page.menu.querySelector("#switcher-status")!.textContent).not.toContain("Stopped");
+    expect(page.menu.querySelector("[data-switcher-start]")).toBeNull();
     expect(page.hub.starts).toEqual([]);
   });
 
-  test("a start refused after the menu re-rendered still says so on the current row", async () => {
+  test("a start refused after the dialog re-rendered still says so in the status card", async () => {
     installStopReconcileForTests([0]);
     const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
     await page.boot([["uatu", idle], ["two", idle]]);
@@ -1118,35 +1104,34 @@ describe("initHubNav with the live activity topic", () => {
     page.hub.startAnswer = () => new Promise<Response>(resolve => {
       refuse = () => resolve(Response.json({ error: "a folder mutation is pending" }, { status: 409 }));
     });
-    const row = () => page.menu.querySelector<HTMLElement>('.hub-menu-item[href="/s/uatu/"]')!;
-    const rowState = () => row().querySelector<HTMLElement>(".hub-menu-state.is-stopped")?.textContent ?? null;
+    const start = () => page.menu.querySelector<HTMLElement>("[data-switcher-start]");
+    const click = (element: HTMLElement) => element.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
     page.openMenu();
     await settle();
-    const before = row();
-    before.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
-    expect(rowState()).toBe("starting…");
+    expect(page.menu.querySelector("#switcher-status")!.textContent).toContain("Stopped");
+    expect(start()!.textContent).toBe("Start");
+    click(start()!);
+    expect(start()!.textContent).toBe("Starting…");
     // A second click while starting does not start again.
-    before.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    click(start()!);
     await waitFor(() => page.hub.starts.length === 1);
     await settle();
     expect(page.hub.starts).toEqual(["uatu"]);
 
-    // Payments reports activity: the open menu re-renders, replacing rows.
+    // Payments reports activity: the open dialog re-renders.
     page.latest().activity("two", working);
-    expect(row()).not.toBe(before);
-    expect(rowState()).toBe("starting…");
+    expect(start()!.textContent).toBe("Starting…");
 
     refuse();
-    await waitFor(() => rowState() === "start failed");
-    expect(rowState()).toBe("start failed");
+    await waitFor(() => start()?.textContent === "Start failed");
 
-    // Started elsewhere: the row's state clears with the running list.
+    // Started elsewhere: the card's Start goes with the running list.
     page.hub.workspaces = [workspace("uatu", "Uatu"), workspace("two", "Payments")];
     page.latest().activity("uatu", idle);
-    expect(row().querySelector(".hub-menu-state.is-stopped")).toBeNull();
+    expect(start()).toBeNull();
   });
 
-  test("the current workspace's menu row starts its stopped session and stays on the page", async () => {
+  test("the status card starts the current stopped session and stays on the page", async () => {
     installStopReconcileForTests([0]);
     const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments", false)]);
     await page.boot([["uatu", idle], ["two", stopped]]);
@@ -1155,11 +1140,9 @@ describe("initHubNav with the live activity topic", () => {
     await waitFor(() => currentSessionRunningFact() === false);
 
     const items = page.openMenu();
-    const current = items.find(item => item.getAttribute("href") === "/s/uatu/")!;
-    const state = current.querySelector<HTMLElement>(".hub-menu-state.is-stopped")!;
-    expect(state.textContent).toBe("stopped");
-    current.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
-    expect(state.textContent).toBe("starting…");
+    const click = (element: HTMLElement) => element.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    click(page.menu.querySelector<HTMLElement>("[data-switcher-start]")!);
+    expect(page.menu.querySelector("[data-switcher-start]")!.textContent).toBe("Starting…");
     await waitFor(() => page.hub.starts.length === 1);
     await settle();
     expect(page.hub.starts).toEqual(["uatu"]);
@@ -1168,7 +1151,8 @@ describe("initHubNav with the live activity topic", () => {
 
     // Another stopped workspace's row still navigates on success.
     const other = items.find(item => item.getAttribute("href") === "/s/two/")!;
-    other.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    expect(other.querySelector(".hub-menu-state")!.textContent).toBe("Stopped");
+    click(other);
     await waitFor(() => page.navigations.length === 1);
     expect(page.hub.starts).toEqual(["uatu", "two"]);
     expect(page.navigations).toEqual(["/s/two/"]);
@@ -1552,27 +1536,14 @@ describe("repository identity around the workspace selector", () => {
     expect(repositoryTitle(family, "missing")).toBeNull();
   });
 
-  test("grouping follows explicit parent/repository identity, never a display name", () => {
-    const entries = groupHubWorkspaces(family, "atlas-trst");
-    expect(entries.map(entry => entry.kind === "repository" ? `repo:${entry.main.id}` : `plain:${entry.workspace.id}`))
-      .toEqual(["repo:atlas", "plain:notes"]);
-    const repository = entries[0]!;
-    if (repository.kind !== "repository") throw new Error("expected a repository group");
-    expect(repository.children.map(child => child.id)).toEqual(["atlas-trst", "atlas-ext"]);
-    // A same-named workspace in another repository is never absorbed.
-    const twin = { ...atlas, id: "atlas-two", repositoryId: "repo-2" };
-    const separated = groupHubWorkspaces([...family, twin], "atlas");
-    expect(separated.filter(entry => entry.kind === "repository").length).toBe(2);
-  });
-
-  test("a child's label names its ownership; a main checkout's branch is explicit", () => {
-    expect(childProvenanceLabel(trst)).toBe("from main");
-    expect(childProvenanceLabel(external)).toBe("External worktree");
-    expect(childProvenanceLabel({ ...external, ownership: "uncertain" })).toBe("Ownership uncertain");
-    expect(childProvenanceLabel({ ...trst, sourceRef: undefined })).toBe("origin unknown");
+  test("a checkout's branch is explicit, never guessed", () => {
     expect(checkoutBranchLabel(atlas)).toBe("main");
     expect(checkoutBranchLabel({ ...atlas, detached: true })).toBe("Detached HEAD");
     expect(checkoutBranchLabel({ ...atlas, branch: undefined })).toBe("Branch unknown");
+    // A same-named workspace in another repository is never absorbed: a
+    // child's name is its own branch, its repository its parent.
+    const twin = { ...atlas, id: "atlas-two", repositoryId: "repo-2" };
+    expect(repositoryTitle([...family, twin], "atlas-ext")).toBe("atlas");
   });
 
   test("parseHubState carries the Hub's verified ownership through to the picker", () => {
@@ -1587,7 +1558,7 @@ describe("repository identity around the workspace selector", () => {
   });
 });
 
-describe("initHubNav renders the repository title and the grouped menu", () => {
+describe("initHubNav renders the status card, the chip and the Checkouts rows", () => {
   const savedGlobals = new Map<string, unknown>();
   const setGlobal = (key: string, value: unknown) => {
     if (!savedGlobals.has(key)) savedGlobals.set(key, Reflect.get(globalThis, key));
@@ -1645,7 +1616,7 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
     expect(document.querySelector('#hub-menu a[href="/settings#personal-chat-preferences-pane"]')).toBe(settings);
   });
 
-  test("the chip names the repository, the menu groups by it, and no title line duplicates it", async () => {
+  test("the chip names the branch, the status card the repository, and the rows are one flat list", async () => {
     const { document, window } = await mount("/s/atlas-trst/", [
       { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },
       { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "Trst", ownership: "uatu", sourceRef: "main" },
@@ -1653,46 +1624,34 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
       { id: "notes", displayName: "Notes", path: "/src/notes", running: true },
     ]);
 
-    // F1: the chip names this child's repository first, then its branch —
-    // the same two-part reading a main checkout's chip has. It is the ONLY
-    // place the repository is named: the separate title line above the
-    // selector was removed once the chip carried the repository for every
-    // checkout, so nothing repeats it (2026-09-19, second round).
-    expect(document.querySelector("#hub-repository")).toBeNull();
+    // The chip names the checkout this page works in: its branch.
     const chip = document.querySelector<HTMLElement>("#hub-current")!;
-    expect(chip.firstChild!.textContent).toBe("atlas");
     expect(chip.querySelector(".hub-toggle-branch")!.textContent).toBe("Trst");
+    expect(document.querySelector("#hub-toggle")!.getAttribute("aria-label")).toBe("Switch. Working in atlas, Trst.");
 
     document.querySelector<HTMLElement>("#hub-toggle")!.dispatchEvent(new window.Event("click", { bubbles: true }));
     const menu = document.querySelector<HTMLElement>("#hub-menu")!;
-    const header = menu.querySelector<HTMLElement>(".hub-menu-group")!;
-    expect(header.textContent).toContain("atlas");
-    // The group header is not a link and owns the repository's one fork.
-    expect(header.tagName).toBe("DIV");
-    expect(header.getAttribute("href")).toBeNull();
-    expect(header.querySelector("button")!.getAttribute("aria-label")).toBe("Add worktree to atlas");
+    expect(menu.hidden).toBe(false);
+    // The status card names the repository, then the branch.
+    expect(menu.querySelector("#switcher-status")!.textContent).toMatch(/Working in\s*atlas\s*·\s*Trst/);
+    // No group headers and no Sign out; one + New, for this repository.
+    expect(menu.querySelector(".hub-menu-group")).toBeNull();
+    expect(menu.textContent).not.toContain("Sign out");
+    expect([...menu.querySelectorAll("[data-fork-for]")].map(button => button.getAttribute("aria-label"))).toEqual(["New worktree in atlas"]);
 
     const rows = [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")];
-    // The repository's main checkout leads its own group, its children
-    // follow in order, and the workspace outside any family comes after.
-    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "atlas-trst", "atlas-ext", "notes"]);
+    // Every checkout but the current one, running before stopped.
+    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "notes", "atlas-ext"]);
     const row = (id: string) => menu.querySelector<HTMLElement>(`.hub-menu-item[data-workspace-id="${id}"]`)!;
-    // The repository's own main checkout row, under the header that already
-    // names the repository.
-    expect(row("atlas").querySelector(".hub-menu-label")!.textContent).toContain("main checkout");
-    expect(row("atlas").querySelector(".hub-menu-branch")!.textContent).toBe("main");
-    expect(row("atlas").style.paddingInlineStart).toBe("");
-    // F4: the header already groups them, so children share the main
-    // checkout's left edge; they carry the ownership labels beneath.
-    expect(row("atlas-trst").style.paddingInlineStart).toBe("");
-    expect(row("atlas-trst").querySelector(".hub-menu-provenance")!.textContent).toBe("from main");
-    expect(row("atlas-ext").querySelector(".hub-menu-provenance")!.textContent).toBe("External worktree");
-    // A workspace with no repository family stays a plain, unindented row
-    // with no group header of its own.
-    expect(row("notes").style.paddingInlineStart).toBe("");
-    expect(menu.querySelectorAll(".hub-menu-group")).toHaveLength(1);
-    // Only a main checkout has a fork control, and only one.
-    expect(menu.querySelectorAll('[aria-label^="Add worktree to"]')).toHaveLength(1);
+    expect(row("atlas").getAttribute("role")).toBe("option");
+    expect(row("atlas").querySelector(".switcher-row-line1")!.textContent).toBe("atlas");
+    expect(row("atlas").querySelector(".switcher-row-line2")!.textContent).toBe("main");
+    expect(row("atlas-ext").querySelector(".switcher-row-line1")!.textContent).toBe("agent/outside");
+    expect(row("atlas-ext").querySelector(".switcher-row-line2")!.textContent).toBe("Stopped");
+    expect(row("atlas-ext").getAttribute("aria-label")).toBe("agent/outside, Stopped. Start and go to checkout");
+    expect(row("notes").querySelector(".switcher-row-line1")!.textContent).toBe("Notes");
+    // Provenance stays on the dashboard.
+    expect(menu.querySelector(".hub-menu-provenance")).toBeNull();
   });
 
   test("a missing docs folder is labelled a folder in the picker, a missing worktree a checkout", async () => {
@@ -1707,79 +1666,41 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
     const row = (id: string) => menu.querySelector<HTMLElement>(`.hub-menu-item[data-workspace-id="${id}"]`)!;
     expect(row("docs").getAttribute("aria-disabled")).toBe("true");
     expect(row("docs").querySelector(".hub-menu-state.is-stopped")!.textContent).toBe("Missing folder");
-    expect(row("docs").title).toBe("Folder missing. Restore it externally, then reopen the picker to refresh.");
+    expect(row("docs").title).toBe("Folder missing. Restore it externally, then reopen the switcher to refresh.");
     expect(row("atlas-gone").getAttribute("aria-disabled")).toBe("true");
     expect(row("atlas-gone").querySelector(".hub-menu-state.is-stopped")!.textContent).toBe("Missing checkout");
-    expect(row("atlas-gone").title).toBe("Checkout missing. Restore it externally, then reopen the picker to refresh.");
+    expect(row("atlas-gone").title).toBe("Checkout missing. Restore it externally, then reopen the switcher to refresh.");
   });
 
-  // Decisions F2–F4 (2026-09-19, second round): the fork control trails its
-  // group header, consecutive repositories are visibly divided, and no row is
-  // indented.
-  test("the fork trails each group header, consecutive groups are divided, and no child is indented", async () => {
+  test("a search over the rows matches names, branches and states", async () => {
     const { document, window } = await mount("/s/atlas/", [
       { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },
-      { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "Trst", ownership: "uatu", sourceRef: "main" },
+      { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "fix/pane-heights", ownership: "uatu", sourceRef: "main" },
       { id: "beacon", displayName: "beacon", path: "/src/beacon", running: false, repositoryId: "repo-2", branch: "main", createWorktree: true },
-      { id: "beacon-probe", displayName: "probe", path: "/src/beacon.worktrees/probe", running: false, repositoryId: "repo-2", parentId: "beacon", branch: "probe/first-attempt", ownership: "external" },
     ]);
-
     document.querySelector<HTMLElement>("#hub-toggle")!.dispatchEvent(new window.Event("click", { bubbles: true }));
     const menu = document.querySelector<HTMLElement>("#hub-menu")!;
-    const headers = [...menu.querySelectorAll<HTMLElement>(".hub-menu-group")];
-    expect(headers.map(header => header.dataset.repository)).toEqual(["atlas", "beacon"]);
-
-    // F2: the repository's name leads the header and its fork control is the
-    // header's last element, so the layout can push it to the trailing edge.
-    for (const header of headers) {
-      expect(header.firstElementChild!.className).toBe("hub-menu-label");
-      expect(header.lastElementChild!.tagName).toBe("BUTTON");
-      expect(header.lastElementChild!.className).toBe("hub-menu-fork");
-      // F11: the one shared glyph, straight from the dialog module's public
-      // surface — the dashboard's inlined copy draws the very same string.
-      // linkedom re-serializes self-closing tags with a space before "/>".
-      expect(header.lastElementChild!.innerHTML.replace(/ \/>/g, "/>")).toBe(worktreeForkIcon);
-      expect(worktreeForkIcon).toContain('viewBox="0 0 32 20"');
-    }
-
-    // F3: a separator of its own divides consecutive repository groups. The
-    // first group needs none — the menu's dashboard divider already precedes
-    // it — and the dividers around Hub dashboard and Sign out are untouched.
-    expect(headers[0]!.previousElementSibling!.className).toBe("hub-menu-divider");
-    expect(headers[1]!.previousElementSibling!.className).toBe("hub-menu-divider is-group");
-    expect(menu.querySelectorAll(".hub-menu-divider.is-group")).toHaveLength(1);
-    expect(menu.querySelectorAll(".hub-menu-divider")).toHaveLength(3);
-
-    // F6: the open menu is bounded to what is visible and scrolls, so a
-    // repository or two can never push Sign out past the bottom of a phone
-    // with no way back to it. The pixel bound is measured from the menu's
-    // own top; the stylesheet owns the scrolling itself.
-    expect(menu.style.getPropertyValue("--hub-menu-max-height")).toMatch(/^\d+px$/);
-
-    // F4: every row — main checkout and child alike — shares one left edge.
-    const rows = [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")];
-    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "atlas-trst", "beacon", "beacon-probe"]);
-    for (const row of rows) {
-      expect(row.style.paddingInlineStart).toBe("");
-      expect(row.style.marginInlineStart).toBe("");
-      expect(row.className).toBe("hub-menu-item");
-    }
+    const search = menu.querySelector<HTMLInputElement>("#switcher-search")!;
+    const ids = () => [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")].map(row => row.dataset.workspaceId);
+    expect(ids()).toEqual(["atlas-trst", "beacon"]);
+    search.value = "pane";
+    search.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(ids()).toEqual(["atlas-trst"]);
+    // While searching, the status card folds away.
+    expect(menu.hasAttribute("data-searching")).toBe(true);
+    search.value = "stopped";
+    search.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(ids()).toEqual(["beacon"]);
+    // Arrow keys make a row active for the combobox; Escape closes.
+    search.dispatchEvent(Object.assign(new window.Event("keydown", { bubbles: true }), { key: "ArrowDown" }));
+    expect(search.getAttribute("aria-activedescendant")).toBe("switcher-checkout-beacon");
+    expect(menu.querySelector("#switcher-checkout-beacon")!.getAttribute("aria-selected")).toBe("true");
+    document.dispatchEvent(Object.assign(new window.Event("keydown", { bubbles: true }), { key: "Escape" }));
+    expect(menu.hidden).toBe(true);
   });
 });
 
-describe("isPlainActivation", () => {
-  test("a plain primary click or a keyboard activation is ordinary; modifiers and other buttons are not", () => {
-    expect(isPlainActivation({})).toBe(true);
-    expect(isPlainActivation({ button: 0 })).toBe(true);
-    expect(isPlainActivation({ button: 1 })).toBe(false);
-    expect(isPlainActivation({ button: 2 })).toBe(false);
-    for (const key of ["metaKey", "ctrlKey", "shiftKey", "altKey"] as const) {
-      expect(isPlainActivation({ button: 0, [key]: true })).toBe(false);
-    }
-  });
-});
-
-describe("activating the current workspace in the switcher", () => {
+describe("the Checkouts rows in the switcher", () => {
   const savedGlobals = new Map<string, unknown>();
   const setGlobal = (key: string, value: unknown) => {
     if (!savedGlobals.has(key)) savedGlobals.set(key, Reflect.get(globalThis, key));
@@ -1851,6 +1772,7 @@ describe("activating the current workspace in the switcher", () => {
     let toggleFocused = 0;
     toggle.focus = () => { toggleFocused += 1; };
 
+    const list = document.querySelector<HTMLElement>("#switcher-checkouts")!;
     const open = () => {
       toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(menu.hidden).toBe(false);
@@ -1864,14 +1786,14 @@ describe("activating the current workspace in the switcher", () => {
       target.dispatchEvent(event);
       return event;
     };
-    return { document, window, toggle, menu, open, entry, click, starts, navigations, workspaces, stateReads: () => stateReads, toggleFocused: () => toggleFocused };
+    return { document, window, toggle, menu, list, open, entry, click, starts, navigations, workspaces, stateReads: () => stateReads, toggleFocused: () => toggleFocused };
   }
 
   test("the refresh an opening starts keeps every unchanged entry as the node already on screen", async () => {
     const page = await mountSwitcher(true);
     const readsBefore = page.stateReads();
     page.open();
-    const shown = [...page.menu.children];
+    const shown = [...page.list.children];
     const twin = page.entry("twin");
     const cold = page.entry("cold");
     // The opening's background read answers with the same list: nothing a
@@ -1880,8 +1802,8 @@ describe("activating the current workspace in the switcher", () => {
     await Bun.sleep(5);
     expect(page.stateReads()).toBe(readsBefore + 1);
     // Identity, compared as booleans: a linkedom node diff never finishes printing.
-    expect(page.menu.children.length).toBe(shown.length);
-    expect([...page.menu.children].every((node, index) => node === shown[index])).toBe(true);
+    expect(page.list.children.length).toBe(shown.length);
+    expect([...page.list.children].every((node, index) => node === shown[index])).toBe(true);
 
     // A changed workspace re-renders only its own entry.
     page.workspaces[1] = { ...page.workspaces[1]!, path: "/src/twin-moved" };
@@ -1892,7 +1814,7 @@ describe("activating the current workspace in the switcher", () => {
     expect(page.entry("twin").textContent).toContain("/src/twin-moved");
     expect(page.entry("twin") === twin).toBe(false);
     expect(page.entry("cold") === cold).toBe(true);
-    expect(page.menu.children.length).toBe(shown.length);
+    expect(page.list.children.length).toBe(shown.length);
   });
 
   // Reopens the menu so its opening's refresh reads `page.workspaces` again,
@@ -1914,7 +1836,7 @@ describe("activating the current workspace in the switcher", () => {
     const cold = page.entry("cold");
     page.workspaces.splice(1, 0, { id: "alpha", displayName: "Alpha", path: "/src/alpha", running: true });
     await refresh(page, () => page.entry("alpha") !== null);
-    expect(rowOrder(page.menu)).toEqual(["uatu", "alpha", "twin", "cold"]);
+    expect(rowOrder(page.menu)).toEqual(["alpha", "twin", "cold"]);
     // Identity, compared as booleans: a linkedom node diff never finishes printing.
     expect(page.entry("twin") === twin).toBe(true);
     expect(page.entry("cold") === cold).toBe(true);
@@ -1929,7 +1851,7 @@ describe("activating the current workspace in the switcher", () => {
     const cold = page.entry("cold");
     page.workspaces.splice(1, 1);
     await refresh(page, () => page.entry("alpha") === null);
-    expect(rowOrder(page.menu)).toEqual(["uatu", "twin", "cold"]);
+    expect(rowOrder(page.menu)).toEqual(["twin", "cold"]);
     expect(page.entry("twin") === twin).toBe(true);
     expect(page.entry("cold") === cold).toBe(true);
   });
@@ -1937,98 +1859,66 @@ describe("activating the current workspace in the switcher", () => {
   test("a reordered list keeps every unchanged entry's node and ends in the new order", async () => {
     const page = await mountSwitcher(true);
     page.open();
-    const current = page.entry("uatu");
     const twin = page.entry("twin");
     const cold = page.entry("cold");
     const dashboard = page.menu.querySelector('a[href="/"]');
-    const signOut = page.menu.querySelector('a[href="/login"]');
     // Cold starts running and moves up among the running rows, above twin.
     page.workspaces[2] = { ...page.workspaces[2]!, running: true };
-    await refresh(page, () => !page.entry("cold").textContent?.includes("stopped"));
-    expect(rowOrder(page.menu)).toEqual(["uatu", "cold", "twin"]);
+    await refresh(page, () => !page.entry("cold").textContent?.includes("Stopped"));
+    expect(rowOrder(page.menu)).toEqual(["cold", "twin"]);
     expect(page.entry("cold") === cold).toBe(false);
-    expect(page.entry("uatu") === current).toBe(true);
     expect(page.entry("twin") === twin).toBe(true);
     expect(page.menu.querySelector('a[href="/"]') === dashboard).toBe(true);
-    expect(page.menu.querySelector('a[href="/login"]') === signOut).toBe(true);
-    expect(page.menu.firstElementChild === dashboard).toBe(true);
-    expect(page.menu.lastElementChild === signOut).toBe(true);
   });
 
-  test("a changed entry is replaced and keyboard focus follows it to the new node", async () => {
+  test("a changed entry is replaced and stays the combobox's active row", async () => {
     const page = await mountSwitcher(true);
     page.open();
     const twin = page.entry("twin");
-    // linkedom tracks no focus: model activeElement, which falls back to the
-    // body once the focused node leaves the document.
-    let focused: Element | null = null;
-    Object.defineProperty(page.document, "activeElement", {
-      configurable: true,
-      get: () => (focused !== null && page.document.contains(focused) ? focused : page.document.body),
-    });
-    const anchorPrototype = Object.getPrototypeOf(twin) as { focus: () => void };
-    const originalFocus = anchorPrototype.focus;
-    anchorPrototype.focus = function (this: Element) { focused = this; };
-    try {
-      twin.focus();
-      page.workspaces[1] = { ...page.workspaces[1]!, path: "/src/twin-moved" };
-      await refresh(page, () => page.entry("twin").textContent?.includes("twin-moved") === true);
-      expect(page.entry("twin") === twin).toBe(false);
-      expect(page.document.activeElement === page.entry("twin")).toBe(true);
-    } finally {
-      anchorPrototype.focus = originalFocus;
-    }
+    const search = page.menu.querySelector<HTMLInputElement>("#switcher-search")!;
+    search.dispatchEvent(Object.assign(new page.window.Event("keydown", { bubbles: true }), { key: "ArrowDown" }));
+    expect(search.getAttribute("aria-activedescendant")).toBe(twin.id);
+    page.workspaces[1] = { ...page.workspaces[1]!, path: "/src/twin-moved" };
+    await refresh(page, () => page.entry("twin").textContent?.includes("twin-moved") === true);
+    expect(page.entry("twin") === twin).toBe(false);
+    // Reopening starts afresh; the arrow picks the same row by identity.
+    search.dispatchEvent(Object.assign(new page.window.Event("keydown", { bubbles: true }), { key: "ArrowDown" }));
+    expect(page.entry("twin").getAttribute("aria-selected")).toBe("true");
   });
 
-  test("an ordinary click on the current running workspace closes the menu without navigating; siblings and other gestures keep the link", async () => {
+  test("the current workspace is the status card, not a row; a same-named sibling is a link of its own", async () => {
     const page = await mountSwitcher(true);
     page.open();
-    const current = page.entry("uatu");
-    expect(current.getAttribute("aria-current")).toBe("true");
-    expect(current.getAttribute("href")).toBe("/s/uatu/");
-
-    const plain = page.click(current);
-    expect(plain.defaultPrevented).toBe(true);
-    expect(page.menu.hidden).toBe(true);
-    expect(page.toggleFocused()).toBe(1);
-    expect(page.navigations).toEqual([]);
-    expect(page.starts).toEqual([]);
-
-    // Keyboard activation dispatches the same plain click.
-    page.open();
-    expect(page.click(page.entry("uatu"), {}).defaultPrevented).toBe(true);
-    expect(page.menu.hidden).toBe(true);
-
-    // Open-elsewhere gestures are the anchor's to handle.
-    page.open();
-    expect(page.click(page.entry("uatu"), { metaKey: true }).defaultPrevented).toBe(false);
-    expect(page.click(page.entry("uatu"), { ctrlKey: true }).defaultPrevented).toBe(false);
-    expect(page.click(page.entry("uatu"), { shiftKey: true }).defaultPrevented).toBe(false);
-    expect(page.click(page.entry("uatu"), { button: 1 }).defaultPrevented).toBe(false);
-    expect(page.menu.hidden).toBe(false);
+    expect(page.entry("uatu")).toBeNull();
+    expect(page.menu.querySelector("#switcher-status")!.textContent).toContain("Uatu");
+    expect(page.menu.querySelector("[data-switcher-start]")).toBeNull();
 
     // A sibling with the same display name is matched by id, not name: its
-    // link navigates as any other running workspace's does.
+    // link navigates as any other running workspace's does, and the path
+    // tells them apart.
     const twin = page.entry("twin");
-    expect(twin.getAttribute("aria-current")).toBeNull();
-    expect(page.click(twin).defaultPrevented).toBe(false);
-    // Both carry the path that tells them apart.
-    expect(current.textContent).toContain("/src/uatu");
+    expect(twin.getAttribute("href")).toBe("/s/twin/");
     expect(twin.textContent).toContain("/src/twin");
+    expect(page.click(twin).defaultPrevented).toBe(false);
+    // Open-elsewhere gestures are the anchor's to handle.
+    expect(page.click(twin, { metaKey: true }).defaultPrevented).toBe(false);
+    expect(page.navigations).toEqual([]);
+
+    // Escape closes and gives focus back to the chip.
+    page.document.dispatchEvent(Object.assign(new page.window.Event("keydown", { bubbles: true }), { key: "Escape" }));
+    expect(page.menu.hidden).toBe(true);
+    expect(page.toggleFocused()).toBe(1);
   });
 
-  test("the current stopped workspace keeps its Start action and never navigates", async () => {
+  test("the current stopped workspace starts from the status card and never navigates; a stopped sibling starts and goes", async () => {
     const page = await mountSwitcher(false);
     page.open();
-    const current = page.entry("uatu");
-    expect(current.textContent).toContain("stopped");
-    const event = page.click(current);
-    expect(event.defaultPrevented).toBe(true);
+    expect(page.menu.querySelector("#switcher-status")!.textContent).toContain("Stopped");
+    page.click(page.menu.querySelector<HTMLElement>("[data-switcher-start]")!);
     for (let attempt = 0; attempt < 50 && page.starts.length === 0; attempt += 1) await Bun.sleep(1);
     expect(page.starts).toEqual(["uatu"]);
     expect(page.navigations).toEqual([]);
 
-    // A stopped sibling starts and then navigates there.
     const cold = page.entry("cold");
     expect(page.click(cold).defaultPrevented).toBe(true);
     for (let attempt = 0; attempt < 50 && page.navigations.length === 0; attempt += 1) await Bun.sleep(1);
@@ -2037,7 +1927,7 @@ describe("activating the current workspace in the switcher", () => {
   });
 });
 
-describe("fork controls of main checkouts that share a display name", () => {
+describe("+ New when main checkouts share a display name", () => {
   const savedGlobals = new Map<string, unknown>();
   const setGlobal = (key: string, value: unknown) => {
     if (!savedGlobals.has(key)) savedGlobals.set(key, Reflect.get(globalThis, key));
@@ -2099,61 +1989,29 @@ describe("fork controls of main checkouts that share a display name", () => {
       for (let attempt = 0; attempt < 100 && !rendered(); attempt += 1) await Bun.sleep(1);
       expect(rendered()).toBe(true);
     };
-    const header = (id: string) => menu.querySelector<HTMLElement>(`.hub-menu-group[data-repository="${id}"]`)!;
-    const fork = (id: string) => header(id).querySelector<HTMLButtonElement>(".hub-menu-fork")!;
-    return { document, menu, open, refresh, fork, header, workspaces };
+    const fork = () => menu.querySelector<HTMLButtonElement>("#switcher-new-slot [data-fork-for]");
+    return { document, menu, open, refresh, fork, workspaces };
   }
 
-  test("both controls speak the same name but carry their own checkout's id, apart from its row's", async () => {
+  test("+ New belongs to the current repository only, apart from any row's identity", async () => {
     const page = await mountTwins();
     page.open();
-    expect(page.fork("docs-a").getAttribute("aria-label")).toBe("Add worktree to docs");
-    expect(page.fork("docs-b").getAttribute("aria-label")).toBe("Add worktree to docs");
-    expect(page.fork("docs-a").dataset.forkFor).toBe("docs-a");
-    expect(page.fork("docs-b").dataset.forkFor).toBe("docs-b");
-    // The control never takes its row's identity: the row is the workspace.
-    expect(page.fork("docs-b").hasAttribute("data-workspace-id")).toBe(false);
+    const forks = page.menu.querySelectorAll("[data-fork-for]");
+    expect(forks).toHaveLength(1);
+    expect(page.fork()!.getAttribute("aria-label")).toBe("New worktree in docs");
+    expect(page.fork()!.textContent).toContain("New");
+    expect(page.fork()!.dataset.forkFor).toBe("docs-a");
+    // The control never takes a row's identity: the row is the workspace.
+    expect(page.fork()!.hasAttribute("data-workspace-id")).toBe(false);
   });
 
-  test("focus on the second repository's fork control stays on that repository's control when a refresh replaces both headers", async () => {
+  test("a refresh that changes another repository keeps + New's node", async () => {
     const page = await mountTwins();
     page.open();
-    const first = page.fork("docs-a");
-    const second = page.fork("docs-b");
-    // linkedom tracks no focus: model activeElement, which falls back to the
-    // body once the focused node leaves the document.
-    let focused: Element | null = null;
-    Object.defineProperty(page.document, "activeElement", {
-      configurable: true,
-      get: () => (focused !== null && page.document.contains(focused) ? focused : page.document.body),
-    });
-    const buttonPrototype = Object.getPrototypeOf(second) as { focus: () => void };
-    const originalFocus = buttonPrototype.focus;
-    buttonPrototype.focus = function (this: Element) { focused = this; };
-    try {
-      second.focus();
-      page.workspaces[0] = { ...page.workspaces[0]!, path: "/src/a/docs-moved" };
-      page.workspaces[1] = { ...page.workspaces[1]!, path: "/src/b/docs-moved" };
-      await page.refresh(() => page.fork("docs-a") !== first && page.fork("docs-b") !== second);
-      // Both headers were rebuilt, so focus had to be put back by identity.
-      expect(page.document.activeElement === page.fork("docs-b")).toBe(true);
-      expect(page.document.activeElement === page.fork("docs-a")).toBe(false);
-    } finally {
-      buttonPrototype.focus = originalFocus;
-    }
-  });
-
-  test("a refresh that changes only the first repository's header keeps the second repository's fork control node", async () => {
-    const page = await mountTwins();
-    page.open();
-    const firstHeader = page.header("docs-a");
-    const secondHeader = page.header("docs-b");
-    const second = page.fork("docs-b");
-    page.workspaces[0] = { ...page.workspaces[0]!, path: "/src/a/docs-moved" };
-    await page.refresh(() => page.header("docs-a") !== firstHeader);
+    const fork = page.fork();
+    page.workspaces[1] = { ...page.workspaces[1]!, path: "/src/b/docs-moved" };
+    await page.refresh(() => page.menu.querySelector('[data-workspace-id="docs-b"]')?.textContent?.includes("docs-moved") === true);
     // Identity, compared as booleans: a linkedom node diff never finishes printing.
-    expect(page.header("docs-b") === secondHeader).toBe(true);
-    expect(page.fork("docs-b") === second).toBe(true);
-    expect(page.fork("docs-a").dataset.forkFor).toBe("docs-a");
+    expect(page.fork() === fork).toBe(true);
   });
 });

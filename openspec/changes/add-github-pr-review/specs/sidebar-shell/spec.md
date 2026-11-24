@@ -14,7 +14,7 @@ Every expanded pane SHALL keep its fixed chrome (header and any toolbar) plus a 
 - **AND** when even the minimums do not fit, the panes split the stack in proportion to their minimums, after a pane with essential content has its own
 
 #### Scenario: A pane's essential content is its minimum
-- **WHEN** the Pull request pane shows a picked pull request with a pending review at 1440×900, or is the expanded pane on a 390×844 touch device's Files tab
+- **WHEN** the Pull request pane shows a viewed pull request with a pending review at 1440×900, or is the expanded pane on a 390×844 touch device's Files tab
 - **THEN** the pane is at least as tall as its summary and actions, so `Finish review (n)` and `Merge on GitHub ↗` are whole without scrolling
 - **AND** when the stack is too short for every minimum, the other panes share what is left, none below the stack's 72px floor
 

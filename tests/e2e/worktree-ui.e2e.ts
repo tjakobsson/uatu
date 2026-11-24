@@ -44,6 +44,8 @@ async function files(page: Page): Promise<void> {
 }
 
 async function picker(page: Page): Promise<void> {
+  // Already open: the switcher covers the tab bar on touch.
+  if (await page.locator("#hub-menu").isVisible()) return;
   await files(page);
   await openHubMenu(page);
 }
@@ -54,7 +56,7 @@ async function fork(
   mode: "New branch / worktree" | "Existing branch" | "Register worktree…",
 ): Promise<void> {
   await picker(page);
-  await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+  await page.getByRole("button", { name: `New worktree in ${parentId}`, exact: true }).click();
   await page.getByRole("menuitem", { name: mode, exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
 }
@@ -169,84 +171,40 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     await page.locator('[data-item-path="CHILD.md"]').click();
     await expect(page.locator("#preview")).toContainText("dialog-child-marker");
 
-    // Back through the picker, then through browser history. The picker
-    // groups the menu by repository and labels each child (decisions A and
-    // E), and the second-round decisions F1–F4 shape the chip, the header
-    // and the rows.
+    // Back through the switcher, then through browser history. The face
+    // names this checkout's branch, the status card its repository and
+    // branch, and the Checkouts rows are one flat list (add-workspace-switcher).
     await picker(page);
-    // F1: the chip reads `<repository> <branch>` for this CHILD checkout,
-    // exactly as it reads for a main checkout — and is the only place the
-    // repository is named, the separate title line above it being gone.
-    await expect(page.locator("#hub-repository")).toHaveCount(0);
-    await expect(page.locator("#hub-current")).toContainText(parentId);
-    await expect(page.locator("#hub-current .hub-toggle-branch")).toHaveText("feature/dialog");
-    const group = page.locator(`#hub-menu .hub-menu-group[data-repository="${parentId}"]`);
-    await expect(group).toContainText(parentId);
-    const forkControl = group.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true });
+    const touchMode = (await page.locator("html").getAttribute("data-ui-mode")) === "touch";
+    if (touchMode) await expect(page.locator("#switcher-button .touch-switcher-name")).toHaveText("feature/dialog");
+    else await expect(page.locator("#hub-current .hub-toggle-branch")).toHaveText("feature/dialog");
+    await expect(page.locator("#switcher-status")).toContainText(parentId);
+    await expect(page.locator("#switcher-status")).toContainText("feature/dialog");
+    // No group headers: + New in the Checkouts heading is this repository's.
+    await expect(page.locator("#hub-menu .hub-menu-group")).toHaveCount(0);
+    const forkControl = page.locator("#switcher-new-slot").getByRole("button", { name: `New worktree in ${parentId}`, exact: true });
     await expect(forkControl).toBeVisible();
-    // F2: the fork control sits at the group header's trailing edge, the
-    // same edge a row's status text ends on — not beside the name.
-    // Opening the picker starts a background refresh; inventory/activity
-    // updates replace its children too. Re-resolve and measure on each try
-    // rather than assuming the earlier visibility check pins these nodes.
-    await expect(async () => {
-      const groupBox = await group.boundingBox();
-      const forkBox = await forkControl.boundingBox();
-      expect(groupBox).not.toBeNull();
-      expect(forkBox).not.toBeNull();
-      expect(forkBox!.x).toBeGreaterThan(groupBox!.x + groupBox!.width / 2);
-      expect((groupBox!.x + groupBox!.width) - (forkBox!.x + forkBox!.width)).toBeLessThan(10);
-    }).toPass({ timeout: 10_000 });
+    await expect(forkControl).toHaveText(/New/);
     const mainRow = page.locator(`#hub-menu .hub-menu-item[data-workspace-id="${parentId}"]`);
-    await expect(mainRow).toContainText("main checkout");
-    const childRow = page.locator(`#hub-menu .hub-menu-item[data-workspace-id="${child.workspaceId}"]`);
-    await expect(childRow.locator(".hub-menu-provenance")).toHaveText("from main");
-    // F4: the child shares the main checkout's left edge — the group header
-    // above does the grouping, so nothing is indented.
+    await expect(mainRow.locator(".switcher-row-line1")).toHaveText(parentId);
+    await expect(mainRow.locator(".switcher-row-line2")).toContainText("main");
+    // The current checkout is the status card, not a row.
+    await expect(page.locator(`#hub-menu .hub-menu-item[data-workspace-id="${child.workspaceId}"]`)).toHaveCount(0);
+    // Two lines at most, at least 54px tall, and every row on one left edge.
     await expect(async () => {
-      const mainLabelBox = await mainRow.locator(".hub-menu-label").boundingBox();
-      const childLabelBox = await childRow.locator(".hub-menu-label").boundingBox();
-      expect(mainLabelBox).not.toBeNull();
-      expect(childLabelBox).not.toBeNull();
-      expect(Math.abs(childLabelBox!.x - mainLabelBox!.x)).toBeLessThan(1);
+      const boxes = await page.locator("#hub-menu .hub-menu-item[data-workspace-id] .switcher-row-line1").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().x));
+      expect(boxes.length).toBeGreaterThan(1);
+      expect(Math.max(...boxes) - Math.min(...boxes)).toBeLessThan(1);
+      const heights = await page.locator("#hub-menu .hub-menu-item[data-workspace-id]").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+      expect(Math.min(...heights)).toBeGreaterThanOrEqual(54);
     }).toPass({ timeout: 10_000 });
-    // F3: consecutive repository groups are divided from one another; the
-    // first carries no divider of its own (the menu's dashboard divider is
-    // already above it).
-    const separation = await page.evaluate(() => {
-      const menu = document.querySelector("#hub-menu")!;
-      const headers = [...menu.querySelectorAll(".hub-menu-group")];
-      return {
-        groups: headers.length,
-        dividers: menu.querySelectorAll(".hub-menu-divider.is-group").length,
-        firstIsDivided: headers[0]?.previousElementSibling?.classList.contains("is-group") ?? false,
-        laterAllDivided: headers.slice(1).every(header => header.previousElementSibling?.classList.contains("is-group") === true),
-      };
-    });
-    expect(separation.groups).toBeGreaterThan(1);
-    expect(separation.dividers).toBe(separation.groups - 1);
-    expect(separation.firstIsDivided).toBe(false);
-    expect(separation.laterAllDivided).toBe(true);
-    // The open picker never pushes the viewport sideways — it is the 390 px
+    // The open switcher never pushes the viewport sideways — it is the 390 px
     // touch run that this protects.
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await captureScreenshot(page, info, `worktree-ui-${label}-selector`);
     await page.emulateMedia({ colorScheme: "dark" });
     await captureScreenshot(page, info, `worktree-ui-${label}-selector-dark`);
-    // The repository band has to separate from the menu it sits in under
-    // BOTH schemes: the dark palette collapses several surface tiers onto
-    // one value, so a band painted with the wrong token vanishes there.
-    const bandColours = async () => page.evaluate(() => {
-      const menu = document.querySelector("#hub-menu") as HTMLElement;
-      const header = menu.querySelector(".hub-menu-group") as HTMLElement;
-      return { band: getComputedStyle(header).backgroundColor, menu: getComputedStyle(menu).backgroundColor };
-    });
-    const darkBand = await bandColours();
-    expect(darkBand.band).not.toBe(darkBand.menu);
     await page.emulateMedia({ colorScheme: "light" });
-    const lightBand = await bandColours();
-    expect(lightBand.band).not.toBe(lightBand.menu);
-    expect(lightBand.band).not.toBe(darkBand.band);
     await page.locator(`#hub-menu a[href="/s/${parentId}/"]`).click();
     await files(page);
     await expect(page.locator('[data-item-path="NOTES.md"]')).toHaveAttribute("aria-selected", "true");
@@ -987,16 +945,14 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
 });
 
 
-// Decision F6 (2026-09-19, second round): the user's phone showed a picker
-// taller than the screen — beacon's children and Sign out below the fold,
-// with nothing to scroll. In touch mode the menu lives inside a fullscreen
-// `overflow: hidden` Files pane pinned above the tab bar, so the overflow was
-// not merely off-screen, it was unreachable. The menu is bounded to what is
-// visible and scrolls itself.
+// Decision F6 (2026-09-19, second round), kept through the switcher
+// (add-workspace-switcher): many checkouts must not push the switcher's
+// lists, or its footer, out of reach on a phone. The sheet's lists scroll on
+// their own and the footer stays pinned.
 test.describe("the workspace picker on a phone-sized viewport", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("a picker taller than the screen scrolls, and Sign out stays reachable", async ({ hub, hubContext }, info) => {
+  test("a switcher with more checkouts than the screen scrolls its lists, and its footer stays reachable", async ({ hub, hubContext }, info) => {
     test.setTimeout(90_000);
     const parentId = "orbit-touch";
     const page = await hubContext.newPage();
@@ -1005,7 +961,7 @@ test.describe("the workspace picker on a phone-sized viewport", () => {
     await page.goto(`${hub.origin}/s/${parentId}/`);
     await ready(page);
 
-    // Enough checkouts that the menu cannot fit, created through the same
+    // Enough checkouts that the lists cannot fit, created through the same
     // published family the UI uses — from the page, so the request carries
     // the hub cookie and its own Origin.
     const created = await page.evaluate(async (source: string) => {
@@ -1026,35 +982,35 @@ test.describe("the workspace picker on a phone-sized viewport", () => {
     await picker(page);
     const menu = page.locator("#hub-menu");
     const viewport = page.viewportSize()!;
-    const metrics = await menu.evaluate(node => ({
+    const lists = menu.locator(".switcher-scroll");
+    const metrics = await lists.evaluate(node => ({
       scrollHeight: node.scrollHeight,
       clientHeight: node.clientHeight,
-      top: node.getBoundingClientRect().top,
       overflowY: getComputedStyle(node).overflowY,
     }));
     // The fixture really does overflow — otherwise this proves nothing.
     expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
     expect(metrics.overflowY).toBe("auto");
-    // …and what is shown fits on the screen, above the tab bar.
-    expect(metrics.clientHeight).toBeLessThanOrEqual(viewport.height);
-    const tabBarTop = await page.locator(".touch-tab-bar").evaluate(node => node.getBoundingClientRect().top);
-    expect(metrics.top + metrics.clientHeight).toBeLessThanOrEqual(tabBarTop + 1);
+    // The sheet fits the screen.
+    const sheet = (await menu.boundingBox())!;
+    expect(sheet.y + sheet.height).toBeLessThanOrEqual(viewport.height + 1);
+    await expect(menu.locator(".hub-menu-item[data-workspace-id]")).not.toHaveCount(0);
 
-    // The group bands, the dividers and both fixed entries survive.
-    await expect(menu.locator(".hub-menu-group")).not.toHaveCount(0);
-    await expect(menu.getByText("Hub dashboard", { exact: true })).toHaveCount(1);
-
-    // Scrolling the menu to its end brings Sign out into view, on screen and
-    // actually hittable rather than merely painted under something else.
-    await menu.evaluate(node => { node.scrollTop = node.scrollHeight; });
-    const signOut = menu.getByText("Sign out", { exact: true });
-    await expect(signOut).toBeInViewport();
-    const hittable = await signOut.evaluate(node => {
-      const rect = node.getBoundingClientRect();
-      const at = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-      return at !== null && (node === at || node.contains(at) || at.contains(node));
-    });
-    expect(hittable).toBe(true);
+    // Scrolling the lists to their end brings the last row into view; the
+    // footer's Hub links are on screen and hittable throughout.
+    await lists.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await expect(menu.locator(".hub-menu-item[data-workspace-id]").last()).toBeInViewport();
+    for (const name of ["Hub dashboard", "Settings"]) {
+      const link = menu.locator("#switcher-footer").getByText(name, { exact: true });
+      await expect(link).toBeInViewport();
+      const hittable = await link.evaluate(node => {
+        const rect = node.getBoundingClientRect();
+        const at = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        return at !== null && (node === at || node.contains(at) || at.contains(node));
+      });
+      expect(hittable).toBe(true);
+    }
+    await expect(menu.getByText("Sign out", { exact: true })).toHaveCount(0);
     // Nothing about the bounded menu pushes the 390 px viewport sideways.
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await captureScreenshot(page, info, "worktree-ui-touch-selector-scrolled");

@@ -12,7 +12,7 @@
 //
 // The tabs follow the ARIA tabs pattern (arrow keys, Home / End) and each
 // switch is a history entry. Whether GitHub takes writes is read from the
-// summary on every store change, for the branch's pull request and a picked
+// summary on every store change, for the branch's pull request and a viewed
 // one alike: stale data shows under a banner and sending waits (Retry says
 // what it is doing, then the new answer); without a credential the view gives
 // way to the "connect GitHub" card on both tabs. Conversation opens with the
@@ -24,8 +24,8 @@
 // first non-blank changed line. The tabs row holds the one review button
 // (diff-review.ts; Review, or Finish (n)) on touch and desktop alike and, on
 // Files changed, Jump to file. On a phone the preview header is a title row
-// (#n, the title in up to two lines, Open on GitHub and text size; a picked
-// PR's number row keeps its own line for the Picked chip) over the tabs row;
+// (#n, the title in up to two lines, Open on GitHub and text size; a viewed
+// PR has the switcher's Viewing strip above it instead) over the tabs row;
 // in portrait the title row scrolls away and the tabs row stays pinned, in a
 // short touch viewport the whole header is one pinned row (--pr-sticky-top
 // follows the header). Files changed leaves out the state, author and branch facts
@@ -230,7 +230,7 @@ function syncShown(): void {
   for (const number of left) {
     const count = pullRequestStore.pendingCount(number);
     if (count === 0) continue;
-    showToast(`Your review of #${number} is still pending: ${count} ${count === 1 ? "comment" : "comments"}, visible only to you until you finish it. The Pull request pane and Browse pull requests mark it.`);
+    showToast(`Your review of #${number} is still pending: ${count} ${count === 1 ? "comment" : "comments"}, visible only to you until you finish it. The Pull request pane and the switcher mark it.`);
   }
 }
 
@@ -459,19 +459,12 @@ function present(view: Mounted, detail: PullRequestDetail): void {
   addPendingLines(view);
 }
 
-// "#642 · owner/repo", and for a picked pull request (not the checked-out
-// branch's) a compact "Picked · ← Back" chip in the same row: on touch the
-// Preview tab has no Pull request pane beside it to say so (styles.css shows
-// the chip on touch only). sidebar/pull-request-scope.ts handles Back.
+// "#642 · owner/repo". A viewed pull request (not the checked-out branch's)
+// says so in the switcher's Viewing strip above the header, not here.
 function renderPathLine(detail: PullRequestDetail): void {
   const pr = detail.summary;
-  const picked = pullRequestStore.scopedNumber() === pr.number;
-  const branch = pullRequestStore.state.branch;
-  const html = `#${pr.number}<span class="pr-path-repo"> · ${escapeHtml(detail.repository.owner)}/${escapeHtml(detail.repository.name)}</span>${picked
-    ? `<span class="pr-picked-chip" title="Picked PR, not checked out"><span>Picked</span><span class="sr-only">: not checked out</span><button type="button" class="gh-link-button pr-back-to-branch" data-pr-back-to-branch aria-label="${escapeHtmlAttribute(branch ? `Back to ${branch}` : "Back to this branch")}" title="${escapeHtmlAttribute(`Show the checked-out branch's pull request${branch ? `; ${branch} stays checked out` : ""}`)}">← Back</button></span>`
-    : ""}`;
-  // Unchanged and still there (another preview rewrites the line): kept, so
-  // a focused Back stays focused.
+  const html = `#${pr.number}<span class="pr-path-repo"> · ${escapeHtml(detail.repository.owner)}/${escapeHtml(detail.repository.name)}</span>`;
+  // Unchanged and still there (another preview rewrites the line): kept.
   if (pathLineHtml === html && previewPathElement.querySelector(".pr-path-repo")) return;
   pathLineHtml = html;
   previewPathElement.innerHTML = html;
@@ -547,7 +540,7 @@ onUiModeChange(relayout);
 
 // Stale data (rate-limited or unreachable) stays visible under a banner that
 // says how old it is, with Retry (mockup 6): for the branch's pull request
-// and a picked one alike.
+// and a viewed one alike.
 function renderBanner(view: Mounted): void {
   const banner = view.root.querySelector<HTMLElement>("[data-pr-banner]")!;
   const summary = pullRequestStore.state.summary;

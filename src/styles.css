@@ -620,10 +620,10 @@ html.uatu-desktop-host
   position: relative;
 }
 
-/* Hub workspace switcher — visible only when the session is served through
-   a uatu hub (see shell/hub-nav.ts). A full-width row under the brand
-   header, same shape as the Terminal row; the dropdown reuses the
-   panels-menu surface. */
+/* The workspace switcher (shell/switcher.ts). Desktop: the sidebar header's
+   chip, whose second line says `Viewing #n · ← Back` while a pull request is
+   viewed. Touch: the tab bar's switcher button (below). Both open one
+   dialog: a panel under the chip on desktop, a full-height sheet on touch. */
 .sidebar-hub-row {
   position: relative;
   /* Top padding mirrors the mode row's gap so the switcher breathes from
@@ -636,92 +636,69 @@ html.uatu-desktop-host
   display: none;
 }
 
+.switcher-chip {
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.switcher-chip:has(.switcher-chip-viewing:not([hidden])) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
+}
+
 .hub-toggle-button {
   appearance: none;
   width: 100%;
+  min-height: 2.1rem;
   display: flex;
   align-items: center;
   gap: 0.45rem;
   padding: 0.4rem 0.6rem;
   background: transparent;
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
+  border: 0;
   color: var(--text-strong);
   cursor: pointer;
   font: inherit;
-  font-size: 0.82rem;
+  font-size: 0.85rem;
   font-weight: 600;
   text-align: left;
 }
 
 .hub-toggle-button:hover {
   background: var(--surface-muted);
-  border-color: var(--border-medium);
 }
 
-.hub-toggle-button svg {
+.hub-toggle-button[data-stopped] .hub-toggle-label,
+.hub-toggle-button[data-stopped] .switcher-chip-glyph {
+  opacity: 0.6;
+}
+
+.hub-toggle-button .switcher-chevron {
   color: var(--text-subtle);
   flex-shrink: 0;
 }
 
-/* The current checkout's branch, beside a main checkout's name on the chip. */
-.hub-toggle-branch {
-  margin-inline-start: 0.35rem;
+/* The branch glyph, with the session's liveness as a small dot on it. */
+.switcher-chip-glyph {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
   color: var(--text-subtle);
-  font-weight: 400;
 }
 
-/* A repository's non-interactive header inside the menu: it names the
-   repository and owns its one fork control; the checkout rows below it are
-   the things you can switch to. A band, like the Hub dashboard's own group
-   heading, so the eye lands on the repository boundary before the rows.
-   --surface-track rather than --surface-muted: the muted/subtle/raised tiers
-   all collapse onto #161b22 in dark, where a band painted with any of them
-   would be invisible against the menu it sits in. */
-.hub-menu-group {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.15rem 0.4rem;
-  border-radius: 0.3rem;
-  background: var(--surface-track);
-  color: var(--text-strong);
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+.switcher-chip-glyph .indicator-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--surface);
+  box-sizing: content-box;
 }
 
-/* The repository's name takes the row and gives way to the fork control,
-   which the flex rule below pins to the trailing edge. */
-.hub-menu-group .hub-menu-label {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* At the header's trailing edge — the same edge a row's status text ends on
-   — while keeping a 44px tap target. */
-.hub-menu-fork {
-  flex: 0 0 auto;
-  margin-inline-start: auto;
-  min-width: 44px;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  border-radius: 0.3rem;
-  color: inherit;
-  cursor: pointer;
-}
-
-.hub-menu-fork:hover {
-  background: var(--surface-subtle);
-  color: var(--text-strong);
+.hub-toggle-button[data-no-hub] .indicator-dot {
+  display: none;
 }
 
 .hub-toggle-label {
@@ -732,105 +709,126 @@ html.uatu-desktop-host
   white-space: nowrap;
 }
 
-/* A repository or two is enough to make this menu taller than the phone it
-   is open on, and in touch mode it sits inside a fullscreen `overflow:
-   hidden` Files pane pinned above the tab bar — so its last rows, Sign out
-   among them, were simply cut off and unreachable. It scrolls instead,
-   bounded by what is visible below its own top edge. The pixel bound is
-   measured at open time (shell/hub-nav.ts sets --hub-menu-max-height,
-   because the top depends on the header above it); the fallback keeps a
-   sane bound before that runs and if it never does. */
-.hub-menu {
-  left: 0.75rem;
-  right: 0.75rem;
-  min-width: 0;
-  max-height: var(--hub-menu-max-height, calc(100dvh - 12rem));
-  overflow-y: auto;
-  /* A flick that reaches the end of the menu must not start scrolling the
-     page (or the fullscreen Files pane) behind it. */
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
+.switcher-chip-viewing {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.9rem;
+  padding: 0 0.6rem;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--text-strong);
+  font-size: 0.8rem;
+  font-weight: 600;
 }
 
-/* The connection chip's live-dot treatment, available to the hub switcher's
-   standalone dots (the base .indicator-dot rules only color the dot inside
+.switcher-chip-viewing[hidden] {
+  display: none;
+}
+
+.viewing-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.viewing-label .switcher-eye {
+  color: light-dark(#0550ae, #79c0ff);
+  flex-shrink: 0;
+}
+
+/* Small text on the tinted line: darker than --accent to reach 4.5:1. */
+.viewing-back {
+  flex: 0 0 auto;
+  min-height: 24px;
+  color: light-dark(#0550ae, #79c0ff);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The Viewing strip: the Files tab (under the brand) and the Preview tab
+   (above the pull request) on touch, the preview on desktop while the
+   sidebar is collapsed (the chip says it otherwise). Never on a short touch
+   screen: the bar and the switcher say both facts there. */
+.viewing-strip {
+  display: none;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0 0.75rem 0 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--text-strong);
+  font-size: 0.95rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.viewing-strip .viewing-back {
+  min-height: 44px;
+  max-width: 65%;
+  padding: 0 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: inherit;
+}
+
+html[data-ui-mode="touch"] .viewing-strip:not([hidden]),
+html:not([data-ui-mode="touch"]) .app-shell.is-sidebar-collapsed #viewing-strip-preview:not([hidden]) {
+  display: flex;
+}
+
+/* Edge to edge under the brand, like the panes below it. */
+html[data-ui-mode="touch"] #viewing-strip-files {
+  margin: 0.5rem calc(-1 * (env(safe-area-inset-right) + 1.25rem)) 0 calc(-1 * (env(safe-area-inset-left) + 1.25rem));
+  padding-left: calc(env(safe-area-inset-left) + 1.25rem);
+  padding-right: calc(env(safe-area-inset-right) + 0.75rem);
+}
+
+/* Edge to edge across the preview shell's padding. */
+#viewing-strip-preview {
+  margin: 0 -1.75rem;
+  padding-left: 1.75rem;
+  padding-right: 1.5rem;
+}
+
+@media (max-width: 640px) {
+  #viewing-strip-preview {
+    margin: 0 -0.75rem;
+    padding-left: 0.75rem;
+    padding-right: 0.5rem;
+  }
+}
+
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .viewing-strip:not([hidden]) {
+    display: none;
+  }
+}
+
+/* The live dot (the base .indicator-dot rules only color the dot inside
    .connection-state). */
 .hub-toggle-button .indicator-dot.is-live,
-.hub-menu .indicator-dot.is-live {
+.switcher .indicator-dot.is-live {
   background: var(--success);
   animation: uatu-pulse 1.8s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .hub-toggle-button .indicator-dot.is-live,
-  .hub-menu .indicator-dot.is-live {
+  .switcher .indicator-dot.is-live {
     animation: none;
   }
 }
 
-.hub-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.35rem 0.4rem;
-  color: var(--text-strong);
-  font-size: 0.78rem;
-  border-radius: 0.3rem;
-  text-decoration: none;
-}
-
-.hub-menu-item:hover {
-  background: var(--surface-subtle);
-  text-decoration: none;
-}
-
-.hub-menu-item[aria-current="true"] {
-  font-weight: 700;
-}
-
-.hub-menu-item .hub-menu-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hub-menu-provenance, .hub-menu-branch {
-  display: block;
-  color: var(--text-subtle);
-  font-size: 0.7rem;
-  font-weight: 400;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.hub-menu-item .hub-menu-state {
-  color: var(--text-subtle);
-  font-size: 0.7rem;
-  flex-shrink: 0;
-}
-
-/* Other workspaces' live activity (hub-nav's activity consumer). In the
-   menu, the state column names it; on the collapsed chip, a badge summarizes
-   it — a warm count pill when an interaction awaits the user, a pink
-   count pill when work finished unviewed, a quiet accent dot while agents
-   merely work — so the three read as three levels. The chip button's
-   aria-label carries the same words. */
-.hub-menu-item .hub-menu-state.is-awaiting {
-  color: var(--attention);
-  font-weight: 600;
-}
-
-.hub-menu-item .hub-menu-state.is-working {
-  color: var(--accent);
-}
-
-.hub-menu-item .hub-menu-state.is-finished {
-  color: var(--finished);
-  font-weight: 400;
-}
-
+/* Other workspaces' activity: a warm count pill when an interaction awaits
+   the user, a pink count pill when work finished unviewed, a quiet accent
+   dot while agents merely work — three levels. The controls' names carry
+   the same words. */
 .hub-activity-badge {
   display: inline-grid;
   place-items: center;
@@ -859,8 +857,7 @@ html.uatu-desktop-host
 }
 
 /* The finished pill shares the awaiting pill's box, so the chip does not
-   change height as one badge gives way to the other; only the tone differs,
-   and it never pulses — nothing is waiting on the user. */
+   change height as one badge gives way to the other. */
 .hub-activity-badge.is-finished {
   min-width: 1.15rem;
   height: 1.15rem;
@@ -888,17 +885,827 @@ html.uatu-desktop-host
   }
 }
 
-.hub-menu-divider {
-  margin: 0.3rem 0.15rem;
+/* --- The dialog -------------------------------------------------------------- */
+
+.switcher-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: transparent;
+}
+
+html[data-ui-mode="touch"] .switcher-backdrop {
+  background: rgba(1, 4, 9, 0.55);
+}
+
+.switcher-backdrop[hidden],
+.switcher[hidden] {
+  display: none;
+}
+
+.switcher {
+  position: fixed;
+  z-index: 1500;
+  top: var(--switcher-top, 6rem);
+  left: var(--switcher-left, 0.75rem);
+  width: min(29rem, calc(100vw - 1rem));
+  max-height: calc(100dvh - var(--switcher-top, 6rem) - 0.75rem);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.75rem;
+  background: var(--surface-raised);
+  color: var(--text-strong);
+  box-shadow: 0 16px 48px light-dark(rgba(15, 23, 42, 0.22), rgba(0, 0, 0, 0.6));
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.switcher-grab {
+  display: none;
+}
+
+.switcher-lists {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.switcher-lists[hidden],
+.switcher-step[hidden] {
+  display: none;
+}
+
+.switcher-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.4rem 0.2rem 1rem;
+  flex: 0 0 auto;
+}
+
+/* Desktop: the panel hangs from the chip, which already says what it is. */
+html:not([data-ui-mode="touch"]) .switcher-lists > .switcher-head {
+  display: none;
+}
+
+.switcher-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.switcher-icon-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
   border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+
+.switcher-icon-button:hover {
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+}
+
+/* One grid: the status card, the search, the lists (the only part that
+   scrolls) and the footer, pinned at the bottom. A phone in landscape puts
+   the lists in a second column. */
+.switcher-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "status" "search" "lists" "footer";
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0.75rem 0.75rem 0;
+}
+
+.switcher-status { grid-area: status; }
+.switcher-search { grid-area: search; }
+.switcher-scroll { grid-area: lists; }
+.switcher-footer { grid-area: footer; }
+
+.switcher-status {
+  margin-bottom: 0.65rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.switcher[data-searching] .switcher-status {
+  display: none;
+}
+
+.switcher-status-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  min-height: 44px;
+  padding: 0.2rem 0.9rem;
+}
+
+.switcher-status-key {
+  flex: 0 0 4.6rem;
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+}
+
+.switcher-status-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 1rem;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.switcher-status-value strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.switcher-status-repo {
+  color: var(--text-subtle);
+}
+
+.switcher-status-stopped {
+  color: var(--text-subtle);
+}
+
+.switcher-status-viewing {
+  border-top: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  padding-bottom: 0.55rem;
+}
+
+.switcher-status-viewing .switcher-status-row {
+  padding-bottom: 0;
+}
+
+.switcher-status-back {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 0.15rem;
+  color: light-dark(#0550ae, #79c0ff);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.switcher-status-note {
+  margin: 0;
+  padding: 0 0.9rem;
+  color: var(--text-subtle);
+  font-size: 0.82rem;
+}
+
+.switcher-start {
+  flex: 0 0 auto;
+}
+
+.switcher-search {
+  position: relative;
+  margin-bottom: 0.4rem;
+}
+
+.switcher-search svg {
+  position: absolute;
+  left: 0.85rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-subtle);
+  pointer-events: none;
+}
+
+.switcher-search input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem 0.5rem 2.5rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.switcher-search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+.switcher-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  /* The rows' sr-only text needs a containing block inside the scroller. */
+  position: relative;
+  padding-bottom: 0.5rem;
+}
+
+.switcher-section[hidden] {
+  display: none;
+}
+
+.switcher-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  margin-top: 0.35rem;
+}
+
+.switcher-section-head h3 {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.switcher-section-action {
+  position: relative;
+  display: inline-flex;
+}
+
+/* + New, the filter toggle and Show all: accent text buttons, 44px tall. */
+.switcher-new,
+.switcher-filter-toggle,
+.switcher-show-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 44px;
+  padding: 0 0.25rem;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.switcher-filter-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% - 4px);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 12rem;
+  padding: 0.3rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  background: var(--surface-raised);
+  box-shadow: 0 8px 24px light-dark(rgba(15, 23, 42, 0.18), rgba(0, 0, 0, 0.5));
+}
+
+.switcher-filter-menu[hidden] {
+  display: none;
+}
+
+.switcher-filter-menu button {
+  min-height: 44px;
+  padding: 0 0.75rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.switcher-filter-menu button[aria-checked="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.switcher-filter-menu button:is(:hover, :focus-visible) {
+  background: var(--surface-subtle);
+}
+
+.switcher-list {
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.switcher-list:empty {
+  display: none;
+}
+
+/* A row: at most two lines, the first what it is (15px), the second muted
+   and shorter (13px), at least 54px tall. Tapping it is its only action. */
+.switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 54px;
+  box-sizing: border-box;
+  padding: 0.4rem 0.9rem;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-strong);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.switcher-row:first-child {
+  border-top: 0;
+}
+
+.switcher-row:hover {
+  background: var(--surface-subtle);
+  text-decoration: none;
+}
+
+.switcher-row.is-active {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.switcher-row.is-viewing {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.switcher-row[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.switcher-row .indicator-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-subtle);
+}
+
+.switcher-row .indicator-dot.is-hollow {
+  background: transparent;
+  border: 1.5px solid var(--text-subtle);
+  box-sizing: border-box;
+}
+
+/* Busy: a spinner in place of the status dot. */
+.switcher-row .indicator-dot.switcher-spinner {
+  width: 11px;
+  height: 11px;
+  background: transparent;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  box-sizing: border-box;
+  animation: switcher-spin 0.9s linear infinite;
+}
+
+@keyframes switcher-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switcher-row .indicator-dot.switcher-spinner {
+    animation: none;
+  }
+}
+
+.switcher-row-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.switcher-row-line1 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.95rem;
+  line-height: 1.3;
+}
+
+.switcher-row-line1 strong {
+  font-weight: 700;
+}
+
+.switcher-row-number {
+  color: var(--text-subtle);
+}
+
+.switcher-row-line2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-subtle);
+  font-size: 0.82rem;
+  line-height: 1.3;
+}
+
+.switcher-sep {
+  margin: 0 0.3rem;
+}
+
+/* Colour on line 2 marks the one fact to act on. */
+.switcher-part.is-attention,
+.switcher-part.is-awaiting {
+  color: var(--attention);
+  font-weight: 600;
+}
+
+.switcher-part.is-danger {
+  color: var(--danger);
+}
+
+.switcher-part.is-success {
+  color: var(--success);
+}
+
+.switcher-part.is-working,
+.switcher-part.is-progress {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.switcher-part.is-finished {
+  color: var(--finished);
+}
+
+.switcher-row-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+}
+
+.switcher-row-mark.is-viewing {
+  color: var(--accent);
+}
+
+.switcher-row-mark.is-checked-out {
+  color: var(--success);
+}
+
+.switcher-row-mark svg {
+  width: 18px;
+  height: 18px;
+}
+
+.switcher-note {
+  margin: 0.25rem 0 0.5rem;
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+}
+
+.switcher-note.is-error {
+  color: var(--danger);
+}
+
+.switcher-note .gh-link-button {
+  min-height: 32px;
+  font-weight: 600;
+}
+
+#switcher-pull-requests-section .gh-connect-line {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.switcher-footer {
+  display: flex;
+  gap: 1.25rem;
+  padding: 0.25rem 0.25rem 0.5rem;
   border-top: 1px solid var(--border-soft);
 }
 
-/* The divide between two repositories: the same rule as the menu's other
-   dividers, with more air around it, so consecutive groups never run
-   together. */
-.hub-menu-divider.is-group {
-  margin-block: 0.65rem 0.45rem;
+.switcher-footer[hidden] {
+  display: none;
+}
+
+.switcher-footer-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--text-subtle);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.switcher-footer-link:hover {
+  color: var(--text-strong);
+  text-decoration: none;
+}
+
+/* The choice step: replaces the lists (desktop), a shorter sheet (touch). */
+.switcher-step {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.switcher-step-head {
+  padding-left: 0.4rem;
+}
+
+.switcher-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.25rem 1rem 1.25rem;
+}
+
+.switcher-step-subject {
+  margin: 0 0 0.25rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.switcher-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.switcher-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.switcher-choice:hover {
+  background: var(--surface-subtle);
+}
+
+.switcher-choice.is-default {
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.switcher-choice-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.switcher-choice-lines {
+  display: flex;
+  flex-direction: column;
+  color: var(--text-subtle);
+  font-size: 0.88rem;
+}
+
+.switcher-facts {
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface);
+}
+
+.switcher-facts dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.5rem 1.25rem;
+  margin: 0;
+  padding: 0.85rem 1rem;
+}
+
+.switcher-facts dt {
+  color: var(--text-subtle);
+}
+
+.switcher-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.switcher-more {
+  border-top: 1px solid var(--border-soft);
+}
+
+.switcher-more summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 1rem;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.switcher-more dl {
+  padding-top: 0;
+}
+
+.switcher-create {
+  width: 100%;
+  min-height: 48px;
+  font-size: 1rem;
+}
+
+.switcher-step-note {
+  margin: 0;
+  color: var(--text-subtle);
+}
+
+.switcher-step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* Touch: a full-height sheet over every tab; the choice step a shorter
+   sheet at the bottom. */
+html[data-ui-mode="touch"] .switcher {
+  top: calc(env(safe-area-inset-top) + 0.75rem);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: auto;
+  max-height: none;
+  border-radius: 1rem 1rem 0 0;
+  border-bottom: 0;
+  font-size: 1rem;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+html[data-ui-mode="touch"] .switcher-grab {
+  display: block;
+  width: 2.5rem;
+  height: 4px;
+  margin: 0.5rem auto 0;
+  border-radius: 999px;
+  background: var(--border-medium);
+  flex: 0 0 auto;
+}
+
+html[data-ui-mode="touch"] .switcher[data-step] {
+  top: auto;
+  max-height: calc(100dvh - env(safe-area-inset-top) - 2rem);
+}
+
+html[data-ui-mode="touch"] .switcher-search input {
+  font-size: 16px;
+}
+
+/* A phone in landscape: two columns, the status card, search and footer on
+   the left and the two lists on the right; the choice cards side by side. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .switcher {
+    top: env(safe-area-inset-top);
+    border-radius: 0;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  html[data-ui-mode="touch"] .switcher-grab {
+    display: none;
+  }
+  html[data-ui-mode="touch"] .switcher-body {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas: "status lists" "search lists" ". lists" "footer lists";
+    column-gap: 1.25rem;
+    padding-top: 0;
+  }
+  html[data-ui-mode="touch"] .switcher-scroll {
+    padding-bottom: 0.75rem;
+  }
+  html[data-ui-mode="touch"] .switcher-scroll > .switcher-section:first-of-type .switcher-section-head {
+    margin-top: 0;
+  }
+  html[data-ui-mode="touch"] .switcher-footer {
+    border-top: 0;
+  }
+  html[data-ui-mode="touch"] .switcher[data-step] {
+    top: env(safe-area-inset-top);
+  }
+  html[data-ui-mode="touch"] .switcher-choices {
+    flex-direction: row;
+  }
+  html[data-ui-mode="touch"] .switcher-choice {
+    flex: 1 1 0;
+  }
+}
+
+/* --- The touch tab bar's switcher button ------------------------------------- */
+
+.touch-switcher {
+  display: none;
+}
+
+/* The four tabs and the switcher: the button is about one and a half cells. */
+html[data-ui-mode="touch"][data-switcher] .touch-tab-list {
+  flex: 4 1 0;
+}
+
+html[data-ui-mode="touch"] .touch-switcher:not([hidden]) {
+  position: relative;
+  display: flex;
+  flex: 1.5 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  min-width: 0;
+  padding: 0 0.4rem;
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  background: none;
+  color: var(--text-strong);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.touch-switcher-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-subtle);
+}
+
+.switcher-eye-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: light-dark(#0550ae, #79c0ff);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.switcher-eye-pill[hidden] {
+  display: none;
+}
+
+.touch-switcher-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.touch-switcher .hub-activity-badge:not([hidden]) {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  margin: 0;
+}
+
+.touch-switcher[data-stopped] :is(.touch-switcher-top, .touch-switcher-name) {
+  opacity: 0.55;
+}
+
+/* A short touch screen: the slim bar; glyph, pill, name and count on one
+   line, the tap box still 44px tall. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .touch-switcher:not([hidden]) {
+    flex-direction: row;
+    gap: 0.45rem;
+  }
+  html[data-ui-mode="touch"] .touch-switcher::before {
+    content: "";
+    position: absolute;
+    inset: -4px 0 0;
+  }
+  html[data-ui-mode="touch"] .touch-switcher-name {
+    font-size: 0.8rem;
+  }
+  html[data-ui-mode="touch"] .touch-switcher .hub-activity-badge:not([hidden]) {
+    position: static;
+  }
 }
 
 /* Terminal touch keybar — hidden everywhere except coarse-pointer devices
@@ -2960,20 +3767,12 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 }
 .pr-scope-title { flex: 1 1 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
 .pr-scope-bar .gh-mock-label { flex: 0 0 auto; }
-.pr-scope-bar .pr-back-to-branch { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
-/* The pane's and the scope bar's way back: one control, touch-sized. In the
-   scope bar on touch it is "← Back" (its name stays whole), so the tag, the
-   title and the way back share one row. */
-html[data-ui-mode="touch"] .pr-back-to-branch { min-height: 44px; }
-html[data-ui-mode="touch"] .pr-scope-bar { padding-block: 0; }
-html[data-ui-mode="touch"] .pr-scope-bar .pr-back-rest {
-  position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
-}
+html[data-ui-mode="touch"] .pr-scope-bar { min-height: 44px; padding-block: 0.25rem; box-sizing: border-box; }
 .pr-scope-status { flex-basis: 100%; color: var(--danger); }
 /* Said once per screen: while the Pull request pane is on screen it carries
-   the way back and the stale-data line, so the scope bar keeps only its
-   "PR #n" tag and title. */
-.pane-stack:has(> [data-pane-id="pull-request"]:not([hidden]):not(.is-collapsed)) .pr-scope-bar :is(.pr-back-to-branch, .pr-scope-status) { display: none; }
+   the stale-data line, so the scope bar keeps only its "PR #n" tag and
+   title. */
+.pane-stack:has(> [data-pane-id="pull-request"]:not([hidden]):not(.is-collapsed)) .pr-scope-bar .pr-scope-status { display: none; }
 /* One line per file: name, then its folder muted and truncated. recent-view.ts
    reads --recent-row-height for its windowing. */
 .recent-files { --recent-row-height: 32px; overflow: auto; flex: 1 1 0; min-height: 0; position: relative; overflow-anchor: none; }
@@ -8752,14 +9551,14 @@ html[data-ui-mode="touch"] .sidebar-mode-row {
 }
 html[data-ui-mode="touch"] .sidebar-mode-row:not([data-open]) { display: none; }
 html[data-ui-mode="touch"] .follow-switch { min-height: 44px; }
-/* Under the brand: the workspace switcher, then the pane stack. */
-html[data-ui-mode="touch"] .sidebar-hub-row { padding-top: 0.5rem; }
+/* Under the brand: the Viewing strip while viewing, then the pane stack.
+   The workspace switcher is the tab bar's button on touch. */
+html[data-ui-mode="touch"] .sidebar-hub-row { display: none; }
 html[data-ui-mode="touch"] .sidebar-body { margin-top: 0.5rem; }
 
 /* A short touch screen (a phone in landscape, about 390px tall): the brand
    collapses to one slim row (a small logo, the name, the status; the build
-   badge goes), and the workspace switcher sits beside it instead of under
-   it, so the expanded pane keeps most of the Files tab. */
+   badge goes), so the expanded pane keeps most of the Files tab. */
 @media (max-height: 500px) {
   html[data-ui-mode="touch"][data-active-tab="files"] .sidebar {
     display: grid;
@@ -8769,10 +9568,8 @@ html[data-ui-mode="touch"] .sidebar-body { margin-top: 0.5rem; }
     column-gap: 0.75rem;
     padding-top: calc(env(safe-area-inset-top) + 0.25rem);
   }
-  html[data-ui-mode="touch"] .sidebar-header { grid-column: 1; grid-row: 1; min-height: 44px; }
-  html[data-ui-mode="touch"] .sidebar-hub-row { grid-column: 2; grid-row: 1; padding: 0; }
-  html[data-ui-mode="touch"] .sidebar-hub-row .hub-toggle-button { min-height: 40px; }
-  html[data-ui-mode="touch"] :is(.sidebar-body, .sidebar-terminal-row) { grid-column: 1 / -1; }
+  html[data-ui-mode="touch"] .sidebar-header { grid-column: 1 / -1; grid-row: 1; min-height: 44px; }
+  html[data-ui-mode="touch"] :is(.sidebar-body, .sidebar-terminal-row, .viewing-strip) { grid-column: 1 / -1; }
   html[data-ui-mode="touch"] .sidebar-body { grid-row: 2; align-self: stretch; margin-top: 0.25rem; }
   html[data-ui-mode="touch"] .brand { gap: 0.45rem; }
   html[data-ui-mode="touch"] .brand-logo { width: 28px; height: 28px; }
@@ -11830,41 +12627,15 @@ textarea.gh-input { resize: vertical; min-height: 4rem; }
 .pr-pane.is-stale > :not(.pr-pane-pin, .pr-pane-details),
 .pr-pane.is-stale > .pr-pane-pin > .pr-pane-top > *,
 .pr-pane.is-stale > .pr-pane-details:not(.is-floating) { opacity: 0.72; }
-/* A picked pull request (not the checked-out branch's own) says so, with the
-   way back. */
-.pr-pane-scope {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.5rem;
-  margin: 0 0 0.4rem; padding: 0.15rem 0.5rem; border-radius: 0.4rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  font-size: 0.74rem; color: var(--text-strong);
-}
-/* Small text on the tinted note: darker than --accent to reach 4.5:1. */
-.pr-pane-scope .pr-back-to-branch { color: light-dark(#0550ae, #79c0ff); font-size: inherit; }
-html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.15rem; }
-/* Back is a real target: 24px on desktop, 44px on touch (the touch rule
-   with the scope bar's). */
-.pr-pane-scope .pr-back-to-branch { min-height: 24px; padding-inline: 0.15rem; }
 .pr-pane-pending-short { display: none; }
-/* A short touch screen (a phone in landscape): a picked pull request's note
-   is "Picked · ← Back" beside the top row, and the pending note keeps to its
+/* A short touch screen (a phone in landscape): the pending note keeps to its
    advice (Finish review has the count), so the actions stay in the pane. */
 @media (max-height: 500px) {
-  html[data-ui-mode="touch"] .pr-pane.is-picked > .pr-pane-pin { display: flex; flex-wrap: wrap; align-items: center; column-gap: 0.5rem; }
-  html[data-ui-mode="touch"] .pr-pane-pin > .pr-pane-scope { flex: 0 0 auto; margin: 0; }
-  html[data-ui-mode="touch"] .pr-pane-pin > .pr-pane-top { flex: 1 1 0; min-width: 0; }
-  html[data-ui-mode="touch"] :is(.pr-pane-scope-rest, .pr-pane-scope .pr-back-rest, .pr-pane-pending-full) {
+  html[data-ui-mode="touch"] .pr-pane-pending-full {
     position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
   }
   html[data-ui-mode="touch"] .pr-pane-pending-short { display: inline; }
-  html[data-ui-mode="touch"] .pr-pane-scope .pr-back-to-branch { min-height: 44px; margin-block: -6px; }
 }
-/* A picked pull request's way back takes a row: the title gives up its
-   second line so the summary and the actions still fit a short pane (the
-   Files scope bar and the preview carry it in full). */
-.pr-pane.is-picked .pr-pane-title-text { -webkit-line-clamp: 1; }
-/* Touch: the expanded pane has the room; two lines, as the preview has. */
-html[data-ui-mode="touch"] .pr-pane.is-picked .pr-pane-title-text { -webkit-line-clamp: 2; }
 html[data-ui-mode="touch"] .pr-scope-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.3; }
 .pr-pane-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.45rem; min-width: 0; }
 /* Beside Details, spelled out in full: tight spacing keeps the state and
@@ -12464,10 +13235,6 @@ html[data-ui-mode="touch"]:has(.pr-composer-input:focus) .pr-toast { bottom: cal
   color: var(--text-strong);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
 }
-.gh-dialog-wide { width: min(46rem, calc(100vw - 1.5rem)); }
-/* Anchored at the top, not centred: what a choice adds (a fork's notice, a
-   lookup) grows the picker downward instead of moving it under the pointer. */
-html:not([data-ui-mode="touch"]) .gh-dialog-wide[open] { margin-top: min(8dvh, 4rem); margin-bottom: auto; }
 .gh-dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
 /* Whatever takes focus or is scrolled to stays above the pinned footer
    (review-dialogs.ts measures it into --gh-dialog-footer-height). */
@@ -12593,54 +13360,6 @@ html[data-ui-mode="touch"] .gh-pending-actions .gh-link-button { min-height: 44p
 .gh-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1.2rem; margin: 0.5rem 0 0.9rem; }
 .gh-facts dt { color: var(--text-subtle); }
 .gh-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.gh-picker-search { display: flex; gap: 0.5rem; }
-.gh-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.7rem 0; }
-.gh-chip {
-  padding: 0.25rem 0.75rem;
-  border: 1px solid var(--border-medium);
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--text-subtle);
-  font: inherit;
-  font-size: 0.84rem;
-  cursor: pointer;
-}
-.gh-chip.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.gh-pr-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border: 1px solid var(--border-medium);
-  border-radius: 0.6rem;
-  max-height: min(22rem, 50dvh);
-  overflow: auto;
-  /* The containing block of the rows' sr-only text: without it that text
-     escapes the list's clip and makes the whole dialog scroll. */
-  position: relative;
-}
-.gh-pr-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.6rem 0.85rem;
-  border-bottom: 1px solid var(--border-soft);
-  cursor: pointer;
-}
-.gh-pr-row:last-child { border-bottom: 0; }
-.gh-pr-row:hover { background: var(--surface-subtle); }
-.gh-pr-row.is-selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
-.gh-pr-row.has-worktree .gh-pr-row-title strong { color: var(--text-subtle); }
-.gh-pr-row-main { min-width: 0; }
-.gh-pr-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
-.gh-pr-row-meta { margin-top: 0.15rem; color: var(--text-subtle); font-size: 0.82rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
-.gh-pr-row-aside { display: grid; justify-items: end; align-content: start; gap: 0.25rem; flex: 0 0 auto; font-size: 0.82rem; }
-.gh-pr-row-checks { color: var(--text-subtle); white-space: nowrap; }
-/* A merged or closed pull request found by number (not in the open list). */
-.gh-picker-lookup {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem 0.75rem;
-  padding: 0.6rem 0.85rem; border: 1px solid var(--border-medium); border-radius: 0.6rem;
-}
-
 /* --- Touch mode ---------------------------------------------------------- */
 
 html[data-ui-mode="touch"] .pr-thread,
@@ -12660,8 +13379,7 @@ html[data-ui-mode="touch"] .pane-header .gh-pill-button::after {
   content: ""; position: absolute; left: 50%; top: 50%; width: max(calc(100% + 12px), 44px); height: 44px; transform: translate(-50%, -50%);
 }
 html[data-ui-mode="touch"] :is(.pr-pane-number, .pr-pane-elsewhere a, .gh-pending-location),
-html[data-ui-mode="touch"] .pr-pane-mock select,
-html[data-ui-mode="touch"] .gh-chip {
+html[data-ui-mode="touch"] .pr-pane-mock select {
   display: inline-flex; align-items: center; min-height: 44px;
 }
 /* The title's tap box is at least 44px tall without making the title row
@@ -12694,24 +13412,10 @@ html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-title {
 html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-title[data-expanded] { -webkit-line-clamp: unset; }
 html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-meta { order: -1; flex: 0 0 auto; margin: 0; }
 html[data-ui-mode="touch"][data-preview-kind="pull-request"] .pr-path-repo { display: none; }
-/* A picked pull request (not the checked-out branch's) says so in the same
-   row on touch, where no Pull request pane is beside it: "Picked · ← Back".
-   Back's tap box is 44px tall without making the row taller. */
-.pr-picked-chip { display: none; }
-html[data-ui-mode="touch"] .pr-picked-chip {
-  display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.4rem; padding: 0 0 0 0.45rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-soft)); border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  color: var(--text-strong); font-family: var(--font-sans, system-ui, sans-serif); font-size: 0.72rem; white-space: nowrap; word-break: normal;
-}
-html[data-ui-mode="touch"] .pr-picked-chip .pr-back-to-branch {
-  min-height: 44px; margin-block: -0.75rem; padding: 0 0.5rem; color: light-dark(#0550ae, #79c0ff); font-size: inherit;
-}
 /* On a phone the header is two rows: the title row (#n, then the title in
    up to two lines, with Open on GitHub and the text size buttons at its
-   end) and the slim tabs row (tabs, the review button, Jump to file). A
-   picked pull request's number row keeps its own line for the Picked chip
-   and Back, with the title under it. Scrolled, only the tabs row stays
+   end) and the slim tabs row (tabs, the review button, Jump to file).
+   Scrolled, only the tabs row stays
    pinned (the rows above scroll away: their height is the negative top),
    and each file's pinned header is the context. pull-request-view.ts reads
    the pinned height into --pr-sticky-top. */
@@ -12726,9 +13430,6 @@ html[data-ui-mode="touch"] .pr-picked-chip .pr-back-to-branch {
   }
   html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading .preview-meta { flex: 0 0 auto; display: flex; align-items: center; }
   html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-title { flex: 1 1 0; min-width: 0; }
-  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading:has(.pr-picked-chip) { padding-right: 0; }
-  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading:has(.pr-picked-chip) .preview-meta { flex: 1 1 100%; min-height: 44px; padding-right: var(--pr-heading-actions, 8.5rem); box-sizing: border-box; }
-  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading:has(.pr-picked-chip) #preview-title { flex: 1 1 100%; }
   /* The tabs keep their 44px height without the segment's frame around
      them. */
   html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-control { padding: 0; }
@@ -12788,45 +13489,6 @@ html[data-ui-mode="touch"] :is(.pr-composer-input, .pr-composer-line select, .gh
 html[data-ui-mode="touch"] .pr-event > .gh-avatar { display: none; }
 html[data-ui-mode="touch"] .pr-timeline::before { display: none; }
 html[data-ui-mode="touch"] .gh-dialog-body { --gh-dialog-pad-top: 1.1rem; padding: var(--gh-dialog-pad-top) 1rem 0; }
-/* The pull request picker is a full-height sheet on touch: the list takes
-   the room between the filters and the pinned footer. */
-html[data-ui-mode="touch"] .gh-dialog-wide[open] {
-  width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0;
-  border: 0; border-radius: 0;
-  padding-top: env(safe-area-inset-top);
-}
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-body { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-list { flex: 1 1 auto; min-height: 8rem; max-height: none; }
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-footer { margin-top: auto; }
-/* On a phone the picker's filter chips are one row that scrolls sideways,
-   and its footer buttons one compact row under the footer's line. */
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-chips { flex: 0 0 auto; gap: 0.3rem; }
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-chip { flex: 0 0 auto; padding-inline: 0.6rem; white-space: nowrap; }
-/* On a phone all four filter chips fit one row: "Review requested" reads
-   "To review" (its full name stays the chip's name), the counts tighten,
-   and on the narrowest screens they wrap to a second row, never cut. */
-.gh-chip-short { display: none; }
-@media (max-width: 480px) {
-  html[data-ui-mode="touch"] .gh-chip-short { display: inline; }
-  html[data-ui-mode="touch"] .gh-chip-full {
-    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
-  }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-chip { padding-inline: 0.55rem; font-size: 0.8rem; }
-}
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-footer { row-gap: 0.35rem; }
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-actions { flex-wrap: nowrap; gap: 0.4rem; }
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-actions .gh-button { flex: 0 1 auto; min-width: 0; padding-inline: 0.65rem; white-space: nowrap; font-size: 0.84rem; }
-@media (max-width: 359px) {
-  html[data-ui-mode="touch"] .gh-dialog-actions .gh-button[data-short-label] { font-size: 0; }
-  html[data-ui-mode="touch"] .gh-dialog-actions .gh-button[data-short-label]::after { content: attr(data-short-label); font-size: 0.84rem; }
-}
-/* Rows stack their badges under the title so more of the list fits; the
-   explanation of the two actions gives way to the list (the buttons say
-   what they do). */
-html[data-ui-mode="touch"] .gh-picker-help { display: none; }
-html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-sub { margin-bottom: 0.6rem; }
-html[data-ui-mode="touch"] .gh-pr-row { flex-direction: column; gap: 0.3rem; padding: 0.55rem 0.75rem; }
-html[data-ui-mode="touch"] .gh-pr-row-aside { display: flex; flex-wrap: wrap; justify-items: start; align-items: center; gap: 0.5rem; }
 html[data-ui-mode="touch"] .gh-dialog-footer { padding-bottom: 1rem; }
 html[data-ui-mode="touch"] .gh-dialog-actions { width: 100%; justify-content: flex-end; }
 html[data-ui-mode="touch"] .pr-composer-hint { display: none; }
@@ -12835,10 +13497,9 @@ html[data-ui-mode="touch"] .pr-composer-hint { display: none; }
    request dialog keeps one scrolling body and a compact one-row footer. The
    footer stays pinned, and scroll-padding keeps whatever is focused or
    scrolled to clear of it. The why-not line takes the attribution's place
-   while it has something to say. The picker's list takes the height left
-   between the filters and the footer, so nothing overflows under it. */
+   while it has something to say. */
 @media (max-height: 500px) {
-  html[data-ui-mode="touch"] .gh-dialog:not(.gh-dialog-wide)[open] { max-height: calc(100dvh - 1rem); margin-block: auto; }
+  html[data-ui-mode="touch"] .gh-dialog[open] { max-height: calc(100dvh - 1rem); margin-block: auto; }
   html[data-ui-mode="touch"] .gh-dialog-body { --gh-dialog-pad-top: 0.7rem; }
   html[data-ui-mode="touch"] .gh-dialog-title { margin-bottom: 0.2rem; font-size: 1.05rem; }
   html[data-ui-mode="touch"] .gh-dialog-sub { margin-bottom: 0.4rem; }
@@ -12853,9 +13514,6 @@ html[data-ui-mode="touch"] .pr-composer-hint { display: none; }
   html[data-ui-mode="touch"] .gh-dialog-footer:has(> .gh-dialog-reason:not(:empty)) > .gh-dialog-attribution { display: none; }
   html[data-ui-mode="touch"] .gh-dialog-actions { flex: 0 0 auto; flex-wrap: nowrap; width: auto; }
   html[data-ui-mode="touch"] .gh-dialog-actions .gh-button { min-height: 44px; padding: 0.3rem 0.85rem; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-list { flex: 1 1 0; min-height: 0; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-chips { margin: 0.4rem 0; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-search { flex: 0 0 auto; }
 }
 
 /* A short touch viewport (a phone in landscape, about 390px tall): the pull
@@ -13028,25 +13686,6 @@ html[data-ui-mode="touch"] .pr-file-action[data-file-comment] .pr-file-action-la
 /* A manual refresh GitHub answered. */
 .pr-pane-updated { margin-left: 0.45rem; color: var(--text-subtle); font-size: 0.72rem; white-space: nowrap; }
 .pr-pane-updated[hidden] { display: none; }
-
-/* The picker's heading, explanation and search: one block in the flow,
-   except on a short touch screen (a phone in landscape), where the heading
-   and the search share one row and the explanation gives way, so at least
-   three results show above the footer. Rows keep their badges beside the
-   title there (the screen is wide). */
-.gh-picker-head { display: contents; }
-@media (max-height: 500px) {
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head { display: flex; flex: 0 0 auto; align-items: center; gap: 0.75rem; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head .gh-dialog-title { flex: 0 1 auto; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head .gh-dialog-sub { display: none; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-picker-head .gh-picker-search { flex: 1 1 18rem; min-width: 12rem; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-chips { margin: 0.3rem 0; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row { flex-direction: row; align-items: center; gap: 0.75rem; padding: 0.35rem 0.75rem; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-aside { flex: 0 0 auto; justify-content: flex-end; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-title { flex-wrap: nowrap; min-width: 0; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-row-main { min-width: 0; flex: 1 1 auto; }
-}
 
 /* A desktop-layout window narrowed to phone width with a preview open
    (shell/narrow-layout-offer.ts): one small bar at the bottom, offering

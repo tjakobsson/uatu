@@ -205,33 +205,45 @@
           </div>
         </div>
 
-        <!-- Hub workspace switcher: hidden unless the session is served
-             through a uatu hub (shell/hub-nav.ts unhides it after probing
-             the hub API at the origin root). -->
+        <!-- The workspace switcher's desktop chip (shell/switcher.ts): hidden
+             unless the session is served through a uatu hub or serves GitHub
+             data, and hidden in touch mode, where the tab bar's switcher
+             button takes its place. Line 1 names the checkout this page
+             works in; line 2, only while a pull request is viewed, says so
+             with the way back. -->
         <div class="sidebar-hub-row" id="hub-control" hidden>
-          <button
-            id="hub-toggle"
-            class="hub-toggle-button"
-            type="button"
-            aria-expanded="false"
-            aria-controls="hub-menu"
-            aria-label="Switch workspace or open the hub dashboard"
-            title="Switch workspace or open the hub dashboard"
-          >
-            <!-- Liveness is set by hub-nav from real hub state — a cached
-                 page can belong to a stopped session, so no default. -->
-            <span class="indicator-dot" aria-hidden="true"></span>
-            <span id="hub-current" class="hub-toggle-label"></span>
-            <!-- Other workspaces' activity, from the live stream: a count
-                 pill while one awaits the user, a quiet dot while agents
-                 merely work. The button's aria-label carries the words. -->
-            <span id="hub-activity-badge" class="hub-activity-badge" aria-hidden="true" hidden></span>
-            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <div id="hub-menu" class="panels-menu hub-menu" hidden></div>
+          <div class="switcher-chip">
+            <button
+              id="hub-toggle"
+              class="hub-toggle-button"
+              type="button"
+              aria-haspopup="dialog"
+              aria-expanded="false"
+              aria-controls="hub-menu"
+              aria-label="Switch"
+              title="Switch"
+            >
+              <span class="switcher-chip-glyph">
+                <svg class="switcher-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/><path d="M4.5 5.1v5.8M11.5 7.1c0 2.6-3.2 2.4-6.2 4"/></svg>
+                <!-- Liveness is set from real hub state — a cached page can
+                     belong to a stopped session, so no default. -->
+                <span class="indicator-dot" aria-hidden="true"></span>
+              </span>
+              <span id="hub-current" class="hub-toggle-label"></span>
+              <!-- Other workspaces' activity, from the live stream: a count
+                   pill while one awaits the user, a quiet dot while agents
+                   merely work. The button's aria-label carries the words. -->
+              <span id="hub-activity-badge" class="hub-activity-badge" aria-hidden="true" hidden></span>
+              <svg class="switcher-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                <path d="M5 6.5 8 3.5l3 3M5 9.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+            <div id="switcher-chip-viewing" class="switcher-chip-viewing" hidden></div>
+          </div>
         </div>
+        <!-- The Viewing strip on the Files tab (touch): `Viewing #n` with
+             `← Back to <branch>`, only while a pull request is viewed. -->
+        <div id="viewing-strip-files" class="viewing-strip" hidden></div>
         <div class="sidebar-mode-row" id="sidebar-mode-row">
           <button
             id="follow-toggle"
@@ -550,6 +562,9 @@
            somewhere to hand focus back to. It is never focused automatically —
            only by user action or by dismissing find. -->
       <main class="preview-shell" tabindex="-1">
+        <!-- The Viewing strip on the Preview tab (touch; desktop while the
+             sidebar is collapsed). -->
+        <div id="viewing-strip-preview" class="viewing-strip" hidden></div>
         <header class="preview-header">
           <div class="preview-heading">
             <p class="eyebrow"><span class="eyebrow-preview">Preview</span><span class="eyebrow-pull-request">Pull request</span></p>
@@ -1358,7 +1373,87 @@
         <span class="touch-tab-badge" aria-hidden="true"></span>
       </button>
       </div>
+      <!-- The switcher button (workspace-switcher): not a tab. It names the
+           checkout this page works in, carries an eye pill while a pull
+           request is viewed and the other workspaces' attention badge, and
+           opens the switcher. Hidden unless the switcher is offered. -->
+      <button
+        id="switcher-button"
+        class="touch-switcher"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+        aria-controls="hub-menu"
+        aria-label="Switch"
+        hidden
+      >
+        <span class="touch-switcher-top">
+          <svg class="switcher-glyph" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/><path d="M4.5 5.1v5.8M11.5 7.1c0 2.6-3.2 2.4-6.2 4"/></svg>
+          <span class="switcher-eye-pill" aria-hidden="true" hidden>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="1.9"/></svg>
+            <span class="switcher-eye-pill-number"></span>
+          </span>
+        </span>
+        <span class="touch-switcher-name" aria-hidden="true"></span>
+        <span class="hub-activity-badge" aria-hidden="true" hidden></span>
+      </button>
     </nav>
+
+    <!-- The workspace switcher's dialog (shell/switcher.ts): a full-height
+         sheet on touch, a panel under the chip on desktop. Its Checkouts
+         rows come from the Hub's part (shell/hub-nav.ts). -->
+    <div id="switcher-backdrop" class="switcher-backdrop" hidden></div>
+    <div id="hub-menu" class="switcher" role="dialog" aria-modal="true" aria-labelledby="switcher-title" tabindex="-1" hidden>
+      <div class="switcher-grab" aria-hidden="true"></div>
+      <div class="switcher-lists">
+        <div class="switcher-head">
+          <h2 id="switcher-title" class="switcher-title">Switch</h2>
+          <button type="button" class="switcher-icon-button" data-switcher-close aria-label="Close">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="switcher-body">
+          <section id="switcher-status" class="switcher-status" aria-label="Where you are"></section>
+          <div class="switcher-search">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6.75" cy="6.75" r="4.75"/><path d="m10.25 10.25 4 4"/></svg>
+            <input
+              id="switcher-search"
+              type="search"
+              placeholder="Search"
+              autocomplete="off"
+              spellcheck="false"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls="switcher-checkouts switcher-pull-requests"
+              aria-label="Search checkouts and pull requests"
+            />
+          </div>
+          <div class="switcher-scroll">
+            <section id="switcher-checkouts-section" class="switcher-section" role="group" aria-labelledby="switcher-checkouts-heading" hidden>
+              <div class="switcher-section-head">
+                <h3 id="switcher-checkouts-heading">Checkouts</h3>
+                <span id="switcher-new-slot" class="switcher-section-action"></span>
+              </div>
+              <div id="switcher-checkouts" class="switcher-list" role="listbox" aria-labelledby="switcher-checkouts-heading"></div>
+              <p id="switcher-checkouts-empty" class="switcher-note" hidden></p>
+            </section>
+            <section id="switcher-pull-requests-section" class="switcher-section" role="group" aria-labelledby="switcher-pull-requests-heading" hidden>
+              <div class="switcher-section-head">
+                <h3 id="switcher-pull-requests-heading">Pull requests</h3>
+                <span id="switcher-filter-slot" class="switcher-section-action"></span>
+              </div>
+              <div id="switcher-pr-notes"></div>
+              <div id="switcher-pull-requests" class="switcher-list" role="listbox" aria-labelledby="switcher-pull-requests-heading"></div>
+              <div id="switcher-pr-more"></div>
+            </section>
+          </div>
+          <div id="switcher-footer" class="switcher-footer" hidden></div>
+        </div>
+      </div>
+      <div id="switcher-step" class="switcher-step" role="group" hidden></div>
+    </div>
+    <p id="switcher-live" class="sr-only" role="status" aria-live="polite"></p>
 
     <div
       id="terminal-confirm"

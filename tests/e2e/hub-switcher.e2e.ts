@@ -8,7 +8,8 @@
 // a backgrounded task still reads working — all from the brokered stream's
 // activity topic, no reload. Each state is captured as a screenshot under
 // the change's screenshots folder at desktop and phone sizes; the phone run
-// is touch mode, where the switcher lives in the Files tab.
+// is touch mode, where the switcher is the tab bar's button
+// (add-workspace-switcher).
 
 
 import { QUIET_BEFORE_NOTICE_MS } from "../../src/shell/attention-notice";
@@ -77,7 +78,7 @@ async function shot(page: Page, testInfo: TestInfo, name: string, clip?: { x: nu
 // A close-up of the chip and, when open, its menu — the review needs the
 // badge legible, not a 1400 px canvas with a 20 px dot in it.
 async function switcherClip(page: Page): Promise<{ x: number; y: number; width: number; height: number }> {
-  const control = await page.locator("#hub-control").boundingBox();
+  const control = await page.locator("#hub-control .switcher-chip").boundingBox();
   const menu = await page.locator("#hub-menu").boundingBox();
   const box = menu && control
     ? { x: Math.min(control.x, menu.x), y: control.y, width: Math.max(control.width, menu.x + menu.width - control.x), height: menu.y + menu.height - control.y }
@@ -86,20 +87,33 @@ async function switcherClip(page: Page): Promise<{ x: number; y: number; width: 
   return { x: Math.max(0, box.x - pad), y: Math.max(0, box.y - pad), width: box.width + pad * 2, height: box.height + pad * 2 };
 }
 
+// The switcher's face: the sidebar chip on desktop, the tab bar's button on
+// touch. Both carry the badge and say it in words (the chip's tooltip and
+// name, the button's name).
+async function face(page: Page) {
+  const touch = (await page.locator("html").getAttribute("data-ui-mode")) === "touch";
+  return {
+    control: page.locator(touch ? "#switcher-button" : "#hub-control"),
+    toggle: page.locator(touch ? "#switcher-button" : "#hub-toggle"),
+    badge: page.locator(touch ? "#switcher-button .hub-activity-badge" : "#hub-activity-badge"),
+    words: touch ? "aria-label" : "title",
+  };
+}
+
 async function expectStaged(page: Page): Promise<void> {
-  await expect(page.locator("#hub-control")).toBeVisible();
-  const badge = page.locator("#hub-activity-badge");
-  await expect(badge).toBeVisible();
-  await expect(badge).toHaveClass(/is-awaiting/);
-  await expect(badge).toHaveText("1");
-  await expect(page.locator("#hub-toggle")).toHaveAttribute("title", /1 workspace awaiting your reply/);
+  const chip = await face(page);
+  await expect(chip.control).toBeVisible();
+  await expect(chip.badge).toBeVisible();
+  await expect(chip.badge).toHaveClass(/is-awaiting/);
+  await expect(chip.badge).toHaveText("1");
+  await expect(chip.toggle).toHaveAttribute(chip.words, /1 workspace awaiting your reply/);
 }
 
 // The badge must not resize the chip: a pill taller than the label's line
 // box would shift every sidebar row below it each time a question arrives
 // or is answered.
 async function chipHeight(page: Page): Promise<number> {
-  const box = await page.locator("#hub-toggle").boundingBox();
+  const box = await (await face(page)).toggle.boundingBox();
   return box?.height ?? 0;
 }
 
@@ -127,31 +141,38 @@ async function openMenuAndExpectStates(page: Page): Promise<void> {
   await openMenu(page);
   const menu = page.locator("#hub-menu");
   // These workspaces are plain folders: no `.git` directory, no parent, so no
-  // repository family. They stay flat rows with no group header, and there is
-  // no repository title line anywhere — the chip is the only place a
-  // repository is ever named.
-  await expect(menu.locator(".hub-menu-group")).toHaveCount(0);
-  await expect(menu.locator(".hub-menu-divider.is-group")).toHaveCount(0);
-  await expect(page.locator("#hub-repository")).toHaveCount(0);
-  // F1's boundary: with no repository family there is no repository and no
-  // branch to name, so the chip carries the display name alone.
-  await expect(page.locator("#hub-current")).toHaveText("alpha");
+  // repository family and no branch to name: the face and the status card
+  // carry the display name alone.
+  const touch = (await page.locator("html").getAttribute("data-ui-mode")) === "touch";
+  if (touch) await expect(page.locator("#switcher-button .touch-switcher-name")).toHaveText("alpha");
+  else await expect(page.locator("#hub-current")).toHaveText("alpha");
   await expect(page.locator("#hub-current .hub-toggle-branch")).toHaveCount(0);
+  await expect(menu.locator("#switcher-status")).toContainText("Working in");
+  await expect(menu.locator("#switcher-status")).toContainText("alpha");
+  // The current workspace is the status card, not a row; the rest are
+  // ordered by who needs you: awaiting, working, then stopped.
   const item = (id: string) => menu.locator(`.hub-menu-item[href="/s/${id}/"]`);
-  await expect(item("alpha")).toHaveAttribute("aria-current", "true");
-  await expect(item("beta").locator(".hub-menu-state")).toHaveText("awaiting you");
+  await expect(item("alpha")).toHaveCount(0);
+  await expect(menu.locator(".hub-menu-item[data-workspace-id]")).toHaveCount(3);
+  expect(await menu.locator(".hub-menu-item[data-workspace-id]").evaluateAll(rows => rows.map(row => row.getAttribute("data-workspace-id")))).toEqual(["beta", "gamma", "delta"]);
+  await expect(item("beta").locator(".hub-menu-state")).toHaveText("Awaiting you");
   await expect(item("beta").locator(".hub-menu-state")).toHaveClass(/is-awaiting/);
-  await expect(item("gamma").locator(".hub-menu-state")).toHaveText("working");
-  await expect(item("delta").locator(".hub-menu-state")).toHaveText("stopped");
+  await expect(item("gamma").locator(".hub-menu-state")).toHaveText("Working");
+  await expect(item("gamma").locator(".switcher-spinner")).toHaveCount(1);
+  await expect(item("gamma")).toHaveAttribute("aria-label", /Agent working/);
+  await expect(item("delta").locator(".hub-menu-state")).toHaveText("Stopped");
+  // No Sign out in the switcher: it lives on the Hub's own pages.
+  await expect(menu.getByText("Sign out", { exact: true })).toHaveCount(0);
+  await expect(menu.locator('a[href="/"]')).toHaveText("Hub dashboard");
 }
 
 async function expectAnswered(page: Page, staged: Staged): Promise<void> {
   await answerQuestion(staged);
-  const badge = page.locator("#hub-activity-badge");
+  const chip = await face(page);
   // Awaiting cleared; gamma still works, so the badge is the working dot.
-  await expect(badge).toHaveClass(/is-working/);
-  await expect(badge).toHaveText("");
-  await expect(page.locator("#hub-toggle")).toHaveAttribute("title", /Agents working in 1 workspace/);
+  await expect(chip.badge).toHaveClass(/is-working/);
+  await expect(chip.badge).toHaveText("");
+  await expect(chip.toggle).toHaveAttribute(chip.words, /Agents working in 1 workspace/);
 }
 
 // gamma's turn ends while the user is looking at alpha. The work is done
@@ -165,13 +186,13 @@ async function expectFinished(page: Page, staged: Staged): Promise<void> {
 }
 
 async function expectFinishedBadge(page: Page): Promise<void> {
-  const badge = page.locator("#hub-activity-badge");
-  await expect(badge).toBeVisible();
-  await expect(badge).toHaveClass(/is-finished/);
-  await expect(badge).toHaveText("1");
-  // Never colour alone: the chip's own name and tooltip say it too.
-  await expect(page.locator("#hub-toggle")).toHaveAttribute("title", /Work finished in 1 workspace/);
-  await expect(page.locator("#hub-toggle")).toHaveAttribute("aria-label", /Work finished in 1 workspace/);
+  const chip = await face(page);
+  await expect(chip.badge).toBeVisible();
+  await expect(chip.badge).toHaveClass(/is-finished/);
+  await expect(chip.badge).toHaveText("1");
+  // Never colour alone: the face's own name (and the chip's tooltip) say it too.
+  await expect(chip.toggle).toHaveAttribute(chip.words, /Work finished in 1 workspace/);
+  await expect(chip.toggle).toHaveAttribute("aria-label", /Work finished in 1 workspace/);
 }
 
 test.describe("desktop", () => {
@@ -199,7 +220,7 @@ test.describe("desktop", () => {
     await shot(page, testInfo, "after-switcher-desktop-chip-finished");
     await shot(page, testInfo, "after-switcher-desktop-chip-finished-closeup", await switcherClip(page));
     await openMenu(page);
-    await expectMenuState(page, "gamma", "finished", "finished");
+    await expectMenuState(page, "gamma", "Finished", "finished");
     await shot(page, testInfo, "after-switcher-desktop-menu-finished-closeup", await switcherClip(page));
     await closeMenu(page);
     // Both count pills must sit inside the label's line box: a taller badge
@@ -222,14 +243,14 @@ test.describe("desktop", () => {
     await expect(badge).toHaveText("");
     await expect(page.locator("#hub-toggle")).toHaveAttribute("title", /Agents working in 1 workspace/);
     await openMenu(page);
-    await expectMenuState(page, "gamma", "working", "working");
+    await expectMenuState(page, "gamma", "Working", "working");
     await shot(page, testInfo, "after-switcher-desktop-menu-background-closeup", await switcherClip(page));
     await closeMenu(page);
 
     // The background work is gone and no turn runs: now it is finished.
     await expectFinished(page, staged);
     await openMenu(page);
-    await expectMenuState(page, "gamma", "finished", "finished");
+    await expectMenuState(page, "gamma", "Finished", "finished");
     await closeMenu(page);
   });
 
@@ -246,8 +267,8 @@ test.describe("desktop", () => {
     await expect(badge).toHaveText("1");
     await expect(page.locator("#hub-toggle")).toHaveAttribute("title", /1 workspace awaiting your reply/);
     await openMenu(page);
-    await expectMenuState(page, "beta", "awaiting you", "awaiting");
-    await expectMenuState(page, "gamma", "finished", "finished");
+    await expectMenuState(page, "beta", "Awaiting you", "awaiting");
+    await expectMenuState(page, "gamma", "Finished", "finished");
     await shot(page, testInfo, "after-switcher-desktop-menu-awaiting-over-finished-closeup", await switcherClip(page));
     await closeMenu(page);
 
@@ -277,11 +298,12 @@ test.describe("desktop", () => {
     // A fresh context boots with the chat panel collapsed: the page is on
     // gamma, but its chat is not in view, so nothing is acknowledged yet.
     await expect(gammaPage.locator("html")).toHaveAttribute("data-chat-panel", "collapsed");
-    // The page has heard that gamma finished (its own row says so), which is
-    // the moment it would acknowledge if it were going to: it posts in the
-    // same activity update that renders the row.
+    // The page has heard the activity snapshot (it is connected and its
+    // switcher lists the others), which is the moment it would acknowledge
+    // if it were going to: it posts in the same activity update.
+    await expect(gammaPage.locator("#connection-state .connection-label")).toHaveText("Connected");
     await openMenu(gammaPage);
-    await expectMenuState(gammaPage, "gamma", "finished", "finished");
+    await expect(gammaPage.locator('#hub-menu .hub-menu-item[href="/s/alpha/"]')).toHaveCount(1);
     await closeMenu(gammaPage);
     expect(acknowledgements).toEqual([]);
     await expect(page.locator("#hub-activity-badge")).toHaveClass(/is-finished/);
@@ -309,12 +331,15 @@ test.describe("phone", () => {
   // boots the UI into touch mode with the bottom tab bar.
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("the same switcher states in touch mode's Files tab", async ({ hub, hubContext }, testInfo) => {
+  test("the same switcher states from touch mode's tab bar button, on any tab", async ({ hub, hubContext }, testInfo) => {
     const staged = await stageActivity(hub, hubContext);
     const page = await openSessionTab(hubContext, hub.workspaces[0]!);
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    // The header dropdown is gone on touch: the button is the switcher.
+    await expect(page.locator("#hub-control")).toBeHidden();
     await page.locator("#touch-tab-files").click();
-    await expect(page.locator("#touch-tab-files")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#hub-control")).toBeHidden();
+    await page.locator("#touch-tab-terminal").click();
 
     await expectStaged(page);
     await shot(page, testInfo, "after-switcher-phone-chip-awaiting");
@@ -329,7 +354,7 @@ test.describe("phone", () => {
     await expectFinished(page, staged);
     await shot(page, testInfo, "after-switcher-phone-chip-finished");
     await openMenu(page);
-    await expectMenuState(page, "gamma", "finished", "finished");
+    await expectMenuState(page, "gamma", "Finished", "finished");
     await shot(page, testInfo, "after-switcher-phone-menu-finished");
     await closeMenu(page);
   });
@@ -366,8 +391,9 @@ test.describe("in-app notice for questions elsewhere", () => {
   // as new only after the workspace has read quiet for a moment
   // (QUIET_BEFORE_NOTICE_MS): wait for both before staging.
   async function settled(page: Page): Promise<void> {
-    await expect(page.locator("#hub-control")).toBeVisible();
-    await expect(page.locator("#hub-toggle")).not.toHaveAttribute("title", /awaiting/);
+    const chip = await face(page);
+    await expect(chip.control).toBeVisible();
+    await expect(chip.toggle).not.toHaveAttribute(chip.words, /awaiting/);
     await page.waitForTimeout(QUIET_BEFORE_NOTICE_MS + 100);
   }
 
@@ -439,9 +465,9 @@ test.describe("in-app notice for questions elsewhere", () => {
       const gamma = hub.workspaces.find(entry => entry.id === "gamma")!;
       await childChatControl(gamma, { action: "status", conversationId: busy.conversation.id, status: "running" });
       await openMenu(page);
-      await expectMenuState(page, "gamma", "working", "working");
+      await expectMenuState(page, "gamma", "Working", "working");
       await childChatControl(gamma, { action: "status", conversationId: busy.conversation.id, status: "completed" });
-      await expectMenuState(page, "gamma", "finished", "finished");
+      await expectMenuState(page, "gamma", "Finished", "finished");
       await closeMenu(page);
       await expect(page.locator(".attention-notice")).toHaveCount(0);
       await answer(mine);

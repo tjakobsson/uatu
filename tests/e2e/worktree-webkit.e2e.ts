@@ -40,7 +40,7 @@ async function fork(page: Page, parentId: string, mode: string): Promise<void> {
     await page.getByRole("tab", { name: "Files", exact: true }).click();
   }
   await openHubMenu(page);
-  await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+  await page.getByRole("button", { name: `New worktree in ${parentId}`, exact: true }).click();
   await page.getByRole("menuitem", { name: mode, exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
 }
@@ -82,11 +82,12 @@ test.describe("worktree dialog on an iOS-shaped WebKit", () => {
     await page.close();
   });
 
-  // Decision F6 in the engine that actually shipped it: iOS Safari is where
-  // the user found a picker taller than the screen with nothing to scroll.
+  // Decision F6 in the engine that actually shipped it, kept through the
+  // switcher (add-workspace-switcher): iOS Safari is where the user found a
+  // picker taller than the screen with nothing to scroll.
   // `-webkit-overflow-scrolling` and `overscroll-behavior` are WebKit's own
-  // concerns, so the bounded, scrollable menu is proved here too.
-  test("a picker taller than the screen scrolls, and Sign out stays reachable", async ({ hub, hubContext }, info) => {
+  // concerns, so the sheet's scrolling lists are proved here too.
+  test("a switcher with more checkouts than the screen scrolls its lists, and its footer stays reachable", async ({ hub, hubContext }, info) => {
     test.setTimeout(90_000);
     const parentId = "orbit-webkit";
     const page = await hubContext.newPage();
@@ -111,23 +112,23 @@ test.describe("worktree dialog on an iOS-shaped WebKit", () => {
 
     await page.reload();
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await page.getByRole("tab", { name: "Files", exact: true }).tap();
     await openHubMenu(page, { tap: true });
     const menu = page.locator("#hub-menu");
     const viewport = page.viewportSize()!;
-    const metrics = await menu.evaluate(node => ({
+    const lists = menu.locator(".switcher-scroll");
+    const metrics = await lists.evaluate(node => ({
       scrollHeight: node.scrollHeight,
       clientHeight: node.clientHeight,
-      top: node.getBoundingClientRect().top,
       overflowY: getComputedStyle(node).overflowY,
     }));
     expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
     expect(metrics.overflowY).toBe("auto");
-    expect(metrics.top + metrics.clientHeight).toBeLessThanOrEqual(viewport.height);
+    const sheet = (await menu.boundingBox())!;
+    expect(sheet.y + sheet.height).toBeLessThanOrEqual(viewport.height + 1);
 
-    await menu.evaluate(node => { node.scrollTop = node.scrollHeight; });
-    const signOut = menu.getByText("Sign out", { exact: true });
-    await expect(signOut).toBeInViewport();
+    await lists.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await expect(menu.locator(".hub-menu-item[data-workspace-id]").last()).toBeInViewport();
+    await expect(menu.locator("#switcher-footer").getByText("Hub dashboard", { exact: true })).toBeInViewport();
     await captureScreenshot(page, info, "worktree-ui-webkit-selector-scrolled");
     expect(errors).toEqual([]);
     await page.close();

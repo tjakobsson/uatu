@@ -40,7 +40,17 @@ async function surface(page: Page, name: "Files" | "Preview" | "Terminal" | "Cha
     await page.locator("#terminal-toggle").click();
   }
 }
+// Touch mode keeps Follow in the sidebar header's menu.
+async function clickFollow(page: Page) {
+  const menu = page.locator("#sidebar-menu-toggle");
+  const inMenu = !(await page.locator("#follow-toggle").isVisible()) && await menu.isVisible();
+  if (inMenu) await menu.click();
+  await page.getByRole("button", { name: "Follow", exact: true }).click();
+  if (inMenu) await menu.click();
+}
 async function picker(page: Page) {
+  // Already open: the switcher covers the tab bar on touch.
+  if (await page.locator("#hub-menu").isVisible()) return;
   await surface(page, "Files");
   await openHubMenu(page);
 }
@@ -85,12 +95,12 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(`${hub.origin}/s/${parentId}/`);
     await surface(page, "Files");
-    await page.getByRole("button", { name: "Follow", exact: true }).click();
+    await clickFollow(page);
     await page.locator('[data-item-path="NOTES.md"]').click();
     const sourceConversation = await seed(page, parentId, "source conversation only");
     const sourceTerminal = await terminal(page, hub.workspaces[0]!.path, "source-cwd");
     await picker(page);
-    await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+    await page.getByRole("button", { name: `New worktree in ${parentId}`, exact: true }).click();
     await page.getByRole("menuitem", { name: "New branch / worktree" }).click();
     await page.getByLabel("Name", { exact: true }).fill("feature/browser");
     await page.getByRole("button", { name: "Create", exact: true }).click();
@@ -110,7 +120,7 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await page.getByRole("button", { name: "Open", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/s/${child.workspaceId}/`));
     await surface(page, "Files");
-    await page.getByRole("button", { name: "Follow", exact: true }).click();
+    await clickFollow(page);
     await page.locator('[data-item-path="CHILD.md"]').click();
     await surface(page, "Preview");
     await expect(page.locator("#preview")).toContainText("child-checkout-marker");
@@ -180,7 +190,7 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     // F7: Existing branch does not offer a branch another checkout already
     // holds, so the dialog can no longer reach the occupancy refusal at all.
     await picker(page);
-    await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+    await page.getByRole("button", { name: `New worktree in ${parentId}`, exact: true }).click();
     await page.getByRole("menuitem", { name: "Existing branch", exact: true }).click();
     await page.getByRole("dialog").getByRole("combobox").fill("agent/external");
     await expect(page.locator('[role="option"][data-value="local:agent/external"]')).toHaveCount(0);
@@ -198,23 +208,23 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     // Registration is reached from the fork menu's register list, the one
     // place an unregistered checkout is acted on.
     await picker(page);
-    await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+    await page.getByRole("button", { name: `New worktree in ${parentId}`, exact: true }).click();
     await page.getByRole("menuitem", { name: "Register worktree…", exact: true }).click();
     await page.getByRole("dialog").locator(".wt-card").filter({ hasText: "agent/external" })
       .getByRole("button", { name: "Register workspace", exact: true }).click();
     await expect(page.getByText("Registration does not move files", { exact: false })).toBeVisible();
     await page.getByRole("button", { name: "Register workspace", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    // A registered tree Uatu did not create says so in the picker, instead of
-    // claiming an unknown origin for a branch it never created (decision A).
-    // Scoped to THIS test's own checkout: the desktop and touch runs share one
-    // hub and both register an `agent/external` of the same repository.
+    // The registered tree is a checkout in the switcher, named by its branch
+    // (its provenance stays on the dashboard). Scoped to THIS test's own
+    // checkout: the desktop and touch runs share one hub and both register
+    // an `agent/external` of the same repository.
     const registeredExternal = (await worktreeInventory(page, parentId)).checkouts
       .find((row: { path: string }) => row.path === externalPath);
     await picker(page);
-    await expect(page.locator(`#hub-menu a[data-workspace-id="${registeredExternal.workspaceId}"] .hub-menu-provenance`))
-      .toHaveText("External worktree");
-    await page.locator("#hub-toggle").click();
+    await expect(page.locator(`#hub-menu a[data-workspace-id="${registeredExternal.workspaceId}"] .switcher-row-line1`))
+      .toHaveText("agent/external");
+    await page.keyboard.press("Escape");
     await git(hub.workspaces[0]!.path, ["worktree", "remove", externalPath]);
     await expect.poll(async () => (await worktreeInventory(page, parentId)).checkouts.find((row: { branch: string }) => row.branch === "agent/external")?.availability).toBe("missing");
     await picker(page);
@@ -223,7 +233,7 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await expect(missingRow).toContainText("Missing checkout");
     await expect(missingRow).toHaveAttribute("aria-disabled", "true");
     await captureScreenshot(page, info, `integrated-${touch ? "touch" : "desktop"}-missing`);
-    await page.locator("#hub-toggle").click();
+    await page.keyboard.press("Escape");
     await context(parentId, "NOTES.md", sourceConversation, `${parentId} source notes`, sourceTerminal);
 
     // Hold an authoritative chat inventory response in the old child, switch,

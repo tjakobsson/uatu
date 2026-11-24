@@ -134,7 +134,11 @@ test.describe("touch tab navigation", () => {
     expect(barBox?.width ?? 0).toBeGreaterThanOrEqual(389);
     expect((barBox?.y ?? 0) + (barBox?.height ?? 0)).toBeGreaterThanOrEqual(843);
     // The bar carries only the four surface tabs — no mode control.
-    await expect(page.locator("#touch-tab-bar button")).toHaveCount(4);
+    await expect(page.locator("#touch-tab-bar [role=tab]")).toHaveCount(4);
+    // The switcher button (add-workspace-switcher) is only offered in a Hub
+    // or with GitHub data; this harness serves neither.
+    await expect(page.locator("#touch-tab-bar button:visible")).toHaveCount(4);
+    await expect(page.locator("#switcher-button")).toBeHidden();
     // Desktop-only chrome stays gone in touch mode.
     await expect(page.locator("#terminal-toggle")).toBeHidden();
   });

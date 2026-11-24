@@ -1,5 +1,6 @@
 import { captureTerminalToken, waitForWorkspaceCredential } from "./terminal/client";
 import { initHubNav } from "./shell/hub-nav";
+import { initSwitcher } from "./shell/switcher";
 import { injectPwaLinks, unregisterLegacyServiceWorkers } from "./shell/pwa";
 import { reconcileNotifications } from "./pwa/notification-client.js";
 import { hubUrl, isHubPage } from "./shared/app-url";
@@ -116,6 +117,8 @@ initFindShortcuts();
 initSidebarCollapse();
 initSidebarPanes();
 initPreviewTextSize();
+// The switcher first: the Hub's part registers with it once the Hub answers.
+initSwitcher();
 initHubNav();
 initSidebarWidth();
 initGitLogControls();
