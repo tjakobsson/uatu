@@ -158,9 +158,14 @@ export function normalizeAcpUpdate(params: unknown, memory: AcpMemory, now: numb
       // belongs to the message before it.
       if (memory.live) return { updates: [], outcome: "ignored", eventType };
       const updates = sealOpenBlock(memory, now);
-      if (content?.type === "image" && memory.lastUser) {
+      if (content?.type === "image") {
+        // An image after the message's text joins it; an image with no
+        // message before it is a message of its own (an image-only prompt),
+        // which keeps every later message at its live position.
         const attachment: MessageAttachment = { name: "image", mimeType: text(content.mimeType) ?? "image/png" };
-        memory.lastUser = { ...memory.lastUser, attachments: [...memory.lastUser.attachments ?? [], attachment] };
+        memory.lastUser = memory.lastUser
+          ? { ...memory.lastUser, attachments: [...memory.lastUser.attachments ?? [], attachment] }
+          : nextUserMessage(memory, "", now, { attachments: [attachment] });
         updates.push({ kind: "upsert", item: memory.lastUser });
         return { updates, outcome: "handled", eventType };
       }

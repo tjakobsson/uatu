@@ -225,7 +225,13 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   const running = runs.get(params.sessionId);
   if (running && flag("refuse-steer")) throw new RequestError(-32603, "Antigravity is busy and did not take the message");
   if (running && flag("crash-on-steer")) process.exit(1);
-  updateSession(params.sessionId, session => { session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text } }); });
+  // Replay keeps the prompt's blocks: its text, then each image.
+  updateSession(params.sessionId, session => {
+    for (const block of params.prompt) {
+      if (block.type === "text" && block.text) session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text: block.text } });
+      else if (block.type === "image") session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "image", mimeType: block.mimeType, data: "" } });
+    }
+  });
   if (running) {
     // A steer: the earlier prompt ends now, and this one carries the run.
     return new Promise<PromptResult>(resolve => {

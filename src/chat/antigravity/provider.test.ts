@@ -461,6 +461,20 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect((await prompts())[0]!.params!.prompt).toEqual([{ type: "text", text: "Look" }, { type: "image", mimeType: "image/png", data: Buffer.from([137, 80, 78, 71]).toString("base64") }]);
     });
 
+    test("an image-only message keeps its id after reload, and so do the messages after it", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      const image = path.join(fake.workspace, "pixel.png");
+      await writeFile(image, new Uint8Array([137, 80, 78, 71]));
+      const pictured = await run(session.id, "", { attachments: [{ id: "att-1", name: "pixel.png", mimeType: "image/png", absolutePath: image }] });
+      const after = await run(session.id, "And this");
+      const reread = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reread.dispose());
+      const users = (await reread.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
+      expect(users.map(item => item.id)).toEqual([`message:${pictured.messageId}`, `message:${after.messageId}`]);
+      expect(users[0]).toEqual(expect.objectContaining({ attachments: [{ name: "image", mimeType: "image/png" }] }));
+    });
+
     test("attachments are not declared when agy does not advertise image prompts", async () => {
       const { fake, provider } = await setup();
       await fake.setFlag("no-image", true);

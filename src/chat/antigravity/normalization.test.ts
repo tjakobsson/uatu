@@ -104,6 +104,14 @@ describe("normalizeAcpUpdate (D5)", () => {
     expect(send(live(), chunk("user_message_chunk", "Echo")).outcome).toBe("ignored");
   });
 
+  test("an image-only message in replay keeps its place, so later ids match the live ones", () => {
+    const memory = createAcpMemory(SESSION, CWD);
+    const rows = [{ sessionUpdate: "user_message_chunk", content: { type: "image", mimeType: "image/png", data: "" } }, chunk("agent_message_chunk", "A picture"), chunk("user_message_chunk", "Next")]
+      .flatMap(update => items(send(memory, update)));
+    expect([...new Set(rows.map(row => row.id))]).toEqual([`message:${SESSION}.u1`, `message:${SESSION}.a1.1`, `message:${SESSION}.u2`]);
+    expect(rows[0]).toEqual(expect.objectContaining({ text: "", attachments: [{ name: "image", mimeType: "image/png" }] }));
+  });
+
   test("an image in a reply is captured under antigravity:message:<id>", () => {
     const memory = live();
     const [reply] = items(send(memory, chunk("agent_message_chunk", "Here is a chart: ![chart](chart.svg)")));
