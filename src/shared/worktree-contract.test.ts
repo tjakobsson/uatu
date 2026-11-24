@@ -372,6 +372,15 @@ describe("contract validation refuses shapes the UI could not trust", () => {
     expect(() => parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "existing-local", base: { kind: "remote", ref: "origin/release" } })).toThrow(/local ref/);
   });
 
+  test("only a successful creation reports a pull request head, as 12 hex digits", () => {
+    const success = { ok: true, operationId: "o", kind: "create", phase: "complete", registered: false, started: false };
+    expect(parseWorktreeOperationResult({ ...success, pullRequestHead: "0123456789ab" })).toMatchObject({ pullRequestHead: "0123456789ab" });
+    expect(() => parseWorktreeOperationResult({ ...success, pullRequestHead: "HEAD" })).toThrow(/invalid pullRequestHead/);
+    expect(() => parseWorktreeOperationResult({ ...success, kind: "register", pullRequestHead: "0123456789ab" })).toThrow(/only a creation/);
+    expect(() => parseWorktreeOperationResult({ ok: false, operationId: "o", kind: "create", error: { code: "internal", message: "x", retry: "none" }, pullRequestHead: "0123456789ab" }))
+      .toThrow(/refused/);
+  });
+
   test("a successful result cannot also carry a failure", () => {
     expect(() => parseWorktreeOperationResult({ ok: true, operationId: "o", kind: "create", phase: "complete", registered: true, started: false, error: { code: "internal", message: "x", retry: "none" } }))
       .toThrow(/cannot carry an error/);

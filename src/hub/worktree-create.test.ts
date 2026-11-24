@@ -528,7 +528,7 @@ describe("pull request checkouts (pull-request mode)", () => {
       base: { kind: "local", ref: "pr/57" },
       sourceRef: "refs/pull/57/head",
       upstream: "refs/pull/57/head",
-      pullRequest: { number: 57, remote: "origin", headRef: "refs/pull/57/head", headOid: HEAD, createBranch: true },
+      pullRequest: { number: 57, remote: "origin", headRef: "refs/pull/57/head", headOid: HEAD, createBranch: true, checkoutOid: HEAD },
       destination: "/tmp/uatu-pr/atlas.worktrees/pr-57",
       disambiguated: false,
     });

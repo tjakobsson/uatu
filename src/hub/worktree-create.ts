@@ -73,6 +73,9 @@ export type WorktreePullRequestPlan = {
   readonly headOid: string;
   // False when an existing `pr/<n>` with exactly this upstream is reused.
   readonly createBranch: boolean;
+  // The commit the checkout will have: the fetched head for a new branch,
+  // the existing branch's own tip (unchanged) for a reused one.
+  readonly checkoutOid?: string;
 };
 
 export type WorktreeCreationPlan = {
@@ -101,6 +104,8 @@ export type WorktreeCreationPlan = {
 export type WorktreePullRequestFacts = {
   readonly headOid: string;
   readonly existingUpstream?: { readonly remote?: string; readonly merge?: string };
+  // The existing branch's tip, when there is one.
+  readonly existingOid?: string;
 };
 
 export type WorktreeCreationInput = {
@@ -162,7 +167,8 @@ function planPullRequest(
       refuse("branch-exists", `A branch named ${branch} already exists and does not track pull request #${number} on ${remote}. Nothing was reset; rename or delete that branch, then try again.`);
     }
   }
-  return { number, remote, headRef, headOid: facts.headOid, createBranch: !exists };
+  const checkoutOid = exists ? facts.existingOid : facts.headOid;
+  return { number, remote, headRef, headOid: facts.headOid, createBranch: !exists, ...(checkoutOid === undefined ? {} : { checkoutOid }) };
 }
 
 export async function planWorktreeCreation(input: WorktreeCreationInput): Promise<WorktreeCreationPlan> {

@@ -423,7 +423,13 @@ export class WorktreeService {
     if (!fetched.ok) return { error: fetched.error };
     const branch = pullRequestWorktreeBranch(request.pullRequest.number);
     if (!view.refs.local.includes(branch)) return { headOid: fetched.headOid };
-    return { headOid: fetched.headOid, existingUpstream: await readBranchUpstream(this.run, view.source.path, branch) };
+    const tip = await this.run(["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`], view.source.path);
+    const existingOid = tip.exitCode === 0 && !tip.timedOut ? tip.stdout.trim() : undefined;
+    return {
+      headOid: fetched.headOid,
+      existingUpstream: await readBranchUpstream(this.run, view.source.path, branch),
+      ...(existingOid ? { existingOid } : {}),
+    };
   }
 
   private async createWhileFenced(
@@ -546,6 +552,7 @@ export class WorktreeService {
         checkout: { ...checkout, running: registration.started },
         registered: true,
         started: registration.started,
+        ...(plan.pullRequest === undefined ? {} : { pullRequestHead: plan.pullRequest.headOid.slice(0, 12) }),
         ...(registration.startError === undefined
           ? {}
           : { startError: WorktreeOperationError.of("start-failed", `The workspace could not be started: ${registration.startError}. It remains stopped; retry Start.`, { retry: "retry-start" }).detail }),
@@ -1156,6 +1163,7 @@ export class WorktreeService {
       locked: false,
       ...(plan.sourceRef === undefined ? {} : { sourceRef: plan.sourceRef }),
       ...(plan.upstream === undefined ? {} : { upstream: plan.upstream }),
+      ...(plan.pullRequest?.checkoutOid === undefined ? {} : { head: plan.pullRequest.checkoutOid.slice(0, 12) }),
     };
     return checkout;
   }

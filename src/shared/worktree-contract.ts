@@ -469,6 +469,10 @@ export type WorktreeOperationResult =
     // A failed explicit start does NOT fail the operation: the configured
     // workspace stays stopped and this reports why.
     readonly startError?: WorktreeError;
+    // A pull request checkout only: the pull request's head as just fetched
+    // (12 hex digits, like `checkout.head`). It differs from the checkout's
+    // head when an existing `pr/<n>` was reused as it was.
+    readonly pullRequestHead?: string;
   }
   | {
     readonly ok: false;
@@ -721,7 +725,7 @@ function unknownWorktreeInventory(sourceWorkspaceId: string, error: WorktreeErro
 function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
   const record = closed(
     value,
-    ["ok", "operationId", "kind", "phase", "checkout", "registered", "started", "startError", "error", "retainedCheckout"],
+    ["ok", "operationId", "kind", "phase", "checkout", "registered", "started", "startError", "error", "retainedCheckout", "pullRequestHead"],
     "worktree operation result",
   );
   const ok = flag(record, "ok", "worktree operation result");
@@ -740,6 +744,7 @@ function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
         ? record.phase as WorktreePhase
         : fail("worktree operation result has an unknown phase");
   if (!ok) {
+    if (record.pullRequestHead !== undefined) fail("a refused worktree operation result cannot carry a pull request head");
     return {
       ok: false,
       operationId,
@@ -761,7 +766,15 @@ function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
     registered: flag(record, "registered", "worktree operation result"),
     started,
     ...(record.startError === undefined ? {} : { startError: parseWorktreeError(record.startError) }),
+    ...(record.pullRequestHead === undefined ? {} : { pullRequestHead: pullRequestHead(record, kind) }),
   };
+}
+
+function pullRequestHead(record: Record<string, unknown>, kind: WorktreeOperationKind): string {
+  if (kind !== "create") fail("only a creation reports a pull request head");
+  const value = record.pullRequestHead;
+  if (typeof value !== "string" || !/^[0-9a-f]{12}$/.test(value)) fail("worktree operation result has an invalid pullRequestHead");
+  return value as string;
 }
 
 function fingerprintField(record: Record<string, unknown>, field: string, label: string): string {
