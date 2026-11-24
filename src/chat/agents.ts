@@ -239,9 +239,14 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   // Shared and read-only, never consumed: every read within the TTL gets it,
   // and a newer completed listing, a conversation created or renamed here,
   // or an inventory tick from the agent ends it. Bumping an agent's epoch
-  // keeps a listing started before such a change from caching what it missed.
+  // keeps a listing started before such a change from caching what it missed,
+  // and read order fences the rest: a listing that completes after one
+  // started later has completed caches nothing.
   private readonly lateLists = new Map<string, { list: AgentConversationSummary[]; at: number }>();
   private readonly lateListEpochs = new Map<string, number>();
+  // Per agent: the last listing started, and the latest-started one completed.
+  private readonly listingsStarted = new Map<string, number>();
+  private readonly listingsSettled = new Map<string, number>();
   private readonly lateListingTtlMs: number;
   private readonly activitySubscriptions = new Set<MergedActivitySubscription>();
 
@@ -301,6 +306,15 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       if (late && Date.now() - late.at < this.lateListingTtlMs) return late.list;
       if (late) this.lateLists.delete(id);
       const epoch = this.lateListEpochs.get(id) ?? 0;
+      const sequence = (this.listingsStarted.get(id) ?? 0) + 1;
+      this.listingsStarted.set(id, sequence);
+      // True for the latest-started listing to complete so far; an older one
+      // completing after it is superseded.
+      const newest = () => {
+        if (sequence < (this.listingsSettled.get(id) ?? 0)) return false;
+        this.listingsSettled.set(id, sequence);
+        return true;
+      };
       const read = (async () => {
         const conversations = await agent.service.listConversations();
         return conversations.map(summary => qualifyAgentSummary(agent.descriptor, summary));
@@ -321,11 +335,11 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       if (timer !== undefined) clearTimeout(timer);
       if (bounded !== null) {
         // A listing in time is newer than any late one.
-        void read.then(() => { if ((this.lateListEpochs.get(id) ?? 0) === epoch) this.lateLists.delete(id); }, () => undefined);
+        void read.then(() => { if (newest()) this.lateLists.delete(id); }, () => undefined);
         return bounded;
       }
       void read.then(late => {
-        if ((this.lateListEpochs.get(id) ?? 0) !== epoch) return;
+        if (!newest() || (this.lateListEpochs.get(id) ?? 0) !== epoch) return;
         this.lateLists.set(id, { list: late, at: Date.now() });
         if (late.length > 0) this.inventoryHub.tick();
       }, () => undefined);

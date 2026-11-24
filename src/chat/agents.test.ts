@@ -2669,6 +2669,36 @@ describe("inventory", () => {
     subscription.cancel();
   });
 
+  test("a listing that completes after a later-started one answered caches nothing", async () => {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    a.conversations = [summary("ready", 5)];
+    // The first listing is slow and answers last, with a conversation since removed.
+    let answerFirst!: (value: ConversationSummary[]) => void;
+    const answers: Array<() => Promise<ConversationSummary[]>> = [
+      () => new Promise(resolve => { answerFirst = resolve; }),
+      async () => [summary("created", 9)],
+      async () => [summary("created", 9)],
+    ];
+    let reads = 0;
+    b.listConversations = () => answers[reads++]!();
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      inventoryContributionTimeoutMs: 25,
+      agents: [
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
+      ],
+    });
+    const ids = async () => (await service.listConversations()).map(conversation => conversation.id);
+    expect(await ids()).toEqual(["opencode:ready"]);
+    expect(await ids()).toEqual(["claude:created", "opencode:ready"]);
+    answerFirst([summary("removed", 7)]);
+    await Bun.sleep(0);
+    expect(await ids()).toEqual(["claude:created", "opencode:ready"]);
+    expect(reads).toBe(3);
+  });
+
   test("a late listing ends with its TTL: the next read lists again", async () => {
     const { service, listed, ids } = slowListing({ lateListingTtlMs: 150 });
     const subscription = await service.subscribeInventory();
