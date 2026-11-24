@@ -14961,6 +14961,100 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("listConversations reconciles pending move-in active-session probes when a moved-in child is omitted", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-probe-reconcile");
+    const movedOutChild = { ...fixtureSession("c-probe-moved-out"), parentId: parent.id };
+    const stayedChild = { ...fixtureSession("c-probe-stayed"), parentId: parent.id };
+    const foreignMovedOutChild = { ...movedOutChild, directory: `${process.cwd()}-elsewhere` };
+    provider.sessions = [parent];
+    const activeReplies = new Map<number, (ids: string[]) => void>();
+    let activeCalls = 0;
+    provider.listActiveSessions = () => new Promise<string[]>(resolve => {
+      activeCalls += 1;
+      activeReplies.set(activeCalls, resolve);
+    });
+    let currentMovedOutChild: ProviderSession = movedOutChild;
+    const lookedUp: string[] = [];
+    provider.getSession = async id => {
+      lookedUp.push(id);
+      if (id === parent.id) return parent;
+      if (id === movedOutChild.id) return currentMovedOutChild;
+      if (id === stayedChild.id) return stayedChild;
+      return null;
+    };
+
+    const pump = adapter.startEventPump();
+
+    // Case 1: moved-in child leaves again (missed move-out frame) while its active-session probe is pending.
+    const movedIn1 = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: movedOutChild.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: movedOutChild.id, directory: process.cwd(), title: movedOutChild.title, sparse: true },
+    } });
+    await movedIn1;
+    await waitUntil(() => activeReplies.has(1));
+
+    // Child moves out without delivering a second move frame; listConversations omits it and must verify ownership.
+    currentMovedOutChild = foreignMovedOutChild;
+    lookedUp.length = 0;
+    await adapter.listConversations();
+    expect(lookedUp).toContain(movedOutChild.id);
+
+    // Pending global active reply now arrives containing the moved-out child; must be fenced.
+    activeReplies.get(1)!([movedOutChild.id]);
+    await tasks.get(`active.probe:${movedOutChild.id}`);
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests(movedOutChild.id).status).toBe("idle");
+
+    // Case 2: a moved-in child that stays local is still seeded when listConversations omits children.
+    const movedIn2 = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: stayedChild.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: stayedChild.id, directory: process.cwd(), title: stayedChild.title, sparse: true },
+    } });
+    await movedIn2;
+    await waitUntil(() => activeReplies.has(2));
+
+    lookedUp.length = 0;
+    await adapter.listConversations();
+    expect(lookedUp).toContain(stayedChild.id);
+
+    activeReplies.get(2)!([stayedChild.id]);
+    await tasks.get(`active.probe:${stayedChild.id}`);
+    expect(adapter.activity().working).toBe(true);
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {

@@ -2601,6 +2601,7 @@ export class ChatAdapter {
       ...this.backgroundWork.keys(),
       ...this.unresolvedBackgroundWork,
       ...this.pendingInteractions.keys(),
+      ...this.activeSessionProbes.keys(),
     ])];
   }
 
@@ -2784,13 +2785,20 @@ export class ChatAdapter {
     else this.activeSessionProbes.set(id, remaining);
   }
 
-  private async syncActiveSessions(candidateIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
+  private async syncActiveSessions(
+    candidateIds: ReadonlySet<string>,
+    signal?: AbortSignal,
+    initialBaselines?: ReadonlyMap<string, number>,
+  ): Promise<void> {
     if (!this.provider.listActiveSessions || candidateIds.size === 0 || this.disposed || signal?.aborted) return;
     const baselines = new Map<string, number>();
     for (const id of candidateIds) {
-      baselines.set(id, this.statusSequence(id));
+      const baseline = initialBaselines?.get(id) ?? this.statusSequence(id);
+      if (this.statusSequence(id) !== baseline) continue;
+      baselines.set(id, baseline);
       this.beginActiveProbe(id);
     }
+    if (baselines.size === 0) return;
     try {
       let activeIds: string[];
       try {
@@ -2800,9 +2808,8 @@ export class ChatAdapter {
       }
       if (this.disposed || signal?.aborted) return;
       const active = new Set(activeIds);
-      for (const id of candidateIds) {
+      for (const [id, baseline] of baselines) {
         if (!active.has(id)) continue;
-        const baseline = baselines.get(id)!;
         if (this.statusSequence(id) !== baseline) continue;
         const stop = this.stoppingTurns.get(id);
         if (stop) {
@@ -2812,7 +2819,7 @@ export class ChatAdapter {
         this.seedProbedRunning(id, baseline);
       }
     } finally {
-      for (const id of candidateIds) this.endActiveProbe(id);
+      for (const id of baselines.keys()) this.endActiveProbe(id);
     }
   }
 
@@ -7415,8 +7422,13 @@ export class ChatAdapter {
         boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
         this.scheduleBackgroundRecovery(lifecycle.id);
       }
-      if (confirmed !== undefined) {
-        void this.runTask(`active.probe:${lifecycle.id}`, () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal));
+      if (confirmed !== undefined && this.provider.listActiveSessions) {
+        const probeBaseline = this.statusSequence(lifecycle.id);
+        this.beginActiveProbe(lifecycle.id);
+        void this.runTask(
+          `active.probe:${lifecycle.id}`,
+          () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal, new Map([[lifecycle.id, probeBaseline]])),
+        ).catch(() => undefined).finally(() => this.endActiveProbe(lifecycle.id));
       }
       return true;
     }
