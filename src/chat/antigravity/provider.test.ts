@@ -23,9 +23,9 @@ import { AntigravityRuntime } from "./runtime";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(options: { idleReleaseMs?: number; prices?: AntigravityPriceTable } = {}) {
+async function setup(options: { idleReleaseMs?: number; prices?: AntigravityPriceTable; setupDeadlineMs?: number } = {}) {
   const fake = await installFakeAgy();
-  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices });
+  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs });
   const events: NormalizedProviderEvent[] = [];
   const controller = new AbortController();
   void (async () => { for await (const event of provider.events(controller.signal)) events.push(event); })();
@@ -104,6 +104,15 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await provider.dispose();
       expect(await fake.running()).toBe(0);
       await expect(listing).rejects.toThrow();
+    });
+
+    for (const stuck of ["hang-initialize", "hang-list"] as const) test(`a listing stuck in ${stuck === "hang-initialize" ? "initialize" : "session/list"} is ended at its deadline, however often it is refreshed`, async () => {
+      const { fake, provider } = await setup({ setupDeadlineMs: 600 });
+      await fake.setFlag(stuck, true);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await expect(provider.listSessions()).rejects.toThrow(`Antigravity did not answer ${stuck === "hang-initialize" ? "initialize" : "session/list"} within`);
+        expect(await fake.running()).toBe(0);
+      }
     });
 
     test("a crashed leader's process group is reaped", async () => {

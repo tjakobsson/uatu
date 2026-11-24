@@ -25,6 +25,9 @@ import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nex
 const IDLE_RELEASE_MS = 5 * 60_000;
 const DEFAULT_TITLE = "New conversation";
 const LIST_PAGE_LIMIT = 20;
+// How long agy may take to answer `initialize` or a listing before its
+// process is ended, so a hung agy cannot pile up children.
+const SETUP_DEADLINE_MS = 30_000;
 // How long a prompt whose connection closed waits to learn whether its
 // process exited, which names the failure.
 const PROCESS_EXIT_WAIT_MS = 1_000;
@@ -87,6 +90,7 @@ export type AntigravityProviderOptions = {
   termGraceMs?: number;
   // The built-in price table unless a test supplies its own.
   prices?: AntigravityPriceTable;
+  setupDeadlineMs?: number;
   // Where agy keeps its transcripts (`~/.gemini/...`): the home directory of
   // the workspace process unless a test supplies its own.
   homeDirectory?: string;
@@ -115,6 +119,7 @@ export class AntigravityProvider implements ChatProvider {
   private readonly termGraceMs?: number;
   private readonly prices: AntigravityPriceTable;
   private readonly homeDirectory: string;
+  private readonly setupDeadlineMs: number;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly interactions = new PendingInteractions<PermissionDetail>((conversationId, event) => this.publish({ ...event, conversationId }));
   private readonly conversations = new Map<string, Conversation>();
@@ -141,6 +146,7 @@ export class AntigravityProvider implements ChatProvider {
     this.termGraceMs = options.termGraceMs;
     this.prices = options.prices ?? ANTIGRAVITY_PRICES;
     this.homeDirectory = options.homeDirectory ?? os.homedir();
+    this.setupDeadlineMs = options.setupDeadlineMs ?? SETUP_DEADLINE_MS;
   }
 
   describe(): ChatAgent {
@@ -562,7 +568,7 @@ export class AntigravityProvider implements ChatProvider {
     this.processes.add(process);
     void process.settled.then(() => this.processes.delete(process));
     try {
-      await process.ready;
+      await withDeadline(process.ready, this.setupDeadlineMs, "initialize");
     } catch (error) {
       await this.closeProcess(process);
       throw error;
@@ -580,7 +586,7 @@ export class AntigravityProvider implements ChatProvider {
   private async withListingProcess<T>(read: (process: AcpProcess) => Promise<T>): Promise<T | "login-missing"> {
     const process = await this.startProcess();
     try {
-      const value = await read(process);
+      const value = await withDeadline(read(process), this.setupDeadlineMs, "session/list");
       this.setLogin("ok");
       return value;
     } catch (error) {
@@ -834,6 +840,15 @@ export class AntigravityProvider implements ChatProvider {
     await Promise.all(processes.map(process => process.settled));
     this.events_.close();
   }
+}
+
+/** The promise's outcome, or a failure naming the step once the deadline passes. */
+function withDeadline<T>(promise: Promise<T>, milliseconds: number, step: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Antigravity did not answer ${step} within ${Math.round(milliseconds / 1000)}s`)), milliseconds);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
 function applyUpdates(items: ConversationItem[], updates: NormalizedProviderEvent["updates"]): void {
