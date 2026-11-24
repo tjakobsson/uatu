@@ -29,7 +29,10 @@ become observable; the refactors themselves are described in `design.md` and
   Chat links to the Hub's Settings only for a Hub-managed login; otherwise it
   shows the agent's own command. One constant per agent replaces the duplicated
   login commands in chat and the Hub. Copy that names a fixed agent is
-  corrected.
+  corrected. One approved difference: the login notice decides whether a page
+  is Hub-served from the Hub's page marker, not the URL's shape, so a
+  standalone run with `--base-path` shows the agent's login command instead of
+  a Settings link that leads nowhere.
 - Pending permission and question requests move into a shared holder that any
   provider can use. Claude Code behaves as before apart from these approved
   differences (design D4):
@@ -45,15 +48,23 @@ become observable; the refactors themselves are described in `design.md` and
   - approving a displaced query's plan switches only that query: no
     `plan.approved` is emitted and the conversation's mode stays unchanged;
   - committing a staged revert sweeps any request the interrupt left pending
-    before the replacement starts.
+    before the replacement starts;
+  - manual renames of one conversation run one at a time and wait for an
+    automatic title write already under way, outside shutdown too;
+  - pending requests are keyed by conversation, kind and id, not by id alone,
+    so two conversations that share a request id each keep an answerable
+    card;
+  - a failed wakeup cancel returns an otherwise idle conversation to idle and
+    releases its process.
 - The end-to-end harness routes requests to any number of fake agents keyed by
   agent id.
 - **BREAKING** for strict workspace API validators: the agent descriptor gains
   its login declaration. The workspace API revision and the bundled web
   revision are bumped.
 
-OpenCode behaves as it does today. Claude Code does too, apart from the approved
-differences listed above and the deliberate differences design D4 records for
+OpenCode behaves as it does today, apart from the login notice difference
+above. Claude Code does too, apart from that difference, the approved
+differences listed above, and the deliberate differences design D4 records for
 workspace shutdown and prompt delivery (such as a revert's replacement being
 acknowledged only once Claude Code has taken it). Beyond those, the only visible
 differences are startup messages that name the agent that failed and corrected
