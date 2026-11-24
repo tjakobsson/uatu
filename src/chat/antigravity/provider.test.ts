@@ -9,6 +9,7 @@ import type { ConversationItem } from "../types";
 import { ConversationNotFoundError } from "../workspace";
 import { pathAgentRuntime } from "../path-agent-runtime";
 import { LazyChatService } from "../service";
+import type { AntigravityPriceTable } from "./pricing";
 import { AntigravityProvider } from "./provider";
 import { AntigravityRuntime } from "./runtime";
 
@@ -19,9 +20,9 @@ import { AntigravityRuntime } from "./runtime";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(options: { idleReleaseMs?: number } = {}) {
+async function setup(options: { idleReleaseMs?: number; prices?: AntigravityPriceTable } = {}) {
   const fake = await installFakeAgy();
-  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500 });
+  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices });
   const events: NormalizedProviderEvent[] = [];
   const controller = new AbortController();
   void (async () => { for await (const event of provider.events(controller.signal)) events.push(event); })();
@@ -363,6 +364,31 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await fake.setFlag("auth-missing", false);
       await service.listConversations();
       expect(await service.status()).toEqual(expect.objectContaining({ state: "ready", login: "ok" }));
+    });
+  });
+  describe("cost (D11)", () => {
+    const prices: AntigravityPriceTable = { source: "test", snapshot: "2026-11-24", models: { "gemini-4-neon": { input: 1, output: 10, cacheRead: 0.1, from: "test" } }, families: {} };
+    const carriers = (upserts: (id: string) => ConversationItem[], sessionId: string) => upserts(sessionId).filter(item => item.id.startsWith("usage:")) as Array<Extract<ConversationItem, { type: "assistant_message" }>>;
+
+    test("each turn is priced into its usage, at the same rate whatever the thinking level", async () => {
+      const { provider, run, upserts } = await setup({ prices });
+      const session = await provider.createSession("a");
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-neon" }, "low");
+      await run(session.id, "Say hello");
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-neon" }, "xhigh");
+      await run(session.id, "Say hello again");
+      const [low, high] = carriers(upserts, session.id);
+      // 8886 input and 32 output tokens (thinking inside output), no cached reads.
+      expect(low!.usage!.costUsd).toBeCloseTo((8886 * 1 + 32 * 10) / 1_000_000, 12);
+      expect(high!.usage!.costUsd).toBe(low!.usage!.costUsd!);
+    });
+
+    test("a turn on an unpriced model has no cost", async () => {
+      const { provider, run, upserts } = await setup({ prices });
+      const session = await provider.createSession("a");
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-argon" });
+      await run(session.id, "Say hello");
+      expect(carriers(upserts, session.id)[0]!.usage).not.toHaveProperty("costUsd");
     });
   });
 });

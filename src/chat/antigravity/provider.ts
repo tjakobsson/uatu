@@ -14,6 +14,8 @@ import { ConversationNotFoundError } from "../workspace";
 import { catalogFromSession, variantFor, type AcpCatalog } from "./catalog";
 import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./connection";
 import { ANTIGRAVITY_AGENT } from "./descriptor";
+import { ANTIGRAVITY_PRICES } from "./prices";
+import { priceTurn, type AntigravityPriceTable } from "./pricing";
 import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nextUserMessage, normalizeAcpUpdate, sealOpenBlock, toolItems, userMessageId, type AcpMemory } from "./normalization";
 
 // A conversation with no turn, no open permission and no history read in
@@ -70,6 +72,8 @@ export type AntigravityProviderOptions = {
   spawn?: AcpSpawn;
   stdinCloseGraceMs?: number;
   termGraceMs?: number;
+  // The built-in price table unless a test supplies its own.
+  prices?: AntigravityPriceTable;
 };
 
 const STOP_FAILURES: Record<string, string> = {
@@ -93,6 +97,7 @@ export class AntigravityProvider implements ChatProvider {
   private readonly spawn?: AcpSpawn;
   private readonly stdinCloseGraceMs?: number;
   private readonly termGraceMs?: number;
+  private readonly prices: AntigravityPriceTable;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly interactions = new PendingInteractions<PermissionDetail>((conversationId, event) => this.publish({ ...event, conversationId }));
   private readonly conversations = new Map<string, Conversation>();
@@ -115,6 +120,7 @@ export class AntigravityProvider implements ChatProvider {
     this.spawn = options.spawn;
     this.stdinCloseGraceMs = options.stdinCloseGraceMs;
     this.termGraceMs = options.termGraceMs;
+    this.prices = options.prices ?? ANTIGRAVITY_PRICES;
   }
 
   describe(): ChatAgent {
@@ -356,6 +362,10 @@ export class AntigravityProvider implements ChatProvider {
     const carrierId = `${conversation.sessionId}.t${turn.userIndex}`;
     const model = memory.model;
     const hasUsage = Object.keys(turn.usage).length > 0;
+    // agy reports tokens only; the built-in table prices them (design D11).
+    // An unpriced model leaves the cost absent, which is not zero.
+    const costUsd = hasUsage ? priceTurn(turn.usage, model?.modelId, this.prices) : undefined;
+    if (costUsd !== undefined) turn.usage.costUsd = costUsd;
     if (hasUsage) {
       updates.push({ kind: "upsert", item: { id: `usage:${carrierId}`, type: "assistant_message", createdAt: now, markdown: "", usage: { ...turn.usage }, ...(model ? { model } : {}) } });
       conversation.accounting.push({ messageId: carrierId, createdAt: now, usage: { ...turn.usage }, ...(model ? { model: model.modelId } : {}) });
