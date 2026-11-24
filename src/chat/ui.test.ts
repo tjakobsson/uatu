@@ -3914,6 +3914,8 @@ describe("chat reversible-history composer", () => {
       const send = document.querySelector<HTMLButtonElement>("#chat-send")!;
       expect(send.getAttribute("aria-label")).toBe(status === "running" ? "Send as steer; hold 2.5 seconds to queue" : "Send message");
       expect(document.querySelector(".chat-send-group")!.hasAttribute("data-steering")).toBe(true);
+      // The hold-to-queue gesture is offered as for a steering agent.
+      expect(document.querySelector("#chat-send-help")!.textContent).toContain("Hold Send or Space: after 0.5 seconds, a 2-second queue countdown starts.");
       // The dock never offers a switch to steer; Send now only while idle.
       expect(document.querySelector('[data-queue-steer="held"]')).toBeNull();
       expect(!!document.querySelector('[data-queue-send-now="held"]')).toBe(status === "idle");

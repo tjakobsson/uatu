@@ -64,3 +64,22 @@ test("an immediate steer joins the turn once, with no Steer entry, while Alt+Ent
   await expect(page.locator("#chat-items [data-chat-item-id^='message:']").filter({ hasText: "After this turn" })).toHaveCount(1);
   await expect(steered).toHaveCount(1);
 });
+
+test("holding Send for 2.5 seconds queues on an immediate-steering agent", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await boot(page, request);
+  await submit(page, "Start the work", "Enter");
+  await expect(page.locator("#chat-stop")).toBeEnabled();
+  await page.locator("#chat-input").fill("Hold to queue this");
+  const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+  const box = (await page.locator("#chat-send").boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  const response = await accepted;
+  await page.mouse.up();
+  expect(await response.json()).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+  expect(JSON.parse(response.request().postData() ?? "{}")).toEqual(expect.objectContaining({ delivery: "queue" }));
+  await openChatPending(page);
+  await expect(page.locator(".chat-queued-message")).toContainText("Hold to queue this");
+  await expect(page.locator("#chat-items [data-chat-item-id^='message:']").filter({ hasText: "Hold to queue this" })).toHaveCount(0);
+});

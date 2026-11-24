@@ -16682,6 +16682,38 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     } finally { await adapter.dispose(); await rm(directory, { recursive: true, force: true }); }
   });
 
+  test("a carried turn sends no completion notification and keeps the workspace working until it ends", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now"] };
+    provider.sessions = [fixtureSession("session")];
+    const notifications: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => notifications.push(event) });
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    const turn = (status: "running" | "completed", phase: "started" | "completed") => provider.eventQueue.push({ normalized: {
+      conversationId: "session", updates: [{ kind: "status", status }], outcome: "handled", eventType: `turn.${phase}`,
+      notificationTurns: [{ sourceId: "turn-1", phase, createdAt: Date.now() }],
+    } });
+    const completions = () => notifications.filter(event => event.type === "notification" && event.notification.kind === "turn-completed");
+    try {
+      await adapter.history("session");
+      turn("running", "started");
+      await liveEventsApplied(adapter, provider);
+      expect(adapter.activity().working).toBe(true);
+      const held = await adapter.prompt("session", "r-q", "after the turn", undefined, undefined, undefined, undefined, "queue");
+      await adapter.prompt("session", "r-s", "into the turn", undefined, undefined, undefined, undefined, "steer");
+      // The provider reports nothing for the earlier prompt's end, so the
+      // steered turn is still the same running turn.
+      await Bun.sleep(30);
+      expect(completions()).toEqual([]);
+      expect(adapter.activity().working).toBe(true);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => entry.id)).toEqual([held.messageId]);
+      turn("completed", "completed");
+      await waitUntil(() => completions().length === 1);
+      await waitUntil(() => provider.prompts.length === 2);
+      expect(provider.prompts.map(prompt => [prompt.text, prompt.delivery])).toEqual([["into the turn", "steer"], ["after the turn", "queue"]]);
+    } finally { await adapter.dispose(); }
+  });
+
   test("Send now keeps the rule for agents without steering", async () => {
     const { adapter, queue } = immediate();
     try {
