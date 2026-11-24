@@ -44,7 +44,7 @@ commit that passes `bun run test:ci` on its own.
 - [x] 3.8 Implement immediate steering for agy: serialize prompts, send a steer as a further `session/prompt`, publish no status for the superseded prompt's `end_turn`, keep one turn token across the steer, and give live user messages the ids replay derives. Verify with provider tests against the mid-turn fixture: one turn, one user message after reload, and held messages waiting for the carried turn.
 - [x] 3.9 Implement image attachments gated on the advertised prompt capabilities. Verify with tests that attachments are declared and sent as image blocks when advertised, and not declared otherwise.
 - [x] 3.10 Implement the login-missing state from -32000, its recheck on listing, retry and prompt, and "Antigravity login failed" turn failures. Verify with provider and service tests.
-- [ ] 3.11 Register Antigravity last in `src/cli.ts`, declaring the capabilities in the `antigravity-chat` spec. Verify with a service test that chat status lists OpenCode, Claude Code and Antigravity in order with OpenCode as default, that the declaration matches the spec, and that `bun run test:ci` passes.
+- [x] 3.11 Register Antigravity last in `src/cli.ts`, declaring the capabilities in the `antigravity-chat` spec. Verify with a service test that chat status lists OpenCode, Claude Code and Antigravity in order with OpenCode as default, that the declaration matches the spec, and that `bun run test:ci` passes.
 
 ## 4. Price table (commit 4)
 

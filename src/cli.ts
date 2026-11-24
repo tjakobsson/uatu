@@ -16,14 +16,8 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, serveRemovedText, usageText, versionText, type WatchOptions } from "./cli/parse";
-import { LazyChatService } from "./chat/service";
 import { MultiAgentChatService } from "./chat/agents";
-import { CLAUDE_CODE_AGENT } from "./chat/claude/descriptor";
-import { ClaudeProvider } from "./chat/claude/provider";
-import { ClaudeRuntime } from "./chat/claude/runtime";
-import { openCodeAgentRuntime } from "./chat/opencode/agent-runtime";
-import { OPENCODE_AGENT } from "./chat/opencode/descriptor";
-import { pathAgentRuntime } from "./chat/path-agent-runtime";
+import { registeredChatAgents } from "./chat/registered-agents";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
 import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
@@ -210,35 +204,9 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
   const chatRoot = await selectCanonicalChatRoot(rootEntries);
 
   try {
-    // Two agents, each with its own runtime nature (D4): OpenCode as a
-    // spawned loopback server, Claude Code as probe-only with
-    // per-conversation SDK sessions. Registration order is the picker
-    // order and the server default.
     chatService = new MultiAgentChatService({
       workspacePath: chatRoot,
-      agents: [
-        {
-          descriptor: OPENCODE_AGENT,
-          service: new LazyChatService({
-            workspacePath: chatRoot,
-            metrics,
-            agentName: OPENCODE_AGENT.name,
-            runtime: openCodeAgentRuntime({ workspacePath: chatRoot }),
-          }),
-        },
-        {
-          descriptor: CLAUDE_CODE_AGENT,
-          service: new LazyChatService({
-            workspacePath: chatRoot,
-            metrics,
-            agentName: CLAUDE_CODE_AGENT.name,
-            runtime: pathAgentRuntime(
-              new ClaudeRuntime({ workspacePath: chatRoot }),
-              executable => new ClaudeProvider({ workspacePath: chatRoot, executable }),
-            ),
-          }),
-        },
-      ],
+      agents: registeredChatAgents({ workspacePath: chatRoot, metrics }),
     });
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,

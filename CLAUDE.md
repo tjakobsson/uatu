@@ -69,10 +69,16 @@ src/
 │                   v1/ is the 1.x provider on `@opencode-ai/sdk` and its
 │                   normalization, v2/ the 2.x provider on
 │                   `@opencode/client`; the shared normalization core sits
-│                   at the root) and chat/claude/ (probe runtime,
+│                   at the root), chat/claude/ (probe runtime,
 │                   per-conversation SDK sessions, transcript reader,
 │                   model catalog, normalization, account: what
-│                   `accountInfo()` says about the login). One conversation is
+│                   `accountInfo()` says about the login) and
+│                   chat/antigravity/ (the `agy` PATH runtime, connection:
+│                   one `agy acp` process over the official ACP SDK,
+│                   provider: a process per live conversation and replay
+│                   history, normalization, catalog: models and thinking
+│                   levels). registered-agents lists the offered agents in
+│                   picker order, which cli.ts registers. One conversation is
 │                   owned by one agent for life; ids are agent-qualified
 │                   on the wire (`<agentId>:<providerId>`). Each agent's
 │                   `sdk-coverage.ts` holds the hand-kept annotations for
