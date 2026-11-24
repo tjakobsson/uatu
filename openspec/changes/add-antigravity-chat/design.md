@@ -272,7 +272,11 @@ a size bound. It validates each line's shape and adds permission outcomes,
 file-read output, and per-turn tokens and model to the matching replayed rows,
 matched by tool call id and turn order. A missing file, an unreadable file,
 or a file whose shape is not recognized leaves the replayed history unchanged
-and is logged at debug level only. Live turns take tokens from
+and is logged at debug level only. When agy refuses to load a listed
+conversation because its login has expired, the transcript alone gives its
+history (messages, replies, thoughts and tool rows under the ids replay
+uses), so it stays readable; without a transcript it cannot be read until
+agy is signed in again. Live turns take tokens from
 `PromptResponse.usage` when present, and from the transcript after the turn
 otherwise.
 

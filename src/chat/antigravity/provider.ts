@@ -17,7 +17,7 @@ import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./c
 import { ANTIGRAVITY_AGENT } from "./descriptor";
 import { ANTIGRAVITY_PRICES } from "./prices";
 import { priceTurn, ratesFor, type AntigravityPriceTable } from "./pricing";
-import { enrichReplay, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
+import { enrichReplay, historyFromTranscript, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
 import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nextUserMessage, normalizeAcpUpdate, sealOpenBlock, toolItems, userMessageId, type AcpMemory } from "./normalization";
 
 // A conversation with no turn, no open permission and no history read in
@@ -244,7 +244,11 @@ export class AntigravityProvider implements ChatProvider {
     if (!conversation.seeded) {
       conversation.holds += 1;
       try { await this.ensureProcess(conversation); }
-      finally { conversation.holds -= 1; this.scheduleIdle(conversation); }
+      catch (error) {
+        // A listed conversation stays readable when agy's login has expired:
+        // its transcript is read on its own (spec: login-missing state).
+        if (rpcErrorCode(error) !== AUTH_REQUIRED_CODE || !await this.seedFromTranscript(conversation)) throw error;
+      } finally { conversation.holds -= 1; this.scheduleIdle(conversation); }
     }
     const items = conversation.items;
     const end = historyPageEnd(options.cursor, conversation.version, items.length);
@@ -606,6 +610,20 @@ export class AntigravityProvider implements ChatProvider {
       return process;
     })().finally(() => { conversation.starting = undefined; });
     return conversation.starting;
+  }
+
+  /** History from the transcript alone, when agy cannot load the conversation. */
+  private async seedFromTranscript(conversation: Conversation): Promise<boolean> {
+    const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
+    if (!("steps" in read) || conversation.seeded) return conversation.seeded;
+    const items = historyFromTranscript(read.steps, conversation.sessionId, this.now());
+    conversation.items.splice(0, conversation.items.length, ...items);
+    const memory = conversation.memory;
+    memory.userCount = items.filter(item => item.type === "user_message").length;
+    memory.blockCount = 0;
+    await this.enrichFromTranscript(conversation);
+    conversation.seeded = true;
+    return true;
   }
 
   /** Add what replay omits from agy's transcript, or leave replay as it is (design D10). */

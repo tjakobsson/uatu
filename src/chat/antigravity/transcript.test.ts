@@ -102,6 +102,24 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
     });
   }
 
+  test("a listed conversation stays readable from its transcript after agy's login expires", async () => {
+    await placeTranscript();
+    const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, homeDirectory: home, prices });
+    try {
+      expect((await provider.listSessions()).map(session => session.id)).toContain(sessionId);
+      await fake.setFlag("auth-missing", true);
+      const items = (await provider.listMessages(sessionId, { limit: 500 })).items;
+      expect(items.filter(item => item.type === "user_message").map(item => [item.id, item.type === "user_message" && item.text])).toEqual([
+        [`message:${sessionId}.u1`, "Say hello"], [`message:${sessionId}.u2`, "read: README.md"], [`message:${sessionId}.u3`, "write: a file"],
+      ]);
+      expect(items.some(item => item.type === "assistant_message" && item.markdown === "The README describes a small fixture workspace.")).toBe(true);
+      expect(tool(items, "read_file")?.output).toBe("Showing lines 1-1 of 1\n1: # Fixture workspace");
+      expect(tool(items, "write_file")).toEqual(expect.objectContaining({ status: "failed", error: 'permission check failed for write_file "hello.txt"' }));
+      expect(carriers(items)).toHaveLength(3);
+      expect(provider.loginState()).toBe("missing");
+    } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
+  });
+
   test("reading the transcript leaves it byte-identical", async () => {
     const file = await placeTranscript();
     const digest = async () => createHash("sha256").update(await readFile(file)).digest("hex");

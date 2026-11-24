@@ -2,8 +2,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type { StoredMessageAccounting } from "../provider";
+import { CHAT_TEXT_SEAL, executionEvidence } from "../turn-liveness";
 import type { ConversationItem, ModelSelection, TokenUsage } from "../types";
 import { ANTIGRAVITY_PROVIDER_ID } from "./normalization";
+import { nativeVisualMessageIdentity } from "../visual-identity";
+import { ANTIGRAVITY_AGENT } from "./descriptor";
 
 /**
  * agy's own transcript of a conversation, read to add what `session/load`
@@ -28,7 +31,8 @@ type Step = {
   input?: number;
   output?: number;
   cacheRead?: number;
-  toolCalls: number;
+  toolNames: string[];
+  thinking?: string;
   content?: string;
   error?: string;
 };
@@ -57,11 +61,11 @@ export async function readTranscript(file: string, maxBytes = TRANSCRIPT_MAX_BYT
     try { value = JSON.parse(line); } catch { return { skipped: "unrecognized" }; }
     // Every step names its index and type; anything else is not a format we know.
     if (!value || typeof value !== "object" || typeof value.step_index !== "number" || typeof value.type !== "string") return { skipped: "unrecognized" };
-    const toolCalls = Array.isArray(value.tool_calls) ? value.tool_calls.length : 0;
+    const toolNames = Array.isArray(value.tool_calls) ? value.tool_calls.map(call => text((call as Record<string, unknown> | null)?.name) ?? "tool") : [];
     steps.push({
       type: value.type, status: text(value.status), model: text(value.model),
       input: count(value.input_tokens), output: count(value.output_tokens), cacheRead: count(value.cache_read_tokens),
-      toolCalls, content: text(value.content), error: text(value.error),
+      toolNames, thinking: text(value.thinking), content: text(value.content), error: text(value.error),
     });
   }
   return steps.length ? { steps } : { skipped: "unrecognized" };
@@ -157,4 +161,46 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
   }
   closeTurn(result.at(-1)?.createdAt ?? 0);
   return { items: result, accounting };
+}
+
+/**
+ * History built from the transcript alone, for a conversation agy will not
+ * load (its login has expired): the user's messages, replies, thoughts and
+ * tool rows, with the ids replay gives them, so the conversation stays
+ * readable. Tool output and tokens come from enrichReplay as usual.
+ */
+export function historyFromTranscript(steps: Step[], sessionId: string, createdAt: number): ConversationItem[] {
+  const items: ConversationItem[] = [];
+  let user = 0;
+  let block = 0;
+  let tool = 0;
+  const pendingTools: Array<Extract<ConversationItem, { type: "tool" }>> = [];
+  for (const step of steps) {
+    if (step.type === "USER_INPUT") {
+      user += 1; block = 0;
+      const request = step.content?.match(/<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/)?.[1] ?? step.content ?? "";
+      items.push({ id: `message:${sessionId}.u${user}`, type: "user_message", createdAt, text: request.trim() });
+    } else if (user > 0 && step.type === "PLANNER_RESPONSE") {
+      if (step.thinking) {
+        block += 1;
+        items.push({ id: `reasoning:${sessionId}.r${user}.${block}`, type: "reasoning", createdAt, text: step.thinking, status: "completed" });
+      }
+      if (step.content) {
+        block += 1;
+        const id = `${sessionId}.a${user}.${block}`;
+        items.push({ id: `message:${id}`, type: "assistant_message", createdAt, markdown: step.content, completedAt: createdAt,
+          ...nativeVisualMessageIdentity(ANTIGRAVITY_AGENT.id, id), ...executionEvidence(false), [CHAT_TEXT_SEAL]: "ended" } as ConversationItem);
+      }
+      for (const name of step.toolNames) {
+        tool += 1;
+        const item: Extract<ConversationItem, { type: "tool" }> = { id: `tool:${sessionId}.transcript.${tool}`, type: "tool", createdAt, name, status: "completed" };
+        items.push(item);
+        pendingTools.push(item);
+      }
+    } else if (user > 0 && step.type === "GENERIC") {
+      const item = pendingTools.shift();
+      if (item && step.status === "ERROR") items[items.indexOf(item)] = { ...item, status: "failed" };
+    }
+  }
+  return items;
 }
