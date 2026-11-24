@@ -361,6 +361,12 @@ export class ReversibleHistoryTargetError extends Error {
 
 export type ProviderPermissionReply = "once" | "always" | "reject";
 
+/** How an immediate steer sent before its confirmation settled (add-antigravity-chat D9). */
+export type SteerConfirmation =
+  | { outcome: "accepted"; messageId: string; createdAt?: number }
+  | { outcome: "refused"; reason: string }
+  | { outcome: "unknown" };
+
 // Provider-neutral by contract: identity, display name, mime, and where the
 // stored bytes live on disk. How an attachment reaches the agent (file: URL,
 // inline base64, multipart, ...) is each provider's own concern — nothing
@@ -434,8 +440,11 @@ export interface ChatProvider {
    * OperationOutcomeUnknownError when the steer may have reached the agent;
    * any other rejection is a definite refusal.
    * `createdAt`, when given, is the accepted message's timeline position.
+   * An immediate steer may instead resolve as soon as it is sent, with a
+   * `confirmation` that settles from the agent's answer to it: the adapter
+   * then frees the conversation at once and settles the steer later.
    */
-  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt?: number }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> }>;
   /** Native identity known before dispatch, for read-only unknown recovery. */
   promptIdentity?(identity: string): string;
   /**

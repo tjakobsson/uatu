@@ -20,7 +20,7 @@ import type {
   ProviderSession,
   StoredMessageAccounting,
 } from "./provider";
-import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
+import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type SteerConfirmation } from "./provider";
 import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, ConversationSnapshot, MessageDelivery, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
@@ -16736,6 +16736,39 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
       await expect(steering).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
       // Stop's queue pause still holds the held message.
       expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.id, entry.paused])).toEqual([[held.messageId, true]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a steer the agent confirms later frees the conversation at once: follow-ups queue, a second steer is sent, and each settles", async () => {
+    const { adapter, provider, steer, queue, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const confirmations: Array<(confirmation: SteerConfirmation) => void> = [];
+      const accept = provider.prompt.bind(provider);
+      provider.prompt = async (sessionId, input) => {
+        const sent = await accept(sessionId, input);
+        if (input.delivery !== "steer") return sent;
+        return { ...sent, createdAt: 5, confirmation: new Promise<SteerConfirmation>(resolve => confirmations.push(resolve)) };
+      };
+      const first = await steer("r-1", "first steer");
+      expect(first).toEqual(expect.objectContaining({ pending: false, delivery: "steer", awaitingConfirmation: true }));
+      expect(await userRows()).toEqual([]);
+      // The lane is free: a follow-up queues, editable, and a second steer goes out.
+      const held = await queue("r-q", "after the turn");
+      expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.unconfirmed ?? false])).toEqual([["after the turn", false]]);
+      const second = await steer("r-2", "second steer");
+      expect(second).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      expect(provider.prompts.filter(prompt => prompt.delivery === "steer").map(prompt => prompt.text)).toEqual(["first steer", "second steer"]);
+      confirmations[0]!({ outcome: "accepted", messageId: first.messageId, createdAt: 5 });
+      confirmations[1]!({ outcome: "refused", reason: "agy did not take it" });
+      await waitUntil(() => adapter.projectionForTests("session").items().some(item => item.type === "notice"));
+      expect(await userRows()).toEqual([expect.objectContaining({ id: `message:${first.messageId}`, requestId: "r-1", text: "first steer" })]);
+      expect(adapter.projectionForTests("session").items().find(item => item.type === "notice")).toEqual(expect.objectContaining({ code: "steer-refused", requestId: "r-2", message: "agy did not take it" }));
+      // A retry of the same request is the cached answer, never a resend.
+      expect(await steer("r-1", "first steer")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      expect(provider.prompts.filter(prompt => prompt.delivery === "steer")).toHaveLength(2);
     } finally { await adapter.dispose(); }
   });
 

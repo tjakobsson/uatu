@@ -251,8 +251,17 @@ agent in commit 2, before the Antigravity provider exists):
   refusal, and the earlier prompt's end, held meanwhile, is then reported as
   it came. A `cancelled` result or the connection ending is an unknown
   outcome: unconfirmed, never resent. A steer is therefore confirmed only
-  when the turn carrying it ends; one that outlasts the adapter's admission
-  bound is unconfirmed until its late acceptance settles it.
+  when its own prompt is answered, usually when the turn carrying it ends.
+  Waiting for that must block nothing: the provider answers the steer at
+  once as sent, with a confirmation that settles later, and the adapter
+  answers the client "sent, awaiting confirmation" (`awaitingConfirmation`)
+  and frees the conversation's admission lane at once, so a queued
+  follow-up goes into the dock and stays editable, and a second steer can be
+  sent. The client keeps the steer as an unconfirmed draft. Acceptance puts
+  its row, carrying the request id, where it was sent, which settles the
+  draft; a refusal adds a `steer-refused` notice naming the request, which
+  returns the draft to the composer with agy's reason; an unknown outcome
+  leaves the draft unconfirmed, never resent.
 - The provider publishes no status, and no completion signal, for the earlier
   prompt's end, so the adapter keeps the conversation running, sends no
   completion notification and does not drain the held queue. The seam's

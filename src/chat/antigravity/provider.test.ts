@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { installFakeAgy } from "../../../tests/fixtures/antigravity/fake-agy-path";
-import { OperationOutcomeUnknownError, type NormalizedProviderEvent } from "../provider";
+import type { NormalizedProviderEvent, SteerConfirmation } from "../provider";
 import { CHAT_TURN } from "../turn-liveness";
 import type { ConversationItem } from "../types";
 import { ConversationNotFoundError } from "../workspace";
@@ -474,27 +474,46 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(order((await reread.listMessages(session.id, { limit: 100 })).items)).toEqual(live);
     });
 
-    test("a steer is accepted only once agy takes it, and its row appears only then", async () => {
-      const { provider, waitFor, upserts } = await setup();
+    test("a steer is answered at once as sent, and confirmed with its row only once agy answers it", async () => {
+      const { provider, waitFor, upserts, ended } = await setup();
       const session = await provider.createSession("a");
       await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
       const users = async () => (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message").map(item => item.id);
       const before = await users();
-      const steering = provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" });
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as Awaited<ReturnType<AntigravityProvider["prompt"]>> & { confirmation: Promise<SteerConfirmation> };
+      // Sent, not confirmed: no row yet.
       expect(await users()).toEqual(before);
-      const accepted = await steering;
-      expect(await users()).toEqual([...before, `message:${accepted.messageId}`]);
-      await waitFor(() => upserts(session.id).some(item => item.id === `message:${accepted.messageId}`), "the published steer row");
+      const confirmation = await sent.confirmation;
+      expect(confirmation).toEqual({ outcome: "accepted", messageId: sent.messageId, createdAt: sent.createdAt });
+      expect(await users()).toEqual([...before, `message:${sent.messageId}`]);
+      await ended(session.id);
     });
 
-    test("a steer agy refuses rejects with its reason, publishes no row, and leaves the turn running to its end", async () => {
+    test("a second steer can be sent while the first awaits confirmation, and both are confirmed in order", async () => {
+      const { provider, waitFor, upserts, ended, statuses, prompts } = await setup();
+      const session = await provider.createSession("a");
+      const first = await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      const one = await provider.prompt(session.id, { id: "s1", text: "One", delivery: "steer" }) as { messageId: string; confirmation: Promise<SteerConfirmation> };
+      const two = await provider.prompt(session.id, { id: "s2", text: "Two", delivery: "steer" }) as { messageId: string; confirmation: Promise<SteerConfirmation> };
+      expect((await one.confirmation).outcome).toBe("accepted");
+      expect((await two.confirmation).outcome).toBe("accepted");
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["completed"]);
+      expect((await prompts()).map(entry => (entry.params!.prompt as Array<{ text: string }>)[0]!.text)).toEqual(["steer: run it", "One", "Two"]);
+      const users = (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message").map(item => item.id);
+      expect(users).toEqual([`message:${first.messageId}`, `message:${one.messageId}`, `message:${two.messageId}`]);
+    });
+
+    test("a steer agy refuses settles as refused with its reason, publishes no row, and leaves the turn running to its end", async () => {
       const { fake, provider, waitFor, upserts, statuses, ended } = await setup();
       const session = await provider.createSession("a");
       await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
       await fake.setFlag("refuse-steer", true);
-      await expect(provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" })).rejects.toThrow("Antigravity is busy and did not take the message");
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      expect(await sent.confirmation).toEqual({ outcome: "refused", reason: "Antigravity is busy and did not take the message" });
       expect(upserts(session.id).filter(item => item.type === "user_message" && item.text === "Steer")).toEqual([]);
       expect(statuses(session.id)).toEqual([]);
       await provider.interrupt(session.id);
@@ -508,7 +527,8 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
       await fake.setFlag("end-then-refuse-steer", true);
-      await expect(provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" })).rejects.toThrow("Antigravity is busy and did not take the message");
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      expect((await sent.confirmation).outcome).toBe("refused");
       await ended(session.id);
       expect(statuses(session.id)).toEqual(["failed"]);
       expect(events.flatMap(event => event.updates).findLast(update => update.kind === "status")).toEqual(expect.objectContaining({ message: "Antigravity stopped: the reply reached its token limit." }));
@@ -521,7 +541,8 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
       await fake.setFlag("crash-on-steer", true);
-      await expect(provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" })).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      expect(await sent.confirmation).toEqual({ outcome: "unknown" });
       expect(upserts(session.id).filter(item => item.type === "user_message" && item.text === "Steer")).toEqual([]);
     });
 

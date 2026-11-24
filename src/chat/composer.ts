@@ -5,7 +5,7 @@ import { AutomaticBackgroundNotices, actionOrigin, automaticBackgroundNote } fro
 import { newRequestId } from "./ids";
 import { addAcceptedDraft, confirmAcceptedDraft, dropQueuedMessage, markDraftUnconfirmed, noteQueuedMessage, projectionFromSnapshot, removeAcceptedDraft, type ChatProjection } from "./projection";
 import { localHistoryOperation, parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, isLiveConversationStatus } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, STEER_REFUSED_NOTICE_CODE, isLiveConversationStatus } from "./types";
 import type { AutomaticBackgroundFeedback, ChatCapability, ChatCommand, ChatEvent, ConversationConfiguration, ConversationSnapshot, MessageAttachment, MessageDelivery, QueuedMessage, ReversibleHistoryResult } from "./types";
 
 export type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
@@ -132,6 +132,7 @@ export class Composer {
     if (event.type === "conversation.status") this.statusChanged(event.conversationId, event.status);
     if (!applied) return;
     if (event.type === "conversation.queue" && (event.change.kind === "removed" || event.change.kind === "delivered")) this.terminal(event.conversationId, event.change.messageId);
+    if (event.type === "item.upsert" && event.item.type === "notice" && event.item.code === STEER_REFUSED_NOTICE_CODE && event.item.requestId) this.steerRefused(event.conversationId, event.item.requestId, event.item.message);
     if (event.type === "conversation.queue" || event.type === "item.upsert") this.update(event.conversationId, current => this.protect(current));
   }
   checkedSnapshot(id: string, snapshot: ConversationSnapshot, pending?: { id: string; action: PendingQueueAction }): ConversationSnapshot {
@@ -223,6 +224,19 @@ export class Composer {
     try { await task; } finally { if (this.staging.get(id) === task) this.staging.delete(id); }
     this.changed("attachments");
   }
+  /** The agent refused a steer it was sent: its draft returns with the reason. */
+  private steerRefused(id: string, requestId: string, reason: string): void {
+    const draft = (this.unknown.get(id) ?? []).find(entry => entry.requestId === requestId && entry.awaiting)
+      ?? this.conversation.read()?.acceptedDrafts.find(entry => entry.requestId === requestId && entry.awaiting);
+    if (!draft) return;
+    const rest = (this.unknown.get(id) ?? []).filter(entry => entry.requestId !== requestId);
+    if (rest.length) boundedSet(this.unknown, id, rest, 100); else this.unknown.delete(id);
+    this.update(id, p => removeAcceptedDraft(p, requestId));
+    this.merge(id, draft.text);
+    this.changed("restored", id);
+    this.presentation.error(`${reason}. Draft restored.`, id);
+  }
+
   private merge(id: string, text: string): void {
     if (!text.trim()) return;
     const newer = this.drafts.read(id);
@@ -314,6 +328,19 @@ export class Composer {
     try {
       const accepted = await this.transport.prompt(id, requestId, text, configuration.model, configuration.mode, configuration.variant, refs.length ? refs : undefined, delivery);
       if (this.disposed) return;
+      if (accepted.awaitingConfirmation) {
+        // Sent to the agent, confirmed later (D9): kept as an unconfirmed
+        // draft that its row or a refusal settles, never resent.
+        this.retries.delete(id);
+        this.presentation.accepted(accepted);
+        const draft = { requestId, messageId: `pending:${requestId}`, text, ...(refs.length ? { attachments: refs } : {}), unconfirmed: true as const, awaiting: true as const };
+        boundedSet(this.unknown, id, [...(this.unknown.get(id) ?? []).filter(entry => entry.requestId !== requestId), draft].slice(-20), 100);
+        this.update(id, p => ({ ...p, acceptedDrafts: p.acceptedDrafts.map(entry => entry.requestId === requestId ? draft : entry) }));
+        this.changed("accepted", id);
+        this.presentation.note(null); this.presentation.error(null, id);
+        for (const entry of staged) this.release(entry.previewUrl);
+        return;
+      }
       if (reload) { reload.messageId = accepted.messageId; if (!accepted.pending && accepted.operation !== "reload") retireReload(); }
       this.retries.delete(id);
       if (accepted.delivery !== "steer") this.conversation.consumeConfiguration(id, stage);

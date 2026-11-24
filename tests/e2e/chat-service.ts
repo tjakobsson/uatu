@@ -71,6 +71,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private generation = "e2e-chat-1";
   private nextId = 1;
   private readonly conversations = new Map<string, ConversationSummary>();
+  // Immediate steers sent and not yet confirmed, per conversation.
+  private readonly awaitingSteers = new Map<string, ConversationItem[]>();
   private readonly items = new Map<string, Map<string, ConversationItem>>();
   private readonly authoritativeItems = new Map<string, ConversationItem[]>();
   private readonly revertBoundaries = new Map<string, string>();
@@ -425,18 +427,17 @@ export class FakeE2EChatService implements WorkspaceChatService {
     if (existing) return existing;
     const conversation = this.require(id);
     // An `immediate-steering` agent takes a busy steer into the running turn
-    // at once, exactly like the adapter: one user row, no dock entry, no
-    // configuration change, and the turn keeps running (add-antigravity-chat D9).
+    // as the adapter reports it for Antigravity: answered at once as sent,
+    // with no dock entry and no configuration change, and confirmed with its
+    // row only when the turn carrying it completes (add-antigravity-chat D9).
     if (delivery === "steer" && this.capabilities.includes("immediate-steering") && !this.capabilities.includes("steering")
       && (conversation.status === "running" || conversation.status === "sending")
       && !(text.startsWith("/") && (await this.commands()).some(command => text.slice(1).split(/\s/, 1)[0] === command.name))) {
       await new Promise(resolve => setTimeout(resolve, 75));
       const messageId = `message-${this.nextId++}`;
       const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, requestId, ...(attachments?.length ? { attachments } : {}) };
-      this.authoritativeItems.get(id)!.push(item);
-      this.items.get(id)!.set(item.id, item);
-      this.replay.get(id)!.publish({ type: "item.upsert", item });
-      const result = { messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(id) ?? {} };
+      this.awaitingSteers.set(id, [...this.awaitingSteers.get(id) ?? [], item]);
+      const result = { messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(id) ?? {}, awaitingConfirmation: true as const };
       this.receipts.set(key, result);
       return result;
     }
@@ -820,6 +821,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   reset(): void {
+    this.awaitingSteers.clear();
     this.login = undefined;
     this.accountsRevision = 0;
     this.catalogRevision = 0;
@@ -1294,6 +1296,17 @@ export class FakeE2EChatService implements WorkspaceChatService {
       this.notificationFeed.publish({ type: "notification", notification: {
         id: JSON.stringify([id, "turn-completed", sourceId]), conversationId: id, sourceId, kind: "turn-completed", createdAt: Date.now(),
       } });
+    }
+    // The turn's end confirms the steers it carried; one that did not
+    // complete leaves them unconfirmed.
+    const awaiting = this.awaitingSteers.get(id);
+    if (awaiting && !isLiveConversationStatus(status)) {
+      this.awaitingSteers.delete(id);
+      if (status === "completed") for (const item of awaiting) {
+        this.authoritativeItems.get(id)!.push(item);
+        this.items.get(id)!.set(item.id, item);
+        this.replay.get(id)!.publish({ type: "item.upsert", item });
+      }
     }
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
     this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });

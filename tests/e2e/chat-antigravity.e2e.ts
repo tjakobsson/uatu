@@ -58,7 +58,8 @@ test("the picker offers OpenCode, Claude Code and Antigravity in that order, and
   await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Send as steer; hold 2.5 seconds to queue");
   await submit(page, "Keep it to one line");
   const steer = page.locator("#chat-items [data-chat-item-id^='message:']").filter({ hasText: "Keep it to one line" });
-  await expect(steer).toHaveCount(1);
+  // Sent at once, confirmed when the turn carrying it ends.
+  await expect(page.locator("#chat-items .is-pending").filter({ hasText: "Keep it to one line" })).toContainText("waiting for the agent to confirm");
   await expect(page.locator(".chat-queued-message")).toHaveCount(0);
 
   await control(request, { action: "item", agent: "antigravity", conversationId, item: { id: "message:reply", type: "assistant_message", createdAt: Date.now(), markdown: "A fixture workspace for UatuCode's tests." } });
@@ -66,6 +67,7 @@ test("the picker offers OpenCode, Claude Code and Antigravity in that order, and
   await expect(page.locator("#chat-items")).toContainText("A fixture workspace for UatuCode's tests.");
   await expect(page.locator("#chat-stop")).toBeDisabled();
   await expect(steer).toHaveCount(1);
+  await expect(page.locator("#chat-items .is-pending")).toHaveCount(0);
   await captureScreenshot(page, testInfo, "antigravity-conversation-desktop");
 });
 

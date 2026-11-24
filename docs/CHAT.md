@@ -982,11 +982,14 @@ future requests.
 - **Steering.** Antigravity takes a message sent during a turn into that
   turn at once (immediate steering, above). `agy` has no acknowledgement
   for a prompt, so the steer is confirmed only by `agy`'s answer to it,
-  which comes when the turn carrying it ends; it then appears in the
-  timeline where you sent it. Until then it shows as unconfirmed. If `agy`
-  answers the steer with an error, its text returns to the composer with
-  `agy`'s reason. If the turn is stopped or `agy`'s process ends first, the
-  steer stays unconfirmed and is never resent.
+  which usually comes when the turn carrying it ends. Until then it shows
+  as "Sent — waiting for the agent to confirm", and nothing waits for it:
+  you can queue follow-ups, edit them in the pending messages panel, and
+  send another steer. Once confirmed, the steer appears in the timeline
+  where you sent it. If `agy` answers the steer with an error, its text
+  returns to the composer with `agy`'s reason. If the turn is stopped or
+  `agy`'s process ends first, the steer stays unconfirmed and is never
+  resent.
 - **Context and tokens.** The context indicator follows the used and size
   figures `agy` reports, and each turn carries its token usage.
 - **Cost.** `agy` reports tokens but no price, so Chat prices each turn

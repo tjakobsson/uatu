@@ -582,6 +582,9 @@ export type NoticeItem = TimelineItemBase & {
   code?: string;
   // When a rate-limit notice's window resets, as a timestamp.
   resetsAt?: number;
+  // The submission a notice answers (a refused immediate steer), so the
+  // submitting client can return its draft.
+  requestId?: string;
 };
 
 /**
@@ -603,6 +606,8 @@ export const RATE_LIMIT_ITEM_ID = "notice:rate-limit";
  * retired when it finishes.
  */
 export const LOGIN_FAILED_NOTICE_CODE = "login-failed";
+/** An immediate steer the agent refused after it was sent; carries the submission's requestId. */
+export const STEER_REFUSED_NOTICE_CODE = "steer-refused";
 export const REAUTHENTICATING_NOTICE_CODE = "reauthenticating";
 
 /**

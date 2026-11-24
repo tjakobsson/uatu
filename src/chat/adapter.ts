@@ -10,13 +10,13 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting, ProviderHistoryPage, WorkerSourceGuard, WorkerResultFallback, WorkerRecoverySource, WorkerAssociationWatch } from "./provider";
 import { describeToolDetail } from "./tool-detail";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type SteerConfirmation, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { isLiveConversationStatus } from "./types";
+import { isLiveConversationStatus, STEER_REFUSED_NOTICE_CODE } from "./types";
 import { OPENCODE_TEXT_START_FALLBACK, type OpenCodeTextStart } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TURN, CHAT_TURN_CONTINUES, isTerminalStatus, withRetainedReplyFacts, type ChatStatusLiveness, type ChatTurnIdentity, type ChatTurnToken } from "./turn-liveness";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
@@ -2610,6 +2610,9 @@ export class ChatAdapter {
     // What the provider actually ran, when it was not an ordinary turn.
     operation?: "reload";
     automaticBackground?: AutomaticBackgroundOutcome;
+    // An immediate steer the agent was sent and has not confirmed yet: its
+    // row, or a refusal notice naming this request, follows (D9).
+    awaitingConfirmation?: true;
   }> {
     if (sideQuestionOperation(text)) throw new SideGenerationUnsupportedError("Use the separate side-answer action for /btw; it is never sent to conversation history");
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
@@ -2692,7 +2695,7 @@ export class ChatAdapter {
           // joins the turn being run, and held messages keep waiting for that
           // turn's end, which the provider reports once, after the steer.
           const steered = await this.dispatchImmediateSteer(conversationId, projection, { messageId: this.id(), text, requestId, attachments: attachmentRefs });
-          return { messageId: steered.messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(conversationId) ?? currentConfiguration };
+          return { messageId: steered.messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(conversationId) ?? currentConfiguration, ...(steered.awaitingConfirmation ? { awaitingConfirmation: true as const } : {}) };
         }
         const queue: HeldQueue = this.heldQueues.get(conversationId) ?? [];
         // Order is absolute: while anything is held, a new submission joins the
@@ -3661,13 +3664,13 @@ export class ChatAdapter {
    * The accepted message's row goes in under the same id dispatchPrompt
    * uses, which the provider's own row and replay share.
    */
-  private async dispatchImmediateSteer(conversationId: string, projection: ConversationProjection, input: { messageId: string; text: string; requestId: string; attachments: MessageAttachment[] }): Promise<{ messageId: string }> {
+  private async dispatchImmediateSteer(conversationId: string, projection: ConversationProjection, input: { messageId: string; text: string; requestId: string; attachments: MessageAttachment[] }): Promise<{ messageId: string; awaitingConfirmation?: true }> {
     const providerAttachments = await this.locateAttachments(input.attachments);
     const admission = Promise.resolve().then(() => this.provider.prompt(conversationId, {
       id: input.messageId, text: input.text, delivery: "steer",
       ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
     }));
-    let accepted: { messageId: string; createdAt?: number };
+    let accepted: { messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> };
     this.immediateSteers.set(conversationId, (this.immediateSteers.get(conversationId) ?? 0) + 1);
     try {
       accepted = await this.boundedSteerAdmission(admission, input.messageId).finally(() => {
@@ -3683,6 +3686,21 @@ export class ChatAdapter {
         throw error;
       }
       throw new SteerRefusedError(errorMessage(error));
+    }
+    if (accepted.confirmation) {
+      // Sent, not yet confirmed: the conversation is free again at once, and
+      // the agent's answer settles the steer later, through the same row or
+      // a refusal naming this request. An unknown outcome stays unconfirmed
+      // with the submitting client and is never resent.
+      void accepted.confirmation.then(confirmation => {
+        if (this.disposed) return;
+        const current = this.projection(conversationId);
+        if (confirmation.outcome === "accepted") this.recordImmediateSteer(current, confirmation, input);
+        else if (confirmation.outcome === "refused") {
+          current.upsert({ id: `notice:steer-refused:${input.requestId}`, type: "notice", createdAt: Date.now(), level: "warning", code: STEER_REFUSED_NOTICE_CODE, message: confirmation.reason, requestId: input.requestId });
+        }
+      });
+      return { messageId: accepted.messageId, awaitingConfirmation: true };
     }
     this.recordImmediateSteer(projection, accepted, input);
     return accepted;

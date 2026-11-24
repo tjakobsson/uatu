@@ -737,3 +737,24 @@ test("immediate steering: a lost response is unconfirmed while running and resto
   expect(idle.texts.get("one")).toBe("Not a steer");
   expect(idle.projection().acceptedDrafts).toEqual([]);
 });
+
+test("immediate steering: a steer awaiting confirmation is kept unconfirmed, settles on its row, and returns on a refusal", async () => {
+  const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return acceptance({ messageId: `sent-${args[1]}`, delivery: "steer", pending: false, awaitingConfirmation: true }); } });
+  f.composer.edit("Confirmed later"); await f.composer.submit();
+  f.composer.edit("Refused later"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("");
+  expect(f.projection().acceptedDrafts.map(draft => [draft.text, draft.unconfirmed, draft.awaiting])).toEqual([["Confirmed later", true, true], ["Refused later", true, true]]);
+  const [first, second] = f.prompts.map(args => args[1]);
+  // The agent's row for the first settles its draft.
+  const row = { type: "item.upsert" as const, conversationId: "one", generation: "g", sequence: 1, item: { id: "message:native-1", type: "user_message" as const, createdAt: 1, text: "Confirmed later", requestId: first } };
+  const applied = applyChatEvent(f.projection(), row);
+  f.context.write(applied.projection); f.composer.observe(row, applied.outcome === "applied");
+  expect(f.projection().acceptedDrafts.map(draft => draft.text)).toEqual(["Refused later"]);
+  // A refusal naming the second returns it to the composer with the reason.
+  const refusal = { type: "item.upsert" as const, conversationId: "one", generation: "g", sequence: 2, item: { id: `notice:steer-refused:${second}`, type: "notice" as const, createdAt: 2, level: "warning" as const, code: "steer-refused", message: "agy did not take it", requestId: second } };
+  const refused = applyChatEvent(f.projection(), refusal);
+  f.context.write(refused.projection); f.composer.observe(refusal, refused.outcome === "applied");
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.texts.get("one")).toBe("Refused later");
+  expect(f.errors.at(-1)).toEqual(["agy did not take it. Draft restored.", "one"]);
+});
