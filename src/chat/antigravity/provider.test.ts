@@ -155,6 +155,20 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await fake.running()).toBe(0);
     });
 
+    test("a load that fails after part of its replay leaves no partial history behind", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      const first = await run(session.id, "Say hello");
+      const second = await run(session.id, "Say hello again");
+      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reader.dispose());
+      await fake.setFlag("fail-load", true);
+      await expect(reader.listMessages(session.id, { limit: 100 })).rejects.toThrow("Failed to load the conversation");
+      await fake.setFlag("fail-load", false);
+      const users = (await reader.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
+      expect(users.map(item => item.id)).toEqual([`message:${first.messageId}`, `message:${second.messageId}`]);
+    });
+
     test("reopened history comes from replay, without starting a turn, with the same user message ids", async () => {
       const first = await setup();
       const session = await first.provider.createSession("a");

@@ -17,6 +17,7 @@
 //   crash-on-steer       present: the process exits 1 on a prompt sent during a run
 //   hang-initialize      present: `initialize` never answers
 //   slow-config          present: `session/set_config_option` answers after 300 ms
+//   fail-load            present: `session/load` fails after sending its replay
 //   hang-list            present: `session/list` never answers
 //   orphan-child         present: each process starts a `sleep 30` worker in its
 //                        group, its pid in `orphans`
@@ -169,6 +170,7 @@ app.onRequest(methods.agent.session.load, async ({ params, client }) => {
   // A loaded session is back on agy's defaults, as the trial showed.
   updateSession(session.sessionId, stored => { stored.model = fixture.defaultModel; stored.thoughtLevel = fixture.defaultThoughtLevel; stored.mode = fixture.modes.currentModeId; });
   for (const update of session.replay) await client.notify(methods.client.session.update, { sessionId: session.sessionId, update } as never);
+  if (flag("fail-load")) throw new RequestError(-32603, "Failed to load the conversation");
   setTimeout(() => void client.notify(methods.client.session.update, { sessionId: session.sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: fixture.commands } } as never), 0);
   return sessionAnswer({ ...session, model: fixture.defaultModel, thoughtLevel: fixture.defaultThoughtLevel, mode: fixture.modes.currentModeId }) as never;
 });

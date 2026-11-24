@@ -57,6 +57,9 @@ type Conversation = {
   process?: AcpProcess;
   starting?: Promise<AcpProcess>;
   loading: boolean;
+  // Replay being read by a load: committed to the store only once the load
+  // succeeds, so a load that fails part-way leaves no partial history.
+  replay?: { memory: AcpMemory; items: ConversationItem[] };
   // What the user chose, and what agy is known to run in the current process.
   configuration: ConversationConfiguration;
   applied: ConversationConfiguration | null;
@@ -572,6 +575,7 @@ export class AntigravityProvider implements ChatProvider {
       }
       const process = await this.startProcess();
       conversation.loading = true;
+      if (!conversation.seeded) conversation.replay = { memory: createAcpMemory(conversation.sessionId, this.workspacePath), items: [] };
       try {
         const answer = await process.agent.request("session/load", { sessionId: conversation.sessionId, cwd: this.workspacePath, mcpServers: [] });
         this.setLogin("ok");
@@ -580,14 +584,19 @@ export class AntigravityProvider implements ChatProvider {
         conversation.applied = catalogFromSession(answer, false).current;
         conversation.configuration = { ...conversation.applied, ...conversation.configuration };
       } catch (error) {
+        conversation.replay = undefined;
         await this.closeProcess(process);
         if (rpcErrorCode(error) === AUTH_REQUIRED_CODE) this.setLogin("missing");
         throw error;
       } finally {
         conversation.loading = false;
       }
-      if (!conversation.seeded) {
-        sealOpenBlock(conversation.memory, this.now()).forEach(update => this.store(conversation, [update]));
+      const replay = conversation.replay;
+      conversation.replay = undefined;
+      if (replay && !conversation.seeded) {
+        applyUpdates(replay.items, sealOpenBlock(replay.memory, this.now()));
+        conversation.items.splice(0, conversation.items.length, ...replay.items);
+        Object.assign(conversation.memory, replay.memory);
         await this.enrichFromTranscript(conversation);
         conversation.seeded = true;
       }
@@ -699,9 +708,10 @@ export class AntigravityProvider implements ChatProvider {
     if (conversation.loading) {
       // Replay: the store's history when it has none yet, otherwise
       // already known and dropped.
-      if (conversation.seeded) return;
-      const normalized = normalizeAcpUpdate(params, conversation.memory, this.now());
-      this.store(conversation, normalized.updates);
+      const replay = conversation.replay;
+      if (conversation.seeded || !replay) return;
+      const normalized = normalizeAcpUpdate(params, replay.memory, this.now());
+      applyUpdates(replay.items, normalized.updates);
       if (normalized.sessionLifecycle) this.retitle(conversation, normalized.sessionLifecycle.title);
       return;
     }
@@ -745,16 +755,7 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   private store(conversation: Conversation, updates: NormalizedProviderEvent["updates"]): void {
-    for (const update of updates) {
-      if (update.kind === "upsert") {
-        const index = conversation.items.findIndex(item => item.id === update.item.id);
-        if (index >= 0) conversation.items[index] = update.item;
-        else conversation.items.push(update.item);
-      } else if (update.kind === "remove") {
-        const index = conversation.items.findIndex(item => item.id === update.itemId);
-        if (index >= 0) conversation.items.splice(index, 1);
-      }
-    }
+    applyUpdates(conversation.items, updates);
   }
 
   private emit(conversation: Conversation, event: Omit<NormalizedProviderEvent, "conversationId">): void {
@@ -777,6 +778,19 @@ export class AntigravityProvider implements ChatProvider {
     await Promise.all(processes.map(process => this.closeProcess(process)));
     await Promise.all(processes.map(process => process.settled));
     this.events_.close();
+  }
+}
+
+function applyUpdates(items: ConversationItem[], updates: NormalizedProviderEvent["updates"]): void {
+  for (const update of updates) {
+    if (update.kind === "upsert") {
+      const index = items.findIndex(item => item.id === update.item.id);
+      if (index >= 0) items[index] = update.item;
+      else items.push(update.item);
+    } else if (update.kind === "remove") {
+      const index = items.findIndex(item => item.id === update.itemId);
+      if (index >= 0) items.splice(index, 1);
+    }
   }
 }
 
