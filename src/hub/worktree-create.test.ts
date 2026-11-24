@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {
   assertNoForceFlags,
+  buildPullRequestBranchCommands,
   buildWorktreeAddArguments,
   destinationOccupied,
   mainCheckoutPathFor,
@@ -12,9 +13,10 @@ import {
   runWorktreeAdd,
   targetBranchFor,
   type WorktreeCreationPlan,
+  type WorktreeCreationRequest,
 } from "./worktree-create";
 import { createGitRunner, listRefs, listWorktrees, repositoryContext, type GitRun } from "./worktree-git";
-import { WorktreeOperationError, type WorktreeCreateRequest } from "../shared/worktree-contract";
+import { WorktreeOperationError } from "../shared/worktree-contract";
 
 // Real Git, real temporary repositories, never the Uatu checkout itself. The
 // environment is built explicitly: developing Uatu inside a Hub-managed
@@ -92,7 +94,7 @@ async function options(): Promise<{ env: Record<string, string> }> {
   return { env: await cleanEnvironment() };
 }
 
-async function plan(repository: string, request: Pick<WorktreeCreateRequest, "mode" | "branch" | "base">): Promise<WorktreeCreationPlan> {
+async function plan(repository: string, request: WorktreeCreationRequest): Promise<WorktreeCreationPlan> {
   const context = await repositoryContext(repository, await options());
   if (context.kind !== "checkout") throw new Error("expected a checkout");
   const refs = await listRefs(repository, await options());
@@ -107,7 +109,7 @@ async function plan(repository: string, request: Pick<WorktreeCreateRequest, "mo
   });
 }
 
-async function create(repository: string, request: Pick<WorktreeCreateRequest, "mode" | "branch" | "base">) {
+async function create(repository: string, request: WorktreeCreationRequest) {
   const created = await plan(repository, request);
   const outcome = await runWorktreeAdd(createGitRunner(await options()), repository, created);
   return { plan: created, outcome };
@@ -502,5 +504,82 @@ describe("existing local branch history", () => {
       branchOrigin: "release",
     });
     expect(planned.sourceRef).toBe("release");
+  });
+});
+
+describe("pull request checkouts (pull-request mode)", () => {
+  const HEAD = "a".repeat(40);
+  const request = { mode: "pull-request" as const, pullRequest: { number: 57, remote: "origin" } };
+  const planFor = (overrides: Partial<Parameters<typeof planWorktreeCreation>[0]> = {}) => planWorktreeCreation({
+    request,
+    mainPath: "/tmp/uatu-pr/atlas",
+    refs: { local: ["main"], remote: ["origin/main"] },
+    records: [],
+    occupied: async () => false,
+    pullRequest: { headOid: HEAD },
+    ...overrides,
+  });
+
+  test("a new pr/<n> at the fetched head, its upstream the pull request's head ref", async () => {
+    const planned = await planFor();
+    expect(planned).toEqual({
+      mode: "pull-request",
+      branch: "pr/57",
+      base: { kind: "local", ref: "pr/57" },
+      sourceRef: "refs/pull/57/head",
+      upstream: "refs/pull/57/head",
+      pullRequest: { number: 57, remote: "origin", headRef: "refs/pull/57/head", headOid: HEAD, createBranch: true },
+      destination: "/tmp/uatu-pr/atlas.worktrees/pr-57",
+      disambiguated: false,
+    });
+    // Upstream first, then the branch; then a plain checkout of it.
+    expect(buildPullRequestBranchCommands(planned)).toEqual([
+      ["config", "branch.pr/57.remote", "origin"],
+      ["config", "branch.pr/57.merge", "refs/pull/57/head"],
+      ["branch", "--no-track", "pr/57", HEAD],
+    ]);
+    expect(buildWorktreeAddArguments(planned)).toEqual(["worktree", "add", planned.destination, "pr/57"]);
+  });
+
+  test("an existing pr/<n> tracking exactly this pull request is reused as it is", async () => {
+    const planned = await planFor({
+      refs: { local: ["main", "pr/57"], remote: [] },
+      pullRequest: { headOid: HEAD, existingUpstream: { remote: "origin", merge: "refs/pull/57/head" } },
+      branchOrigin: "refs/pull/57/head",
+    });
+    expect(planned.pullRequest?.createBranch).toBe(false);
+    expect(planned.sourceRef).toBe("refs/pull/57/head");
+    // No branch command at all: nothing is reset, fast-forwarded or re-pointed.
+    expect(buildPullRequestBranchCommands(planned)).toEqual([]);
+    // Someone else's matching branch keeps an unknown origin.
+    const foreign = await planFor({
+      refs: { local: ["main", "pr/57"], remote: [] },
+      pullRequest: { headOid: HEAD, existingUpstream: { remote: "origin", merge: "refs/pull/57/head" } },
+    });
+    expect(foreign.sourceRef).toBeUndefined();
+  });
+
+  test("any other existing pr/<n> is a conflict, never a reset", async () => {
+    for (const existingUpstream of [{}, { remote: "fork", merge: "refs/pull/57/head" }, { remote: "origin", merge: "refs/heads/main" }]) {
+      const refused = await rejection(planFor({ refs: { local: ["main", "pr/57"], remote: [] }, pullRequest: { headOid: HEAD, existingUpstream } }));
+      expect(refused.code).toBe("branch-exists");
+      expect(refused.message).toBe("A branch named pr/57 already exists and does not track pull request #57 on origin. Nothing was reset; rename or delete that branch, then try again.");
+    }
+  });
+
+  test("a checked-out pr/<n> offers that checkout", async () => {
+    const refused = await rejection(planFor({
+      refs: { local: ["main", "pr/57"], remote: [] },
+      records: [{ path: "/tmp/uatu-pr/elsewhere", head: HEAD, branch: "pr/57", detached: false, bare: false, locked: false, prunable: false }] as never,
+      pullRequest: { headOid: HEAD, existingUpstream: { remote: "origin", merge: "refs/pull/57/head" } },
+    }));
+    expect(refused).toMatchObject({ code: "branch-in-use", retry: "open-existing", conflictCheckoutId: "/tmp/uatu-pr/elsewhere" });
+  });
+
+  test("the branch is derived from the number, and the head must be a commit id", async () => {
+    expect(targetBranchFor(request)).toBe("pr/57");
+    expect((await rejection(planFor({ request: { ...request, branch: "feature/x" } }))).code).toBe("invalid-input");
+    expect((await rejection(planFor({ pullRequest: { headOid: "HEAD~1" } }))).code).toBe("internal");
+    expect((await rejection(planFor({ pullRequest: undefined }))).code).toBe("internal");
   });
 });

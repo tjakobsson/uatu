@@ -24,7 +24,32 @@ export function createWorktreeBranchRules() {
     const separator = remoteRef.indexOf("/");
     return separator < 0 ? remoteRef : remoteRef.slice(separator + 1);
   }
-  return { WORKTREE_BRANCH_NAME_MAX_LENGTH, validWorktreeBranch, initialWorktreeBase, localTrackingBranch };
+  // A pull request checkout (the `pull-request` create mode). GitHub numbers
+  // pull requests from 1; the ceiling keeps the number a plain integer that
+  // never needs exponent notation in a ref.
+  const WORKTREE_PULL_REQUEST_NUMBER_MAX = 2_147_483_647;
+  function validPullRequestNumber(value: unknown): value is number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= WORKTREE_PULL_REQUEST_NUMBER_MAX;
+  }
+  // A configured remote's name, as the request names it. Deliberately
+  // narrower than Git's own grammar (no slash, no leading dot or dash), so a
+  // name can never read as an option, a URL, a path or a refspec.
+  function validWorktreeRemoteName(name: string): boolean {
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(name) && !name.includes("..") && !name.endsWith(".lock");
+  }
+  // The local branch of a pull request checked out by number: `pr/<n>`. It
+  // cannot collide with a fork's `main` or `patch-1`.
+  function pullRequestWorktreeBranch(number: number): string {
+    return `pr/${number}`;
+  }
+  // The head ref GitHub publishes for every pull request, forks included.
+  function pullRequestHeadRef(number: number): string {
+    return `refs/pull/${number}/head`;
+  }
+  return {
+    WORKTREE_BRANCH_NAME_MAX_LENGTH, validWorktreeBranch, initialWorktreeBase, localTrackingBranch,
+    WORKTREE_PULL_REQUEST_NUMBER_MAX, validPullRequestNumber, validWorktreeRemoteName, pullRequestWorktreeBranch, pullRequestHeadRef,
+  };
 }
 const branchRules = createWorktreeBranchRules();
 
@@ -32,6 +57,11 @@ export const WORKTREE_BRANCH_NAME_MAX_LENGTH = branchRules.WORKTREE_BRANCH_NAME_
 export const validWorktreeBranch = branchRules.validWorktreeBranch;
 export const initialWorktreeBase = branchRules.initialWorktreeBase;
 export const localTrackingBranch = branchRules.localTrackingBranch;
+export const WORKTREE_PULL_REQUEST_NUMBER_MAX = branchRules.WORKTREE_PULL_REQUEST_NUMBER_MAX;
+export const validPullRequestNumber = branchRules.validPullRequestNumber;
+export const validWorktreeRemoteName = branchRules.validWorktreeRemoteName;
+export const pullRequestWorktreeBranch = branchRules.pullRequestWorktreeBranch;
+export const pullRequestHeadRef = branchRules.pullRequestHeadRef;
 
 // The destination folder name. Only the FOLDER is sanitized — the branch and
 // the child's display name keep their exact spelling, slashes included.

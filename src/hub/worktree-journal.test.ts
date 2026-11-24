@@ -7,6 +7,7 @@ import path from "node:path";
 import { worktreeJournalPath, worktreeProvenancePath } from "./state-dir";
 import {
   ownershipForCheckout,
+  parseWorktreeIntent,
   recoverWorktreeOperation,
   registerCreatedWorktree,
   WorktreeJournal,
@@ -443,6 +444,32 @@ describe("restart recovery at every creation boundary", () => {
     const unreadable = await recoverAt("creating", { present: true, identityReadable: false, detail: "dubious ownership" });
     expect(unreadable.outcome?.kind).toBe("uncertain");
     expect(await unreadable.provenance.load()).toEqual([]);
+  });
+
+  test("a pull request checkout journals its own branch and recovers like any creation", async () => {
+    const root = await stateRoot();
+    const journal = new WorktreeJournal(worktreeJournalPath(root));
+    const provenance = new WorktreeProvenanceStore(worktreeProvenancePath(root));
+    const pullRequest = {
+      ...INTENT,
+      phase: "creating" as const,
+      destination: "/repos/atlas.worktrees/pr-57",
+      mode: "pull-request" as const,
+      branch: "pr/57",
+      base: { kind: "local" as const, ref: "pr/57" },
+      sourceRef: "refs/pull/57/head",
+      checkoutId: IDENTITY.checkoutId,
+    };
+    await journal.begin(pullRequest);
+    // Survives a restart's re-read, then recovers to a registrable checkout
+    // whose recorded origin is the pull request's head ref.
+    expect(await new WorktreeJournal(worktreeJournalPath(root)).read()).toMatchObject({ mode: "pull-request", branch: "pr/57" });
+    const outcome = await recoverWorktreeOperation({ journal, provenance, inspect: async () => present() });
+    expect(outcome?.kind).toBe("retained-unregistered");
+    expect((await provenance.byCheckoutId(IDENTITY.checkoutId))?.sourceRef).toBe("refs/pull/57/head");
+    // Its base must be the branch it checks out, nothing else.
+    expect(() => parseWorktreeIntent({ ...pullRequest, version: 1, base: { kind: "remote", ref: "origin/pr/57" } })).toThrow(/own local branch/);
+    expect(() => parseWorktreeIntent({ ...pullRequest, version: 1, base: { kind: "local", ref: "main" } })).toThrow(/own local branch/);
   });
 
   test("no pending record means nothing to recover", async () => {

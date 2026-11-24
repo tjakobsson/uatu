@@ -21,7 +21,8 @@ import {
   type CloneCredentialProcessContext,
 } from "./credential-context";
 import type { CredentialAssignment } from "./credential-types";
-import { WorktreeOperationError, type WorktreeError } from "../shared/worktree-contract";
+import { pullRequestHeadRef } from "../shared/worktree-branches";
+import { worktreeError, WorktreeOperationError, type WorktreeError } from "../shared/worktree-contract";
 import { assertGitArgumentSafe, createGitRunner, type GitRunner, type WorktreeGitOptions } from "./worktree-git";
 
 export type WorktreeRemote = { readonly name: string; readonly url: string };
@@ -139,10 +140,14 @@ export function buildWorktreeFetchEnvironment(
   return env;
 }
 
+// `refspec` narrows the fetch to one ref (a pull request's head, see
+// fetchPullRequestHead below); without it every branch of the remote is
+// fetched and pruned.
 export function buildWorktreeFetchArguments(
   repositoryPath: string,
   remote: WorktreeRemote,
   selection: WorktreeFetchSelection = { kind: "none" },
+  refspec?: string,
 ): string[] {
   assertGitArgumentSafe(remote.name, "remote");
   const args = [
@@ -163,6 +168,13 @@ export function buildWorktreeFetchArguments(
       "--git-credential-helper",
     ].join(" ");
     args.push("-c", `credential.https://${selection.process.host}.helper=${helper}`);
+  }
+  if (refspec !== undefined) {
+    // One ref into one destination: no tags, no pruning, and FETCH_HEAD left
+    // alone, so a session fetching in the same checkout is not disturbed.
+    assertGitArgumentSafe(refspec, "refspec");
+    args.push("fetch", "--no-tags", "--no-write-fetch-head", "--", remote.name, refspec);
+    return args;
   }
   // --prune is what lets a disappeared remote branch disappear from the
   // selector instead of lingering as a selectable ghost.
@@ -192,7 +204,7 @@ export function parseWorktreeRemotes(output: string): WorktreeRemote[] {
 // Fetch into a dozen network round trips.
 export const WORKTREE_FETCH_REMOTE_LIMIT = 4;
 
-export async function listWorktreeRemotes(run: GitRunner, repositoryPath: string): Promise<WorktreeRemote[]> {
+export async function listWorktreeRemotes(run: GitRunner, repositoryPath: string, limit = WORKTREE_FETCH_REMOTE_LIMIT): Promise<WorktreeRemote[]> {
   const result = await run(["config", "-z", "--get-regexp", "^remote\\..*\\.url$"], repositoryPath);
   // Exit code 1 is "no matches" — a repository with no remote at all.
   if (result.timedOut) {
@@ -202,7 +214,7 @@ export async function listWorktreeRemotes(run: GitRunner, repositoryPath: string
   if (result.exitCode !== 0) {
     throw WorktreeOperationError.of("fetch-network", "The repository's remotes could not be read. Cached branches are unchanged.", { retry: "retry-fetch" });
   }
-  return parseWorktreeRemotes(result.stdout).slice(0, WORKTREE_FETCH_REMOTE_LIMIT);
+  return parseWorktreeRemotes(result.stdout).slice(0, limit);
 }
 
 // Authentication is decided before network: "unable to access … 403" is an
@@ -308,4 +320,81 @@ export async function fetchWorktreeRemotes(options: WorktreeFetchOptions): Promi
     fetched.push(remote.name);
   }
   return { ok: true, fetchedAt: now(), remotes: fetched };
+}
+
+// --- A pull request's head (the `pull-request` create mode) ------------------
+
+export type PullRequestHeadFetchOptions = Omit<WorktreeFetchOptions, "now"> & {
+  readonly remote: string;
+  readonly number: number;
+  // A ref only this operation uses, under refs/uatu/. The fetch writes the
+  // head there (never a branch, never FETCH_HEAD), the commit is read back,
+  // and the ref is deleted again.
+  readonly scratchRef: string;
+};
+
+export type PullRequestHeadFetchOutcome =
+  | { readonly ok: true; readonly headOid: string }
+  | { readonly ok: false; readonly error: WorktreeError };
+
+// A failed pull request fetch in the create flow's words: nothing was
+// created, and there is no cached listing to speak of.
+export function classifyPullRequestFetchFailure(stderr: string, remote: WorktreeRemote, number: number): WorktreeError {
+  const headRef = pullRequestHeadRef(number);
+  // The remote answered and has no such ref: a wrong number, or a remote
+  // that is not the pull request's GitHub repository.
+  if (/couldn't find remote ref|no such ref/i.test(stderr)) {
+    return worktreeError("ref-unavailable", `Pull request #${number} was not found on ${remote.name}: it has no ${headRef}. Check the number, and that ${remote.name} is the pull request's GitHub repository. Nothing was created.`);
+  }
+  const classified = classifyWorktreeFetchFailure(stderr, remote);
+  if (classified.code === "fetch-authentication") {
+    return worktreeError("fetch-authentication", `Fetch authentication failed for ${remote.name}. Correct the credentials on the parent workspace and retry. Nothing was created.`, { retry: "retry-fetch" });
+  }
+  if (/^Could not reach /.test(classified.message)) {
+    return worktreeError("fetch-network", `Could not reach ${remote.name}. Nothing was created; retry.`, { retry: "retry-fetch" });
+  }
+  return worktreeError("fetch-network", `Fetching pull request #${number} from ${remote.name} failed: ${stderr.trim()}. Nothing was created.`, { retry: "retry-fetch" });
+}
+
+// The one explicit fetch a pull request checkout makes: `refs/pull/<n>/head`
+// from one configured remote, with the credential the parent's policy
+// selects for that remote and nothing else (the same environment as Fetch
+// remote branches). It never prompts and never touches a local branch.
+export async function fetchPullRequestHead(options: PullRequestHeadFetchOptions): Promise<PullRequestHeadFetchOutcome> {
+  const remotes = await listWorktreeRemotes(options.run, options.repositoryPath, Number.POSITIVE_INFINITY);
+  const remote = remotes.find(candidate => candidate.name === options.remote);
+  if (!remote) {
+    return { ok: false, error: worktreeError("invalid-input", `This repository has no remote named ${options.remote}. Nothing was fetched or created.`) };
+  }
+  let selection: WorktreeFetchSelection;
+  try {
+    selection = await options.policy.select(options.parentWorkspaceId, remote);
+  } catch (error) {
+    if (error instanceof WorktreeOperationError) return { ok: false, error: error.detail };
+    throw error;
+  }
+  assertGitArgumentSafe(options.scratchRef, "scratch ref");
+  const result = await options.runWith(
+    buildWorktreeFetchArguments(options.repositoryPath, remote, selection, `${pullRequestHeadRef(options.number)}:${options.scratchRef}`),
+    options.repositoryPath,
+    buildWorktreeFetchEnvironment(options.env, selection),
+  );
+  if (result.timedOut) {
+    return { ok: false, error: worktreeError("fetch-network", `Fetching pull request #${options.number} from ${remote.name} timed out. Nothing was created; retry.`, { retry: "retry-fetch" }) };
+  }
+  if (result.exitCode !== 0) {
+    return { ok: false, error: classifyPullRequestFetchFailure(result.stderr || result.stdout, remote, options.number) };
+  }
+  try {
+    const resolved = await options.run(["rev-parse", "--verify", "--quiet", "--end-of-options", `${options.scratchRef}^{commit}`], options.repositoryPath);
+    const headOid = resolved.stdout.trim();
+    if (resolved.exitCode !== 0 || resolved.timedOut || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(headOid)) {
+      return { ok: false, error: worktreeError("ref-unavailable", `The head of pull request #${options.number} could not be read after fetching it. Nothing was created; retry.`) };
+    }
+    return { ok: true, headOid };
+  } finally {
+    // Best effort: a leftover scratch ref is inert, since no listing reads
+    // refs/uatu/, and the fetched commit stays reachable only through it.
+    await options.run(["update-ref", "-d", "--", options.scratchRef], options.repositoryPath).catch(() => undefined);
+  }
 }

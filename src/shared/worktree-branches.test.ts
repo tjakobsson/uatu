@@ -3,7 +3,12 @@ import { describe, expect, test } from "bun:test";
 import {
   initialWorktreeBase,
   localTrackingBranch,
+  pullRequestHeadRef,
+  pullRequestWorktreeBranch,
+  validPullRequestNumber,
   validWorktreeBranch,
+  validWorktreeRemoteName,
+  WORKTREE_PULL_REQUEST_NUMBER_MAX,
   worktreeDestinationCandidates,
   worktreeFolderName,
   WORKTREE_BRANCH_NAME_MAX_LENGTH,
@@ -86,5 +91,28 @@ describe("predetermined destinations", () => {
   test("the destination is a sibling of the main folder, on either separator", () => {
     expect(worktreeDestinationCandidates("/repos/atlas/", "release")[0]).toBe("/repos/atlas.worktrees/release");
     expect(worktreeDestinationCandidates("C:\\repos\\atlas", "release")[0]).toBe("C:\\repos\\atlas.worktrees\\release");
+  });
+});
+
+describe("pull request checkouts", () => {
+  test("a pull request is checked out on pr/<n>, from refs/pull/<n>/head, into a pr-<n> folder", () => {
+    expect(pullRequestWorktreeBranch(57)).toBe("pr/57");
+    expect(validWorktreeBranch(pullRequestWorktreeBranch(WORKTREE_PULL_REQUEST_NUMBER_MAX))).toBe(true);
+    expect(pullRequestHeadRef(57)).toBe("refs/pull/57/head");
+    expect(worktreeDestinationCandidates("/repos/atlas", "pr/57")[0]).toBe("/repos/atlas.worktrees/pr-57");
+  });
+
+  test("numbers are positive integers that fit a ref without exponent notation", () => {
+    for (const value of [1, 57, WORKTREE_PULL_REQUEST_NUMBER_MAX]) expect(validPullRequestNumber(value)).toBe(true);
+    for (const value of [0, -3, 1.5, Number.NaN, Number.POSITIVE_INFINITY, WORKTREE_PULL_REQUEST_NUMBER_MAX + 1, "57", null]) {
+      expect(`${String(value)}:${validPullRequestNumber(value)}`).toBe(`${String(value)}:false`);
+    }
+  });
+
+  test("remote names are plain names, never options, paths, URLs or refspecs", () => {
+    for (const name of ["origin", "upstream", "my-fork", "gh_1", "a.b"]) expect(`${name}:${validWorktreeRemoteName(name)}`).toBe(`${name}:true`);
+    for (const name of ["", "-f", "--upload-pack=x", ".origin", "a/b", "a..b", "x.lock", "a b", "a:b", "https://github.com/x", "o".repeat(101)]) {
+      expect(`${name}:${validWorktreeRemoteName(name)}`).toBe(`${name}:false`);
+    }
   });
 });

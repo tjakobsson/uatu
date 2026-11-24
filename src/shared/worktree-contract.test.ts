@@ -337,8 +337,35 @@ describe("contract validation refuses shapes the UI could not trust", () => {
     expect(() => parseWorktreeInventory(inventory({ checkouts: [checkout({ repositoryId: "repository-beacon" })] }))).toThrow(/mixes repositories/);
   });
 
+  test("a pull request checkout names a positive number and a remote, and nothing to select", () => {
+    expect(parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "pull-request", pullRequest: { number: 57, remote: "origin" }, start: true }))
+      .toEqual({ sourceWorkspaceId: "atlas", mode: "pull-request", pullRequest: { number: 57, remote: "origin" }, start: true });
+    expect(parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "pull-request", branch: "pr/57", pullRequest: { number: 57, remote: "upstream" } }).branch).toBe("pr/57");
+    const refused = (pullRequest: unknown, extra: Record<string, unknown> = {}) =>
+      () => parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "pull-request", pullRequest, ...extra });
+    for (const number of [0, -1, 1.5, "57", Number.NaN, 2 ** 31]) expect(refused({ number, remote: "origin" })).toThrow(/positive integer/);
+    for (const remote of ["-f", "--upload-pack=x", "../x", "a/b", "https://github.com/a/b", ".hidden", "x.lock", "a b", ""]) {
+      expect(refused({ number: 57, remote })).toThrow(/remote/);
+    }
+    expect(refused({ number: 57 })).toThrow(/requires remote/);
+    expect(refused({ number: 57, remote: "origin", head: "x" })).toThrow(/unknown field: head/);
+    expect(refused(undefined)).toThrow(/must be an object/);
+    expect(refused({ number: 57, remote: "origin" }, { branch: "pr/58" })).toThrow(/pr\/<number>/);
+    expect(refused({ number: 57, remote: "origin" }, { base: { kind: "remote", ref: "origin/main" } })).toThrow(/takes no base/);
+    // The ref modes never take a pull request.
+    expect(() => parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "remote-tracking", base: { kind: "remote", ref: "origin/x" }, pullRequest: { number: 1, remote: "origin" } }))
+      .toThrow(/only a pull request checkout/);
+    // Refusals carry the closed vocabulary's invalid-input code.
+    try {
+      refused({ number: 0, remote: "origin" })();
+    } catch (error) {
+      expect((error as WorktreeOperationError).detail.code).toBe("invalid-input");
+    }
+  });
+
   test("create requests must agree with their base and reject option-like names", () => {
-    expect(parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "new-branch", branch: "feature/login", base: { kind: "local", ref: "main" } }).base.ref).toBe("main");
+    const parsed = parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "new-branch", branch: "feature/login", base: { kind: "local", ref: "main" } });
+    expect(parsed.mode !== "pull-request" && parsed.base.ref).toBe("main");
     expect(() => parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "new-branch", base: { kind: "local", ref: "main" } })).toThrow(/requires a name/);
     expect(() => parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "new-branch", branch: "--force", base: { kind: "local", ref: "main" } })).toThrow(/valid branch name/);
     expect(() => parseWorktreeCreateRequest({ sourceWorkspaceId: "atlas", mode: "remote-tracking", branch: "release", base: { kind: "local", ref: "release" } })).toThrow(/remote ref/);
