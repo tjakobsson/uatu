@@ -20,6 +20,7 @@
 //   end-then-refuse-steer present: a prompt sent during a run ends the earlier
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
+//   fail-thought-level   present: setting `thought_level` fails
 //   refuse-next-steer    present: the next steer is refused, and the flag removed
 //   hold-config          present: `session/set_config_option` waits to answer until
 //                        it is removed
@@ -202,6 +203,7 @@ app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
   log({ method: "session/set_config_option", params });
   if (flag("legacy-only")) throw RequestError.methodNotFound("session/set_config_option");
   while (flag("hold-config")) await Bun.sleep(5);
+  if (flag("fail-thought-level") && params.configId === "thought_level") throw new RequestError(-32603, "Failed to set the thinking level");
   let answer: ReturnType<typeof configOptions> = [];
   updateSession(params.sessionId, session => {
     const value = String(params.value);

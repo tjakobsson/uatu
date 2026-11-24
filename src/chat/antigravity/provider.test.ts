@@ -483,6 +483,19 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect((await fake.sessions())[0]).toEqual(expect.objectContaining({ model: "gemini-4-argon", thoughtLevel: "low" }));
     });
 
+    test("a model change that lands before a later setting fails is kept, so switching back sends the model again", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      await fake.setFlag("fail-thought-level", true);
+      await expect(provider.prompt(session.id, { id: "p1", text: "Say hello", delivery: "queue", model: { providerId: "antigravity", modelId: "gemini-4-argon" }, variant: "low" })).rejects.toThrow("Failed to set the thinking level");
+      expect((await fake.sessions()).find(entry => entry.sessionId === session.id)?.model).toBe("gemini-4-argon");
+      await fake.setFlag("fail-thought-level", false);
+      const modelChanges = async () => (await fake.log()).filter(entry => entry.method === "session/set_config_option" && entry.params?.configId === "model").map(entry => entry.params!.value);
+      await run(session.id, "Say hello", { model: { providerId: "antigravity", modelId: "gemini-4-neon" } });
+      expect(await modelChanges()).toEqual(["gemini-4-argon", "gemini-4-neon"]);
+      expect((await fake.sessions()).find(entry => entry.sessionId === session.id)?.model).toBe("gemini-4-neon");
+    });
+
     test("thinking levels learned for one model survive a load that advertises another", async () => {
       const { fake, provider, run } = await setup();
       await fake.setFlag("no-legacy-models", true);

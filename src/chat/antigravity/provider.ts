@@ -913,31 +913,39 @@ export class AntigravityProvider implements ChatProvider {
     let variant = model ? variantFor(this.catalog, model.modelId, wantedVariant) : undefined;
     const mode = input.mode ?? chosen.mode;
     const sessionId = conversation.sessionId;
-    let applied = conversation.applied ?? {};
-    const modelChanged = model !== undefined && applied.model?.modelId !== model.modelId;
-    if (model && this.catalog?.selection === "legacy") {
-      // No config options: the legacy id names the model and its level (D7).
-      if (modelChanged || applied.variant !== variant) {
-        const legacyId = legacyModelId(this.catalog, model.modelId, variant);
-        if (!legacyId) throw new UnsupportedVariantSelectionError(`Antigravity offers no model id for ${model.modelId}`);
-        await process.agent.request<unknown>("session/set_model", { sessionId, modelId: legacyId });
-        applied = { ...applied, model, ...(variant ? { variant } : {}) };
-        if (!variant) delete applied.variant;
+    const before = conversation.applied ?? {};
+    let applied = before;
+    // Each change agy confirms is recorded as it lands, so a later step
+    // failing leaves what agy runs known: a retry sends what still differs,
+    // and the turn is priced under the model agy has.
+    try {
+      const modelChanged = model !== undefined && applied.model?.modelId !== model.modelId;
+      if (model && this.catalog?.selection === "legacy") {
+        // No config options: the legacy id names the model and its level (D7).
+        if (modelChanged || applied.variant !== variant) {
+          const legacyId = legacyModelId(this.catalog, model.modelId, variant);
+          if (!legacyId) throw new UnsupportedVariantSelectionError(`Antigravity offers no model id for ${model.modelId}`);
+          await process.agent.request<unknown>("session/set_model", { sessionId, modelId: legacyId });
+          applied = { ...applied, model, ...(variant ? { variant } : {}) };
+          if (!variant) delete applied.variant;
+        }
+      } else if (modelChanged) {
+        const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "model", value: model.modelId });
+        applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
+        // The answer advertises the new model's thinking levels.
+        this.refreshAdvertisedLevels(answer.configOptions);
+        variant = variantFor(this.catalog, model.modelId, wantedVariant);
       }
-    } else if (modelChanged) {
-      const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "model", value: model.modelId });
-      applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
-      // The answer advertises the new model's thinking levels.
-      this.refreshAdvertisedLevels(answer.configOptions);
-      variant = variantFor(this.catalog, model.modelId, wantedVariant);
-    }
-    if (this.catalog?.selection !== "legacy" && variant && (modelChanged || applied.variant !== variant)) {
-      const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "thought_level", value: variant });
-      applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
-    }
-    if (mode && applied.mode !== mode) {
-      await process.agent.request("session/set_mode", { sessionId, modeId: mode });
-      applied = { ...applied, mode };
+      if (this.catalog?.selection !== "legacy" && variant && (modelChanged || applied.variant !== variant)) {
+        const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "thought_level", value: variant });
+        applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
+      }
+      if (mode && applied.mode !== mode) {
+        await process.agent.request("session/set_mode", { sessionId, modeId: mode });
+        applied = { ...applied, mode };
+      }
+    } finally {
+      if (applied !== before) conversation.applied = applied;
     }
     conversation.applied = applied;
     conversation.configuration = { ...(model ? { model } : {}), ...(variant ? { variant } : {}), ...(mode ? { mode } : {}) };
