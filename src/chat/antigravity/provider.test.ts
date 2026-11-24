@@ -535,6 +535,19 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(upserts(session.id).filter(item => item.type === "user_message" && item.text === "Steer")).toEqual([]);
     });
 
+    test("Stop after a steer ends the whole turn as interrupted, never as the superseded prompt's completion", async () => {
+      const { provider, waitFor, upserts, statuses, ended } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
+      // agy ends the earlier prompt with `end_turn` as the steer arrives.
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" });
+      await provider.interrupt(session.id);
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["interrupted"]);
+      expect(await sent.confirmation).toEqual({ outcome: "unknown" });
+    });
+
     test("a steer whose process ends before agy answers has an unknown outcome", async () => {
       const { fake, provider, waitFor, upserts } = await setup();
       const session = await provider.createSession("a");
