@@ -9,7 +9,7 @@ import type { NormalizedProviderEvent } from "../provider";
 import type { ConversationItem } from "../types";
 import type { AntigravityPriceTable } from "./pricing";
 import { AntigravityProvider } from "./provider";
-import { readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
+import { readSessionTranscript, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
 
 // One conversation recorded through the fake agy (text, a read, a denied
 // write), reopened by fresh providers with different transcripts on disk.
@@ -150,6 +150,11 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
   test("a recorded model id is read as its family unless it is a model of its own", () => {
     expect(transcriptModelFamily("gemini-4-neon-low", () => false)).toBe("gemini-4-neon");
     expect(transcriptModelFamily("gpt-oss-120b-medium", id => id === "gpt-oss-120b-medium")).toBe("gpt-oss-120b-medium");
+  });
+
+  test("an id that could leave agy's brain directory reads no transcript", async () => {
+    for (const id of ["../outside", "a/b", "..", ".hidden"]) expect(await readSessionTranscript(home, id)).toEqual({ skipped: "missing" });
+    expect("steps" in await readSessionTranscript(home, sessionId)).toBe(true);
   });
 
   test("an oversized or unreadable transcript is skipped", async () => {

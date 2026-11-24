@@ -20,6 +20,16 @@ import { ANTIGRAVITY_AGENT } from "./descriptor";
 export const TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024;
 const LEVEL_SUFFIX = /-(?:minimal|low|medium|high|xhigh)$/;
 
+// A session id names one directory under agy's brain; anything that could
+// leave it (a separator, `..`) is not one.
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/** A session's transcript, or `missing` for an id that cannot name one. */
+export function readSessionTranscript(home: string, sessionId: string): ReturnType<typeof readTranscript> {
+  if (!SESSION_ID.test(sessionId) || sessionId.includes("..")) return Promise.resolve({ skipped: "missing" });
+  return readTranscript(transcriptPath(home, sessionId));
+}
+
 export function transcriptPath(home: string, sessionId: string): string {
   return path.join(home, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl");
 }

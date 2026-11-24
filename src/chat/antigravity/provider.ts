@@ -17,7 +17,7 @@ import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./c
 import { ANTIGRAVITY_AGENT } from "./descriptor";
 import { ANTIGRAVITY_PRICES } from "./prices";
 import { priceTurn, ratesFor, type AntigravityPriceTable } from "./pricing";
-import { enrichReplay, historyFromTranscript, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
+import { enrichReplay, historyFromTranscript, readSessionTranscript, transcriptModelFamily, transcriptTurns } from "./transcript";
 import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nextUserMessage, normalizeAcpUpdate, sealOpenBlock, toolItems, userMessageId, type AcpMemory } from "./normalization";
 
 // A conversation with no turn, no open permission and no history read in
@@ -514,7 +514,7 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   private async usageFromTranscript(conversation: Conversation, turn: Turn, carrierId: string, model: ModelSelection | undefined): Promise<void> {
-    const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
+    const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
     if (!("steps" in read) || this.disposed) return;
     const recorded = transcriptTurns(read.steps)[turn.userIndex - 1];
     if (!recorded?.usage || recorded.request !== turn.request.trim()) return;
@@ -701,7 +701,7 @@ export class AntigravityProvider implements ChatProvider {
 
   /** History from the transcript alone, when agy cannot load the conversation. */
   private async seedFromTranscript(conversation: Conversation): Promise<boolean> {
-    const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
+    const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
     if (!("steps" in read) || conversation.seeded) return conversation.seeded;
     const items = historyFromTranscript(read.steps, conversation.sessionId, this.now());
     conversation.items.splice(0, conversation.items.length, ...items);
@@ -716,7 +716,7 @@ export class AntigravityProvider implements ChatProvider {
 
   /** Add what replay omits from agy's transcript, or leave replay as it is (design D10). */
   private async enrichFromTranscript(conversation: Conversation): Promise<void> {
-    const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
+    const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
     const known = (id: string) => this.knownModel(id);
     const enriched = "steps" in read ? enrichReplay(conversation.items, conversation.sessionId, transcriptTurns(read.steps), {
       family: model => transcriptModelFamily(model, known),
