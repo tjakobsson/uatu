@@ -16505,6 +16505,26 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     } finally { await adapter.dispose(); }
   });
 
+  for (const order of ["acceptance first", "provider row first"] as const) test(`an accepted steer keeps the provider's timeline position (${order})`, async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const row = { id: "message:native-steer", type: "user_message" as const, createdAt: 5, text: "steer" };
+      const reply = { id: "message:reply", type: "assistant_message" as const, createdAt: 6, markdown: "Reply to the steer" };
+      const publish = (...items: ConversationItem[]) => provider.eventQueue.push({ normalized: { conversationId: "session", updates: items.map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "update" } });
+      provider.prompt = async () => {
+        if (order === "provider row first") { publish(row, reply); await liveEventsApplied(adapter, provider); }
+        return { messageId: "native-steer", ...(order === "acceptance first" ? { createdAt: 5 } : {}) };
+      };
+      await steer("r-s", "steer");
+      if (order === "acceptance first") { publish(row, reply); await liveEventsApplied(adapter, provider); }
+      expect(await userRows()).toEqual([expect.objectContaining({ id: "message:native-steer", createdAt: 5, requestId: "r-s" })]);
+      const ids = adapter.projectionForTests("session").items().map(item => item.id);
+      expect(ids.indexOf("message:native-steer")).toBeLessThan(ids.indexOf("message:reply"));
+    } finally { await adapter.dispose(); }
+  });
+
   test("held messages wait for the carried turn's end, not for the steer", async () => {
     const { adapter, provider, steer, queue, status } = immediate();
     const pump = adapter.startEventPump(); void pump.catch(() => undefined);

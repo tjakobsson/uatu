@@ -3655,8 +3655,8 @@ export class ChatAdapter {
    * restores the draft with the agent's reason. An admission that neither
    * answers in time nor fails is an unknown outcome the receipt retains and
    * never resends.
-   * The accepted message's row goes in at acceptance under the same id
-   * dispatchPrompt uses, which the provider's own row and replay share.
+   * The accepted message's row goes in under the same id dispatchPrompt
+   * uses, which the provider's own row and replay share.
    */
   private async dispatchImmediateSteer(conversationId: string, projection: ConversationProjection, input: { messageId: string; text: string; requestId: string; attachments: MessageAttachment[] }): Promise<{ messageId: string }> {
     const providerAttachments = await this.locateAttachments(input.attachments);
@@ -3664,15 +3664,28 @@ export class ChatAdapter {
       id: input.messageId, text: input.text, delivery: "steer",
       ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
     }));
-    let accepted: { messageId: string };
+    let accepted: { messageId: string; createdAt?: number };
     try {
       accepted = await this.boundedSteerAdmission(admission, input.messageId);
     } catch (error) {
       if (error instanceof OperationOutcomeUnknownError) throw error;
       throw new SteerRefusedError(errorMessage(error));
     }
-    projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text: input.text, requestId: input.requestId, ...(input.attachments.length ? { attachments: input.attachments } : {}) });
+    this.recordImmediateSteer(projection, accepted, input);
     return accepted;
+  }
+
+  // The accepted steer's row, at the provider's position: a row the provider
+  // already published keeps its own place and only gains the request id;
+  // otherwise the provider's acceptance names the position.
+  private recordImmediateSteer(projection: ConversationProjection, accepted: { messageId: string; createdAt?: number }, input: { text: string; requestId: string; attachments: MessageAttachment[] }): void {
+    const id = `message:${accepted.messageId}`;
+    const existing = projection.get(id);
+    if (existing?.type === "user_message") {
+      if (existing.requestId !== input.requestId) projection.upsert({ ...existing, requestId: input.requestId });
+      return;
+    }
+    projection.upsert({ id, type: "user_message", createdAt: accepted.createdAt ?? Date.now(), text: input.text, requestId: input.requestId, ...(input.attachments.length ? { attachments: input.attachments } : {}) });
   }
 
   // Provider events can update the cache while prompt admission awaits.

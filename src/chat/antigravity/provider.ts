@@ -256,7 +256,7 @@ export class AntigravityProvider implements ChatProvider {
 
   // ---- turns --------------------------------------------------------------
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt: number }> {
     const conversation = this.conversation(sessionId);
     if (input.delivery === "steer") return this.steer(conversation, input);
     if (conversation.turn) throw new Error("Antigravity is still answering this conversation");
@@ -277,11 +277,11 @@ export class AntigravityProvider implements ChatProvider {
     this.publish({ conversationId: sessionId, updates: [], outcome: "handled", eventType: "session/prompt", notificationTurns: [{ sourceId: turn.id, phase: "started", createdAt: now }] });
     clearTimeout(conversation.idle);
     this.send(conversation, process, turn, blocks);
-    return { messageId: userMessageId(memory, memory.userCount) };
+    return { messageId: userMessageId(memory, memory.userCount), createdAt: user.createdAt };
   }
 
   /** A steer joins the running turn as a further prompt (design D9). */
-  private async steer(conversation: Conversation, input: { text: string; attachments?: ProviderAttachment[] }): Promise<{ messageId: string }> {
+  private async steer(conversation: Conversation, input: { text: string; attachments?: ProviderAttachment[] }): Promise<{ messageId: string; createdAt: number }> {
     const turn = conversation.turn;
     const process = conversation.process;
     if (!turn || turn.ended || !process?.alive) throw new Error("Antigravity is not answering this conversation, so there is nothing to steer");
@@ -291,7 +291,7 @@ export class AntigravityProvider implements ChatProvider {
     const user = nextUserMessage(memory, input.text, this.now(), { attachments: attachmentRefs(input.attachments) });
     this.emit(conversation, { updates: [...sealOpenBlock(memory, this.now()), { kind: "upsert", item: user }], outcome: "handled", eventType: "session/prompt" });
     this.send(conversation, process, turn, blocks);
-    return { messageId: userMessageId(memory, memory.userCount) };
+    return { messageId: userMessageId(memory, memory.userCount), createdAt: user.createdAt };
   }
 
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {

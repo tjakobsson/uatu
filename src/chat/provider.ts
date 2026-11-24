@@ -432,8 +432,9 @@ export interface ChatProvider {
    * the turn's end once, after the steered part (add-antigravity-chat D9).
    * Its steer rejects with OperationOutcomeUnknownError when the steer may
    * have reached the agent; any other rejection is a definite refusal.
+   * `createdAt`, when given, is the accepted message's timeline position.
    */
-  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt?: number }>;
   /** Native identity known before dispatch, for read-only unknown recovery. */
   promptIdentity?(identity: string): string;
   /**
