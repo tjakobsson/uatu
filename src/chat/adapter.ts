@@ -2621,13 +2621,13 @@ export class ChatAdapter {
     const parentId = session.parentId ?? null;
     boundedSet(this.sessionParents, session.id, parentId, INVENTORY_SESSION_LIMIT);
     const cached = this.inventorySessions.get(session.id);
-    if (cached && (!cached.inWorkspace || cached.deleted)) {
-      boundedSet(this.inventorySessions, session.id, {
+    if (cached && (!cached.inWorkspace || cached.deleted) && this.absenceSequence(session.id) <= tick) {
+      this.rememberInventorySession(session.id, {
         inWorkspace: true,
         parentId,
         title: session.title || cached.title,
         deleted: false,
-      }, INVENTORY_SESSION_LIMIT);
+      }, true);
     }
   }
 
@@ -2695,6 +2695,14 @@ export class ChatAdapter {
     visited = new Set<string>(),
   ): Promise<void> {
     visited.add(parentId);
+    const retainChild = (childId: string, statusBaseline: number): void => {
+      const currentStatus = this.projections.get(childId)?.status;
+      if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
+        || currentStatus === "completed" || currentStatus === "failed" || currentStatus === "interrupted") return;
+      const stop = this.stoppingTurns.get(childId);
+      if (stop) stop.activeProbeBaseline = statusBaseline;
+      else this.seedProbedRunning(childId, statusBaseline, true);
+    };
     for (const [childId] of recoveredWorkerChildren) this.beginActiveProbe(childId);
     try {
       for (const [childId, statusBaseline] of recoveredWorkerChildren) {
@@ -2705,9 +2713,7 @@ export class ChatAdapter {
         if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
           || existingStatus === "completed" || existingStatus === "failed" || existingStatus === "interrupted") continue;
         if (presentIds?.has(childId)) {
-          const stop = this.stoppingTurns.get(childId);
-          if (stop) stop.activeProbeBaseline = statusBaseline;
-          else this.seedProbedRunning(childId, statusBaseline, true);
+          retainChild(childId, statusBaseline);
           continue;
         }
         const started = ++this.presenceClock;
@@ -2719,24 +2725,20 @@ export class ChatAdapter {
           if (inWorkspace && session) {
             if (this.absenceSequence(childId) > started || this.settledTurns.has(childId)) continue;
             this.refreshConfirmedPresence(session, started);
-            if (this.statusSequence(childId) !== statusBaseline) continue;
-            const stop = this.stoppingTurns.get(childId);
-            if (stop) stop.activeProbeBaseline = statusBaseline;
-            else this.seedProbedRunning(childId, statusBaseline, true);
+            retainChild(childId, statusBaseline);
           } else if (this.presenceSequence(childId) <= started) {
             const nested = this.forgetMissingSession(childId, started);
             if (nested.length > 0) await this.reconcileRecoveredWorkerChildren(childId, nested, signal, presentIds, visited);
+          } else if (this.absenceSequence(childId) < this.presenceSequence(childId)) {
+            // A newer confirmed presence overtook this stale negative lookup;
+            // retain the recovered worker evidence so it is not dropped.
+            retainChild(childId, statusBaseline);
           }
         } catch {
           // Keep recovered worker activity when a transient provider error prevents
           // verification so subsequent healthy refreshes/reconnects can reconcile it.
-          if (!this.disposed && !signal?.aborted
-            && this.absenceSequence(childId) <= started
-            && this.statusSequence(childId) === statusBaseline
-            && !this.settledTurns.has(childId)) {
-            const stop = this.stoppingTurns.get(childId);
-            if (stop) stop.activeProbeBaseline = statusBaseline;
-            else this.seedProbedRunning(childId, statusBaseline, true);
+          if (!this.disposed && !signal?.aborted && this.absenceSequence(childId) <= started) {
+            retainChild(childId, statusBaseline);
           }
         }
       }

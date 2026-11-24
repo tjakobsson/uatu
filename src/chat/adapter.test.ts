@@ -15055,6 +15055,133 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("confirmed presence restoring a previously foreign conversation invalidates inventory", async () => {
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        try { return await work(); }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const session = fixtureSession("c-move-back-inv");
+    const foreign = { ...session, directory: `${process.cwd()}-elsewhere` };
+    provider.sessions = [session];
+    let currentSession: ProviderSession = session;
+    provider.getSession = async id => (id === session.id ? currentSession : null);
+
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+
+    // Seed visible inventory, then move the conversation out so it is cached as foreign.
+    await adapter.listConversations();
+    const movedOut = waitForEvent("session.updated");
+    currentSession = foreign;
+    provider.eventQueue.push({ normalized: {
+      conversationId: session.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.updated",
+      sessionLifecycle: { kind: "updated", id: session.id, directory: foreign.directory, title: session.title, sparse: false },
+    } });
+    await movedOut;
+    await expectInventorySignal(inventory);
+
+    // Move back: getConversation confirms local presence before the queued session.updated arrives.
+    currentSession = session;
+    await adapter.getConversation(session.id);
+    await expectInventorySignal(inventory);
+
+    // The subsequent session.updated with the same title does not miss the move-back or double-invalidate.
+    const movedBack = waitForEvent("session.updated");
+    provider.eventQueue.push({ normalized: {
+      conversationId: session.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.updated",
+      sessionLifecycle: { kind: "updated", id: session.id, directory: session.directory, title: session.title, sparse: false },
+    } });
+    await movedBack;
+    expect(await Promise.race([inventory.next(), Promise.resolve("quiet" as const)])).toBe("quiet");
+
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("recovered worker child retains running activity when a stale null lookup is overtaken by a newer local lookup", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        return await result;
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-stale-child-miss");
+    const child = { ...fixtureSession("c-overtaken-local"), parentId: parent.id };
+    provider.sessions = [parent];
+    provider.reconcileBackgroundTasks = async id => id === parent.id ? [{
+      id: `task:${child.id}`,
+      type: "background_task",
+      taskId: child.id,
+      taskType: "agent",
+      childConversationId: child.id,
+      description: "Recovered worker",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has(`background.recovery:${parent.id}`));
+    await tasks.get(`background.recovery:${parent.id}`);
+    expect(adapter.activity().working).toBe(true);
+
+    // Parent disappears; first child lookup is deferred and will return null (stale),
+    // while a second newer lookup confirms the child is local.
+    let childCalls = 0;
+    let resolveStaleChildLookup!: (session: ProviderSession | null) => void;
+    provider.getSession = async id => {
+      if (id === parent.id) return null;
+      if (id === child.id) {
+        childCalls += 1;
+        if (childCalls === 1) return new Promise<ProviderSession | null>(resolve => { resolveStaleChildLookup = resolve; });
+        return child;
+      }
+      return null;
+    };
+    const parentMiss = adapter.getConversation(parent.id).catch(() => undefined);
+    await waitUntil(() => resolveStaleChildLookup !== undefined);
+
+    // Newer local lookup overtakes the pending verification.
+    await adapter.getConversation(child.id);
+
+    // Older verification now returns null; it is fenced as stale and retains the child's running evidence.
+    resolveStaleChildLookup(null);
+    await parentMiss;
+    expect(adapter.activity().working).toBe(true);
+    expect(adapter.projectionForTests(child.id).status).toBe("running");
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
