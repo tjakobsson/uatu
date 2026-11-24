@@ -302,6 +302,12 @@ export class FakeGithubService implements GithubService {
     return { headOid: record.seed.headRefOid, paths: [...paths].sort(), truncated: false };
   }
 
+  async pullRequestCommits(_repositoryId: string, number: number): Promise<{ headOid: string; baseOid: string }> {
+    this.assertReadable();
+    const record = this.record(number);
+    return { headOid: record.seed.headRefOid, baseOid: record.seed.baseRefOid };
+  }
+
   // --- internals -------------------------------------------------------
 
   // The checked-out branch's head is local already; every other one only

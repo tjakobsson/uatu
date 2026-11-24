@@ -30,6 +30,12 @@ test("the compare base moving changes the key", () => {
   expect(key(repository({ mergeBase: "ddddddd" }))).not.toBe(key(repository()));
 });
 
+test("the pull request base's state changes the key, even when the merge base stays (design D8)", () => {
+  const withBase = (state: "exact" | "stale") => ({ ...repository(), base: { ...repository().base, mode: "pull-request" as const, pullRequest: { number: 42, ref: "origin/main", state } } });
+  expect(key(withBase("exact"))).not.toBe(key(withBase("stale")));
+  expect(key(withBase("stale"))).not.toBe(key(repository()));
+});
+
 test("the file's own change entry changing changes the key", () => {
   expect(key(repository({ changedFiles: [file("docs/b.md")] }))).not.toBe(key(repository()));
   expect(key(repository({ changedFiles: [{ ...file("docs/a.md"), status: "A" }, file("docs/b.md")] }))).not.toBe(key(repository()));

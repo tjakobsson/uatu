@@ -51,6 +51,7 @@ import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
 import { isDocumentVisible } from "../shared/file-visibility";
 import { FolderListingError, type WatchSession } from "./watch-session";
+import { documentDiffReview } from "../github/anchoring";
 import { githubRouteHandlers } from "../github/http";
 import type { GithubService } from "../github/service";
 
@@ -445,7 +446,13 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
           const fileFacts = doc && rootPath
             ? await collectFileFacts({ absolutePath: doc.id, rootPath })
             : undefined;
-          return Response.json({ ...payload, ...(fileFacts ? { fileFacts } : {}) });
+          // Whether this diff is the checked-out branch's pull request's own
+          // diff of the file (src/github/anchoring.ts, design D8), from the
+          // GitHub service's memory and the checkout: never a GitHub request.
+          const review = payload.kind === "text" || payload.kind === "unchanged"
+            ? await documentDiffReview(deps.github ?? null, roots, documentId, context.compareTarget).catch(() => null)
+            : null;
+          return Response.json({ ...payload, ...(fileFacts ? { fileFacts } : {}), ...(review ? { review } : {}) });
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
           if (message === "document not found") {

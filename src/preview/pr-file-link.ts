@@ -1,8 +1,9 @@
 // A document's Diff view, for a file the workspace's current pull request
 // changes, offers "Review this file in #n": the pull request's Files changed,
-// scrolled to that file, is where line comments are made. The document Diff
-// compares against the workspace's compare base, not the pull request's
-// base, so it offers no commenting of its own.
+// scrolled to that file, where line comments are always anchored. The
+// document Diff compares the local checkout, so it takes comments itself only
+// when the session proves it is the pull request's own diff of the file
+// (design D8, src/preview/diff-pr-review.ts).
 
 // (diff.ts builds the link; this module is the rule.)
 

@@ -392,7 +392,7 @@ function showRefusal(current: State, error: unknown): void {
     previewElement.innerHTML = `<div class="gh-state-card pr-fetch-card" role="region" aria-labelledby="pr-fetch-title">
         <p class="gh-state-card-eyebrow">Pull request #${number}${current.detail?.mock ? ` · <span class="gh-mock-label">Mocked</span>` : ""}</p>
         <h3 id="pr-fetch-title">Get #${number}'s files</h3>
-        <p>To show its files, uatu fetches the pull request's head from origin into a private ref, <code>refs/uatu/pull/${number}/head</code>. Your branch, your files and the index stay as they are.</p>
+        <p>To show its files, uatu fetches the pull request's head from the repository's remote into a private ref, <code>refs/uatu/pull/${number}/head</code>, with this workspace's Git credentials. Your branch, your files and the index stay as they are.</p>
         <p class="pr-fetch-actions"><button type="button" class="gh-button gh-button-primary" data-pr-file-fetch>Fetch #${number}'s head</button>${diff}${githubLink}</p>
         <p class="pr-muted pr-fetch-status" data-pr-fetch-status role="status"></p>
       </div>`;
@@ -527,7 +527,7 @@ function renderBar(current: State): void {
     : local.state === "same" ? `<span class="pr-file-local is-same">Same as your checkout <button type="button" class="gh-link-button" data-pr-file-open-local>Open in workspace</button></span>`
     : local.state === "differs" ? `<span class="pr-file-local">Your checkout differs (${escapeHtml(local.why)}); showing the PR head. <button type="button" class="gh-link-button" data-pr-file-open-local>Open your copy</button></span>`
     : `<span class="pr-file-local">Not in your checkout.</span>`;
-  const lfs = current.payload?.lfsPointer ? `<span class="pr-file-note">A Git LFS pointer: uatu shows the pointer, it doesn't fetch LFS content.</span>` : "";
+  const lfs = current.payload?.lfsPointer ? `<span class="pr-file-note">Stored in Git LFS: this is its pointer. uatu never fetches LFS content.</span>` : "";
   const notice = current.notice ? `<span class="pr-file-note is-attention" role="status">${escapeHtml(current.notice)} <button type="button" class="gh-link-button" data-pr-file-reload>Reload</button></span>` : "";
   const threads = threadsOn(current);
   const pending = (detail?.pendingReview?.comments ?? []).filter(comment => comment.path === current.target.path).length;

@@ -222,6 +222,15 @@ git -c fetch.fsckObjects=true fetch --no-tags <remote> +refs/pull/<n>/head:refs/
 
 *Alternative:* fetch automatically when the base is missing. Rejected: the child otherwise only observes repositories, and silent network fetches with credentials should be a user decision.
 
+*As built (tasks 3.1–3.3, 9.4):*
+
+- The override lives in `src/document/pull-request-base.ts`, a per-root registry the real service sets from each summary, so nothing on the file-observation path imports `src/github/`. It records `{ number, remote, baseRefName, baseRefOid, branch }` and applies only while that branch is checked out, so switching away falls back at once. Only an **open** pull request supplies a base; a merged or closed one detected for the branch doesn't.
+- `CompareBase.pullRequest` is `{ number, ref, state: "exact" | "stale" | "missing" }` rather than `{ number, exact }` plus `pullRequestBaseMissing`. `mode` is `pull-request` for `exact` and `stale`; `missing` keeps the default resolution's mode. `RepositorySnapshot.base` is an open object in `api/openapi.yaml`, so no revision changed.
+- A new association or base, and every successful fetch, notify the session, which collects Git data again without reclassifying documents (`requestRepositoryCollection`). `diff.ts`'s base cache keys on the override identity plus a fetch counter.
+- The fetch is `git -c fetch.fsckObjects=true fetch --no-tags --no-write-fetch-head --no-recurse-submodules --refmap= [--depth=1] -- <remote> <refspecs>` (`src/document/pull-request-refs.ts`). `--no-write-fetch-head` keeps `FETCH_HEAD` untouched, and `--refmap=` stops Git's opportunistic remote-tracking updates from configured refspecs. Only what isn't local is fetched: the head when its commit is missing, and the base branch when GitHub's base commit is missing. One action serves the file view, All files, Change Overview and the document Diff. It runs in the session's environment with `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and `ssh -o BatchMode=yes` unless an SSH command is projected; it stops after 120 s.
+- Failures share `src/shared/git-fetch-failure.ts` with the Hub's worktree fetches: a missing `refs/pull/<n>/head` (404), no Git credential (403; the card says it can't fetch and why, Q2), unreachable (502), too slow (504). Git's text never leaves the child.
+- Pruning runs after each successful fetch: refs of pull requests the service has read as merged or closed go first, then the oldest by their head commit's committer date, never the one just fetched. "When the reviewer leaves it" became "at the next fetch": there is no leave-the-view request to hang it on.
+
 ### D17. The pull request file view
 
 A changed file opens at the pull request's head in the document preview's own Rendered / Source / Diff chooser (`?pr=<n>&path=<path>[&rev=base]`), as a third state of the `pull-request` preview mode. Diff is Files changed limited to that file (`mountFilesChanged(…, { only })`), so threads, the composer and the pending review are the same; Rendered and Source show a threads bar with Show in Diff, and Source marks thread lines (exact: a current RIGHT-side thread's line is a head line). Commenting stays in Diff (D8 is unchanged). Files changed has no per-file Rendered switch: Mermaid, the outline, Find, split layout and the `<base href>` are built for one mounted preview, so each header gets View file instead.
@@ -241,7 +250,15 @@ Owner decisions on the design's questions:
 - **Q4, `refs/uatu/pull/*`:** accepted, at most 20 per repository (D7).
 - **Q5, ignore rules for All files:** only the exposure deny list (VCS metadata, OS litter), not `.uatu.json` ignore rules: those describe the working tree and what the checkout exposes, while the PR's tree is what GitHub already shows every reviewer, and hiding part of it would hide what is being merged.
 
-**Phasing.** Phase 1 (the file view on the fake) and phase 3 (All files and the base revision) are built against the fake; phase 4's Source markers are built, Rendered block markers are not. Phase 2, the Git reader (`src/document/git-objects.ts`), the narrow fetch with pruning and the shallow rule, the real own-PR head check and the new-commits notice against a moving head, waits for the `gh` transport and is testable now against temporary repositories and a bare remote holding `refs/pull/<n>/head` (D15).
+**Phasing.** Phase 1 (the file view on the fake) and phase 3 (All files and the base revision) are built against the fake; phase 4's Source markers are built, Rendered block markers are not. Phase 2 is built: the Git reader (`src/document/git-objects.ts`) and the narrow fetch with pruning and the shallow rule (`src/document/pull-request-refs.ts`) behind the real service, tested against temporary repositories and a bare remote holding `refs/pull/<n>/head` (D15).
+
+*As built (phase 2, task 9.4):*
+
+- `cat-file --batch-check` reads a blob's type and size before `cat-file --batch` reads its bytes, so a blob over the service's 20 MB read cap is never loaded. The file route still renders at most 1 MB. A path containing a newline can't be named on `cat-file`'s line protocol and reads as missing.
+- The seam gained `pullRequestCommits`, answered from the service's memory of the last summary or detail. The blob route uses it, so a rendered file's images don't each re-read the pull request from GitHub. It also gained an optional `reviewContext` (D8) and a `too-large` blob answer.
+- A head is read wherever it is local: the checkout's own branch (the branch's own pull request needs no fetch, and Fetch is then a no-op) or the private ref.
+- An LFS pointer (`parseLfsPointer`: the spec's version line, `oid sha256:`, `size`, under 1 KB) renders as text whatever its extension, with "Stored in Git LFS". The blob route answers 415 for one, so it never shows as a broken image.
+- The new-commits notice was already built. With a moving head, the server now reads a new head as not fetched until Fetch (`pull-request-git.integration.test.ts`).
 
 ### D8. Anchoring rule: comment only on a provably identical diff
 
@@ -262,6 +279,14 @@ Under those conditions the displayed hunks are GitHub's hunks for F: right-side 
 The write route re-checks the same conditions at request time, using the client's `headOid`, so a stale page cannot post. Pierre `additions`/context map to GitHub `RIGHT` with new-file numbers; `deletions` map to `LEFT` with old-file numbers. A range must stay on one side.
 
 *Alternative:* translate line numbers through local edits with a diff-of-diffs. Rejected: it fails silently in exactly the cases that matter, and the spec forbids silent misanchoring.
+
+*As built (tasks 5.2, 5.3):*
+
+- `src/github/anchoring.ts` decides from the checkout (`documentDiffAnchor` in `diff.ts`: repository, path, the resolved base, HEAD, `git status` for the file) and the service's memory (`reviewContext`: the summary's pull request, its head, and the changed paths cached at that head). A diff request never asks GitHub. Reasons are checked in this order: `not-in-pr`, `last-commit`, `base-inexact` (with `baseState`), `head-mismatch`, `local-changes`, then `files-unknown` while the changed files aren't read yet. `lightweight-render` is the browser's, since only it knows the render tier.
+- When exact, the document Diff mounts that file's Files changed (`mountFilesChanged(…, { only, fromCheckout })`) instead of the local Pierre render. Exactness means the hunks are GitHub's, so this reuses the one implementation of threads, composers, drafts and the pending review. Otherwise the local diff stays, under a note giving the reason and listing the file's threads read-only (outdated marked), each opening in Files changed, with Fetch for `base-inexact` and `head-mismatch`. `not-in-pr` shows nothing.
+- `fromCheckout: true` on `POST /api/github/review/threads` makes the write re-run the rule against the checkout and the head GitHub names now (409, draft kept). Requests without it, from Files changed, keep D8's scope.
+- The fake has no `reviewContext`, so the demo's document Diff is unchanged.
+- D10's spike (task 5.1) is unchanged: the per-document Diff places threads only through Files changed's existing annotations.
 
 **Scope (owner decision):** D8 governs the per-document Diff view, which shows the local checkout. Files changed in the pull request view renders GitHub's own diff of the PR (the base and head contents GitHub serves), so it is PR-exact by construction for any PR, checked out or not, including one viewed with View here. Inline comments and replies are offered there for every open PR. The write route checks such a request against the PR head, the PR's changed paths and the pending review's commit only; the local-HEAD and clean-file checks apply to requests from the per-document Diff view.
 

@@ -7,12 +7,14 @@
 // loads exclusively through the dynamic import below.
 import type { SupportedLanguages } from "@pierre/diffs";
 import type { DiffStyle, FileFacts } from "../shared/types";
+import type { DocumentDiffReview } from "../shared/github-contract";
 import { attachReviewLineKeys, type ReviewLine } from "./diff-review-lines";
 
 // The server's diff route attaches `fileFacts` on top of the diff variants
 // so a diff-first load can populate the facts strip without a separate
-// /api/document fetch.
-export type DocumentDiffPayload = DocumentDiffVariant & { fileFacts?: FileFacts };
+// /api/document fetch, and `review` when the checked-out branch has a pull
+// request (src/github/anchoring.ts, design D8).
+export type DocumentDiffPayload = DocumentDiffVariant & { fileFacts?: FileFacts; review?: DocumentDiffReview };
 
 type DocumentDiffVariant =
   | {

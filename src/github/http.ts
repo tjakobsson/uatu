@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { classifyBytes } from "../document/classify";
+import { parseLfsPointer } from "../document/git-objects";
 import { shouldDenyPath } from "../ignore/exposure";
 import { renderMarkdownToHtml, SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "../render/markdown";
 import { renderDocumentSource, type RenderedDocument } from "../server/render-dispatch";
@@ -153,6 +154,7 @@ export function githubRouteHandlers(
       line: numberParam(body.line),
       side: sideParam(body.side),
       body: bodyText(body.body),
+      ...(body.fromCheckout === true ? { fromCheckout: true } : {}),
     })),
     reply: write((service, body, request) => service.replyToThread(
       repositoryParam(body.repository), numberParam(body.number), pathParam(request, "threadId"), bodyText(body.body))),
@@ -197,25 +199,29 @@ export function githubRouteHandlers(
       const rev = revParam(url.searchParams.get("rev"));
       const view = url.searchParams.get("view") === "source" ? "source" : "rendered";
       const blob = await service.pullRequestBlob(repositoryId, number, { path: filePath, rev });
-      if ("state" in blob) throw new FileRefused(409, "not-fetched", `#${number}'s head isn't fetched yet.`);
+      if ("state" in blob && blob.state === "not-fetched") throw new FileRefused(409, "not-fetched", `#${number}'s head isn't fetched yet.`);
+      const revisionOf = (oid: string): PullRequestFileRevision => ({ number, rev, oid, blobBase: `api/github/pr-blob/${keyOf(repositoryId)}/${number}/${oid}/` });
+      if ("state" in blob) throw new FileRefused(413, "too-large", `${filePath} is too large to show here.`, revisionOf(blob.oid));
       const cacheKey = `${repositoryId}\n${blob.oid}\n${filePath}\n${view}`;
       const cached = fileCache.get(cacheKey);
       if (cached) {
         remember(cacheKey, cached);
         return cached;
       }
-      const revision: PullRequestFileRevision = { number, rev, oid: blob.oid, blobBase: `api/github/pr-blob/${keyOf(repositoryId)}/${number}/${blob.oid}/` };
+      const revision = revisionOf(blob.oid);
       const name = path.posix.basename(filePath);
+      // A Git LFS pointer is shown as its text, whatever the file's type:
+      // uatu never runs an LFS fetch.
+      const lfsPointer = parseLfsPointer(blob.bytes) !== null;
       const kind = classifyBytes(name, blob.bytes);
-      if (kind === "binary") throw new FileRefused(415, "binary", `${filePath} is a binary file.`, revision);
+      if (kind === "binary" && !lfsPointer) throw new FileRefused(415, "binary", `${filePath} is a binary file.`, revision);
       if (blob.bytes.length > SYNTAX_HIGHLIGHT_BYTES_LIMIT) throw new FileRefused(413, "too-large", `${filePath} is too large to show here.`, revision);
       const source = new TextDecoder().decode(blob.bytes);
-      const lfsPointer = source.startsWith("version https://git-lfs.github.com/spec/v1");
       const rendered = await renderDocumentSource({
         id: `pr:${number}@${blob.oid}:${filePath}`,
         name,
         relativePath: filePath,
-        kind: lfsPointer ? "text" : kind,
+        kind: lfsPointer || kind === "binary" ? "text" : kind,
         source,
       }, view);
       const payload: FilePayload = {
@@ -247,11 +253,14 @@ export function githubRouteHandlers(
         const repositoryId = repositoryForKey(key);
         if (!repositoryId || !/^[0-9a-f]{7,64}$/i.test(oid)) throw new GithubError(404, "not found");
         const number = numberParam(numberText);
-        const pr = (await service.pullRequest(repositoryId, number)).summary;
-        const rev: PullRequestRevision | null = oid === pr.headRefOid ? "head" : oid === pr.baseRefOid ? "base" : null;
+        const commits = await service.pullRequestCommits(repositoryId, number);
+        const rev: PullRequestRevision | null = oid === commits.headOid ? "head" : oid === commits.baseOid ? "base" : null;
         if (!rev) throw new GithubError(404, "not found");
         const blob = await service.pullRequestBlob(repositoryId, number, { path: filePath, rev });
-        if ("state" in blob) return new Response("Not fetched", { status: 409, headers: { ...NO_STORE, "content-type": "text/plain; charset=utf-8" } });
+        const plain = { ...NO_STORE, "content-type": "text/plain; charset=utf-8" };
+        if ("state" in blob) return new Response(blob.state === "not-fetched" ? "Not fetched" : "Too large", { status: blob.state === "not-fetched" ? 409 : 413, headers: plain });
+        // An image stored in Git LFS is only its pointer here.
+        if (parseLfsPointer(blob.bytes)) return new Response("Stored in Git LFS", { status: 415, headers: plain });
         const extension = path.posix.extname(filePath).toLowerCase();
         const kind = classifyBytes(path.posix.basename(filePath), blob.bytes);
         const type = IMAGE_TYPES[extension] ?? (kind === "binary" ? "application/octet-stream" : "text/plain; charset=utf-8");

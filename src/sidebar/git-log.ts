@@ -86,6 +86,8 @@ export function renderGitLog() {
 
 export function baseModeLabel(mode: RepositorySnapshot["base"]["mode"]): string {
   switch (mode) {
+    case "pull-request":
+      return "pull request base";
     case "remote-default":
       return "remote default";
     case "fallback":

@@ -4324,6 +4324,28 @@ html[data-ui-mode="touch"] .files-query-control:not(.is-open):has(input:placehol
   line-height: 1.4;
 }
 
+/* The pull request's base isn't exact here (Change Overview). */
+.pr-base-note {
+  margin: 0.4rem 0;
+  padding: 0.4rem 0.5rem;
+  border-left: 3px solid var(--attention);
+  background: var(--notice-warn-bg);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.pr-base-note p {
+  margin: 0;
+}
+
+.pr-base-note .pr-base-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
 .untracked-indicator {
   margin: 0.35rem 0;
   padding: 0.25rem 0.5rem;
@@ -5956,6 +5978,19 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
 .uatu-diff-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; }
 .uatu-diff-header > .uatu-diff-pr-link { margin: 0.5rem 0.75rem 0; color: light-dark(#0550ae, #79c0ff); font-size: 0.8rem; font-weight: 600; text-decoration: none; }
 .uatu-diff-header > .uatu-diff-pr-link:hover { text-decoration: underline; }
+/* Why the document Diff can't take comments on the pull request (D8), with
+   the file's threads listed read-only. */
+.uatu-diff-review { margin: 0.5rem 0.75rem; padding: 0.5rem 0.75rem; border-left: 3px solid var(--attention); background: var(--notice-warn-bg); font-size: 0.8rem; line-height: 1.45; }
+.uatu-diff-review p { margin: 0; }
+.uatu-diff-review a { color: light-dark(#0550ae, #79c0ff); }
+.uatu-diff-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem !important; }
+.uatu-diff-review-count { margin-top: 0.5rem !important; font-weight: 600; }
+.uatu-diff-review-threads { list-style: none; margin: 0.25rem 0 0; padding: 0; display: grid; gap: 0.4rem; }
+.uatu-diff-review-thread { padding: 0.35rem 0.5rem; border-radius: 6px; background: var(--surface, light-dark(#fff, #0d1117)); }
+.uatu-diff-review-thread.is-resolved { opacity: 0.75; }
+.uatu-diff-review-thread-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; color: var(--text-subtle); }
+.uatu-diff-review-thread-meta a { margin-left: auto; }
+.uatu-diff-review-thread-body { margin-top: 0.2rem; font-size: 0.8rem; }
 html[data-ui-mode="touch"] .uatu-diff-header > .uatu-diff-pr-link { display: inline-flex; align-items: center; min-height: 44px; margin-block: 0; }
 .preview-shell > .uatu-layout-toolbar {
   align-self: flex-start;

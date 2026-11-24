@@ -104,6 +104,10 @@ export type RepositoryMetadata = {
 };
 
 export type CompareBaseMode =
+  // The checked-out branch's pull request supplies the base (its exact base
+  // commit, or the local remote-tracking base branch); see
+  // `CompareBase.pullRequest`.
+  | "pull-request"
   | "remote-default"
   | "fallback"
   | "dirty-worktree-only"
@@ -136,7 +140,16 @@ export type CompareBase = {
   // True when no base ref is resolvable, so `base` and `last-commit` describe
   // the same diff and the choice is not meaningful.
   targetsCollapsed: boolean;
+  // Present when the checked-out branch has a pull request: which one, the
+  // anchor naming its base (`origin/release/2.0`), and how the base was
+  // found. `exact`: GitHub's base commit is local, so `base` measures from
+  // the merge base GitHub's Files changed uses. `stale`: only the local
+  // remote-tracking base branch is, which may be behind GitHub's. `missing`:
+  // neither is, and the default resolution applies (`mode` says which).
+  pullRequest?: { number: number; ref: string; state: PullRequestBaseState };
 };
+
+export type PullRequestBaseState = "exact" | "stale" | "missing";
 
 export type ChangedFileSummary = {
   path: string;

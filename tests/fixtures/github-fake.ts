@@ -5,7 +5,7 @@
 // (src/github/ops/) run over GitHub-shaped JSON. Writes mutate this fake's
 // copy; an operation it doesn't know throws instead of answering empty data.
 //
-// Scenario controls: a new head, mergeability, rate limits (GraphQL's 200 +
+// Scenario controls: a new head, a retargeted base, the changed files, mergeability, rate limits (GraphQL's 200 +
 // RATE_LIMITED, REST's 403 with remaining 0, a secondary limit with
 // retry-after), no credential (401), no access (not found, SAML SSO), GitHub
 // unavailable (502), a timeout, and checks a token can't read (a partial
@@ -68,6 +68,21 @@ export class FakeGitHub implements GitHubTransport {
     const pr = this.pr(number);
     pr.headRefOid = oid;
     pr.updatedAt = new Date(this.now()).toISOString();
+  }
+
+  // A retargeted (or advanced) base.
+  setBase(number: number, baseRefName: string, baseRefOid: string): void {
+    const pr = this.pr(number);
+    pr.baseRefName = baseRefName;
+    pr.baseRefOid = baseRefOid;
+    pr.updatedAt = new Date(this.now()).toISOString();
+  }
+
+  // The changed files REST answers, in GitHub's `pulls/{n}/files` shape.
+  setFiles(number: number, files: Json[]): void {
+    const pr = this.pr(number);
+    pr.files = files;
+    pr.changedFiles = files.length;
   }
 
   setMergeability(number: number, mergeable: string, mergeStateStatus: string): void {

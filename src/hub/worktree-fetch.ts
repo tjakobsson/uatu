@@ -21,6 +21,7 @@ import {
   type CloneCredentialProcessContext,
 } from "./credential-context";
 import type { CredentialAssignment } from "./credential-types";
+import { classifyGitFetchFailure } from "../shared/git-fetch-failure";
 import { pullRequestHeadRef } from "../shared/worktree-branches";
 import { worktreeError, WorktreeOperationError, type WorktreeError } from "../shared/worktree-contract";
 import { assertGitArgumentSafe, createGitRunner, type GitRunner, type WorktreeGitOptions } from "./worktree-git";
@@ -217,42 +218,17 @@ export async function listWorktreeRemotes(run: GitRunner, repositoryPath: string
   return parseWorktreeRemotes(result.stdout).slice(0, limit);
 }
 
-// Authentication is decided before network: "unable to access … 403" is an
-// authentication problem whose text also matches the transport patterns.
-const AUTHENTICATION_PATTERNS = [
-  /authentication failed/i,
-  /permission denied/i,
-  /could not read (?:username|password)/i,
-  /terminal prompts disabled/i,
-  /access denied/i,
-  /\b(?:401|403)\b/,
-  /repository not found/i,
-  /invalid username or (?:password|token)/i,
-  /publickey/i,
-  /host key verification failed/i,
-];
-
-const NETWORK_PATTERNS = [
-  /could not resolve host/i,
-  /connection (?:refused|reset|timed out)/i,
-  /network is unreachable/i,
-  /no route to host/i,
-  /operation timed out/i,
-  /unable to access/i,
-  /failed to connect/i,
-  /does not appear to be a git repository/i,
-];
-
 export function classifyWorktreeFetchFailure(stderr: string, remote: WorktreeRemote): WorktreeError {
   const text = stderr.trim();
-  if (AUTHENTICATION_PATTERNS.some(pattern => pattern.test(text))) {
+  const kind = classifyGitFetchFailure(text);
+  if (kind === "authentication") {
     return WorktreeOperationError.of(
       "fetch-authentication",
       `Fetch authentication failed for ${remote.name}. Correct the credentials on the parent workspace and retry; cached branches are unchanged.`,
       { retry: "retry-fetch" },
     ).detail;
   }
-  if (NETWORK_PATTERNS.some(pattern => pattern.test(text))) {
+  if (kind === "network") {
     return WorktreeOperationError.of(
       "fetch-network",
       `Could not reach ${remote.name}. Cached branches are unchanged; retry explicitly or use a displayed cached branch.`,
@@ -343,7 +319,7 @@ export function classifyPullRequestFetchFailure(stderr: string, remote: Worktree
   const headRef = pullRequestHeadRef(number);
   // The remote answered and has no such ref: a wrong number, or a remote
   // that is not the pull request's GitHub repository.
-  if (/couldn't find remote ref|no such ref/i.test(stderr)) {
+  if (classifyGitFetchFailure(stderr, { namedRef: true }) === "missing-ref") {
     return worktreeError("ref-unavailable", `Pull request #${number} was not found on ${remote.name}: it has no ${headRef}. Check the number, and that ${remote.name} is the pull request's GitHub repository. Nothing was created.`);
   }
   const classified = classifyWorktreeFetchFailure(stderr, remote);

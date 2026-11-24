@@ -14,6 +14,7 @@ import { refreshServerStateForContext } from "../shell/events";
 import { documentDiffCache, loadDocument } from "../preview/mount";
 import type { FilesPaneFilterMembership, GitStatusForView } from "./tree-view";
 import { baseModeLabel } from "./git-log";
+import { githubApi } from "../github/client";
 
 const COMPARE_TARGET_OPTIONS: { target: CompareTarget; label: string }[] = [
   { target: "base", label: "Since base" },
@@ -110,10 +111,14 @@ export function renderChangeOverview() {
       // Evidence layer: the resolved base ref + mode, plus the merge-base short
       // SHA when present. `merge-base` is shown ONLY here, never on the toggle
       // or the compare anchor.
+      const pullRequestBase = repository.base.pullRequest;
+      const modeLabel = repository.base.mode === "pull-request" && pullRequestBase
+        ? `#${pullRequestBase.number}'s base${pullRequestBase.state === "stale" ? ", may be out of date" : ""}`
+        : baseModeLabel(repository.base.mode);
       const baseLabel =
         repository.base.ref && repository.base.mode !== "dirty-worktree-only"
-          ? `${repository.base.ref} (${baseModeLabel(repository.base.mode)})${repository.base.mergeBase ? ` · ${repository.base.mergeBase.slice(0, 7)}` : ""}`
-          : baseModeLabel(repository.base.mode);
+          ? `${repository.base.ref} (${modeLabel})${repository.base.mergeBase ? ` · ${repository.base.mergeBase.slice(0, 7)}` : ""}`
+          : modeLabel;
       // Readout anchor: the precise, portable ref the changed-files context was
       // computed against (e.g. `vs origin/main`, `vs HEAD`) so the change set
       // carries its meaning when read away from the toggle.
@@ -133,6 +138,7 @@ export function renderChangeOverview() {
             <div><dt>Base</dt><dd>${escapeHtml(baseLabel)}</dd></div>
             <div><dt>Changes</dt><dd class="compare-anchor">${escapeHtml(compareAnchor)}</dd></div>
           </dl>
+          ${renderPullRequestBaseNote(repository)}
           ${untrackedIndicator}
           ${warnings}
         </section>
@@ -141,6 +147,47 @@ export function renderChangeOverview() {
     .join("");
 
   changeOverviewElement.innerHTML = pending + renderCompareTargetControl() + sections;
+}
+
+// The checked-out branch's pull request base when it isn't exact here
+// (add-github-pr-review D7): only the local remote-tracking base branch is
+// there (it may be behind GitHub's), or neither it nor GitHub's base commit
+// is, and the default base is used instead. Either way the explicit fetch
+// brings it in.
+const baseFetchStatus = new Map<string, string>();
+
+function renderPullRequestBaseNote(repository: RepositorySnapshot): string {
+  const pullRequest = repository.base.pullRequest;
+  if (!pullRequest || pullRequest.state === "exact") return "";
+  const number = pullRequest.number;
+  const text = pullRequest.state === "stale"
+    ? `GitHub's base commit for #${number} isn't here, so changes are measured from your ${pullRequest.ref}, which may be out of date.`
+    : `#${number}'s base, ${pullRequest.ref}, isn't available locally, so changes are measured from ${repository.base.comparedAgainstRef} instead.`;
+  const status = baseFetchStatus.get(repository.id) ?? "";
+  return `
+    <div class="pr-base-note" data-pr-base-state="${pullRequest.state}">
+      <p>${escapeHtml(text)}</p>
+      <p class="pr-base-actions"><button type="button" class="gh-button" data-pr-base-fetch data-repository="${escapeHtmlAttribute(repository.id)}" data-number="${number}"${status === FETCHING ? " disabled" : ""}>${status === FETCHING ? "Fetching…" : `Fetch #${number}'s refs`}</button>
+      <span class="pr-muted" role="status" data-pr-base-status>${status === FETCHING ? "" : escapeHtml(status)}</span></p>
+    </div>
+  `;
+}
+
+const FETCHING = "\u0000fetching";
+
+// The explicit, narrow fetch (D7): the pull request's head and its base
+// branch, into a private ref and the base's remote-tracking ref. The session
+// collects Git data again when it's done, which re-renders this pane.
+async function fetchPullRequestBase(repository: string, number: number): Promise<void> {
+  baseFetchStatus.set(repository, FETCHING);
+  renderChangeOverview();
+  try {
+    await githubApi.fetchHead({ repository, number });
+    baseFetchStatus.set(repository, `Fetched #${number}'s refs.`);
+  } catch (error) {
+    baseFetchStatus.set(repository, `Couldn't fetch: ${error instanceof Error ? error.message : "the request failed."}`);
+  }
+  renderChangeOverview();
 }
 
 export function filterMembershipHasAnyPath(filter: FilesPaneFilterMembership): boolean {
@@ -292,6 +339,12 @@ export function initChangeOverviewClickHandler(): void {
   changeOverviewElement.addEventListener("click", event => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const fetchButton = target.closest<HTMLButtonElement>("button[data-pr-base-fetch]");
+    if (fetchButton && !fetchButton.disabled) {
+      void fetchPullRequestBase(fetchButton.dataset.repository ?? "", Number(fetchButton.dataset.number));
       return;
     }
 

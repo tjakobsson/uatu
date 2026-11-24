@@ -85,7 +85,9 @@ src/
 │                   notice for other workspaces) — the app-wide chrome and
 │                   the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
-│                   chooser, layout (split/stacked), diff view,
+│                   chooser, layout (split/stacked), diff view (and
+│                   diff-pr-review: its pull request threads, inline only
+│                   when the session proves it is the PR's diff),
 │                   svg-images (visibility-bound image loading and suspension),
 │                   mermaid trigger, anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
@@ -127,7 +129,12 @@ src/
 ├── document/       document + repository git concerns — metadata, diff,
 │                   classify, git-base-ref, git-data (the repository-level
 │                   sweep: changed files, commit log, repo metadata),
-│                   language detection
+│                   language detection; git-objects (a commit's blobs and
+│                   tree straight from Git, LFS pointers), pull-request-refs
+│                   (the explicit, narrow pull request fetch into
+│                   refs/uatu/pull/<n>/head, pruned to 20), pull-request-base
+│                   (the branch's pull request base that `base` resolves
+│                   from, set by the GitHub service; no src/github import)
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
 ├── ignore/         engine + config (the `.uatu.json ignore` block — explicit
 │                   exposure excludes, narrow build/dist output includes, and
@@ -160,12 +167,16 @@ src/
 │                   stdin bodies, --include) + api + classify (statuses from
 │                   status/headers/GraphQL errors) + remote (base repository,
 │                   branch facts) + ops/ (one pinned query and soft parser per
-│                   call, readiness) + markdown; fake + fake-data (the
+│                   call, readiness) + markdown + anchoring (whether a document
+│                   Diff is the pull request's own diff, design D8); fake +
+│                   fake-data (the
 │                   in-memory demo backend, UATU_GITHUB_FAKE=1); http (the
 │                   /api/github/* handlers); the browser half: client,
 │                   pull-request-store, availability, readiness, present,
 │                   connect. tests/fixtures/github-fake.ts is the
-│                   transport-level fake over hand-written fixtures
+│                   transport-level fake over hand-written fixtures;
+│                   tests/fixtures/pull-request-remote.ts a local bare
+│                   remote standing in for GitHub's Git side
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA assets, shared browser notification enrollment UI,
@@ -174,7 +185,8 @@ src/
                     + worktree-branches (the worktree wire DTOs/errors and
                     branch/destination rules shared by client and Hub),
                     document-updates (versioned snapshots/patches and the
-                    keyed reducer used by Hub and browser)
+                    keyed reducer used by Hub and browser), git-fetch-failure
+                    (what a failed `git fetch` said, for Hub and child)
 ```
 
 Outside `src/`: `desktop/macos/` is **UatuCode Desktop**, the SwiftUI macOS

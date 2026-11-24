@@ -57,6 +57,7 @@ import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
 import { consumeChildPolicyDescriptor } from "./hub/child-policy-bootstrap";
 import type { readChildPolicyBootstrap } from "./hub/child-policy";
 import { githubServiceFromEnvironment, type GithubService } from "./github/service";
+import { onPullRequestBaseChange } from "./document/pull-request-base";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -186,6 +187,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
   let chatService: MultiAgentChatService | null = null;
   let githubService: GithubService | null = null;
+  let stopPullRequestBaseWatch: (() => void) | null = null;
 
   // Resolve the actual port to bind. When the user passed `--port`, honor it
   // strictly (no roll). When they didn't, pre-flight probe for a free port
@@ -280,6 +282,9 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
       repositoryRoot: id => watchSession?.getRepositories()?.find(repository => repository.id === id)?.rootPath ?? null,
     });
     githubService = github;
+    // The checked-out branch's pull request base moved (a new association, a
+    // retargeted base): changed files depend on it, so collect Git data again.
+    stopPullRequestBaseWatch = onPullRequestBaseChange(() => watchSession?.requestRepositoryCollection());
     const mediaPath = `${options.basePath}api/media`;
     const inner = Bun.serve({
       hostname: "127.0.0.1",
@@ -422,6 +427,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     shuttingDown = true;
     childPolicy?.dispose();
     githubService?.dispose?.();
+    stopPullRequestBaseWatch?.();
     console.error("uatu: shutting down");
 
     // The OpenCode child is detached as its own process group, so dispose it

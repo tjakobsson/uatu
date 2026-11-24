@@ -612,6 +612,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     },
     async recover() { await Promise.all(entries.map(entry => recover(entry))); },
     requestRepositoryRefresh() { queueAllClassifications(); repositories.request(); },
+    // Git data only (the pull request's base changed): no document moved.
+    requestRepositoryCollection() { repositories.request(); },
     async listFolder(rootId: string, relative: string): Promise<{ status: "listed" | "missing"; revision: number }> {
       const normalized = relative.replace(/\/+$/, "");
       if (!normalized || normalized.includes("\0") || normalized.split("/").some(segment => !segment || segment === "." || segment === "..")) {

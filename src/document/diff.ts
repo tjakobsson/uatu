@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { applyCompareTarget, compareRefForTarget, recordGitMetric, resolveCompareBase, safeGit } from "./git-base-ref";
+import { pullRequestBaseKey } from "./pull-request-base";
 import { DEFAULT_COMPARE_TARGET, findDocument } from "../shared/types";
 import type { CompareBase, CompareTarget, RootGroup } from "../shared/types";
 
@@ -56,13 +57,14 @@ let baseCacheTtlMs = BASE_CACHE_TTL_MS;
 
 type RepoCompareContext = {
   repoRoot: string;
+  headSha: string;
   // Resolved with the default `base` target; per-request compare targets
   // are applied on top via the pure `applyCompareTarget`.
   resolvedBase: CompareBase;
 };
 
 const repoRootByProbeDir = new Map<string, { repoRoot: string | null; expiresAtMs: number }>();
-const contextByRepoRoot = new Map<string, { context: RepoCompareContext; headSha: string; expiresAtMs: number }>();
+const contextByRepoRoot = new Map<string, { context: RepoCompareContext; headSha: string; pullRequestKey: string; expiresAtMs: number }>();
 
 async function resolveRepoContext(probeDir: string): Promise<RepoCompareContext | null> {
   const now = Date.now();
@@ -83,19 +85,59 @@ async function resolveRepoContext(probeDir: string): Promise<RepoCompareContext 
   // Single validation probe: an unchanged HEAD within the TTL means the
   // cached resolved base is still good. An unborn HEAD (fresh repo with
   // no commits) yields an empty sha and always re-resolves.
+  // The pull request's base (pull-request-base.ts) is part of the key: a new
+  // base or association resolves again.
   const head = await safeGit(repoRoot, ["rev-parse", "HEAD"]);
   const headSha = head.ok ? head.stdout.trim() : "";
+  const pullRequestKey = pullRequestBaseKey(repoRoot);
   const cached = contextByRepoRoot.get(repoRoot);
-  if (cached && headSha && cached.headSha === headSha && now < cached.expiresAtMs) {
+  if (cached && headSha && cached.headSha === headSha && cached.pullRequestKey === pullRequestKey && now < cached.expiresAtMs) {
     recordGitMetric("diff.base_cache_hits_total");
     return cached.context;
   }
 
   recordGitMetric("diff.base_cache_misses_total");
   const resolvedBase = await resolveCompareBase(repoRoot);
-  const context: RepoCompareContext = { repoRoot, resolvedBase };
-  contextByRepoRoot.set(repoRoot, { context, headSha, expiresAtMs: now + baseCacheTtlMs });
+  const context: RepoCompareContext = { repoRoot, headSha, resolvedBase };
+  contextByRepoRoot.set(repoRoot, { context, headSha, pullRequestKey, expiresAtMs: now + baseCacheTtlMs });
   return context;
+}
+
+// What the anchoring rule (src/github/anchoring.ts, design D8) needs to know
+// about a document's diff: its repository, repository-relative path, the
+// base it is measured from, HEAD, and whether the file has staged, unstaged
+// or untracked changes. Null outside a Git repository.
+export type DocumentDiffAnchor = { repoRoot: string; relativePath: string; base: CompareBase; headSha: string; clean: boolean };
+
+export async function documentDiffAnchor(
+  roots: RootGroup[],
+  documentId: string,
+  compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
+): Promise<DocumentDiffAnchor | null> {
+  const document = findDocument(roots, documentId);
+  if (!document) return null;
+  const context = await resolveRepoContext(path.dirname(document.id));
+  if (!context) return null;
+  const realDocPath = await fs.realpath(document.id).catch(() => document.id);
+  return anchorFor(context, path.relative(context.repoRoot, realDocPath).split(path.sep).join("/"), compareTarget);
+}
+
+// The same for a repository-relative path (a comment's re-check on write).
+export async function repositoryDiffAnchor(repoRoot: string, relativePath: string, compareTarget: CompareTarget): Promise<DocumentDiffAnchor | null> {
+  const context = await resolveRepoContext(repoRoot);
+  return context ? anchorFor(context, relativePath, compareTarget) : null;
+}
+
+async function anchorFor(context: RepoCompareContext, relativePath: string, compareTarget: CompareTarget): Promise<DocumentDiffAnchor | null> {
+  if (!context.headSha || relativePath.startsWith("../")) return null;
+  const status = await safeGit(context.repoRoot, ["status", "--porcelain=v1", "--untracked-files=all", "--", relativePath]);
+  return {
+    repoRoot: context.repoRoot,
+    relativePath,
+    base: applyCompareTarget(context.resolvedBase, compareTarget),
+    headSha: context.headSha,
+    clean: status.ok && status.stdout.trim() === "",
+  };
 }
 
 // A file-scoped `git diff <ref> -- <newPath>` cannot see the old side of a

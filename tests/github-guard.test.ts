@@ -22,7 +22,8 @@ describe("GitHub boundaries", () => {
     const server = readFileSync(path.join(root, "tests/e2e/server.ts"), "utf8");
     // The real service may run there, but only over the transport-level fake.
     expect(server).not.toMatch(/GhTransport|githubServiceFromEnvironment|src\/github\/gh"/);
-    expect(server).toContain("new GitHubApi(new FakeGitHub())");
+    expect(server).toContain("e2eGithubTransport = new FakeGitHub()");
+    expect(server).toContain("new GitHubApi(e2eGithubTransport)");
     expect(server).toContain("FakeGithubService");
   });
 

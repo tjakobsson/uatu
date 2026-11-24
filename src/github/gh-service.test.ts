@@ -264,10 +264,15 @@ describe("detail", () => {
     expect(fake.calls[0]).toMatchObject({ operation: "UatuOpenPullRequests", variables: { owner: "acme", name: "widgets" } });
   });
 
-  test("the file view's Git reader isn't built: heads read as not fetched", async () => {
-    const { service } = harness(await repository());
+  // Fetching and reading files from Git: pull-request-git.integration.test.ts,
+  // against a local bare remote (this repository's origin is github.com).
+  test("a head that isn't local reads as not fetched, without any Git network call", async () => {
+    const { service, fake } = harness(await repository());
     expect(await service.pullRequestTree("repo", 42)).toEqual({ state: "not-fetched" });
-    await expect(service.fetchPullRequestHead("repo", 42)).rejects.toMatchObject({ httpStatus: 501 });
+    expect(await service.pullRequestBlob("repo", 42, { path: "src/login.ts", rev: "head" })).toEqual({ state: "not-fetched" });
+    expect(await service.pullRequestCommits("repo", 42)).toEqual({ headOid: "4242424242424242424242424242424242424242", baseOid: "1111111111111111111111111111111111111111" });
+    // One detail read, remembered for the next.
+    expect(fake.operations().filter(operation => operation === "UatuPullRequestConversation")).toHaveLength(1);
   });
 });
 

@@ -52,6 +52,7 @@ import { collectRepositorySnapshots } from "../../src/document/git-data";
 import { GitHubApi } from "../../src/github/api";
 import { FakeGithubService } from "../../src/github/fake";
 import { GhGithubService } from "../../src/github/gh-service";
+import { clearPullRequestBases, onPullRequestBaseChange } from "../../src/document/pull-request-base";
 import { GITHUB_FAKE_ENV, GITHUB_FAKE_SCENARIO_ENV, type GithubService } from "../../src/github/service";
 import { FakeGitHub } from "../fixtures/github-fake";
 import {
@@ -248,6 +249,8 @@ const chatService = new Proxy({} as MultiAgentChatService, {
 });
 const terminalEnabled = await terminalBackendAvailable();
 let watchSession = await createSession({ resetWorkspace: process.env.UATU_E2E_PRESERVE_WORKSPACE !== "1" });
+// As src/cli.ts does: a new pull request base collects Git data again.
+onPullRequestBaseChange(() => watchSession.requestRepositoryCollection());
 
 // The brokered live stream, exactly as a hub would mount it, over this one
 // workspace: the SPA opens only /api/hub/live, so the harness brokers its
@@ -394,6 +397,9 @@ async function handleE2EReset(request: Request): Promise<Response> {
     typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
   activeFollow = typeof body.follow === "boolean" ? body.follow : true;
   personalState = { version: 1 };
+  clearPullRequestBases();
+  e2eGithubTransport = null;
+  await Promise.all(e2eGithubRemotes.splice(0).map(remote => fs.rm(remote, { recursive: true, force: true })));
   e2eGithub = body.github && body.github !== "transport" ? new FakeGithubService({ scenario: typeof body.github === "string" ? body.github : undefined }) : environmentGithub();
 
   const previousWorkspaceRoot = activeWorkspaceRoot;
@@ -431,10 +437,14 @@ async function handleE2EReset(request: Request): Promise<Response> {
   }
   if (body.github === "transport") {
     await safeGit(activeWorkspaceRoot, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    e2eGithubTransport = new FakeGitHub();
     e2eGithub = new GhGithubService({
-      api: new GitHubApi(new FakeGitHub()),
+      api: new GitHubApi(e2eGithubTransport),
       mode: "full",
       repositoryRoot: id => watchSession.getRepositories()?.find(repository => repository.id === id)?.rootPath ?? null,
+      // Hermetic: no global or system Git config takes part in a fetch, which
+      // `/__e2e/github` points at a local bare remote (never github.com).
+      gitEnv: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
       log: () => undefined,
     });
   }
@@ -787,6 +797,61 @@ function environmentGithub(): GithubService | null {
 // The PR review backend for the current test: what its reset asked for, else
 // the process's own.
 let e2eGithub: GithubService | null = environmentGithub();
+// The transport fake behind the real service (`github: "transport"`), and the
+// bare remotes `/__e2e/github` made for it.
+let e2eGithubTransport: FakeGitHub | null = null;
+const e2eGithubRemotes: string[] = [];
+
+// `/__e2e/github` (transport mode only): makes fixture pull request #42 the
+// workspace's own. The checkout moves to its head branch `feature/login` at
+// HEAD; a local bare clone stands in for GitHub's Git side (it publishes
+// `refs/pull/42/head`, and `url.<bare>.insteadOf` sends every fetch of
+// `origin` there: nothing reaches github.com); `files` become #42's changed
+// files, with the patches Git computes against `main`. `base` picks D7's case:
+// `exact` (GitHub's base commit is `main`, local), `stale` (GitHub's base is
+// one commit past the local `origin/main`, published only on the bare remote)
+// or `missing` (a base branch that exists nowhere locally).
+async function makeOwnPullRequest(body: { files?: string[]; base?: "exact" | "stale" | "missing" }): Promise<Response> {
+  const fake = e2eGithubTransport;
+  if (!fake) return Response.json({ error: "reset with github: \"transport\" first" }, { status: 409 });
+  const root = activeWorkspaceRoot;
+  const git = async (cwd: string, args: string[]) => {
+    const result = await safeGit(cwd, ["-c", "commit.gpgsign=false", ...args]);
+    if (!result.ok) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const main = await git(root, ["rev-parse", "main"]);
+  const bare = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-e2e-github-"));
+  e2eGithubRemotes.push(bare);
+  await git(os.tmpdir(), ["clone", "--quiet", "--bare", root, bare]);
+  await git(root, ["checkout", "--quiet", "-b", "feature/login"]);
+  const head = await git(root, ["rev-parse", "HEAD"]);
+  await git(bare, ["update-ref", "refs/pull/42/head", head]);
+  await git(root, ["config", `url.${bare}.insteadOf`, "git@github.com:acme/widgets.git"]);
+  const base = body.base ?? "exact";
+  if (base === "missing") {
+    fake.setBase(42, "release/9.9", "9".repeat(40));
+  } else {
+    await git(root, ["update-ref", "refs/remotes/origin/main", main]);
+    let baseOid = main;
+    if (base === "stale") {
+      baseOid = await git(bare, ["commit-tree", `${main}^{tree}`, "-p", main, "-m", "main moved on GitHub"]);
+      await git(bare, ["update-ref", "refs/heads/main", baseOid]);
+    }
+    fake.setBase(42, "main", baseOid);
+  }
+  fake.pushHead(42, head);
+  const files = [];
+  for (const file of body.files ?? []) {
+    const diff = await git(root, ["diff", "--no-ext-diff", `${main}...HEAD`, "--", file]);
+    const patch = diff.slice(Math.max(0, diff.indexOf("@@")));
+    const additions = patch.split("\n").filter(line => line.startsWith("+")).length;
+    const deletions = patch.split("\n").filter(line => line.startsWith("-")).length;
+    files.push({ filename: file, status: diff.includes("new file mode") ? "added" : "modified", additions, deletions, changes: additions + deletions, patch });
+  }
+  fake.setFiles(42, files);
+  return Response.json({ ok: true, head, main });
+}
 let server: ReturnType<typeof Bun.serve>;
 let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
 let workspaceRoutes!: ReturnType<typeof buildRoutes>;
@@ -862,6 +927,11 @@ const inner = Bun.serve({
     // Root-relative for the comparisons below; outside the prefix the
     // fallback answers 404 itself.
     const pathname = stripBasePath(url.pathname, E2E_BASE_PATH);
+    if (pathname === "/__e2e/github" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { action?: string; files?: string[]; base?: "exact" | "stale" | "missing" };
+      if (body.action === "own-pull-request") return makeOwnPullRequest(body);
+      return Response.json({ error: "unknown action" }, { status: 400 });
+    }
     if (pathname === "/__e2e/terminal-sessions-delay") {
       if (request.method === "POST") {
         const body = (await request.json()) as { release?: boolean };

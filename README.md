@@ -279,9 +279,24 @@ devicons, git status, FontAwesome, Material Design, etc.) render
 correctly out of the box in every browser, including Safari and the
 installed PWA, which hide locally-installed fonts from web pages.
 
-The compare base is resolved automatically in order: `origin/HEAD` →
-`origin/main` → `origin/master` → `main` → `master`, then falls back to
-staged + unstaged worktree changes against `HEAD`.
+The compare base is resolved automatically. When the checked-out branch has an
+open GitHub pull request, **Since base** measures from that pull request's base:
+from GitHub's base commit when it is in your clone, which is exactly what
+GitHub's Files changed shows; otherwise from your `<remote>/<base>` branch,
+which Change Overview marks as possibly out of date. If neither is in your
+clone, Change Overview says so and the default order applies. Its **Fetch #n's
+refs** button fetches the pull request's head into the private ref
+`refs/uatu/pull/<n>/head` and its base branch, without touching your branch,
+files or index. Without a pull request the order is `origin/HEAD` →
+`origin/main` → `origin/master` → `main` → `master`, then staged + unstaged
+worktree changes against `HEAD`. **Since last commit** always compares against
+`HEAD`.
+
+In a file's Diff, you can comment on the pull request only when that Diff is
+provably GitHub's diff of the file: your HEAD is the pull request's head, the
+file has no local changes, and Since base uses the pull request's exact base.
+Otherwise the Diff says why and lists the file's review threads, each opening
+in the pull request's Files changed, where you can always comment.
 
 Files at or above 1 MB render without syntax highlighting to keep the
 browser responsive. Binary files appear with VS Code-style icons; images use

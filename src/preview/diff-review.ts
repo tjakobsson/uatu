@@ -37,9 +37,12 @@
 // composers and pending review. Each file header here has View file, which
 // opens that file in the file view (`onViewFile`).
 //
-// The diffs come from the GitHub service. With the fake they are synthetic,
-// so every displayed line is the PR's own line and commenting is always
-// offered; the real service applies the anchoring rule (D8) first.
+// The diffs come from the GitHub service: GitHub's own diff of the pull
+// request (the fake's are synthetic), so every displayed line is the pull
+// request's line and commenting is always offered here (D8's scope). The
+// document Diff view mounts this view for one file only when the session's
+// anchoring rule proves the checkout shows that same diff (`fromCheckout`,
+// src/preview/diff-pr-review.ts).
 
 import { githubWritesPausedReason, sendBlockedReason } from "../github/availability";
 import { githubApi } from "../github/client";
@@ -89,6 +92,10 @@ export type FilesChangedOptions = {
   only?: string;
   // View file on each header: open that file in the file view.
   onViewFile?: (path: string) => void;
+  // Mounted by the document Diff view over the local checkout (D8: only when
+  // it is provably the pull request's diff): new comments ask the session to
+  // re-check the checkout when they are sent.
+  fromCheckout?: boolean;
 };
 
 const VIEW_FILE_ICON = `<svg class="pr-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/></svg>`;
@@ -810,7 +817,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
       // The draft goes the moment GitHub has the comment (sendThenClearDraft),
       // before the page updates: a reload can't bring it back as unsent.
       send: async body => {
-        const next = await githubApi.createThread(target(), { headOid: detail.summary.headRefOid, path: file.path, line: position.line, side: position.side, body });
+        const next = await githubApi.createThread(target(), { headOid: detail.summary.headRefOid, path: file.path, line: position.line, side: position.side, body, ...(options.fromCheckout ? { fromCheckout: true } : {}) });
         return () => {
           composers.delete(key);
           composerBoxes.delete(key);

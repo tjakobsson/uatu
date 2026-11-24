@@ -234,6 +234,31 @@ export type PullRequestList = {
 // A pull request's file at its head or its base commit (the file view).
 export type PullRequestRevision = "head" | "base";
 
+// The document Diff view's `review` field (`GET /api/document/diff`, design
+// D8): whether that diff of the local checkout is provably the pull
+// request's own diff of the file, so its threads can sit on its lines and
+// new comments go to GitHub; otherwise why not. Computed by the session
+// (src/github/anchoring.ts), never by the browser alone, except
+// `lightweight-render`, which only the browser knows (the diff is too large
+// for the inline renderer).
+export const DOCUMENT_DIFF_REVIEW_REASONS = [
+  "not-in-pr",
+  "last-commit",
+  "base-inexact",
+  "head-mismatch",
+  "local-changes",
+  "files-unknown",
+  "lightweight-render",
+] as const;
+export type DocumentDiffReviewReason = typeof DOCUMENT_DIFF_REVIEW_REASONS[number];
+export type DocumentDiffReview = {
+  // The checked-out branch's pull request and its head as the session knows it.
+  number: number;
+  headOid: string;
+  // The file's repository-relative path, as the pull request names it.
+  path: string;
+} & ({ exact: true } | { exact: false; reason: DocumentDiffReviewReason; baseState?: "stale" | "missing" | "other" });
+
 // What the file view's payload adds to a rendered document: which commit it
 // shows, and where that commit's blobs are served for relative images and
 // links (`blobBase`, session-relative: `api/github/pr-blob/<repoKey>/<n>/<oid>/`).

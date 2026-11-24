@@ -58,7 +58,7 @@ export const githubApi = {
   pullRequests: (repository: string) => request<PullRequestList>("GET", appUrl("/api/github/pull-requests"), { repository }),
   markdown: (body: string) => request<{ html: string }>("POST", appUrl("/api/github/markdown"), null, { body }),
   comment: (target: Target, body: string) => request<PullRequestDetail>("POST", appUrl("/api/github/comments"), null, { ...target, body }),
-  createThread: (target: Target, input: { headOid: string; path: string; line: number; side: DiffSide; body: string }) =>
+  createThread: (target: Target, input: { headOid: string; path: string; line: number; side: DiffSide; body: string; fromCheckout?: boolean }) =>
     request<PullRequestDetail>("POST", appUrl("/api/github/review/threads"), null, { ...target, ...input }),
   reply: (target: Target, threadId: string, body: string) =>
     request<PullRequestDetail>("POST", appUrl(`/api/github/review/threads/${encodeURIComponent(threadId)}/replies`), null, { ...target, body }),

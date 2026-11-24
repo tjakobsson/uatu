@@ -7,7 +7,11 @@
 import { appUrl } from "../shared/app-url";
 import { contextualAppUrl } from "../shell/watch-context";
 import { findDocumentById } from "../shell/storage";
-import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
+import { diffRenderTier, prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
+import { diffReviewNoteHtml, diffReviewPlan, type DiffReviewPlan } from "./diff-pr-review";
+import { mountFilesChanged, type FilesChangedView } from "./diff-review";
+import { githubApi } from "../github/client";
+import type { DocumentDiffReview } from "../shared/github-contract";
 import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
 import { pullRequestFileFor } from "./pr-file-link";
 import { pullRequestStore } from "../github/pull-request-store";
@@ -63,6 +67,10 @@ import { documentRevisionKey } from "../shell/document-state";
 import { diffInputKey } from "./diff-input-key";
 let diffLoadGeneration = 0;
 
+// The diff's `review` answer (D8) also depends on the checked-out branch's
+// pull request base: a fetch can make a stale base exact without moving the
+// merge base (the branch still forks from the same commit), so the base's
+// state is part of the key for the repositories holding the document.
 function currentDiffInputKey(documentId: string): string {
   return diffInputKey(documentId, appState.repositories, appState.compareTarget);
 }
@@ -239,18 +247,35 @@ export async function renderDiffIntoPreview(
   const host = document.createElement("div");
   host.className = "uatu-diff-host";
   previewElement.appendChild(host);
-  await renderDocumentDiff(host, payload, languageHint, {
-    diffStyle: appState.diffStyle,
-    wrap: appState.wrap,
-    onDiffStyleChange: next => {
-      void applyDiffStyle(next);
-    },
-  });
-  // A file the current pull request changes: the way to review it there,
-  // in the Diff view's header row beside its layout toggle (again once the
-  // pull request's files are read, if they weren't yet).
-  linkTarget = doc ? { host, doc } : null;
-  syncPullRequestFileLink();
+  // The checked-out branch's pull request (D8, src/preview/diff-pr-review.ts):
+  // when this diff is provably its diff of the file, that file's Files
+  // changed takes the comments; otherwise the local diff, with why not.
+  const review = doc ? reviewFor(doc, payload) : null;
+  const plan = review ? diffReviewPlan(review.review, payload.kind === "text" ? diffRenderTier(payload) : null, pullRequestStore.detail(review.review.number)) : { kind: "none" as const };
+  reviewShown = review ? { host, documentId, payload, planKey: planKey(plan), view: null } : null;
+  if (plan.kind === "inline" && review) {
+    const detail = pullRequestStore.detail(plan.number)!;
+    const section = document.createElement("section");
+    section.className = "pr-view pr-file-diff-view uatu-diff-pr-review";
+    section.dataset.prTab = "files";
+    host.append(section);
+    reviewShown!.view = mountFilesChanged(section, detail, review.repositoryId, { only: plan.path, fromCheckout: true });
+    linkTarget = null;
+  } else {
+    await renderDocumentDiff(host, payload, languageHint, {
+      diffStyle: appState.diffStyle,
+      wrap: appState.wrap,
+      onDiffStyleChange: next => {
+        void applyDiffStyle(next);
+      },
+    });
+    if (plan.kind === "list" && review) host.prepend(reviewNote(plan, review.repositoryId));
+    // A file the current pull request changes: the way to review it there,
+    // in the Diff view's header row beside its layout toggle (again once the
+    // pull request's files are read, if they weren't yet).
+    linkTarget = doc ? { host, doc } : null;
+    syncPullRequestFileLink();
+  }
 
   // The Source / Rendered cache is cleared on every file selection, so
   // `currentRenderedPayload()` returns null while the diff view is the
@@ -261,6 +286,73 @@ export async function renderDiffIntoPreview(
   const choicePayload = doc ? renderedDocumentStubFromMeta(doc) : null;
   syncViewToggle(choicePayload);
   syncLayoutChooser(choicePayload);
+}
+
+// --- the pull request review on a document's Diff (D8) ---------------------
+
+// The review answer for a document of the store's repository (the only one
+// whose pull request the page reads), with that repository.
+function reviewFor(doc: DocumentMeta, payload: DocumentDiffPayload): { review: DocumentDiffReview; repositoryId: string } | null {
+  if (payload.kind !== "text" || !payload.review) return null;
+  const repositoryId = pullRequestStore.state.repositoryId;
+  const repository = appState.repositories.find(candidate => candidate.id === repositoryId);
+  if (!repositoryId || !repository?.watchedRootIds.includes(doc.rootId)) return null;
+  return { review: payload.review, repositoryId };
+}
+
+const planKey = (plan: DiffReviewPlan) => plan.kind === "list"
+  ? JSON.stringify([plan.kind, plan.reason, plan.threads.map(thread => [thread.id, thread.comments.length, thread.isResolved, thread.isOutdated, thread.line])])
+  : plan.kind;
+
+// The Diff on screen that carries a review, so the store's changes (the
+// pull request's detail read, a write) can update it.
+let reviewShown: { host: HTMLElement; documentId: string; payload: DocumentDiffPayload; planKey: string; view: FilesChangedView | null } | null = null;
+pullRequestStore.subscribe(syncDiffReview);
+
+function syncDiffReview(): void {
+  const shown = reviewShown;
+  if (!shown?.host.isConnected) { reviewShown = null; return; }
+  const doc = findDocumentById(shown.documentId);
+  const review = doc ? reviewFor(doc, shown.payload) : null;
+  const detail = review ? pullRequestStore.detail(review.review.number) : null;
+  const plan = review ? diffReviewPlan(review.review, shown.payload.kind === "text" ? diffRenderTier(shown.payload) : null, detail) : { kind: "none" as const };
+  if (planKey(plan) !== shown.planKey) {
+    void renderDiffIntoPreview(shown.documentId, shown.payload);
+    return;
+  }
+  if (shown.view && detail) shown.view.update(detail);
+}
+
+function reviewNote(plan: Extract<DiffReviewPlan, { kind: "list" }>, repositoryId: string): HTMLElement {
+  const wrapper = document.createElement("div");
+  const repository = appState.repositories.find(candidate => candidate.id === repositoryId);
+  const filesHref = (thread?: string) => buildPullRequestPreviewPath(repositoryId, plan.number, "files", thread ? { thread } : plan.path);
+  wrapper.innerHTML = diffReviewNoteHtml(plan, { checkoutCommit: repository?.metadata.commitShort?.slice(0, 7) ?? null, filesHref });
+  const note = wrapper.firstElementChild as HTMLElement;
+  for (const link of note.querySelectorAll<HTMLAnchorElement>("[data-diff-review-open]")) {
+    link.addEventListener("click", event => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+      event.preventDefault();
+      revealPreviewSurface();
+      const thread = link.dataset.diffReviewOpen || undefined;
+      activatePullRequestPreview({ repositoryId, number: plan.number, tab: "files", ...(thread ? { thread } : { file: plan.path }) }, { pushHistory: true });
+    });
+  }
+  const fetchButton = note.querySelector<HTMLButtonElement>("[data-diff-review-fetch]");
+  fetchButton?.addEventListener("click", async () => {
+    const status = note.querySelector<HTMLElement>("[data-diff-review-status]");
+    fetchButton.disabled = true;
+    if (status) status.textContent = "Fetching…";
+    try {
+      await githubApi.fetchHead({ repository: repositoryId, number: plan.number });
+      // The session collects Git data again; the Diff follows the new base.
+      if (status) status.textContent = `Fetched #${plan.number}'s refs.`;
+    } catch (error) {
+      fetchButton.disabled = false;
+      if (status) status.textContent = `Couldn't fetch: ${error instanceof Error ? error.message : "the request failed."}`;
+    }
+  });
+  return note;
 }
 
 // The link, for the Diff view's header row; null when the document isn't in

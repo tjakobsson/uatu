@@ -22,8 +22,17 @@
 // first (head, state, pending review), and run one at a time per pull
 // request.
 //
-// The file view's Git reader (task 9.4) isn't built yet: every pull request's
-// head reads as not fetched, and the fetch says it isn't available.
+// The file view reads from Git (src/document/git-objects.ts), never from
+// GitHub's contents API: a commit that is local (the checkout's own branch,
+// or the private ref the narrow fetch writes) is read with `cat-file` and
+// `ls-tree`; one that isn't answers `not-fetched`, and only the reviewer's
+// Fetch (src/document/pull-request-refs.ts) makes it local. The branch's own
+// pull request usually needs no fetch: its head is the checkout's.
+//
+// A summary with an open pull request for the checked-out branch also sets
+// that repository's pull request base (src/document/pull-request-base.ts),
+// which base resolution reads (D7); a change of association or base makes
+// the session collect Git data again.
 
 import {
   failureMessage,
@@ -52,6 +61,10 @@ import {
   type WritePrecondition,
 } from "./ops/mutations";
 import { ParseNotes } from "./ops/parse";
+import { checkoutReview } from "./anchoring";
+import { commitPresent, listTree, readBlob } from "../document/git-objects";
+import { pullRequestRefsFetched, setPullRequestBase } from "../document/pull-request-base";
+import { fetchPullRequestRefs, prunePullRequestRefs } from "../document/pull-request-refs";
 import { DETECT_PULL_REQUEST, parsePullRequestSummary, pickDetected, PULL_REQUEST_SUMMARY } from "./ops/summary";
 import { parseThreads, PULL_REQUEST_THREADS, type ParsedThreads } from "./ops/threads";
 import {
@@ -64,7 +77,15 @@ import {
   type RemoteRepository,
   type RepositoryGitFacts,
 } from "./remote";
-import type { GithubService, NewThreadInput, PullRequestBlob, PullRequestTreeAnswer, SubmitReviewInput } from "./service";
+import type {
+  GithubService,
+  NewThreadInput,
+  PullRequestBlob,
+  PullRequestCommits,
+  PullRequestReviewContext,
+  PullRequestTreeAnswer,
+  SubmitReviewInput,
+} from "./service";
 import {
   GITHUB_BODY_MAX_LENGTH,
   type GithubRepositoryRef,
@@ -79,9 +100,15 @@ export type GithubWriteMode = "read" | "full";
 
 export const SUMMARY_MIN_INTERVAL_MS = 5_000;
 export const LIST_CACHE_MS = 30_000;
+// What `pullRequestTree` lists at most (the route shows 50,000 after the
+// exposure filter; reading one more says the list stops there).
+const PULL_REQUEST_TREE_READ_LIMIT = 50_001;
 export const BACKOFF_BASE_MS = 15_000;
 export const BACKOFF_MAX_MS = 10 * 60_000;
 export const MANUAL_BYPASS_MS = 15_000;
+// The largest blob the file view's routes read into memory. The rendered
+// views stop at 1 MB (src/github/http.ts); images may be larger.
+export const BLOB_READ_LIMIT = 20 * 1024 * 1024;
 
 export type GhGithubServiceOptions = {
   api: GitHubApi;
@@ -91,13 +118,21 @@ export type GhGithubServiceOptions = {
   // The Hub projects the credential's host here; it counts as GitHub.
   ghHost?: string;
   readGitFacts?: (root: string) => Promise<RepositoryGitFacts | null>;
+  // The environment the narrow fetch runs Git in: the session's own (its
+  // projected Git credentials). Tests pass a clean one.
+  gitEnv?: Record<string, string | undefined>;
+  fetchTimeoutMs?: number;
   now?: () => number;
   // The child log. Gets the operation, failure class and GitHub's error type,
   // never a body, token or stderr.
   log?: (line: string) => void;
 };
 
-type Context = { facts: RepositoryGitFacts; base: RemoteRepository; key: string; upstream: GithubRepositoryRef | null };
+type Context = { root: string; facts: RepositoryGitFacts; base: RemoteRepository; key: string; upstream: GithubRepositoryRef | null };
+
+// A pull request's commits as last read (summary or detail), for the file
+// view and anchoring without asking GitHub again.
+type KnownCommits = { headOid: string; baseOid: string; baseRefName: string; state: string };
 
 type RepositoryState = {
   key: string | null;
@@ -116,12 +151,15 @@ type RepositoryState = {
   files: Map<string, { files: PullRequestFile[]; truncated: boolean }>;
   list: { at: number; value: PullRequestList } | null;
   writing: Set<number>;
+  commits: Map<number, KnownCommits>;
+  fetching: Map<number, Promise<{ headOid: string }>>;
 };
 
 function newState(): RepositoryState {
   return {
     key: null, detectedKey: null, number: null, viewer: null, summary: null, lastGood: null, queriedAt: 0, inflight: null,
     failures: 0, nextAttemptAt: 0, bypassUntil: 0, details: new Map(), files: new Map(), list: null, writing: new Set(),
+    commits: new Map(), fetching: new Map(),
   };
 }
 
@@ -162,7 +200,7 @@ export class GhGithubService implements GithubService {
   private async readSummary(repositoryId: string, manual: boolean): Promise<GithubSummary> {
     const state = this.state(repositoryId);
     const context = await this.context(repositoryId);
-    if (!context) return this.notGithub(state);
+    if (!context) return this.notGithub(state, this.options.repositoryRoot(repositoryId)!);
     const now = this.now();
     if (state.inflight && state.key === context.key) return state.inflight;
     if (!manual) {
@@ -214,6 +252,8 @@ export class GhGithubService implements GithubService {
       state.failures = 0;
       state.nextAttemptAt = 0;
       state.lastGood = { at, key: context.key, ...(pullRequest ? { pullRequest } : {}) };
+      if (pullRequest) this.noteCommits(state, pullRequest);
+      this.setBase(context, pullRequest);
       state.summary = {
         status: pullRequest ? "ready" : "no-pull-request",
         mock: false,
@@ -230,6 +270,8 @@ export class GhGithubService implements GithubService {
       // Detect again next time unless GitHub only couldn't be asked.
       if (statusForFailure(failure) !== "rate-limited" && statusForFailure(failure) !== "unavailable") state.detectedKey = null;
       state.summary = this.failedSummary(state, context, failure);
+      // A stale answer keeps the base it had; any other refusal drops it.
+      this.setBase(context, state.summary.stale ? state.summary.pullRequest : undefined);
       return state.summary;
     }
   }
@@ -274,7 +316,8 @@ export class GhGithubService implements GithubService {
     };
   }
 
-  private notGithub(state: RepositoryState): GithubSummary {
+  private notGithub(state: RepositoryState, root: string): GithubSummary {
+    setPullRequestBase(root, null);
     state.summary = { status: "not-github", mock: false, repository: null, viewer: null, checkedAt: this.now(), stale: false, ...this.modeFields() };
     return state.summary;
   }
@@ -360,6 +403,7 @@ export class GhGithubService implements GithubService {
       omitted: { timeline: conversation.omitted, threads: threads.truncated, files: files.truncated, unavailable },
     };
     state.details.set(number, detail);
+    this.noteCommits(state, detail.summary);
     if (notes.notes.length) this.log(`parsed #${number} with notes: ${notes.notes.slice(0, 10).join("; ")}`);
     return detail;
   }
@@ -441,6 +485,14 @@ export class GhGithubService implements GithubService {
       if (!Number.isInteger(input.line) || input.line < 1) throw new GithubError(422, `Line ${input.line} is outside ${input.path}.`);
       const files = await this.filesAt(context, number, pre.headRefOid, 0, state);
       if (!files.truncated && !files.files.some(file => file.path === input.path)) throw new GithubError(422, `${input.path} is not part of this pull request.`);
+      if (input.fromCheckout) {
+        // The document Diff view showed the checkout: it must still be the
+        // pull request's diff (D8), checked against the head GitHub names now.
+        const review = await checkoutReview(context.root, input.path, {
+          number, headOid: pre.headRefOid, paths: files.truncated ? null : new Set(files.files.map(file => file.path)),
+        });
+        if (!review?.exact) throw new GithubError(409, `Your checkout no longer shows #${number}'s diff of ${input.path}${review && !review.exact ? ` (${review.reason})` : ""}. Reload the diff; your comment is kept.`);
+      }
       if (pre.pending && pre.pending.commitOid !== pre.headRefOid) {
         throw new GithubError(409, "Your pending review was started on an older commit. Submit or discard it first.");
       }
@@ -502,18 +554,100 @@ export class GhGithubService implements GithubService {
     });
   }
 
-  // --- the file view (task 9.4 builds the Git reader) -----------------------
+  // --- the file view (design D17) and anchoring (D8) ------------------------
 
-  async fetchPullRequestHead(_repositoryId: string, _number: number): Promise<{ headOid: string }> {
-    throw new GithubError(501, "Fetching a pull request's files isn't available yet. Review the diff in Files changed, or open the pull request on GitHub.");
+  async pullRequestCommits(repositoryId: string, number: number): Promise<PullRequestCommits> {
+    const known = await this.commitsOf(repositoryId, number);
+    return { headOid: known.headOid, baseOid: known.baseOid };
   }
 
-  async pullRequestBlob(_repositoryId: string, _number: number, _input: unknown): Promise<PullRequestBlob> {
-    return { state: "not-fetched" };
+  async pullRequestBlob(repositoryId: string, number: number, input: { path: string; rev: "head" | "base" }): Promise<PullRequestBlob> {
+    const root = this.rootOf(repositoryId);
+    const known = await this.commitsOf(repositoryId, number);
+    const oid = input.rev === "base" ? known.baseOid : known.headOid;
+    if (!(await commitPresent(root, oid))) return { state: "not-fetched" };
+    const read = await readBlob(root, oid, input.path, { maxBytes: BLOB_READ_LIMIT });
+    if (read.kind === "missing") throw new GithubError(404, `${input.path} isn't in #${number} at its ${input.rev} (${oid.slice(0, 7)}).`);
+    if (read.kind === "too-large") return { state: "too-large", oid, size: read.size };
+    return { oid, bytes: read.bytes };
   }
 
-  async pullRequestTree(_repositoryId: string, _number: number): Promise<PullRequestTreeAnswer> {
-    return { state: "not-fetched" };
+  async pullRequestTree(repositoryId: string, number: number): Promise<PullRequestTreeAnswer> {
+    const root = this.rootOf(repositoryId);
+    const { headOid } = await this.commitsOf(repositoryId, number);
+    if (!(await commitPresent(root, headOid))) return { state: "not-fetched" };
+    // One over the route's cap, so it can say the list stops there.
+    const tree = await listTree(root, headOid, { limit: PULL_REQUEST_TREE_READ_LIMIT });
+    if (!tree) throw new GithubError(500, `#${number}'s files couldn't be listed.`);
+    return { headOid, paths: tree.entries.map(entry => entry.path), truncated: tree.truncated };
+  }
+
+  // The explicit, narrow fetch (D7): only what isn't local yet, the head into
+  // `refs/uatu/pull/<n>/head` and, when the base commit is missing, the base
+  // branch into its remote-tracking ref. A head that is local (the branch's
+  // own pull request, usually) fetches nothing. One fetch per pull request
+  // at a time.
+  fetchPullRequestHead(repositoryId: string, number: number): Promise<{ headOid: string }> {
+    const state = this.state(repositoryId);
+    const running = state.fetching.get(number);
+    if (running) return running;
+    const run = this.fetchHead(repositoryId, number, state).finally(() => state.fetching.delete(number));
+    state.fetching.set(number, run);
+    return run;
+  }
+
+  private async fetchHead(repositoryId: string, number: number, state: RepositoryState): Promise<{ headOid: string }> {
+    const context = await this.requireContext(repositoryId);
+    // The reviewer asked: read where the pull request is now.
+    const detail = await this.pullRequest(repositoryId, number);
+    const { headRefOid: headOid, baseRefOid: baseOid, baseRefName } = detail.summary;
+    const [headLocal, baseLocal] = await Promise.all([commitPresent(context.root, headOid), commitPresent(context.root, baseOid)]);
+    if (headLocal && baseLocal) return { headOid };
+    const outcome = await fetchPullRequestRefs({
+      repoRoot: context.root,
+      remote: context.base.remote,
+      number,
+      head: !headLocal,
+      baseRefName: baseLocal ? null : baseRefName,
+      env: this.options.gitEnv,
+      timeoutMs: this.options.fetchTimeoutMs,
+    });
+    if (!outcome.ok) {
+      this.log(`fetch #${number}: ${outcome.failure}`);
+      const status = outcome.failure === "missing-ref" ? 404
+        : outcome.failure === "no-credential" ? 403
+        : outcome.failure === "invalid" ? 422
+        : outcome.failure === "timeout" ? 504
+        : 502;
+      throw new GithubError(status, `${outcome.message} Nothing in your checkout changed.`);
+    }
+    // A base commit may be local now: measure and collect again.
+    pullRequestRefsFetched(context.root);
+    // Merged or closed pull requests' refs go first, then the oldest.
+    const closed = [...state.commits].filter(([, known]) => known.state !== "OPEN").map(([candidate]) => candidate);
+    await prunePullRequestRefs(context.root, { protect: [number], closed });
+    if (outcome.headOid && outcome.headOid !== headOid) {
+      // It moved on GitHub since the detail was read: read it again, so the
+      // view and the cache name the fetched head.
+      state.details.delete(number);
+      return { headOid: (await this.pullRequest(repositoryId, number)).summary.headRefOid };
+    }
+    return { headOid };
+  }
+
+  // Memory only: anchoring must never become a GitHub request.
+  reviewContext(repositoryId: string): PullRequestReviewContext | null {
+    const state = this.states.get(repositoryId);
+    const pullRequest = state?.summary?.pullRequest;
+    if (!state || !pullRequest || pullRequest.state !== "OPEN") return null;
+    const known = state.commits.get(pullRequest.number);
+    const headOid = known?.headOid ?? pullRequest.headRefOid;
+    const files = state.files.get(`${pullRequest.number}@${headOid}`);
+    return {
+      number: pullRequest.number,
+      headOid,
+      paths: files && !files.truncated ? new Set(files.files.map(file => file.path)) : null,
+    };
   }
 
   // --- internals ---------------------------------------------------------------
@@ -551,6 +685,32 @@ export class GhGithubService implements GithubService {
     } finally {
       state.writing.delete(number);
     }
+  }
+
+  private noteCommits(state: RepositoryState, pullRequest: PullRequestSummary): void {
+    state.commits.set(pullRequest.number, { headOid: pullRequest.headRefOid, baseOid: pullRequest.baseRefOid, baseRefName: pullRequest.baseRefName, state: pullRequest.state });
+  }
+
+  // The base of the checked-out branch's open pull request (D7), or none.
+  private setBase(context: Context, pullRequest: PullRequestSummary | undefined): void {
+    const branch = context.facts.branch;
+    setPullRequestBase(context.root, pullRequest && pullRequest.state === "OPEN" && branch
+      ? { number: pullRequest.number, remote: context.base.remote, baseRefName: pullRequest.baseRefName, baseRefOid: pullRequest.baseRefOid, branch }
+      : null);
+  }
+
+  // A pull request's commits from memory, else from a detail read.
+  private async commitsOf(repositoryId: string, number: number): Promise<KnownCommits> {
+    const known = this.state(repositoryId).commits.get(number);
+    if (known) return known;
+    const detail = await this.pullRequest(repositoryId, number);
+    return { headOid: detail.summary.headRefOid, baseOid: detail.summary.baseRefOid, baseRefName: detail.summary.baseRefName, state: detail.summary.state };
+  }
+
+  private rootOf(repositoryId: string): string {
+    const root = this.options.repositoryRoot(repositoryId);
+    if (!root) throw new GithubError(404, "Unknown repository.");
+    return root;
   }
 
   private async startReview(context: Context, pre: WritePrecondition): Promise<string> {
@@ -628,7 +788,7 @@ export class GhGithubService implements GithubService {
     const base: RemoteRepository = { ...parsed, remote: remoteName };
     const upstreamUrl = facts.upstreamRemote ? facts.remotes.get(facts.upstreamRemote) : undefined;
     const upstream = upstreamUrl ? parseRemoteUrl(upstreamUrl) : null;
-    return { facts, base, upstream, key: detectionKey(facts, base) };
+    return { root, facts, base, upstream, key: detectionKey(facts, base) };
   }
 
   private async isGithubHost(host: string): Promise<boolean> {

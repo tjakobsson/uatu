@@ -30,6 +30,16 @@ describe("FakeGitHub", () => {
     expect(answer.data.repository.pullRequest).toMatchObject({ headRefOid: "f".repeat(40), mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
   });
 
+  test("setBase and setFiles change the base and the changed files later answers name", async () => {
+    const fake = new FakeGitHub();
+    fake.setBase(42, "release/2.0", "e".repeat(40));
+    fake.setFiles(42, [{ filename: "docs/a.md", status: "modified", additions: 1, deletions: 0, changes: 1, patch: "@@ -1 +1,2 @@\n a\n+b" }]);
+    const answer = await new GitHubApi(fake).graphql<{ repository: { pullRequest: Record<string, unknown> } }>("github.com", summary, vars);
+    expect(answer.data.repository.pullRequest).toMatchObject({ baseRefName: "release/2.0", baseRefOid: "e".repeat(40) });
+    const files = await new GitHubApi(fake).rest<{ filename: string }[]>("github.com", "UatuPullRequestFiles", "repos/acme/widgets/pulls/42/files?per_page=100&page=1");
+    expect(files.json.map(file => file.filename)).toEqual(["docs/a.md"]);
+  });
+
   test("rate limits, no credential, no access, unavailable and timeout classify as GitHub's would", async () => {
     let now = 1_000_000;
     const fake = new FakeGitHub({ now: () => now });

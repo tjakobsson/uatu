@@ -21,10 +21,15 @@
 // same seam as bytes: `pullRequestBlob` answers a path at the head or base
 // commit, `pullRequestTree` every path at the head, and `fetchPullRequestHead`
 // is the explicit, narrow fetch that makes a head local (D7). The real
-// service reads them from Git (`git cat-file` / `ls-tree` on
-// `refs/uatu/pull/<n>/head`, design phase 2); classifying and rendering stay
-// in the route layer (src/github/http.ts), so the fake supplies bytes and
-// still exercises the real renderers.
+// service reads them from Git (src/document/git-objects.ts: `git cat-file` /
+// `ls-tree` on the head commit, wherever it is local: the checkout's own
+// branch or the private `refs/uatu/pull/<n>/head`); classifying and rendering
+// stay in the route layer (src/github/http.ts), so the fake supplies bytes
+// and still exercises the real renderers.
+//
+// `reviewContext` is what the document Diff view's anchoring rule (D8,
+// src/github/anchoring.ts) needs about the checked-out branch's pull request,
+// answered from memory only: a diff request never becomes a GitHub request.
 
 import type {
   DiffSide,
@@ -42,12 +47,21 @@ import { GhGithubService } from "./gh-service";
 
 export { GithubError } from "./error";
 
-export type NewThreadInput = { headOid: string; path: string; line: number; side: DiffSide; body: string };
+// `fromCheckout`: the comment comes from the document Diff view, which shows
+// the local checkout; the server then also re-checks the anchoring rule (D8:
+// HEAD at the pull request's head, a clean file, the exact base).
+export type NewThreadInput = { headOid: string; path: string; line: number; side: DiffSide; body: string; fromCheckout?: boolean };
 export type SubmitReviewInput = { event: ReviewEvent; body: string };
 // A file's bytes at the pull request's head or base commit (`oid`), or word
 // that the head isn't local yet. A path the commit doesn't hold is a 404
 // GithubError.
-export type PullRequestBlob = { oid: string; bytes: Uint8Array } | { state: "not-fetched" };
+// A blob over the service's read cap is `too-large`, unread.
+export type PullRequestBlob = { oid: string; bytes: Uint8Array } | { state: "not-fetched" } | { state: "too-large"; oid: string; size: number };
+// The pull request's head and base commits as the service last knew them.
+export type PullRequestCommits = { headOid: string; baseOid: string };
+// The checked-out branch's pull request, for anchoring: `paths` is null
+// while its changed files aren't known (or GitHub truncated them).
+export type PullRequestReviewContext = { number: number; headOid: string; paths: ReadonlySet<string> | null };
 export type PullRequestTreeAnswer = { headOid: string; paths: string[]; truncated: boolean } | { state: "not-fetched" };
 
 export interface GithubService {
@@ -72,6 +86,10 @@ export interface GithubService {
   fetchPullRequestHead(repositoryId: string, number: number): Promise<{ headOid: string }>;
   pullRequestBlob(repositoryId: string, number: number, input: { path: string; rev: PullRequestRevision }): Promise<PullRequestBlob>;
   pullRequestTree(repositoryId: string, number: number): Promise<PullRequestTreeAnswer>;
+  // Which commits the blob route may serve (only these two).
+  pullRequestCommits(repositoryId: string, number: number): Promise<PullRequestCommits>;
+  // Absent on the fake: its pull requests' commits aren't the checkout's.
+  reviewContext?(repositoryId: string): PullRequestReviewContext | null;
   // Dev-only controls; present only on the fake.
   setScenario?(scenario: GithubFakeScenario): void;
   reset?(): void;
