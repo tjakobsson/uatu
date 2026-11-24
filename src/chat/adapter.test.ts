@@ -16645,6 +16645,28 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     } finally { await adapter.dispose(); }
   });
 
+  for (const late of ["refused confirmation", "rejection"] as const) test(`a late admission settles like a timely one: a ${late} records no row, only the refusal`, async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let admit!: (value: { messageId: string; createdAt: number; confirmation: Promise<SteerConfirmation> }) => void, fail!: (error: Error) => void;
+      let refuse!: (value: SteerConfirmation) => void;
+      provider.prompt = () => new Promise((resolve, reject) => { admit = resolve; fail = reject; });
+      await expect(steer("r-late", "late steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      if (late === "rejection") fail(new Error("agy did not take it"));
+      else {
+        // Sent late, and refused later still.
+        admit({ messageId: "native-late", createdAt: 7, confirmation: new Promise(resolve => { refuse = resolve; }) });
+        await Bun.sleep(0);
+        expect(await userRows()).toEqual([]);
+        refuse({ outcome: "refused", reason: "agy did not take it" });
+      }
+      await waitUntil(() => adapter.projectionForTests("session").get("notice:steer-refused:r-late") !== undefined);
+      expect(adapter.projectionForTests("session").get("notice:steer-refused:r-late")).toEqual(expect.objectContaining({ code: "steer-refused", message: "agy did not take it" }));
+      expect(await userRows()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
   test("commands queue, an idle backlog holds, and an idle conversation dispatches whatever the delivery", async () => {
     const { adapter, provider, steer } = immediate();
     try {

@@ -3679,29 +3679,44 @@ export class ChatAdapter {
       });
     } catch (error) {
       if (error instanceof OperationOutcomeUnknownError) {
-        // Late evidence, never a resend: an acceptance that arrives after the
-        // bound still ties this request to its message, so the client's
-        // unconfirmed draft settles against the delivered row.
-        void admission.then(late => { if (!this.disposed) this.recordImmediateSteer(this.projection(conversationId), late, input); }, () => undefined);
+        // Late evidence, never a resend: an admission that answers after the
+        // bound settles like a timely one, so the client's unconfirmed draft
+        // settles against the delivered row, or returns on a refusal.
+        void admission.then(
+          late => this.settleImmediateSteer(conversationId, late, input),
+          late => { if (!(late instanceof OperationOutcomeUnknownError)) this.settleImmediateSteer(conversationId, { outcome: "refused", reason: errorMessage(late) }, input); },
+        );
         throw error;
       }
       throw new SteerRefusedError(errorMessage(error));
     }
     if (accepted.confirmation) {
       // Sent, not yet confirmed: the conversation is free again at once, and
-      // the agent's answer settles the steer later, through the same row or
-      // a refusal naming this request. An unknown outcome stays unconfirmed
-      // with the submitting client and is never resent.
-      void accepted.confirmation.then(confirmation => {
-        if (this.disposed) return;
-        const current = this.projection(conversationId);
-        if (confirmation.outcome === "accepted") this.recordImmediateSteer(current, confirmation, input);
-        else if (confirmation.outcome === "refused") current.upsert(steerRefusedNotice(input.requestId, confirmation.reason, Date.now()));
-      });
+      // the agent's answer settles the steer later. An unknown outcome stays
+      // unconfirmed with the submitting client and is never resent.
+      this.settleImmediateSteer(conversationId, accepted, input);
       return { messageId: accepted.messageId, awaitingConfirmation: true };
     }
     this.recordImmediateSteer(projection, accepted, input);
     return accepted;
+  }
+
+  // The one settlement for a steer's outcome, timely or late: a row for an
+  // acceptance, a `steer-refused` notice naming the request for a refusal,
+  // and a confirmation still to come is awaited first, so a "sent" never
+  // records a row that the agent later refuses.
+  private settleImmediateSteer(conversationId: string, outcome: { messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> } | SteerConfirmation, input: { text: string; requestId: string; attachments: MessageAttachment[] }): void {
+    if (this.disposed) return;
+    if ("confirmation" in outcome && outcome.confirmation) {
+      void outcome.confirmation.then(confirmation => this.settleImmediateSteer(conversationId, confirmation, input));
+      return;
+    }
+    if ("outcome" in outcome && outcome.outcome === "refused") {
+      this.projection(conversationId).upsert(steerRefusedNotice(input.requestId, outcome.reason, Date.now()));
+      return;
+    }
+    if ("outcome" in outcome && outcome.outcome !== "accepted") return;
+    this.recordImmediateSteer(this.projection(conversationId), outcome, input);
   }
 
   // The accepted steer's row, at the provider's position: a row the provider

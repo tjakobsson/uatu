@@ -261,7 +261,12 @@ agent in commit 2, before the Antigravity provider exists):
   its row, carrying the request id, where it was sent, which settles the
   draft; a refusal adds a `steer-refused` notice, which returns the draft to
   the composer with agy's reason; an unknown outcome leaves the draft
-  unconfirmed, never resent. The published notice schema is closed and has
+  unconfirmed, never resent. An admission that answers after the steer
+  admission bound settles the same way, so a late "sent" waits for its
+  confirmation too. The client reconciles a refusal with the receipt in
+  either order, and a refusal it did not see live (another conversation was
+  open, or the history was reread) settles the draft from the history when
+  the conversation is shown. The published notice schema is closed and has
   no request field, so the notice's id names the request
   (`notice:steer-refused:<requestId>`): a new `code` value and an id in an
   existing open string, additive under `api/CONVENTIONS.md`, with no
