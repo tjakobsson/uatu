@@ -16759,17 +16759,22 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
       // Both prompts are pending with the agent: the turn's own, and the
       // steer, which the agent answers only when the turn ends.
       let settleSteer!: (outcome: "refused" | "unknown") => void;
+      let steerSent!: () => void;
+      const sent = new Promise<void>(resolve => { steerSent = resolve; });
       provider.prompt = () => new Promise((_, reject) => {
         settleSteer = outcome => reject(outcome === "unknown" ? new OperationOutcomeUnknownError() : new Error("agy did not take it"));
+        steerSent();
       });
-      provider.interrupt = async sessionId => { provider.interrupts.push(sessionId); settleSteer("unknown"); };
+      provider.interrupt = async sessionId => { provider.interrupts.push(sessionId); };
       const held = await queue("r-q", "held");
       const steering = steer("r-s", "into the turn");
       void steering.catch(() => undefined);
-      for (let i = 0; i < 100 && !settleSteer; i++) await Bun.sleep(1);
-      const stopped = await Promise.race([adapter.abort("session", "stop"), Bun.sleep(1_000).then(() => "waited behind the steer")]);
-      expect(stopped).toEqual({ cancelled: true });
+      await sent;
+      // Stop answers while the steer is still unanswered: it is not held
+      // behind the steer's admission (which would never settle here).
+      expect(await adapter.abort("session", "stop")).toEqual({ cancelled: true });
       expect(provider.interrupts).toEqual(["session"]);
+      settleSteer("unknown");
       await expect(steering).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
       // Stop's queue pause still holds the held message.
       expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.id, entry.paused])).toEqual([[held.messageId, true]]);
