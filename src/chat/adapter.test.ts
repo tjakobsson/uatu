@@ -15182,6 +15182,173 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("moving a parent out preserves a recovered child with cached parentage when a newer local lookup overtakes stale verification", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-cached-parentage");
+    const child = { ...fixtureSession("c-cached-parentage"), parentId: parent.id };
+    provider.sessions = [parent, child];
+    provider.reconcileBackgroundTasks = async id => id === parent.id ? [{
+      id: `task:${child.id}`,
+      type: "background_task",
+      taskId: child.id,
+      taskType: "agent",
+      childConversationId: child.id,
+      description: "Recovered worker",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    const pump = adapter.startEventPump();
+    // Cache child's parentage via listConversations(), then recover parent's worker child.
+    await adapter.listConversations();
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has(`background.recovery:${parent.id}`));
+    await tasks.get(`background.recovery:${parent.id}`);
+    expect(adapter.activity().working).toBe(true);
+
+    // Parent moves out; reconcileMovedChildren verifies cached descendant child via verifyTrackedSessions.
+    let childCalls = 0;
+    let resolveStaleVerify!: (session: ProviderSession | null) => void;
+    provider.getSession = async id => {
+      if (id === parent.id) return { ...parent, directory: `${process.cwd()}-elsewhere` };
+      if (id === child.id) {
+        childCalls += 1;
+        if (childCalls === 1) return new Promise<ProviderSession | null>(resolve => { resolveStaleVerify = resolve; });
+        return child;
+      }
+      return null;
+    };
+    const parentMoveDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: parent.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: parent.id, directory: `${process.cwd()}-elsewhere`, title: parent.title, sparse: true },
+    } });
+    await waitUntil(() => resolveStaleVerify !== undefined);
+
+    // Newer local getConversation(child) overtakes verifyTrackedSessions' stale lookup.
+    await adapter.getConversation(child.id);
+
+    // Stale lookup resolves null; verifyTrackedSessions must retain child rather than marking it forgotten.
+    resolveStaleVerify(null);
+    await parentMoveDone;
+    expect(adapter.activity().working).toBe(true);
+    expect(adapter.projectionForTests(child.id).status).toBe("running");
+
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("listConversations reconciles a deferred Stop active-probe target after probe completion so a refused Stop does not re-seed a moved-out child", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-deferred-stop");
+    const child = { ...fixtureSession("c-deferred-stop"), parentId: parent.id };
+    const foreignChild = { ...child, directory: `${process.cwd()}-elsewhere` };
+    provider.sessions = [parent];
+    let currentChild: ProviderSession = child;
+    const lookedUp: string[] = [];
+    provider.getSession = async id => {
+      lookedUp.push(id);
+      if (id === parent.id) return parent;
+      if (id === child.id) return currentChild;
+      return null;
+    };
+    provider.listActiveSessions = async () => [child.id];
+
+    let rejectInterrupt!: (err: Error) => void;
+    provider.interrupt = () => new Promise<void>((_resolve, reject) => { rejectInterrupt = reject; });
+
+    const pump = adapter.startEventPump();
+    // Start an in-flight Stop on child.
+    const stopPromise = adapter.abort(child.id, "stop-deferred-1").catch(() => undefined);
+    await waitUntil(() => rejectInterrupt !== undefined);
+
+    // Move child out (resets to idle) and back in while Stop is pending; await move-in active probe completion.
+    currentChild = foreignChild;
+    const moveOut1 = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: child.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: child.id, directory: foreignChild.directory, title: child.title, sparse: true },
+    } });
+    await moveOut1;
+
+    currentChild = child;
+    const moveIn = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: child.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: child.id, directory: child.directory, title: child.title, sparse: true },
+    } });
+    await moveIn;
+    await waitUntil(() => tasks.has(`active.probe:${child.id}`));
+    await tasks.get(`active.probe:${child.id}`);
+    // Probe completed and released activeSessionProbes; deferred baseline now lives only in stoppingTurns.
+
+    // Child moves out again with a missed move-out frame; listConversations omits child and must verify it.
+    currentChild = foreignChild;
+    lookedUp.length = 0;
+    await adapter.listConversations();
+    expect(lookedUp).toContain(child.id);
+
+    // Stop is now refused; must NOT re-seed the moved-out child as running.
+    rejectInterrupt(new InterruptNotAppliedError("refused"));
+    await stopPromise;
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests(child.id).status).toBe("idle");
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {

@@ -2596,12 +2596,19 @@ export class ChatAdapter {
   }
 
   private trackedActivityIds(): string[] {
+    const deferredStopTargets: string[] = [];
+    for (const [id, stop] of this.stoppingTurns) {
+      if (stop.activeProbeBaseline !== undefined || (stop.status !== undefined && isLiveConversationStatus(stop.status))) {
+        deferredStopTargets.push(id);
+      }
+    }
     return [...new Set([
       ...this.liveTurns.keys(),
       ...this.backgroundWork.keys(),
       ...this.unresolvedBackgroundWork,
       ...this.pendingInteractions.keys(),
       ...this.activeSessionProbes.keys(),
+      ...deferredStopTargets,
     ])];
   }
 
@@ -2663,12 +2670,16 @@ export class ChatAdapter {
         const missingOrForeign = !session || !await this.isInWorkspace(session, false);
         if (this.disposed || signal?.aborted) return { retained, forgotten };
         if (missingOrForeign) {
-          forgotten.add(id);
           if (this.presenceSequence(id) <= started) {
+            forgotten.add(id);
             const priorWorkerChildren = this.forgetMissingSession(id, started);
             if (priorWorkerChildren.length > 0) {
               await this.reconcileRecoveredWorkerChildren(id, priorWorkerChildren, signal, presentIds, visited);
             }
+          } else if (this.absenceSequence(id) < this.presenceSequence(id)) {
+            retained.add(id);
+          } else {
+            forgotten.add(id);
           }
         } else {
           retained.add(id);
@@ -2838,6 +2849,7 @@ export class ChatAdapter {
       || this.backgroundWork.has(conversationId)
       || this.unresolvedBackgroundWork.has(conversationId)
       || this.pendingInteractions.has(conversationId)
+      || this.stoppingTurns.has(conversationId)
       || this.inventorySessions.has(conversationId)
       || this.listedSessions.has(conversationId);
     if (known) {
@@ -2852,8 +2864,11 @@ export class ChatAdapter {
       projection.status = "idle";
     }
     const stop = this.stoppingTurns.get(conversationId);
-    if (stop?.status && (isLiveConversationStatus(stop.status) || stop.status === "background")) {
-      stop.status = "idle";
+    if (stop) {
+      stop.activeProbeBaseline = undefined;
+      if (stop.status && (isLiveConversationStatus(stop.status) || stop.status === "background")) {
+        stop.status = "idle";
+      }
     }
     const recovery = this.backgroundRecoveries.get(conversationId);
     recovery?.checking?.finish();
