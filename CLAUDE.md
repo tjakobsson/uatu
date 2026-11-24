@@ -73,11 +73,14 @@ src/
 │                   per-conversation SDK sessions, transcript reader,
 │                   model catalog, normalization, account: what
 │                   `accountInfo()` says about the login) and
-│                   chat/antigravity/ (the `agy` PATH runtime, connection:
-│                   one `agy acp` process over the official ACP SDK,
-│                   provider: a process per live conversation and replay
-│                   history, normalization, catalog: models and thinking
-│                   levels). registered-agents lists the offered agents in
+│                   chat/antigravity/ (runtime: the `agy` PATH runtime;
+│                   connection: one `agy acp` process over the official
+│                   ACP SDK, owned from spawn to group cleanup; provider:
+│                   a process per live conversation and replay history;
+│                   normalization; catalog: models and thinking levels;
+│                   transcript: agy's own transcript, read-only, for what
+│                   replay omits; pricing + prices: turn cost from the
+│                   generated models.dev snapshot). registered-agents lists the offered agents in
 │                   picker order, which cli.ts registers. One conversation is
 │                   owned by one agent for life; ids are agent-qualified
 │                   on the wire (`<agentId>:<providerId>`). Each agent's
