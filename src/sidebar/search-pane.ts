@@ -19,9 +19,9 @@ import {
   replaceResultsMarkup,
   shouldDispatch,
 } from "./search-model";
-import { renderSidebar, setSidebarCollapsed } from "./shell";
+import { setSidebarCollapsed } from "./shell";
 import { revealFilesSurface } from "../shell/tab-bar";
-import { persistPaneState } from "./panes";
+import { revealPane } from "./panes";
 import { openSearchResult } from "./search-open";
 import { isDocumentVisible } from "../shared/file-visibility";
 
@@ -436,13 +436,7 @@ export function openSearchPane(seed?: string): void {
   // only the pane would focus an invisible input — the shortcut would look
   // like it did nothing.
   setSidebarCollapsed(false);
-  const pane = appState.panes.search;
-  if (!pane.visible || pane.collapsed) {
-    pane.visible = true;
-    pane.collapsed = false;
-    persistPaneState();
-    renderSidebar();
-  }
+  revealPane("search");
   if (seed !== undefined && seed.length > 0) {
     queryInput.value = seed;
     void runSearch();

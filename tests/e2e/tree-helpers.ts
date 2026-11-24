@@ -145,3 +145,11 @@ export function ancestorDirs(path: string): string[] {
 function escapeAttr(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
+
+// Types into the Files filter. Touch mode folds the field behind a search
+// button until it is opened; desktop always shows it.
+export async function fillFilesQuery(page: Page, value: string): Promise<void> {
+  const toggle = page.locator("#files-query-toggle");
+  if (await toggle.isVisible()) await toggle.click();
+  await page.locator("#files-query").fill(value);
+}

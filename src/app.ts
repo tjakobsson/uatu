@@ -1,8 +1,8 @@
 import { captureTerminalToken, waitForWorkspaceCredential } from "./terminal/client";
 import { initHubNav } from "./shell/hub-nav";
 import { injectPwaLinks, unregisterLegacyServiceWorkers } from "./shell/pwa";
-import { mountNotifications } from "./pwa/notification-client.js";
-import { hubUrl, isHubPage, workspaceIdFromBasePath, appBasePath } from "./shared/app-url";
+import { reconcileNotifications } from "./pwa/notification-client.js";
+import { hubUrl, isHubPage } from "./shared/app-url";
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
@@ -16,6 +16,7 @@ import { initPreviewTextSize } from "./preview/text-size";
 import { initGitLogClickHandler, initGitLogControls } from "./sidebar/git-log";
 import { startCommitAgeTicker } from "./shell/commit-ages";
 import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
+import { initPullRequestPane } from "./sidebar/pull-request-pane";
 import { initFilesPaneFilterControls } from "./sidebar/files-filter";
 import { initMediaDock } from "./media/dock";
 import { mediaPlayer } from "./media/controller";
@@ -119,6 +120,7 @@ initGitLogControls();
 initGitLogClickHandler();
 startCommitAgeTicker();
 initChangeOverviewClickHandler();
+initPullRequestPane();
 initFilesPaneFilterControls();
 initFollowToggle();
 installAnchorHandlers();
@@ -132,12 +134,12 @@ attachAutoStackObserver();
 captureTerminalToken();
 
 injectPwaLinks();
-// Boot does not wait for cleanup. Notification enrollment awaits cleanup
-// before registering the current push worker.
+// Boot does not wait for cleanup. Notification enrollment lives on the Hub's
+// pages (Settings); a workspace page only keeps an existing enrollment's push
+// worker registered, awaiting cleanup first.
 unregisterLegacyServiceWorkers();
-if (isHubPage()) mountNotifications({
-  apiUrl: hubUrl("/api/hub/notifications"), stateUrl: hubUrl("/api/hub/state"), workerUrl: hubUrl("/push-worker.js"),
-  workspaceId: workspaceIdFromBasePath(appBasePath()), hosts: ".sidebar-notifications-row, .sidebar-rail", beforeRegister: unregisterLegacyServiceWorkers,
+if (isHubPage()) reconcileNotifications({
+  apiUrl: hubUrl("/api/hub/notifications"), workerUrl: hubUrl("/push-worker.js"), beforeRegister: unregisterLegacyServiceWorkers,
 });
 attachPopstateHandler();
 

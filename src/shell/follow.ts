@@ -18,6 +18,7 @@ import { appState } from "./state";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId, getSelectionGeneration, getSelectionActivation } from "./selection";
 import { persistPersonalWorkspaceState } from "./personal-state";
 import { revealPreviewSurface } from "./tab-bar";
+import { onUiModeChange } from "./ui-mode";
 import { isFollowEligible } from "../shared/file-visibility";
 
 export { chooseSelectionForFileEvent };
@@ -45,6 +46,25 @@ const followToggleElement: HTMLButtonElement = followToggleElementMaybe;
 // so `followEnabled` keeps a single visible representation at any moment.
 const railFollowToggleElement = document.querySelector<HTMLButtonElement>("#rail-follow-toggle");
 
+// Touch mode's sidebar menu: the Follow row opens from a header button
+// instead of taking a full-width row (styles.css hides the button on
+// desktop, where the row stays). The menu stays open while Follow is
+// switched, so the change is seen; a tap elsewhere or Escape closes it.
+const sidebarMenuToggleElement = document.querySelector<HTMLButtonElement>("#sidebar-menu-toggle");
+const sidebarModeRowElement = document.querySelector<HTMLElement>("#sidebar-mode-row");
+
+function setSidebarMenuOpen(open: boolean): void {
+  if (!sidebarMenuToggleElement || !sidebarModeRowElement) return;
+  if (open) {
+    // Anchored under the button, inside the sidebar (the Files surface).
+    const sidebar = sidebarModeRowElement.offsetParent?.getBoundingClientRect();
+    const button = sidebarMenuToggleElement.getBoundingClientRect();
+    if (sidebar) sidebarModeRowElement.style.setProperty("--sidebar-menu-top", `${Math.round(button.bottom - sidebar.top + 4)}px`);
+  }
+  sidebarModeRowElement.toggleAttribute("data-open", open);
+  sidebarMenuToggleElement.setAttribute("aria-expanded", String(open));
+}
+
 export function initFollowToggle(): void {
   followToggleElement.addEventListener("click", () => {
     applyChipClick();
@@ -52,6 +72,28 @@ export function initFollowToggle(): void {
   railFollowToggleElement?.addEventListener("click", () => {
     applyChipClick();
   });
+  sidebarMenuToggleElement?.addEventListener("click", event => {
+    const open = sidebarMenuToggleElement.getAttribute("aria-expanded") !== "true";
+    setSidebarMenuOpen(open);
+    // From the keyboard, focus goes to the switch (the row is elsewhere in
+    // the tab order); a tap leaves focus where it is.
+    if (open && event.detail === 0) followToggleElement.focus();
+  });
+  document.addEventListener("pointerdown", event => {
+    const target = event.target as Node | null;
+    if (sidebarMenuToggleElement?.getAttribute("aria-expanded") !== "true") return;
+    if (target && (sidebarMenuToggleElement.contains(target) || sidebarModeRowElement?.contains(target))) return;
+    setSidebarMenuOpen(false);
+  });
+  const closeOnEscape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || sidebarMenuToggleElement?.getAttribute("aria-expanded") !== "true") return;
+    event.stopPropagation();
+    setSidebarMenuOpen(false);
+    sidebarMenuToggleElement.focus();
+  };
+  sidebarModeRowElement?.addEventListener("keydown", closeOnEscape);
+  sidebarMenuToggleElement?.addEventListener("keydown", closeOnEscape);
+  onUiModeChange(() => setSidebarMenuOpen(false));
 }
 
 // Counts Follow switches, so a decision Follow deferred while it was on
@@ -165,5 +207,11 @@ export function syncFollowToggle(): void {
     railFollowToggleElement.setAttribute("aria-pressed", String(pressed));
     railFollowToggleElement.disabled = pinned;
     railFollowToggleElement.title = followToggleElement.title;
+  }
+  if (sidebarMenuToggleElement) {
+    const label = `Sidebar menu, Follow ${pressed ? "on" : "off"}`;
+    sidebarMenuToggleElement.toggleAttribute("data-follow-on", pressed);
+    sidebarMenuToggleElement.setAttribute("aria-label", label);
+    sidebarMenuToggleElement.title = label;
   }
 }

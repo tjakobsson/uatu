@@ -60,6 +60,10 @@
     </script>
   </head>
   <body>
+    <!-- The page's one top-level heading. Visually hidden: the sidebar's
+         wordmark shows the name, but touch mode hides the sidebar outside
+         the Files tab, and a heading must not come and go with it. -->
+    <h1 class="sr-only">UatuCode</h1>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="sidebar-header">
@@ -72,7 +76,7 @@
               </g>
             </svg>
             <div class="brand-text">
-              <h1 class="brand-wordmark">UatuCode</h1>
+              <p class="brand-wordmark">UatuCode</p>
               <button
                 id="connection-state"
                 class="connection-state"
@@ -83,12 +87,35 @@
                 <span class="indicator-dot" aria-hidden="true"></span>
                 <span class="connection-label">Connecting</span>
               </button>
+              <!-- Build identifier (shell/connection.ts), under the status
+                   rather than in a footer row of its own. -->
+              <span id="build-badge" class="build-badge" title="Build identifier"></span>
               <!-- Why a start of a stopped session was refused (shell/connection.ts);
                    hidden unless there is something to say. -->
               <p id="connection-error" class="connection-error" role="alert" hidden></p>
             </div>
           </div>
           <div class="sidebar-header-actions">
+            <!-- Touch mode's sidebar menu (shell/follow.ts): the Follow switch
+                 leaves its full-width row for this menu, and a dot on the
+                 button says Follow is on. CSS-gated to touch mode; desktop
+                 keeps the row. -->
+            <button
+              id="sidebar-menu-toggle"
+              class="icon-button sidebar-menu-toggle"
+              type="button"
+              aria-expanded="false"
+              aria-controls="sidebar-mode-row"
+              aria-label="Sidebar menu"
+              title="Sidebar menu"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <circle cx="8" cy="3.25" r="1.35" fill="currentColor" />
+                <circle cx="8" cy="8" r="1.35" fill="currentColor" />
+                <circle cx="8" cy="12.75" r="1.35" fill="currentColor" />
+              </svg>
+              <span class="sidebar-menu-indicator" aria-hidden="true"></span>
+            </button>
             <div class="panels-control">
               <button
                 id="panels-toggle"
@@ -205,8 +232,7 @@
           </button>
           <div id="hub-menu" class="panels-menu hub-menu" hidden></div>
         </div>
-        <div class="sidebar-notifications-row" hidden></div>
-        <div class="sidebar-mode-row">
+        <div class="sidebar-mode-row" id="sidebar-mode-row">
           <button
             id="follow-toggle"
             class="follow-switch"
@@ -245,9 +271,30 @@
         </div>
 
         <div class="sidebar-body pane-stack">
+          <!-- Pull request (src/sidebar/pull-request-pane.ts). Authored
+               unavailable: it joins the stack only once the session answers
+               with GitHub data, so sessions without it never show it. -->
+          <section class="sidebar-pane" data-pane-id="pull-request" data-pane-unavailable hidden>
+            <header class="pane-header">
+              <h2>Pull request</h2>
+              <div class="pane-meta"><span id="pull-request-pane-meta" class="pr-pane-meta"></span></div>
+              <div class="pane-actions">
+                <button id="pull-request-browse" class="pane-action" type="button" aria-label="Browse pull requests…" title="Browse pull requests: open another one"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6.75" cy="6.75" r="4.75"/><path d="m10.25 10.25 4 4"/></svg></button>
+                <button id="pull-request-refresh" class="pane-action" type="button" aria-label="Refresh pull request from GitHub" title="Refresh from GitHub">↻</button>
+                <button class="pane-action" type="button" data-pane-collapse="pull-request" aria-label="Collapse Pull request" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="pull-request" aria-label="Hide Pull request" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div id="pull-request-pane" class="pane-body pull-request-pane-body"></div>
+            <p id="pull-request-live" class="sr-only" role="status" aria-live="polite"></p>
+            <div class="pane-resizer" data-pane-resizer="pull-request" role="separator" aria-orientation="horizontal" aria-label="Resize Pull request"></div>
+          </section>
           <section class="sidebar-pane" data-pane-id="change-overview">
             <header class="pane-header">
               <h2>Change Overview</h2>
+              <!-- While a pull request is picked (sidebar/pull-request-scope.ts):
+                   this pane still describes the checked-out branch. -->
+              <div class="pane-meta"><span id="change-overview-scope" class="pane-scope-note" hidden></span></div>
               <div class="pane-actions">
                 <button class="pane-action" type="button" data-pane-collapse="change-overview" aria-label="Collapse Change Overview" title="Collapse pane">−</button>
                 <button class="pane-action" type="button" data-pane-hide="change-overview" aria-label="Hide Change Overview" title="Hide pane">×</button>
@@ -295,6 +342,24 @@
               <h2>Files</h2>
               <div class="pane-meta">
                 <span id="document-count" class="document-count" role="status" aria-live="off" aria-label="0 files">0</span>
+              </div>
+              <div class="pane-actions">
+                <div class="files-options">
+                  <button class="files-options-trigger" type="button" popovertarget="files-options-popover" aria-label="Files options" aria-expanded="false" title="Files options">⋯</button>
+                  <div id="files-options-popover" class="files-options-content" popover role="group" aria-label="Files options">
+                    <label><input id="files-show-ignored" type="checkbox" checked> Show ignored files</label>
+                    <div id="files-type-options" hidden></div>
+                  </div>
+                </div>
+                <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div class="pane-body">
+              <!-- One slim row under the header: the filter modes, then the
+                   filename filter. It wraps onto two rows only when the
+                   sidebar is too narrow for both. -->
+              <div class="files-toolbar pane-toolbar">
                 <div
                   id="files-pane-filter"
                   class="files-pane-filter"
@@ -321,23 +386,22 @@
                     title="Show only changed files"
                   >Changed</button>
                 </div>
-              </div>
-              <div class="pane-actions">
-                <div class="files-options">
-                  <button class="files-options-trigger" type="button" popovertarget="files-options-popover" aria-label="Files options" aria-expanded="false" title="Files options">⋯</button>
-                  <div id="files-options-popover" class="files-options-content" popover role="group" aria-label="Files options">
-                    <label><input id="files-show-ignored" type="checkbox" checked> Show ignored files</label>
-                    <div id="files-type-options" hidden></div>
-                  </div>
+                <div class="files-query-control">
+                  <!-- Touch mode folds the field behind this button until it
+                       is used (or holds a query); desktop always shows it. -->
+                  <button id="files-query-toggle" class="files-query-toggle" type="button" aria-label="Filter filenames and paths" aria-expanded="false" aria-controls="files-query" title="Filter files">
+                    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10.4 10.4 14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                  </button>
+                  <input id="files-query" type="search" aria-label="Filter filenames and paths" placeholder="Filter files" title="Filter filenames and paths" autocomplete="off" spellcheck="false">
+                  <button id="files-query-clear" type="button" aria-label="Clear filename filter" title="Clear filename filter">×</button>
                 </div>
-                <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
-                <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
               </div>
-            </header>
-            <div class="pane-body">
-              <div class="files-query-control">
-                <input id="files-query" type="search" aria-label="Filter filenames and paths" placeholder="Filter filenames and paths" autocomplete="off" spellcheck="false">
-                <button id="files-query-clear" type="button" aria-label="Clear filename filter" title="Clear filename filter">×</button>
+              <!-- A picked pull request's changed files, in place of the
+                   toolbar and the workspace tree (sidebar/pull-request-scope.ts). -->
+              <div id="pr-scope" class="pr-scope" hidden>
+                <div id="pr-scope-bar" class="pr-scope-bar pane-toolbar"></div>
+                <div id="pr-scope-tree" class="tree" aria-label="Files changed in the pull request"></div>
+                <p id="pr-scope-message" class="tree-empty" hidden></p>
               </div>
               <div id="tree" class="tree"></div>
               <div id="recent-files" class="recent-files" hidden></div>
@@ -382,9 +446,6 @@
           </section>
         </div>
 
-        <footer class="sidebar-footer">
-          <span id="build-badge" class="build-badge" title="Build identifier"></span>
-        </footer>
       </aside>
       <div
         id="sidebar-resizer"
@@ -491,7 +552,7 @@
       <main class="preview-shell" tabindex="-1">
         <header class="preview-header">
           <div class="preview-heading">
-            <p class="eyebrow">Preview</p>
+            <p class="eyebrow"><span class="eyebrow-preview">Preview</span><span class="eyebrow-pull-request">Pull request</span></p>
             <h2 id="preview-title">No document selected</h2>
             <div class="preview-meta">
               <code id="preview-path">Waiting for viewable files</code>
@@ -501,6 +562,13 @@
             <div id="file-facts-strip" class="file-facts-strip" hidden></div>
           </div>
           <div class="preview-toolbar" role="group" aria-label="Preview controls">
+            <!-- The pull request preview's own tabs; shown only while it is
+                 the preview target (html[data-preview-kind]). -->
+            <div id="pr-view-control" class="view-control pr-view-control" role="tablist" aria-label="Pull request view">
+              <button id="pr-tab-conversation" class="view-segment" type="button" role="tab" aria-controls="pr-panel-conversation" data-pr-tab="conversation">Conversation <span class="pr-tab-count" data-pr-tab-count="conversation"></span></button>
+              <button id="pr-tab-files" class="view-segment" type="button" role="tab" aria-controls="pr-panel-files" tabindex="-1" data-pr-tab="files">Files changed <span class="pr-tab-count" data-pr-tab-count="files"></span></button>
+            </div>
+            <a id="pr-view-github" class="action-icon pr-view-github" href="#" target="_blank" rel="noopener noreferrer" title="Open on GitHub" aria-label="Open on GitHub (opens in a new tab)">↗</a>
             <div
               id="view-control"
               class="view-control"
@@ -1202,8 +1270,11 @@
          navigation chrome in touch mode. Fixed to the layout viewport's
          bottom edge, safe-area padded; the software keyboard simply covers
          it (platform convention). Hidden entirely in desktop mode via CSS
-         keyed on data-ui-mode. -->
-    <nav id="touch-tab-bar" class="touch-tab-bar" role="tablist" aria-label="App surfaces">
+         keyed on data-ui-mode. The <nav> is the landmark; the tablist
+         inside it carries the tabs (a role on the <nav> itself would
+         replace the landmark). -->
+    <nav id="touch-tab-bar" class="touch-tab-bar" aria-label="App surfaces">
+      <div class="touch-tab-list" role="tablist" aria-label="App surfaces">
       <button
         id="touch-tab-files"
         class="touch-tab"
@@ -1279,6 +1350,7 @@
         <span class="touch-tab-label">Terminal</span>
         <span class="touch-tab-badge" aria-hidden="true"></span>
       </button>
+      </div>
     </nav>
 
     <div

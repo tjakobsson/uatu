@@ -51,6 +51,8 @@ import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
 import { isDocumentVisible } from "../shared/file-visibility";
 import { FolderListingError, type WatchSession } from "./watch-session";
+import { githubRouteHandlers } from "../github/http";
+import type { GithubService } from "../github/service";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
 // terminal WebSockets must never be reaped by an idle timer.
@@ -105,6 +107,10 @@ type BaseDeps = {
   // (dashboard, login, sibling sessions) as in-app, so an installed webapp
   // never shows iOS's out-of-scope browser chrome navigating between them.
   manifestScope?: "base-path" | "origin";
+  // GitHub pull request service behind /api/github/*. Absent (the default)
+  // means every such route answers 404. Today only the opt-in in-memory fake
+  // implements it (src/github/service.ts).
+  github?: GithubService | null;
   // Optional metrics registry, shared with the watch session so document and
   // Chat stream lifecycles land in one snapshot.
   metrics?: import("../debug/metrics").MetricsRegistry;
@@ -168,6 +174,11 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     return getSession().mediaResponse(request);
   };
   const provenance = new Map<string, Promise<unknown>>();
+  const github = githubRouteHandlers(() => deps.github ?? null, request => {
+    if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
+    if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
+    return null;
+  });
 
   const modeRoutes =
     deps.mode === "prod"
@@ -443,6 +454,22 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         }
       },
     },
+    // GitHub pull requests (src/github/http.ts adapts each entry to the
+    // GithubService seam). Reads are GETs; every write is POST/PATCH/DELETE
+    // behind the workspace credential and origin check.
+    [p("/api/github/summary")]: { GET: github.summary },
+    [p("/api/github/refresh")]: { POST: github.refresh },
+    [p("/api/github/pull-request")]: { GET: github.pullRequest },
+    [p("/api/github/pull-requests")]: { GET: github.pullRequests },
+    [p("/api/github/markdown")]: { POST: github.markdown },
+    [p("/api/github/comments")]: { POST: github.comment },
+    [p("/api/github/review")]: { DELETE: github.discardReview },
+    [p("/api/github/review/submit")]: { POST: github.submitReview },
+    [p("/api/github/review/threads")]: { POST: github.createThread },
+    [p("/api/github/review/threads/:threadId/replies")]: { POST: github.reply },
+    [p("/api/github/review/threads/:threadId/resolution")]: { POST: github.resolve },
+    [p("/api/github/review/comments/:commentId")]: { PATCH: github.editPendingComment, DELETE: github.deletePendingComment },
+    [p("/api/github/dev/scenario")]: { POST: github.devScenario },
     [p("/api/events")]: {
       GET: (request: Request) => {
         const context = requestContext(request);

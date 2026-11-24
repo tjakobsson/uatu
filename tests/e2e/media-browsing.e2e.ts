@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { expect, test as baseTest, showGitLogPane, type APIRequestContext, type Page } from "./fixtures";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { workspacePath } from "./config";
-import { revealTreeRow, treeRow, waitForTreeIdle } from "./tree-helpers";
+import { fillFilesQuery, revealTreeRow, treeRow, waitForTreeIdle } from "./tree-helpers";
 import { mp4Fixture, wavFixture } from "./media-fixtures";
 import { captureScreenshot } from "./evidence";
 
@@ -40,7 +40,7 @@ async function boot(page: Page): Promise<void> {
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await expect(page.locator("#preview")).toContainText("This is a sample README");
   if (await page.locator('[data-tab="files"]').isVisible()) await page.locator('[data-tab="files"]').click();
-  await page.locator("#files-query").fill("media-");
+  await fillFilesQuery(page, "media-");
 }
 
 async function options(page: Page): Promise<void> {
@@ -178,7 +178,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     await page.locator("#files-pane-filter-all").click();
     await expect(page.locator("#document-count")).toHaveText("3");
     await showIgnored(page, false); await expect(page.locator("#document-count")).toHaveText("2");
-    await page.locator("#files-query").fill(b); await expect(page.locator("#document-count")).toHaveText("1");
+    await fillFilesQuery(page, b); await expect(page.locator("#document-count")).toHaveText("1");
     await page.locator("#files-pane-filter-recent").click();
     await expect(page.locator("#files-query")).toHaveValue(b);
     await expect(row(page, b)).toBeVisible();
@@ -219,7 +219,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     await play(page, a).click(); await expectPlaying(page, a);
     const element = await nativeMedia(page).elementHandle();
     await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-    await type(page, "video"); await page.locator("#files-query").fill("media-video");
+    await type(page, "video"); await fillFilesQuery(page, "media-video");
     await fs.writeFile(workspacePath("media-new.wav"), wavFixture(30));
     await expect.poll(async () => (await request.get("/api/state").then(r => r.json())).roots.flatMap((root: any) => root.docs)
       .some((doc: any) => doc.relativePath === "media-new.wav")).toBe(true);

@@ -74,6 +74,15 @@ export function syncFilesPlayingIndicator(key: string | null): void {
   ensureTreeView().setPlayingFile(key);
 }
 
+// While the Files pane shows a pull request's files (sidebar/pull-request-
+// scope.ts) its count is that PR's file count. Registered, not imported, to
+// keep the PR modules out of the shell's import cycle.
+let scopedFileCount: () => number | null = () => null;
+
+export function setFilesScopeCount(count: () => number | null): void {
+  scopedFileCount = count;
+}
+
 function setResultCount(count: number): void {
   documentCountElement.textContent = String(count);
   documentCountElement.setAttribute("aria-label", `${count} ${count === 1 ? "file" : "files"}`);
@@ -89,7 +98,7 @@ function syncFilesPresentation(): void {
   if (recent) recentView.update(entries, appState.selectedId);
   const filterEmpty = appState.filesPaneFilter === "changed" && !view.hasFilterMembers();
   const count = recent ? entries.length : filterEmpty ? 0 : view.getVisibleLeafCount();
-  setResultCount(count);
+  setResultCount(scopedFileCount() ?? count);
   // The count is files only; unlisted ignored folder rows still need a tree.
   const folderRows = !recent && !filterEmpty && view.hasVisibleFolderRows();
   treeElement.hidden = recent || count === 0 && !folderRows;
@@ -105,6 +114,15 @@ const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
 const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 620;
 
+// Panes that follow repository snapshots without being imported here (the
+// Pull request pane registers from app.ts; importing it here would put the
+// PR modules into the shell's import cycle).
+const repositoryHooks: (() => void)[] = [];
+
+export function onSidebarRepositories(hook: () => void): void {
+  repositoryHooks.push(hook);
+}
+
 export function renderSidebar(incremental = false) {
   reconcileSearchVisibility();
   syncIndexStatus();
@@ -112,6 +130,7 @@ export function renderSidebar(incremental = false) {
   renderPanelsMenu();
   renderChangeOverview();
   renderGitLog();
+  for (const hook of repositoryHooks) hook();
   schedulePaneHeightNormalization();
   // Refresh the chip's tooltip every render — `primaryCompareBaseLabel`
   // depends on `appState.repositories` which changes on every refresh.
@@ -149,6 +168,7 @@ export function renderSidebarPatch(patch: DocumentPatch): void {
   if (patch.repositories || patch.repositoryState) renderChangeOverview();
   if (patch.repositories) {
     renderGitLog(); syncFilesPaneFilterControl();
+    for (const hook of repositoryHooks) hook();
     view.setGitStatus(collectGitStatusEntries(appState.repositories));
   }
 }

@@ -153,6 +153,11 @@
      custom properties cascade through the shadow boundary, so setting
      this here is enough to make the diff body track our shared mono face. */
   --diffs-font-family: var(--mono-font-family);
+  /* Line numbers of added and removed lines: Pierre's defaults sit near 3:1
+     on their tinted rows (2.9:1 green in light, 3.3:1 red in dark); these
+     reach 4.5:1. In review diffs they are also the "Comment on line" buttons. */
+  --diffs-fg-number-addition-override: light-dark(#1a7f37, #5ecc71);
+  --diffs-fg-number-deletion-override: light-dark(#cf222e, #ff8182);
 
   /* Embedded terminal palette. The light-on-dark scheme stays consistent
      across uatu's overall light theme — terminals look wrong when bright. */
@@ -2040,17 +2045,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   display: none;
 }
 
-.sidebar-notifications-row {
-  padding: 0.85rem 0.75rem 0;
-  flex-shrink: 0;
-}
-
-.sidebar-notifications-row[hidden] {
-  display: none;
-}
-
-.terminal-toggle-button,
-.sidebar-notifications-button {
+.terminal-toggle-button {
   appearance: none;
   width: 100%;
   display: flex;
@@ -2067,8 +2062,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   text-align: left;
 }
 
-.terminal-toggle-button:hover,
-.sidebar-notifications-button:hover {
+.terminal-toggle-button:hover {
   background: var(--surface-muted);
   border-color: var(--border-medium);
 }
@@ -2597,6 +2591,12 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   flex-wrap: wrap;
 }
 
+/* `display` would otherwise override the hidden attribute: non-document
+   previews (commit, pull request) left an empty pill behind. */
+.preview-type[hidden] {
+  display: none;
+}
+
 .preview-type {
   display: inline-flex;
   align-items: center;
@@ -2904,8 +2904,8 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   flex-shrink: 0;
 }
 
-/* Files-pane header carries the file count and the All/Changed filter chip
-   together so reviewers can read the count and the filter state as one unit. */
+/* Header metadata (the Files count, the pull request number, the search
+   summary) sits at the right of the title, before the pane actions. */
 .pane-meta {
   display: inline-flex;
   align-items: center;
@@ -2920,41 +2920,71 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   white-space: nowrap;
 }
 
-[data-pane-id="files"] > .pane-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-[data-pane-id="files"] > .pane-header h2 { grid-column: 1; grid-row: 1; }
-[data-pane-id="files"] > .pane-header .pane-actions { grid-column: 2; grid-row: 1; }
-[data-pane-id="files"] > .pane-header .pane-meta {
-  grid-column: 1 / -1;
-  justify-content: space-between;
-  margin-left: 0;
-  min-width: 0;
-}
+/* Files: one slim toolbar row under the header — filter modes, then the
+   filename filter. It wraps to two rows only on a very narrow sidebar. */
 [data-pane-id="files"] > .pane-body { display: flex; flex-direction: column; overflow: hidden; }
-.files-query-control { display: flex; flex: 0 0 auto; gap: 0.25rem; padding: 0.4rem 0.6rem; }
+.files-toolbar {
+  display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 0.35rem;
+  padding: 0.3rem 0.75rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+.files-toolbar .files-pane-filter { flex: 0 0 auto; }
+.files-query-control { position: relative; display: flex; flex: 1 1 7rem; min-width: 7rem; }
 .files-query-control input {
   width: 100%; min-width: 0; border: 1px solid var(--border-soft); border-radius: 0.3rem;
-  padding: 0.35rem 0.5rem; background: var(--surface-raised); color: var(--text-strong); font: inherit; font-size: 0.75rem;
+  padding: 0.2rem 1.5rem 0.2rem 0.45rem; background: var(--surface-raised); color: var(--text-strong); font: inherit; font-size: 0.72rem;
 }
+.files-query-control input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+/* The clear button sits inside the field and shows only once there is text. */
 .files-query-control button {
-  border: 0; background: transparent; color: var(--text-subtle); cursor: pointer; min-width: 28px;
+  position: absolute; top: 0; right: 0; bottom: 0; min-width: 1.5rem;
+  border: 0; background: transparent; color: var(--text-subtle); cursor: pointer;
 }
-.recent-files { overflow: auto; flex: 1 1 0; min-height: 0; position: relative; overflow-anchor: none; }
+.files-query-control input:placeholder-shown + button { display: none; }
+/* Pull request scope (sidebar/pull-request-scope.ts): a picked PR's files
+   replace the toolbar and the workspace tree. The workspace tree's host
+   carries the library's inline display, hence !important. */
+[data-pane-id="files"][data-files-scope] :is(.files-toolbar, #recent-files, #tree-empty-message) { display: none; }
+[data-pane-id="files"][data-files-scope] #tree { display: none !important; }
+.pr-scope:not([hidden]) { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.pr-scope-bar {
+  display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.4rem;
+  padding: 0.3rem 0.75rem; border-bottom: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface)); font-size: 0.72rem;
+}
+.pr-scope-label {
+  flex: 0 0 auto; padding: 0.05rem 0.4rem; border-radius: 999px;
+  background: var(--accent); color: var(--surface); font-weight: 600;
+}
+.pr-scope-title { flex: 1 1 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
+.pr-scope-bar .gh-mock-label { flex: 0 0 auto; }
+.pr-scope-bar .pr-back-to-branch { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
+/* The pane's and the scope bar's way back: one control, touch-sized. */
+html[data-ui-mode="touch"] .pr-back-to-branch { min-height: 44px; }
+.pr-scope-status { flex-basis: 100%; color: var(--danger); }
+/* Said once per screen: while the Pull request pane is on screen it carries
+   the way back and the stale-data line, so the scope bar keeps only its
+   "PR #n" tag and title. */
+.pane-stack:has(> [data-pane-id="pull-request"]:not([hidden]):not(.is-collapsed)) .pr-scope-bar :is(.pr-back-to-branch, .pr-scope-status) { display: none; }
+/* One line per file: name, then its folder muted and truncated. recent-view.ts
+   reads --recent-row-height for its windowing. */
+.recent-files { --recent-row-height: 32px; overflow: auto; flex: 1 1 0; min-height: 0; position: relative; overflow-anchor: none; }
+html[data-ui-mode="touch"] .recent-files { --recent-row-height: 44px; }
 .recent-files > div { position: relative; }
-.recent-file { position: absolute; left: 0; right: 0; height: 56px; }
+.recent-file { position: absolute; left: 0; right: 0; height: var(--recent-row-height); }
 .recent-file-open {
   display: flex; align-items: center; gap: 0.5rem; width: 100%; height: 100%; border: 0;
-  padding: 0.35rem 0.75rem; text-align: left; background: transparent; color: var(--text-strong); cursor: pointer; font: inherit;
+  padding: 0 0.75rem; text-align: left; background: transparent; color: var(--text-strong); cursor: pointer; font: inherit;
 }
 .recent-file-open:hover { background: var(--surface-muted); }
 .recent-file-open.is-selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .recent-file-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .recent-file-icon { flex: 0 0 18px; color: var(--accent); }
 .recent-file-icon.is-binary { color: var(--text-subtle); }
-.recent-file-labels { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.recent-file-labels { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; flex: 1; }
 .recent-file-name, .recent-file-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-file-name { flex: 0 1 auto; min-width: 3rem; }
+.recent-file-path { flex: 1 1 0; min-width: 0; }
 .recent-file-name { font-size: 0.8rem; }
 .recent-file-path, .recent-file time { font-size: 0.68rem; color: var(--text-subtle); }
 .recent-file time { flex-shrink: 0; }
@@ -2975,7 +3005,22 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 }
 .files-options-content label { display: flex; align-items: center; gap: 0.5rem; min-height: 32px; cursor: pointer; }
 .files-options-content input { accent-color: var(--accent); }
-html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
+html[data-ui-mode="touch"] #files-pane-filter button { min-height: 30px; padding: 0 0.6rem; font-size: 0.82rem; }
+/* Touch: a slim toolbar row (about 40px). The filter folds behind a search
+   button until opened or holding a query. 16px text: iOS zooms the page on
+   focus for any text control under 16px. */
+.files-query-toggle { display: none; }
+html[data-ui-mode="touch"] .files-toolbar { padding: 0.15rem 0.5rem 0.15rem 0.75rem; }
+html[data-ui-mode="touch"] .files-query-control input { min-height: 32px; padding-top: 0; padding-bottom: 0; font-size: 16px; }
+html[data-ui-mode="touch"] .files-query-control button { min-width: 36px; }
+html[data-ui-mode="touch"] .files-query-control:not(.is-open):has(input:placeholder-shown) {
+  flex: 0 0 auto; min-width: 0; margin-left: auto;
+}
+html[data-ui-mode="touch"] .files-query-control:not(.is-open):has(input:placeholder-shown) > :not(.files-query-toggle) { display: none; }
+html[data-ui-mode="touch"] .files-query-control:not(.is-open):has(input:placeholder-shown) > .files-query-toggle {
+  position: static; display: grid; place-items: center; width: 36px; height: 32px;
+  border: 1px solid var(--border-soft); border-radius: 0.3rem; background: var(--surface-raised); color: var(--text-subtle);
+}
 .recent-files[hidden] { display: none; }
 
 /* Segmented chip: same visual primitive as the view-control, sized down to sit
@@ -3059,6 +3104,14 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   background: light-dark(#eef2f5, #21262d);
 }
 
+/* What a pane describes when that is not the obvious subject (Change
+   Overview while a pull request is picked: the checked-out branch). */
+.pane-scope-note {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0.05rem 0.4rem; border-radius: 999px;
+  background: var(--surface-muted); color: var(--text-strong);
+}
+
 .pane-body {
   min-height: 0;
   overflow: auto;
@@ -3066,7 +3119,9 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   flex: 1 1 auto;
 }
 
-.sidebar-pane.is-collapsed .pane-body,
+/* [data-pane-id] out-ranks the Files pane's own `display: flex` body rule
+   below, which used to leave a folded Files pane showing its toolbar. */
+.sidebar-pane.is-collapsed[data-pane-id] > .pane-body,
 .sidebar-pane.is-collapsed .pane-resizer {
   display: none;
 }
@@ -3138,16 +3193,14 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   font-size: 0.8rem;
 }
 
-.sidebar-footer {
-  padding: 0.75rem 0;
-  border-top: 1px solid var(--border-soft);
-  flex-shrink: 0;
-}
-
 .build-badge {
-  display: inline-block;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono-font-family);
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   color: var(--text-subtle);
   letter-spacing: 0.02em;
 }
@@ -8341,6 +8394,12 @@ html[data-ui-mode="touch"] .plan-meter {
   display: none;
 }
 
+/* Scrolling to a control (focus, scrollIntoView, the browser's own find)
+   keeps it clear of the fixed tab bar. */
+html[data-ui-mode="touch"] {
+  scroll-padding-bottom: calc(var(--tab-bar-total) + 0.5rem);
+}
+
 html[data-ui-mode="touch"] .touch-tab-bar {
   display: flex;
   position: fixed;
@@ -8352,6 +8411,13 @@ html[data-ui-mode="touch"] .touch-tab-bar {
   padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   background: var(--surface-raised);
   border-top: 1px solid var(--border-soft);
+}
+
+/* The tablist inside the <nav> landmark lays the tabs out. */
+.touch-tab-list {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .touch-tab {
@@ -8546,6 +8612,105 @@ html[data-ui-mode="touch"] .pane-resizer {
     user-select: none;
   }
 }
+
+/* Touch mode's pane stack is an accordion (sidebar/panes.ts): one pane is
+   expanded and takes the rest of the Files tab, every header is one slim
+   row (44px for the finger, no more), and the title is a button whose
+   ::before covers the row, so a tap anywhere on it except the actions and
+   the header's own links toggles the pane. Desktop keeps its headers, the
+   − / + button and the resizers. */
+html[data-ui-mode="touch"] .pane-header {
+  position: relative;
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 0 0.15rem 0 0.75rem;
+  gap: 0.35rem;
+  touch-action: manipulation;
+}
+html[data-ui-mode="touch"] .pane-header h2 { flex: 0 0 auto; max-width: 60%; font-size: 0.82rem; }
+html[data-ui-mode="touch"] [data-pane-collapse] { display: none; }
+html[data-ui-mode="touch"] .pane-action { width: 40px; height: 44px; font-size: 1rem; }
+html[data-ui-mode="touch"] .files-options-trigger { min-width: 40px; min-height: 44px; }
+html[data-ui-mode="touch"] .pane-header :is(.pane-actions, .pane-meta a, .pane-meta button) { position: relative; z-index: 1; }
+html[data-ui-mode="touch"] :is(.pane-meta, .pr-pane-meta) { flex-shrink: 1; min-width: 0; overflow: hidden; font-size: 0.76rem; }
+.pane-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.pane-toggle::before { content: ""; position: absolute; inset: 0; }
+/* The disclosure chevron, before the title: right when folded, down when open. */
+.pane-toggle::after {
+  content: "";
+  order: -1;
+  flex: 0 0 auto;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin: 0 0.1rem 0.15rem 0.1rem;
+  border-right: 1.6px solid var(--text-subtle);
+  border-bottom: 1.6px solid var(--text-subtle);
+  transform: rotate(45deg);
+}
+.pane-toggle[aria-expanded="false"]::after { margin-bottom: 0; transform: rotate(-45deg); }
+.pane-toggle:focus-visible { outline: none; }
+.pane-toggle:focus-visible::before { outline: 2px solid var(--accent); outline-offset: -2px; }
+html[data-ui-mode="touch"] .sidebar-pane:not(.is-collapsed) > .pane-header { background: var(--surface-track); }
+/* A folded pane says what it holds beside its title (the pull request's
+   review state; the Files count is already there). */
+.pane-collapsed-summary { display: none; }
+html[data-ui-mode="touch"] .sidebar-pane.is-collapsed .pane-collapsed-summary {
+  display: inline;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-subtle);
+}
+
+/* Touch mode: Follow leaves its full-width row for the header's sidebar
+   menu (shell/follow.ts); a dot on the menu button says Follow is on. */
+.sidebar-menu-toggle { display: none; position: relative; }
+html[data-ui-mode="touch"] .sidebar-menu-toggle { display: inline-flex; }
+.sidebar-menu-toggle[aria-expanded="true"] { background: var(--surface-muted); color: var(--text-strong); }
+.sidebar-menu-indicator {
+  display: none;
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+.sidebar-menu-toggle[data-follow-on] .sidebar-menu-indicator { display: block; }
+html[data-ui-mode="touch"] .sidebar-mode-row {
+  position: absolute;
+  top: var(--sidebar-menu-top, 4rem);
+  right: calc(env(safe-area-inset-right) + 0.75rem);
+  z-index: 40;
+  width: min(16rem, calc(100% - 1.5rem));
+  box-sizing: border-box;
+  padding: 0.35rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  background: var(--surface-raised);
+  box-shadow: 0 8px 24px light-dark(rgba(15, 23, 42, 0.16), rgba(0, 0, 0, 0.5));
+}
+html[data-ui-mode="touch"] .sidebar-mode-row:not([data-open]) { display: none; }
+html[data-ui-mode="touch"] .follow-switch { min-height: 44px; }
+/* Under the brand: the workspace switcher, then the pane stack. */
+html[data-ui-mode="touch"] .sidebar-hub-row { padding-top: 0.5rem; }
+html[data-ui-mode="touch"] .sidebar-body { margin-top: 0.5rem; }
 
 /* Preview surface: the main-stack as-is, hidden while another tab is
    active. The terminal panel escapes this via position: fixed, so only the
@@ -11299,4 +11464,1094 @@ html[data-media-player][data-ui-mode="desktop"][data-notification-chat] .chat-su
   html[data-media-player][data-ui-mode="desktop"] .app-shell {
     padding-bottom: var(--media-dock-height);
   }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Pull request review (src/sidebar/pull-request-pane.ts,                   */
+/* src/preview/pull-request-view.ts, diff-review.ts, review-dialogs.ts,     */
+/* src/shell/pull-request-picker.ts). Shared GitHub tokens first.           */
+/* ------------------------------------------------------------------------ */
+
+:root {
+  --gh-merged: light-dark(#8250df, #a371f7);
+  --gh-attention-soft: light-dark(#fff8c5, #2e2504);
+  --gh-attention-border: light-dark(#d4a72c, #9e6a03);
+  --gh-attention-fg: light-dark(#9a6700, #d29922);
+  --gh-danger-soft: light-dark(#ffebe9, #2d1214);
+  --gh-success-soft: light-dark(#dafbe1, #12261e);
+}
+
+/* Preview chrome: the eyebrow and the PR tabs follow the preview target. */
+.eyebrow-pull-request,
+html[data-preview-kind="pull-request"] .eyebrow-preview { display: none; }
+html[data-preview-kind="pull-request"] .eyebrow-pull-request { display: inline; }
+#pr-view-control,
+#pr-view-github { display: none; }
+html[data-preview-kind="pull-request"] #pr-view-control { display: inline-flex; }
+html[data-preview-kind="pull-request"] #pr-view-github { display: inline-flex; text-decoration: none; }
+/* No pull request detail to show (pull-request-view.ts): no tabs to switch
+   and no GitHub page to open. */
+html[data-preview-kind="pull-request"] :is(#pr-view-control, #pr-view-github)[hidden] { display: none; }
+/* The pinned header on a phone keeps to the title, number and tabs: the
+   Preview tab already says where this is. */
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-heading .eyebrow { display: none; }
+/* Touch targets: the tabs are as tall as the header's other buttons. */
+html[data-ui-mode="touch"] #pr-view-control .view-segment { min-height: 44px; display: inline-flex; align-items: center; }
+.pr-tab-count {
+  margin-left: 0.3rem;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.pr-tab-count:empty { display: none; }
+.view-segment.is-active .pr-tab-count { color: var(--accent); }
+
+.pr-muted { color: var(--text-subtle); }
+.gh-add { color: var(--success-strong); font-variant-numeric: tabular-nums; }
+.gh-del { color: var(--danger); font-variant-numeric: tabular-nums; margin-left: 0.25rem; }
+.gh-ref {
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.35rem;
+  background: var(--accent-soft);
+  /* Darker than --accent: small text on the tinted chip must reach 4.5:1. */
+  color: light-dark(#0550ae, #79c0ff);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.gh-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+}
+.gh-avatar-md { width: 2rem; height: 2rem; font-size: 0.85rem; }
+.gh-avatar-sm { width: 1.35rem; height: 1.35rem; font-size: 0.68rem; }
+
+.gh-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.12rem 0.6rem;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.gh-state::before { content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: currentColor; opacity: 0.85; }
+.gh-state-open { background: var(--success-strong); }
+.gh-state-merged { background: var(--gh-merged); }
+.gh-state-closed { background: var(--danger); }
+.gh-state-draft { background: var(--text-subtle); }
+
+.gh-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.08rem 0.5rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 999px;
+  color: var(--text-subtle);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.gh-pill-success { border-color: var(--success); color: var(--success-strong); }
+.gh-pill-danger { border-color: var(--danger); color: var(--danger); }
+.gh-pill-attention { border-color: var(--gh-attention-border); color: var(--gh-attention-fg); background: var(--gh-attention-soft); }
+.gh-pill-solid-attention { border-color: transparent; background: var(--gh-attention-fg); color: light-dark(#fff, #0d1117); }
+/* The pane header's pending-review count opens Finish review. */
+.gh-pill-button { font: inherit; font-size: 0.66rem; cursor: pointer; }
+.gh-pill-button:hover { border-color: var(--gh-attention-fg); }
+.gh-pill-fork { border-color: var(--gh-merged); color: var(--gh-merged); }
+.gh-pill-xs { padding: 0 0.35rem; font-size: 0.66rem; }
+
+.gh-check { display: inline-block; width: 1rem; text-align: center; font-weight: 700; }
+.gh-check-success { color: var(--success-strong); }
+.gh-check-failure { color: var(--danger); }
+.gh-check-pending { color: var(--attention); font-size: 0.8em; }
+
+.gh-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+.gh-count-pending { border-color: var(--gh-attention-border); background: var(--gh-attention-soft); color: var(--gh-attention-fg); }
+
+.gh-mock-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.45rem;
+  border: 1px dashed var(--gh-merged);
+  border-radius: 0.35rem;
+  color: var(--gh-merged);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.gh-external { color: var(--accent); text-decoration: none; font-size: 0.85rem; white-space: nowrap; }
+.gh-external:hover { text-decoration: underline; }
+
+.gh-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  background: var(--surface-raised);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gh-button:hover:not(:disabled) { background: var(--surface-subtle); }
+.gh-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gh-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.gh-button-primary { border-color: transparent; background: var(--chat-send-fill); color: #fff; }
+.gh-button-primary:hover:not(:disabled) { background: var(--accent); }
+.gh-button-merge { border-color: transparent; background: var(--success-strong); color: #fff; }
+.gh-button-merge:hover:not(:disabled) { background: var(--success); }
+.gh-button-danger { border-color: transparent; background: var(--danger); color: #fff; }
+.gh-button-danger:hover:not(:disabled) { filter: brightness(1.08); background: var(--danger); }
+.gh-button-quiet { border-color: transparent; background: transparent; color: var(--text-subtle); }
+.gh-icon-button { min-width: 2.4rem; padding: 0.3rem; }
+.gh-button-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.2rem;
+  height: 1.2rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--chat-send-fill);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.gh-button:not(.gh-button-primary) .gh-button-count { background: var(--surface-muted); color: var(--text-strong); }
+.gh-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.gh-link-button:hover { text-decoration: underline; }
+
+.gh-input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.88rem;
+}
+.gh-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+textarea.gh-input { resize: vertical; min-height: 4rem; }
+
+.gh-notice {
+  margin: 0.75rem 0;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.55rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.gh-notice-warn { border-color: var(--notice-warn-border); background: var(--notice-warn-bg); }
+
+.gh-state-card {
+  margin: 0 0 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px dashed var(--border-medium);
+  border-radius: 0.6rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.gh-state-card h3 { margin: 0 0 0.3rem; color: var(--text-strong); font-size: 0.86rem; }
+.gh-state-card p { margin: 0 0 0.5rem; color: var(--text-subtle); }
+.gh-state-card-danger { border-style: solid; border-color: light-dark(#f2b8b5, #6e2a2a); }
+.gh-state-card-attention { border-style: solid; border-color: var(--gh-attention-border); background: var(--gh-attention-soft); }
+.gh-state-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.gh-state-card-eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.68rem; font-weight: 700; }
+
+.gh-connect {
+  padding: 1.25rem 1.4rem;
+  border: 1px solid var(--gh-attention-border);
+  border-radius: 0.75rem;
+  background: var(--gh-attention-soft);
+}
+.gh-connect h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+.gh-connect p { margin: 0 0 0.75rem; color: var(--text-subtle); }
+.gh-connect-compact {
+  padding: 0.8rem 0.9rem;
+  border: 1px dashed var(--gh-attention-border);
+  border-radius: 0.6rem;
+  background: var(--gh-attention-soft);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.gh-connect-compact h3 { font-size: 0.86rem; margin-bottom: 0.35rem; }
+.gh-connect-compact .gh-button { width: 100%; margin-top: 0.15rem; white-space: normal; }
+.gh-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.9rem;
+}
+/* Plain text: the steps say where to go, they are not controls. */
+.gh-breadcrumb-step {
+  color: var(--text-strong);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.gh-breadcrumb-separator { color: var(--text-subtle); }
+/* Inside the preview article, Markdown link styles would win over buttons. */
+#preview a.gh-button { text-decoration: none; }
+#preview a.gh-button-primary { color: #fff; background: var(--chat-send-fill); }
+.gh-connect-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+
+/* --- Pull request pane --------------------------------------------------- */
+
+.pull-request-pane-body { font-size: 0.82rem; }
+.pr-pane-meta { display: inline-flex; align-items: center; gap: 0.35rem; }
+.pr-pane-number { color: var(--accent); font-weight: 600; text-decoration: none; }
+.pr-pane-number:hover { text-decoration: underline; }
+#pull-request-refresh.is-spinning { animation: pr-spin 0.9s linear infinite; }
+@keyframes pr-spin { to { transform: rotate(360deg); } }
+.pr-pane.is-stale { opacity: 0.72; }
+/* A picked pull request (not the checked-out branch's own) says so, with the
+   way back. */
+.pr-pane-scope {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.5rem;
+  margin: 0 0 0.4rem; padding: 0.15rem 0.5rem; border-radius: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  font-size: 0.74rem; color: var(--text-strong);
+}
+/* Small text on the tinted note: darker than --accent to reach 4.5:1. */
+.pr-pane-scope .pr-back-to-branch { color: light-dark(#0550ae, #79c0ff); font-size: inherit; }
+html[data-ui-mode="touch"] .pr-pane-scope { padding: 0 0.5rem; margin-bottom: 0.15rem; }
+/* A picked pull request's way back takes a row: the title gives up its
+   second line so the summary and the actions still fit a short pane (the
+   Files scope bar and the preview carry it in full). */
+.pr-pane.is-picked .pr-pane-title { -webkit-line-clamp: 1; }
+.pr-pane-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.45rem; min-width: 0; }
+/* One line beside Details, never wrapped: a long review decision gives way
+   with an ellipsis (it is spelled out under Details → Reviewers). */
+.pr-pane-top > .pr-pane-row { flex: 1 1 auto; flex-wrap: nowrap; overflow: hidden; }
+.pr-pane-top > .pr-pane-row > * { flex: 0 0 auto; }
+.pr-pane-top > .pr-pane-row > .gh-pill { flex: 0 1 auto; display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The top row (state, number, decision, Details) stays pinned while the pane
+   scrolls, so the pull request is always named and Details always in reach.
+   Opaque: rows scroll under it. */
+.pr-pane-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.1rem 0;
+  background: var(--surface);
+}
+.pr-pane-repo { margin-left: 0.4rem; color: var(--text-subtle); font-size: 0.78rem; }
+.pr-pane-title {
+  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0.3rem 0 0.2rem;
+  color: var(--text-strong);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.3;
+  text-decoration: none;
+}
+.pr-pane-title:hover { color: var(--accent); }
+/* Always in view: checks and the first merge blocker on one line. */
+.pr-pane-status {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0 0 0.25rem;
+  color: var(--text-subtle);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+.pr-pane-status.is-blocked > span:last-child { color: var(--gh-attention-fg); }
+.pr-pane-status.is-ready > span:last-child { color: var(--success-strong); font-weight: 600; }
+.pr-pane-pending { margin: 0 0 0.3rem; color: var(--gh-attention-fg); font-size: 0.76rem; line-height: 1.35; }
+/* In flow right under the summary (not pinned): nothing in the pane can
+   scroll under them, and a short pane still shows them. */
+.pr-pane-actions { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; margin: 0.15rem 0 0.3rem; }
+.pr-pane-actions .gh-button { padding-inline: 0.5rem; white-space: nowrap; }
+.pr-pane-actions .gh-external { margin-left: auto; }
+.pr-pane-merge { text-decoration: none; }
+.pr-pane-details-toggle {
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
+  padding: 0.2rem 0 0.2rem 0.4rem;
+  border: 0;
+  background: none;
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+.pr-pane-details[hidden] { display: none; }
+.pr-pane-details { padding-top: 0.3rem; border-top: 1px solid var(--border-soft); }
+.pr-pane-branches { margin-bottom: 0.3rem; }
+.pr-pane-stats { color: var(--text-subtle); margin-bottom: 0.2rem; }
+.pr-pane-stats a { color: inherit; }
+.pr-pane-readiness p { margin: 0 0 0.2rem; font-size: 0.76rem; line-height: 1.35; }
+.pr-pane-readiness-headline { font-weight: 600; }
+.pr-pane-readiness.is-blocked .pr-pane-readiness-headline { color: var(--gh-attention-fg); }
+.pr-pane-readiness.is-ready .pr-pane-readiness-headline { color: var(--success-strong); }
+.pr-pane-reasons { margin: 0 0 0.3rem; padding-left: 1.1rem; font-size: 0.76rem; line-height: 1.35; }
+.pr-pane-checks { margin: 0.1rem 0 0.4rem; padding: 0; list-style: none; }
+.pr-pane-checks li { display: flex; align-items: center; gap: 0.35rem; padding: 0.12rem 0; }
+.pr-pane-check-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-pane-heading {
+  margin: 0.5rem 0 0.3rem;
+  color: var(--text-subtle);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.pr-pane-heading .gh-check { letter-spacing: 0; }
+.pr-pane-reviewers { margin: 0 0 0.6rem; padding: 0; list-style: none; }
+.pr-pane-reviewers li { display: flex; align-items: center; gap: 0.45rem; padding: 0.18rem 0; }
+.pr-pane-reviewer { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Stale data over a pull request: one line above it, Retry included. */
+.pr-pane-stale {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem;
+  margin: 0 0 0.4rem; padding: 0.3rem 0.5rem; border-radius: 0.4rem;
+  border: 1px solid light-dark(#f2b8b5, #6e2a2a); background: var(--gh-danger-soft);
+  font-size: 0.74rem; line-height: 1.35;
+}
+.pr-pane-stale .gh-link-button { font-size: inherit; }
+.pr-pane-stale .pr-retry-note { flex-basis: 100%; }
+.pr-retry-note { font-size: 0.74rem; }
+/* The viewer's pending reviews on other pull requests. */
+.pr-pane-elsewhere { margin: 0.1rem 0 0.35rem; padding: 0; list-style: none; font-size: 0.74rem; color: var(--gh-attention-fg); }
+.pr-pane-elsewhere li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+.pr-pane-elsewhere a { color: inherit; font-weight: 600; }
+/* Touch panes are short: the repository is in the preview header. */
+html[data-ui-mode="touch"] .pr-pane-repo { display: none; }
+html[data-ui-mode="touch"] .pr-pane-title { margin: 0.15rem 0 0.1rem; }
+/* A slim pinned top row: Details is 36px tall, its tap box 44px. */
+html[data-ui-mode="touch"] .pull-request-pane-body { padding: 0.1rem 0.75rem 0.4rem; }
+html[data-ui-mode="touch"] .pr-pane-details-toggle { position: relative; min-height: 36px; }
+html[data-ui-mode="touch"] .pr-pane-details-toggle::after { content: ""; position: absolute; inset: -4px 0; }
+.pr-pane-mock {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.45rem;
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border-medium);
+  color: var(--text-subtle);
+  font-size: 0.74rem;
+}
+.pr-pane-mock select { margin-left: 0.3rem; font: inherit; }
+
+/* --- Pull request preview ------------------------------------------------ */
+
+#preview .pr-view { max-width: 980px; }
+.pr-view-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.8rem;
+  margin: 0 0 1.25rem;
+  color: var(--text-subtle);
+  font-size: 0.86rem;
+}
+.pr-view-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid light-dark(#f2b8b5, #6e2a2a);
+  border-radius: 0.55rem;
+  background: var(--gh-danger-soft);
+  font-size: 0.86rem;
+}
+.pr-view-banner[hidden] { display: none; }
+.pr-view-banner.is-neutral { border-color: var(--border-medium); background: var(--surface-subtle); }
+.pr-view-banner:focus { outline: none; }
+/* Read-only merge readiness at the end of Conversation, where GitHub has
+   its merge box. */
+.pr-merge-box > .pr-merge-box-icon {
+  display: inline-grid; place-items: center; flex: 0 0 auto; width: 2rem; height: 2rem; border-radius: 50%;
+  position: relative; z-index: 1; box-shadow: 0 0 0 3px var(--surface);
+  background: var(--surface-muted); color: var(--text-subtle); font-weight: 700;
+}
+.pr-merge-box.is-ready > .pr-merge-box-icon { background: var(--success-strong); color: #fff; }
+.pr-merge-box.is-blocked > .pr-merge-box-icon { background: var(--gh-attention-soft); color: var(--gh-attention-fg); }
+.pr-merge-box-title { margin: 0 0 0.35rem; font-size: 1rem; }
+.pr-merge-box-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.pr-merge-box-reasons { margin: 0.3rem 0; padding-left: 1.2rem; }
+.pr-merge-box-pending { color: var(--gh-attention-fg); font-weight: 600; }
+#preview .pr-merge-box a.gh-button { text-decoration: none; }
+#preview .pr-merge-box a.gh-button-merge { color: #fff; }
+html[data-ui-mode="touch"] .pr-merge-box > .pr-merge-box-icon { display: none; }
+.pr-timeline { position: relative; }
+.pr-timeline::before {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  bottom: 0;
+  left: 1rem;
+  border-left: 2px solid var(--border-soft);
+}
+.pr-event { position: relative; display: flex; gap: 0.85rem; margin: 0 0 1rem; }
+.pr-event > .gh-avatar { position: relative; z-index: 1; box-shadow: 0 0 0 3px var(--surface); }
+.pr-event-main { flex: 1 1 auto; min-width: 0; }
+.pr-card { border: 1px solid var(--border-medium); border-radius: 0.6rem; overflow: hidden; background: var(--surface); }
+.pr-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.9rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-subtle);
+  color: var(--text-subtle);
+  font-size: 0.86rem;
+}
+.pr-card-header strong { color: var(--text-strong); }
+/* Author · action · time wrap as one run of text; a badge that does not fit
+   beside it drops to its own line instead of squeezing it into a column. */
+.pr-card-header { flex-wrap: wrap; row-gap: 0.3rem; }
+.pr-card-header > span:first-child { flex: 1 1 auto; min-width: 0; }
+#preview .pr-card-body { padding: 0.75rem 0.9rem; font-size: 0.95rem; }
+#preview .pr-card-body > :first-child { margin-top: 0; }
+#preview .pr-card-body > :last-child { margin-bottom: 0; }
+.pr-event-line { align-items: center; gap: 0.6rem; padding-left: 0.2rem; color: var(--text-subtle); font-size: 0.86rem; }
+.pr-event-line .gh-state { position: relative; z-index: 1; }
+.pr-thread-summary {
+  margin: 0.75rem 0 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  font-size: 0.86rem;
+}
+.pr-thread-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--surface-subtle);
+}
+.pr-thread-summary-aside { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-left: auto; }
+#preview .pr-thread-summary-line {
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  border-radius: 0;
+  background: var(--diff-added-bg);
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+#preview .pr-thread-summary-line code { background: none; padding: 0; white-space: inherit; overflow-wrap: anywhere; }
+.pr-thread-summary-comment { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.5rem 0.7rem; }
+#preview .pr-thread-summary-comment .markdown-body p { margin: 0; }
+
+/* Composer (conversation, inline, replies) */
+.pr-composer-box {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  overflow: hidden;
+}
+.pr-composer-heading,
+.pr-composer-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.35rem 0.6rem 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-subtle);
+  font-size: 0.82rem;
+}
+.pr-composer-heading { justify-content: space-between; padding: 0.45rem 0.75rem; color: var(--text-subtle); }
+.pr-composer-heading > [data-composer-heading] { min-width: 0; }
+.pr-composer-tabs button {
+  margin-bottom: -1px;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid transparent;
+  border-radius: 0.4rem 0.4rem 0 0;
+  background: none;
+  color: var(--text-subtle);
+  font: inherit;
+  cursor: pointer;
+}
+.pr-composer-tabs button[aria-selected="true"] { border-color: var(--border-soft); border-bottom-color: var(--surface); background: var(--surface); color: var(--text-strong); }
+.pr-composer-hint { margin-left: auto; color: var(--text-subtle); font-size: 0.75rem; }
+.pr-composer-input {
+  box-sizing: border-box;
+  display: block;
+  width: calc(100% - 1.2rem);
+  margin: 0.6rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.9rem;
+  resize: vertical;
+}
+.pr-composer-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.pr-composer-input[hidden] { display: none; }
+/* A long draft scrolls inside the preview: the actions stay right below. */
+.pr-composer-preview {
+  min-height: 4rem; max-height: min(24rem, 55vh); overflow: auto; overflow-wrap: anywhere;
+  margin: 0.6rem; padding: 0.4rem 0.6rem; font-size: 0.92rem;
+}
+.pr-composer-preview[hidden] { display: none; }
+.pr-composer-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0 0.6rem 0.6rem;
+}
+.pr-composer-note { color: var(--text-subtle); font-size: 0.78rem; }
+.pr-composer-note.is-error { color: var(--danger); }
+.pr-composer-counter { color: var(--text-subtle); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.pr-composer-counter.is-error { color: var(--danger); font-weight: 600; }
+.pr-composer-counter[hidden] { display: none; }
+.gh-field-counter { margin: 0.25rem 0 0; color: var(--text-subtle); font-size: 0.8rem; text-align: right; font-variant-numeric: tabular-nums; }
+.gh-field-counter.is-error { color: var(--danger); font-weight: 600; }
+.gh-field-counter[hidden] { display: none; }
+.pr-pending-edit { padding: 0.4rem 0.2rem 0; }
+.pr-composer-actions { display: inline-flex; gap: 0.4rem; margin-left: auto; }
+
+/* Files changed */
+.pr-review-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  background: var(--surface-subtle);
+  font-size: 0.86rem;
+}
+/* A review in progress stays in view while the files scroll, under the
+   preview's sticky header (diff-review.ts measures it into --pr-sticky-top). */
+.pr-review-bar.is-active {
+  position: sticky;
+  top: var(--pr-sticky-top, 0px);
+  z-index: 3;
+  border-color: var(--gh-attention-border);
+  background: var(--gh-attention-soft);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+.pr-review-bar[hidden] { display: none; }
+.pr-review-bar-reason { flex-basis: 100%; color: var(--danger); font-size: 0.8rem; }
+/* Paused: the reason gets its own line, on a phone too. */
+html[data-ui-mode="touch"] .pr-review-bar.is-active.is-paused { flex-wrap: wrap; }
+.pr-conversation > .pr-review-bar { margin-bottom: 1rem; }
+/* Pinned on a phone it must stay one row: the count is on Finish review. */
+html[data-ui-mode="touch"] .pr-review-bar.is-active .pr-review-bar-text { display: none; }
+html[data-ui-mode="touch"] .pr-review-bar.is-active { padding: 0.3rem 0.5rem; gap: 0.4rem; flex-wrap: nowrap; }
+html[data-ui-mode="touch"] .pr-review-bar.is-active .pr-review-bar-actions { flex: 0 0 auto; }
+html[data-ui-mode="touch"] .pr-review-bar.is-active .gh-button { min-height: 44px; }
+.pr-review-bar-text { flex: 1 1 16rem; color: var(--text-subtle); }
+.pr-review-bar.is-active .pr-review-bar-text { color: var(--text-strong); }
+.pr-review-bar-actions { display: inline-flex; gap: 0.45rem; margin-left: auto; }
+.pr-review-bar kbd { padding: 0 0.3rem; border: 1px solid var(--border-medium); border-radius: 0.25rem; font-size: 0.8em; }
+.pr-files-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.6rem;
+  color: var(--text-subtle);
+  font-size: 0.82rem;
+}
+.pr-file-index { flex: 1 1 20rem; min-width: 0; }
+.pr-files-summary { cursor: pointer; }
+.pr-files-summary-toggle { color: var(--accent); font-weight: 600; }
+.pr-file-index nav {
+  display: grid;
+  gap: 0.1rem;
+  margin: 0.5rem 0 0.4rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.55rem;
+  font-size: 0.82rem;
+}
+.pr-file-index-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.35rem;
+  color: var(--text-strong);
+  text-decoration: none;
+}
+.pr-file-index-item:hover { background: var(--surface-subtle); }
+.pr-file-index-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.8rem; }
+.pr-file { margin: 0 0 1rem; border: 1px solid var(--border-medium); border-radius: 0.6rem; overflow: hidden; }
+.pr-file-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+  font-size: 0.86rem;
+}
+.pr-file-path { font-family: var(--font-mono, ui-monospace, monospace); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.pr-file-badges { display: inline-flex; gap: 0.3rem; margin-left: auto; }
+#preview .pr-file-diff { margin: 0; border: 0; border-radius: 0; }
+
+.pr-thread,
+.pr-inline-composer {
+  max-width: 52rem;
+  margin: 0.5rem 0.75rem 0.6rem 4.2rem;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 0.86rem;
+  white-space: normal;
+  /* The card takes the code column's width and never widens it: a long line
+     picker option or an unbroken word would otherwise grow the diff past
+     the file card (and the phone screen), clipping the card's buttons. */
+  contain: inline-size;
+}
+.pr-thread {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.55rem;
+  background: var(--surface);
+  overflow: hidden;
+}
+.pr-thread.is-pending { border-color: var(--gh-attention-border); }
+/* Jumps and focus scrolling stop below the pinned preview header and review
+   bar (diff-review.ts measures both). */
+.pr-thread,
+.pr-inline-composer,
+.pr-file {
+  scroll-margin-top: calc(var(--pr-sticky-top, 0px) + var(--pr-review-bar-height, 0px) + 0.75rem);
+}
+.pr-thread.is-flash { box-shadow: 0 0 0 3px var(--accent); transition: box-shadow 0.4s ease; }
+.pr-thread:focus { outline: none; }
+.pr-thread:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .pr-thread.is-flash { transition: none; }
+  #pull-request-refresh.is-spinning { animation: none; }
+}
+/* "Comment on a line…": the full-size way into inline review where line
+   numbers are too small to aim at (touch, phone widths). */
+.pr-file-tools { display: none; }
+html[data-ui-mode="touch"] .pr-file-tools {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+html[data-ui-mode="touch"] .pr-file-tools .gh-button { min-height: 44px; }
+.pr-composer-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; min-width: 0; max-width: 100%; }
+.pr-composer-line select {
+  min-width: 0;
+  max-width: min(22rem, 100%);
+  padding: 0.1rem 0.3rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+}
+html[data-ui-mode="touch"] .pr-composer-line select { min-height: 44px; max-width: 100%; }
+.pr-thread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-subtle);
+  color: var(--text-subtle);
+}
+.pr-thread.is-resolved .pr-thread-header { border-bottom: 0; }
+.pr-thread-comment { display: flex; gap: 0.55rem; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border-soft); }
+.pr-thread-comment-main { min-width: 0; flex: 1 1 auto; }
+.pr-thread-comment-meta { color: var(--text-subtle); font-size: 0.8rem; }
+.pr-thread-comment-meta strong { color: var(--text-strong); }
+#preview .pr-thread-comment-body { font-size: 0.88rem; }
+#preview .pr-thread-comment-body > :first-child { margin-top: 0.1rem; }
+#preview .pr-thread-comment-body > :last-child { margin-bottom: 0; }
+.pr-thread-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; }
+.pr-thread-reply { flex: 1 1 14rem; min-width: 0; }
+.pr-thread-footer.is-replying { align-items: flex-start; }
+.pr-thread-footer.is-replying .pr-thread-reply { flex-basis: 100%; }
+.pr-thread-actions { display: inline-flex; gap: 0.4rem; margin-left: auto; }
+.pr-thread-reply-placeholder {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--text-subtle);
+  font: inherit;
+  text-align: left;
+  cursor: text;
+}
+.pr-inline-composer .pr-composer-box { border-color: var(--gh-attention-border); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06); }
+
+.pr-toast.is-error { border-left: 4px solid var(--danger); }
+.pr-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(1.25rem + var(--tab-bar-height, 0px));
+  z-index: 3000;
+  transform: translateX(-50%);
+  max-width: min(36rem, calc(100vw - 2rem));
+  padding: 0.6rem 0.9rem;
+  border-radius: 0.5rem;
+  background: var(--text-strong);
+  color: var(--surface);
+  font-size: 0.86rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+/* --- Dialogs ------------------------------------------------------------- */
+
+.gh-dialog {
+  box-sizing: border-box;
+  width: min(34rem, calc(100vw - 1.5rem));
+  max-height: calc(100dvh - 3rem);
+  padding: 0;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.9rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+}
+.gh-dialog-wide { width: min(46rem, calc(100vw - 1.5rem)); }
+.gh-dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
+.gh-dialog-body { padding: 1.4rem 1.5rem 0; font-size: 0.9rem; line-height: 1.5; }
+.gh-dialog-title { margin: 0 0 0.35rem; font-size: 1.3rem; font-weight: 700; }
+.gh-dialog-sub { margin: 0 0 1rem; color: var(--text-subtle); }
+.gh-dialog-label { display: block; margin: 0.9rem 0 0.35rem; font-weight: 700; }
+.gh-dialog-section {
+  margin: 1.1rem 0 0.5rem;
+  color: var(--text-subtle);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.gh-dialog-empty,
+.gh-dialog-note { margin: 0.4rem 0; font-size: 0.84rem; }
+.gh-dialog-error { margin: 0.75rem 0 0; color: var(--danger); }
+.gh-dialog-error[hidden] { display: none; }
+/* Why the primary action is disabled: under the buttons, in the footer. */
+.gh-dialog-reason { order: 3; flex-basis: 100%; margin: 0; color: var(--text-subtle); font-size: 0.8rem; text-align: right; }
+.gh-dialog-reason:empty { display: none; }
+/* Pinned to the dialog's bottom edge: on a phone the dialog opens at its top
+   and the buttons stay in reach. */
+.gh-dialog-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  margin-top: 1.2rem;
+  padding: 0.75rem 0 1.2rem;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.gh-input[aria-invalid="true"] { border-color: var(--danger); }
+.gh-notice p { margin: 0 0 0.5rem; }
+.gh-dialog-attribution { color: var(--text-subtle); font-size: 0.84rem; }
+.gh-dialog-attribution strong { color: var(--text-strong); }
+.gh-dialog-actions { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
+.gh-dialog-actions .gh-button { min-height: 2.4rem; padding: 0.4rem 1rem; font-size: 0.9rem; }
+.gh-choice-list { display: grid; gap: 0.5rem; margin: 0.8rem 0 0; }
+.gh-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  cursor: pointer;
+}
+.gh-choice input { margin-top: 0.25rem; accent-color: var(--accent); }
+.gh-choice > span { display: grid; gap: 0.1rem; }
+.gh-choice-description { color: var(--text-subtle); font-size: 0.84rem; }
+.gh-choice.is-selected { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-soft); }
+.gh-choice.is-disabled { cursor: not-allowed; opacity: 0.6; }
+.gh-pending-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.55rem;
+  max-height: 14rem;
+  overflow: auto;
+}
+.gh-pending-list li { padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--border-soft); }
+.gh-pending-list li:last-child { border-bottom: 0; }
+.gh-pending-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+.gh-pending-location { color: var(--accent); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.82rem; text-decoration: none; }
+.gh-pending-actions { color: var(--text-subtle); font-size: 0.84rem; white-space: nowrap; }
+/* The whole comment, as typed: what Submit publishes must be readable
+   without opening Edit. */
+.gh-pending-body { margin: 0.15rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The commented line's code, one line, so the old and new sides of the same
+   line number read apart. */
+.gh-pending-excerpt {
+  display: block; margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-subtle); font-size: 0.78rem;
+}
+.gh-pending-edit-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.4rem; margin-top: 0.4rem; }
+.gh-pending-edit-actions .gh-dialog-reason { order: 0; flex: 1 1 12rem; text-align: left; }
+html[data-ui-mode="touch"] .gh-pending-row { align-items: center; }
+html[data-ui-mode="touch"] .gh-pending-actions .gh-link-button { min-height: 44px; padding: 0 0.6rem; }
+/* Finish review: line comments typed but not added to the review. */
+.gh-unsent { margin: 0 0 0.75rem; }
+.gh-unsent p { margin: 0 0 0.4rem; }
+.gh-unsent-list { margin: 0 0 0.5rem; padding-left: 1.1rem; }
+.gh-unsent-list li { overflow-wrap: anywhere; }
+.gh-unsent-text { color: var(--text-subtle); }
+.gh-unsent-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.gh-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1.2rem; margin: 0.5rem 0 0.9rem; }
+.gh-facts dt { color: var(--text-subtle); }
+.gh-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.gh-picker-search { display: flex; gap: 0.5rem; }
+.gh-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.7rem 0; }
+.gh-chip {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+.gh-chip.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.gh-pr-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.6rem;
+  max-height: min(22rem, 50dvh);
+  overflow: auto;
+}
+.gh-pr-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+.gh-pr-row:last-child { border-bottom: 0; }
+.gh-pr-row:hover { background: var(--surface-subtle); }
+.gh-pr-row.is-selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.gh-pr-row.has-worktree .gh-pr-row-title strong { color: var(--text-subtle); }
+.gh-pr-row-main { min-width: 0; }
+.gh-pr-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.gh-pr-row-meta { margin-top: 0.15rem; color: var(--text-subtle); font-size: 0.82rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+.gh-pr-row-aside { display: grid; justify-items: end; align-content: start; gap: 0.25rem; flex: 0 0 auto; font-size: 0.82rem; }
+.gh-pr-row-checks { color: var(--text-subtle); white-space: nowrap; }
+/* A merged or closed pull request found by number (not in the open list). */
+.gh-picker-lookup {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem 0.75rem;
+  padding: 0.6rem 0.85rem; border: 1px solid var(--border-medium); border-radius: 0.6rem;
+}
+
+/* --- Touch mode ---------------------------------------------------------- */
+
+html[data-ui-mode="touch"] .pr-thread,
+html[data-ui-mode="touch"] .pr-inline-composer { margin: 0.5rem 0.4rem 0.6rem; }
+/* Touch targets: every pull request control is at least 44px tall. */
+html[data-ui-mode="touch"] .gh-button { min-height: 44px; }
+html[data-ui-mode="touch"] #pr-view-github { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+html[data-ui-mode="touch"] :is(.pr-view, .pull-request-pane-body, .gh-dialog, #pr-scope) .gh-link-button,
+html[data-ui-mode="touch"] .pr-thread-reply-placeholder,
+html[data-ui-mode="touch"] .pr-composer-tabs button,
+html[data-ui-mode="touch"] :is(.pr-pane-number, .gh-pill-button, .pr-pane-elsewhere a, .gh-pending-location, .pr-file-index-item),
+html[data-ui-mode="touch"] .pr-pane-mock select,
+html[data-ui-mode="touch"] .gh-chip {
+  display: inline-flex; align-items: center; min-height: 44px;
+}
+html[data-ui-mode="touch"] .pr-pane-title { min-height: 44px; }
+/* The "N files" link inside the stats sentence: a 44px tap box that leaves
+   the line's height alone. */
+html[data-ui-mode="touch"] .pr-pane-stats a { display: inline-block; padding: 14px 0; margin: -14px 0; }
+html[data-ui-mode="touch"] :is(.pr-file-header, .pr-files-summary) { min-height: 44px; box-sizing: border-box; }
+html[data-ui-mode="touch"] .pr-files-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.3rem; }
+html[data-ui-mode="touch"] .pr-file-index-item { display: flex; }
+/* 16px text in every text control: iOS zooms the page on focus below that
+   (the same rule as the Files filter). */
+html[data-ui-mode="touch"] :is(.pr-composer-input, .pr-composer-line select, .gh-input, .pr-pane-mock select) { font-size: 16px; }
+html[data-ui-mode="touch"] .pr-event > .gh-avatar { display: none; }
+html[data-ui-mode="touch"] .pr-timeline::before { display: none; }
+html[data-ui-mode="touch"] .gh-dialog-body { padding: 1.1rem 1rem 0; }
+/* The pull request picker is a full-height sheet on touch: the list takes
+   the room between the filters and the pinned footer. */
+html[data-ui-mode="touch"] .gh-dialog-wide[open] {
+  width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0;
+  border: 0; border-radius: 0;
+  padding-top: env(safe-area-inset-top);
+}
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-body { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-pr-list { flex: 1 1 auto; min-height: 8rem; max-height: none; }
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-footer { margin-top: auto; }
+/* Rows stack their badges under the title so more of the list fits; the
+   explanation of the two actions gives way to the list (the buttons say
+   what they do). */
+html[data-ui-mode="touch"] .gh-picker-help { display: none; }
+html[data-ui-mode="touch"] .gh-dialog-wide .gh-dialog-sub { margin-bottom: 0.6rem; }
+html[data-ui-mode="touch"] .gh-pr-row { flex-direction: column; gap: 0.3rem; padding: 0.55rem 0.75rem; }
+html[data-ui-mode="touch"] .gh-pr-row-aside { display: flex; flex-wrap: wrap; justify-items: start; align-items: center; gap: 0.5rem; }
+html[data-ui-mode="touch"] .gh-dialog-footer { padding-bottom: 1rem; }
+html[data-ui-mode="touch"] .gh-dialog-actions { width: 100%; justify-content: flex-end; }
+html[data-ui-mode="touch"] .pr-composer-hint { display: none; }
+
+/* A short touch viewport (a phone in landscape, about 390px tall): the pull
+   request's preview header scrolls away instead of staying pinned, so the
+   pinned review bar and the tab bar leave the diff most of the screen.
+   pull-request-view.ts then pins the review bar at the top. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] { --preview-scroll-inset: 4.5rem; }
+  html[data-ui-mode="touch"][data-preview-kind="pull-request"] .preview-header { position: relative; top: auto; }
+}
+
+/* Diffs where horizontal space is scarce (touch mode, phone widths): a
+   compact line-number column, as wide as its digits, in a smaller font with
+   less padding, and a slimmer change bar. diff-view.ts reads these inside
+   Pierre's shadow root; --diffs-min-number-column-width is Pierre's own. */
+html[data-ui-mode="touch"] diffs-container {
+  --uatu-diff-gutter-utility: none;
+  --uatu-diff-number-size: 0.7rem;
+  --uatu-diff-number-pad-start: 0.7ch;
+  --uatu-diff-number-pad-end: 0.5ch;
+  --uatu-diff-line-pad: 0.6ch;
+  --uatu-diff-bar-width: 2px;
+  --diffs-min-number-column-width: 1ch;
+}
+@media (max-width: 640px) {
+  diffs-container {
+    --uatu-diff-number-size: 0.7rem;
+    --uatu-diff-number-pad-start: 0.7ch;
+    --uatu-diff-number-pad-end: 0.5ch;
+    --uatu-diff-line-pad: 0.6ch;
+    --uatu-diff-bar-width: 2px;
+    --diffs-min-number-column-width: 1ch;
+  }
+}
+
+/* Phone-width previews (every kind: documents, source, diffs, pull requests).
+   Horizontal space is the scarce resource: no card around the content, and
+   an opaque sticky header that content never shows through. Each part of a
+   pull request (its header facts, the description, every review or comment,
+   the merge box, the composer, every file) is a full-width band instead of
+   a nested box, so no width goes to side borders: a tinted header strip
+   (author · action · time, or the file) over its body, hairlines above and
+   below, and the same gap between parts. Threads are tinted cards. */
+@media (max-width: 640px) {
+  .preview-shell { padding: 0 0.75rem 1rem; }
+  .preview-header { padding: 0.7rem 0.75rem 0.6rem; margin: 0 -0.75rem; border-bottom: 1px solid var(--border-soft); }
+  .preview-header::before {
+    bottom: 0;
+    background: light-dark(#fbfcfd, #0d1117);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .preview { margin-top: 0.75rem; padding: 0; border: 0; border-radius: 0; background: none; }
+
+  .pr-view-meta {
+    margin: 0 -0.75rem 0.9rem;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border-medium);
+    background: var(--surface-subtle);
+  }
+  /* Without a banner above, the facts band meets the sticky header. */
+  .pr-view-banner[hidden] + .pr-view-meta { margin-top: -0.75rem; }
+  .pr-timeline::before { display: none; }
+  .pr-event:not(.pr-event-line) { display: block; margin: 0 -0.75rem 0.9rem; }
+  .pr-event > .gh-avatar { display: none; }
+  .pr-event-line { margin: 0 0 0.9rem; padding: 0.15rem 0; }
+  .pr-card { border: 0; border-block: 1px solid var(--border-medium); border-radius: 0; overflow: visible; background: var(--surface); }
+  .pr-card-header { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border-soft); background: var(--surface-track); }
+  /* A review's verdict pill keeps the page surface behind its text (4.5:1). */
+  .pr-card-header .gh-pill:not(.gh-pill-attention) { background: var(--surface); }
+  /* The description is the pull request's own text: an accent edge. */
+  .pr-description .pr-card-header { box-shadow: inset 3px 0 0 var(--accent); }
+  #preview .pr-card-body { padding: 0.65rem 0.75rem 0.8rem; }
+  /* Readiness: an edge in its tone. */
+  .pr-merge-box .pr-card { background: var(--surface-subtle); }
+  .pr-merge-box.is-blocked .pr-card { box-shadow: inset 3px 0 0 var(--gh-attention-border); }
+  .pr-merge-box.is-ready .pr-card { box-shadow: inset 3px 0 0 var(--success-strong); }
+  .pr-event-composer { margin-bottom: 0; padding: 0.75rem; border-top: 1px solid var(--border-medium); background: var(--surface-subtle); }
+  /* Thread meta: path and line, then state, replies and View in diff. */
+  .pr-thread-summary { border-color: var(--border-medium); background: var(--pr-thread-tint); }
+  .pr-thread-summary-head { padding: 0.35rem 0.5rem; row-gap: 0.2rem; background: var(--pr-thread-head-tint); }
+  .pr-thread-summary-aside { flex-basis: 100%; margin-left: 0; }
+  #preview .pr-thread-summary-line { padding: 0.3rem 0.5rem; }
+  .pr-thread-summary-comment { padding: 0.45rem 0.5rem; }
+
+  .pr-review-bar { padding: 0.5rem 0.6rem; }
+  .pr-file { margin: 0 -0.75rem 1.1rem; border-inline: 0; border-radius: 0; }
+  .pr-file-header { padding: 0.45rem 0.75rem; border-bottom-color: var(--border-medium); background: var(--surface-track); }
+  .pr-thread { background: var(--pr-thread-tint); }
+  /* Comment bodies take their card's tint (the Markdown sheet paints its own). */
+  #preview :is(.pr-thread, .pr-thread-summary) .markdown-body { background: transparent; }
+  .pr-thread-header { background: var(--pr-thread-head-tint); }
+  .pr-thread.is-pending { background: color-mix(in srgb, var(--gh-attention-border) 7%, var(--surface)); }
+  .pr-thread.is-pending .pr-thread-header { background: var(--gh-attention-soft); }
+}
+/* Thread cards' tint (phone widths, above): a little of the accent. */
+:root {
+  --pr-thread-tint: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  --pr-thread-head-tint: color-mix(in srgb, var(--accent) 11%, var(--surface));
 }

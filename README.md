@@ -212,7 +212,8 @@ restart the hub:
 ```
 
 On iPhone and iPad, use HTTPS, add Uatu to the Home Screen, and enable
-notifications from the installed app. Supported desktop browsers can enroll
+notifications from the installed app, under **Notifications** in the hub's
+Settings (a workspace reaches Settings from its workspace menu). Supported desktop browsers can enroll
 without installation. Plain HTTP to a remote LAN address does not support push.
 The hub needs outbound access to the browser's push service; no Apple developer
 account or Uatu-hosted relay is needed.

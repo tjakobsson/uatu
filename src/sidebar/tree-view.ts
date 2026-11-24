@@ -27,6 +27,42 @@ const TREE_THEMES: Record<ColorScheme, TreeThemeStyles> = {
   dark: themeToTreeStyles({ type: "dark" }),
 };
 
+// Applies the active scheme's tree palette to a tree host. Shared with the
+// Files pane's pull request scope (sidebar/pull-request-scope.ts), which
+// mounts the same library for a pull request's changed files.
+export function applyTreeTheme(container: HTMLElement, scheme: ColorScheme): void {
+  Object.assign(container.style, TREE_THEMES[scheme]);
+  container.style.setProperty("--trees-git-ignored-color-override", "var(--trees-fg-muted)");
+  for (const [name, value] of Object.entries(TREE_TEXT_COLORS[scheme])) container.style.setProperty(name, value);
+}
+
+// Row text that must stay readable (4.5:1) on the tree's background and its
+// selected-row tint. The library's light Git status colors and muted
+// decoration gray measure 1.9–3.5:1 there, so light mode uses darker
+// shades of the same hues; dark mode keeps the library's status colors and
+// only lifts the decoration gray. `--uatu-tree-*` colors the row decorations
+// (write age, review marks; see the decoration callback below).
+const TREE_TEXT_COLORS: Record<ColorScheme, Record<string, string>> = {
+  light: {
+    "--trees-git-modified-color-override": "#0b6f8c",
+    "--trees-git-added-color-override": "#0a7565",
+    "--trees-git-untracked-color-override": "#0a7565",
+    "--trees-git-renamed-color-override": "#835f00",
+    "--trees-git-deleted-color-override": "#c4122b",
+    "--uatu-tree-meta-color": "#5f5f64",
+    "--uatu-tree-review-color": "#0a63c2",
+  },
+  dark: {
+    "--trees-git-modified-color-override": "",
+    "--trees-git-added-color-override": "",
+    "--trees-git-untracked-color-override": "",
+    "--trees-git-renamed-color-override": "",
+    "--trees-git-deleted-color-override": "",
+    "--uatu-tree-meta-color": "#a0a0a6",
+    "--uatu-tree-review-color": "var(--trees-accent)",
+  },
+};
+
 export type TreeViewSelectionHandler = (documentId: string) => void;
 
 export type TreeViewOptions = {
@@ -82,6 +118,10 @@ export class TreeView {
   private showIgnored = true;
   private mediaType: FilesMediaType = "all";
   private playingKey: string | null = null;
+  // Pull request review marks per tree path (open threads, pending comments),
+  // shown as row decorations. Set by the Pull request pane.
+  private reviewMarks = new Map<string, { threads: number; pending: number }>();
+  private reviewMarksLabel = "";
   private readonly onPlayDocument: ((doc: DocumentMeta) => void) | undefined;
   private readonly composition: FileTreeCompositionOptions = { contextMenu: {
     enabled: true, triggerMode: "both", buttonVisibility: "when-needed",
@@ -181,8 +221,7 @@ export class TreeView {
   // from the same generator with an identical key set, so assignment
   // overwrites every prior declaration — no removal pass needed.
   private applyTreeTheme(scheme: ColorScheme): void {
-    Object.assign(this.container.style, TREE_THEMES[scheme]);
-    this.container.style.setProperty("--trees-git-ignored-color-override", "var(--trees-fg-muted)");
+    applyTreeTheme(this.container, scheme);
   }
 
   // Replace the visible tree with the given roots. Safe to call repeatedly;
@@ -355,10 +394,15 @@ export class TreeView {
             const playing = fileKey(doc) === this.playingKey;
             const latest = row.path === this.latestPath;
             const age = Date.now() - doc.mtimeMs < 86_400_000 ? relativeWriteAge(doc.mtimeMs) : "";
-            if (!playing && !latest && !age) return null;
-            const text = `${playing ? "▶ " : ""}${latest ? "◷ " : ""}${age}`.trim();
-            return { text, parts: [{ text: playing ? "▶ " : "", color: "var(--trees-accent)" }, { text: `${latest ? "◷ " : ""}${age}`.trim() }],
-              title: `${playing ? "Playing. " : ""}${latest ? "Latest write. " : ""}Last written ${new Date(doc.mtimeMs).toISOString()}` };
+            const mark = this.reviewMarks.get(row.path);
+            // U+00A0 separators: the row's flex layout trims ordinary spaces
+            // at part boundaries, which would read "💬1" + "4m" as "💬14m".
+            const review = mark ? `${mark.threads ? `💬${mark.threads}\u00a0` : ""}${mark.pending ? `✎${mark.pending}\u00a0` : ""}${age || playing || latest ? "·\u00a0" : ""}` : "";
+            if (!playing && !latest && !age && !review) return null;
+            const text = `${review}${playing ? "▶ " : ""}${latest ? "◷ " : ""}${age}`.trim();
+            const reviewTitle = mark ? `${this.reviewMarksLabel}: ${mark.threads} open ${mark.threads === 1 ? "thread" : "threads"}, ${mark.pending} pending. ` : "";
+            return { text, parts: [{ text: review, color: "var(--uatu-tree-review-color, var(--trees-accent))" }, { text: playing ? "▶ " : "", color: "var(--trees-accent)" }, { text: `${latest ? "◷ " : ""}${age}`.trim(), color: "var(--uatu-tree-meta-color, var(--trees-fg-muted))" }],
+              title: `${reviewTitle}${playing ? "Playing. " : ""}${latest ? "Latest write. " : ""}Last written ${new Date(doc.mtimeMs).toISOString()}` };
           },
           onSelectionChange: selected => this.handleSelectionChange(selected),
         });
@@ -679,6 +723,21 @@ export class TreeView {
   getEligibleDocuments(): DocumentMeta[] {
     return [...this.renderedPaths].filter(path => matchesFileQuery(path, this.query)).sort(compareTreePaths)
       .map(path => this.documentsByPath.get(path)!).filter(Boolean);
+  }
+
+  // Marks keyed by repository-relative path; like Git status they land on
+  // every watched root's copy of the path.
+  setReviewMarks(marks: ReadonlyMap<string, { threads: number; pending: number }>, label: string): void {
+    const next = new Map<string, { threads: number; pending: number }>();
+    for (const [relativePath, mark] of marks) {
+      for (const prefix of this.rootPrefixById.values()) next.set(`${prefix}${relativePath}`, mark);
+    }
+    const same = next.size === this.reviewMarks.size
+      && [...next].every(([path, mark]) => this.reviewMarks.get(path)?.threads === mark.threads && this.reviewMarks.get(path)?.pending === mark.pending);
+    this.reviewMarksLabel = label;
+    if (same) return;
+    this.reviewMarks = next;
+    if (!this.container.hidden) this.tree?.setComposition(this.tree.getComposition());
   }
 
   setPlayingFile(key: string | null): void {

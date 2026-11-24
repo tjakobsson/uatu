@@ -159,7 +159,8 @@ configuration change. Without this setting, normal use continues and the
 Notifications form explains that sender configuration is required.
 
 Each browser profile or Home Screen installation enrolls independently through
-**Notifications**. Users choose needs-answer and successful turn-completion
+**Notifications** in the Hub's navigation (Dashboard, Add workspace and
+Settings; a workspace reaches it through its menu's Settings link). Users choose needs-answer and successful turn-completion
 alerts, and either **All workspaces** or a list of workspaces. All workspaces is
 a standing rule: a workspace registered later is covered from the moment the
 hub sees it, with no further configuration. A device with a workspace list does

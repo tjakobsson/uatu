@@ -2,8 +2,10 @@ import type { DocumentMeta } from "../shared/types";
 import { fileKey, RecentModel, relativeWriteAge } from "./recent-model";
 import { mediaKind } from "../shared/media";
 
-const ROW_HEIGHT = 56;
 const OVERSCAN = 4;
+// Row height comes from CSS (`--recent-row-height`: one line per file, taller
+// in touch mode), so the windowing matches whatever the mode lays out.
+const FALLBACK_ROW_HEIGHT = 44;
 
 export class RecentView {
   private entries: readonly DocumentMeta[] = [];
@@ -17,6 +19,9 @@ export class RecentView {
   private readonly content = document.createElement("div");
   private readonly observer: ResizeObserver;
   private readonly timer: ReturnType<typeof setInterval>;
+  private rowHeight(): number {
+    return parseFloat(getComputedStyle(this.container).getPropertyValue("--recent-row-height")) || FALLBACK_ROW_HEIGHT;
+  }
   private readonly release = () => {
     if (!this.pressed) return;
     const generation = this.pressGeneration;
@@ -84,21 +89,22 @@ export class RecentView {
     // Copy the array because the incremental model mutates its ordering.
     const next = [...entries];
     const reconcile = () => {
-      const top = Math.floor(this.container.scrollTop / ROW_HEIGHT);
-      const offset = this.container.scrollTop % ROW_HEIGHT;
+      const rowHeight = this.rowHeight();
+      const top = Math.floor(this.container.scrollTop / rowHeight);
+      const offset = this.container.scrollTop % rowHeight;
       const anchors = this.entries.slice(top);
       const hadFocus = this.container.contains(document.activeElement);
       const focusedIndex = this.entries.findIndex(doc => fileKey(doc) === this.focusedKey);
       this.entries = next;
       this.selectedId = selectedId;
-      this.content.style.height = `${next.length * ROW_HEIGHT}px`;
+      this.content.style.height = `${next.length * rowHeight}px`;
       if (this.container.scrollTop > 0) {
         const positions = new Map(next.map((doc, index) => [fileKey(doc), index]));
         const anchor = anchors.find(doc => {
           const position = positions.get(fileKey(doc));
           return position !== undefined && next[position]!.mtimeMs === doc.mtimeMs;
         }) ?? anchors.find(doc => positions.has(fileKey(doc)));
-        if (anchor) this.container.scrollTop = Math.max(0, (positions.get(fileKey(anchor))! - anchors.indexOf(anchor)) * ROW_HEIGHT + offset);
+        if (anchor) this.container.scrollTop = Math.max(0, (positions.get(fileKey(anchor))! - anchors.indexOf(anchor)) * rowHeight + offset);
       }
       if (this.focusedKey && !next.some(doc => fileKey(doc) === this.focusedKey)) {
         this.focusedKey = next[Math.min(Math.max(0, focusedIndex), next.length - 1)] ? fileKey(next[Math.min(Math.max(0, focusedIndex), next.length - 1)]!) : null;
@@ -112,10 +118,11 @@ export class RecentView {
 
   private render(): void {
     if (this.container.hidden) return;
+    const rowHeight = this.rowHeight();
     const hadFocus = this.container.contains(document.activeElement);
-    const start = Math.min(Math.max(0, this.entries.length - 1), Math.max(0, Math.floor(this.container.scrollTop / ROW_HEIGHT) - OVERSCAN));
-    const end = Math.min(this.entries.length, start + Math.ceil((this.container.clientHeight || 560) / ROW_HEIGHT) + OVERSCAN * 2);
-    this.content.style.height = `${this.entries.length * ROW_HEIGHT}px`;
+    const start = Math.min(Math.max(0, this.entries.length - 1), Math.max(0, Math.floor(this.container.scrollTop / rowHeight) - OVERSCAN));
+    const end = Math.min(this.entries.length, start + Math.ceil((this.container.clientHeight || 560) / rowHeight) + OVERSCAN * 2);
+    this.content.style.height = `${this.entries.length * rowHeight}px`;
     const mounted = new Map([...this.content.children].map(row => [row.querySelector<HTMLButtonElement>("button")!.dataset.fileKey!, row as HTMLElement]));
     const rows: HTMLElement[] = [];
     const indices = Array.from({ length: end - start }, (_, index) => start + index);
@@ -125,7 +132,7 @@ export class RecentView {
       const doc = this.entries[index]!;
       const existing = mounted.get(fileKey(doc));
       if (existing) {
-        existing.style.top = `${index * ROW_HEIGHT}px`;
+        existing.style.top = `${index * rowHeight}px`;
         existing.setAttribute("aria-posinset", String(index + 1));
         existing.setAttribute("aria-setsize", String(this.entries.length));
         const button = existing.querySelector<HTMLButtonElement>("button")!;
@@ -140,7 +147,7 @@ export class RecentView {
         const fullPath = this.model.searchPath(doc);
         button.dataset.path = doc.relativePath;
         existing.querySelector<HTMLElement>(".recent-file-name")!.textContent = doc.name;
-        existing.querySelector<HTMLElement>(".recent-file-path")!.textContent = fullPath.includes("/") ? fullPath.slice(0, fullPath.lastIndexOf("/")) : ".";
+        existing.querySelector<HTMLElement>(".recent-file-path")!.textContent = fullPath.includes("/") ? fullPath.slice(0, fullPath.lastIndexOf("/")) : "";
         button.setAttribute("aria-label", `${fullPath}, last written ${age.dateTime}`);
         this.syncRowActions(existing, doc);
         rows.push(existing); continue;
@@ -150,7 +157,7 @@ export class RecentView {
       row.setAttribute("role", "listitem");
       row.setAttribute("aria-posinset", String(index + 1));
       row.setAttribute("aria-setsize", String(this.entries.length));
-      row.style.top = `${index * ROW_HEIGHT}px`;
+      row.style.top = `${index * rowHeight}px`;
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.fileKey = fileKey(doc);
@@ -169,7 +176,7 @@ export class RecentView {
       const name = document.createElement("span"); name.className = "recent-file-name"; name.textContent = doc.name;
       const path = document.createElement("span"); path.className = "recent-file-path";
       const fullPath = this.model.searchPath(doc);
-      path.textContent = fullPath.includes("/") ? fullPath.slice(0, fullPath.lastIndexOf("/")) : ".";
+      path.textContent = fullPath.includes("/") ? fullPath.slice(0, fullPath.lastIndexOf("/")) : "";
       labels.append(name, path);
       const age = document.createElement("time");
       age.dataset.mtime = String(doc.mtimeMs);
@@ -211,8 +218,9 @@ export class RecentView {
     else return;
     const doc = this.entries[index]; if (!doc) return;
     event.preventDefault(); this.focusedKey = fileKey(doc);
-    if (index * ROW_HEIGHT < this.container.scrollTop) this.container.scrollTop = index * ROW_HEIGHT;
-    else if ((index + 1) * ROW_HEIGHT > this.container.scrollTop + this.container.clientHeight) this.container.scrollTop = (index + 1) * ROW_HEIGHT - this.container.clientHeight;
+    const rowHeight = this.rowHeight();
+    if (index * rowHeight < this.container.scrollTop) this.container.scrollTop = index * rowHeight;
+    else if ((index + 1) * rowHeight > this.container.scrollTop + this.container.clientHeight) this.container.scrollTop = (index + 1) * rowHeight - this.container.clientHeight;
     this.render(); this.restoreFocus();
   }
   dispose(): void {

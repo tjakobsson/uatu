@@ -8,6 +8,10 @@
 //
 //   bun run dev             start the dev hub and open the session
 //   bun run dev --no-open   start it without opening a browser
+//   bun run dev --github-fake
+//                           serve MOCKED GitHub pull request data from the
+//                           in-memory fake (src/github/fake.ts); sets
+//                           UATU_GITHUB_FAKE=1 for the hub and its sessions
 //
 // Ctrl+C stops the hub, and the hub stops its session children.
 
@@ -23,12 +27,17 @@ const DEV_USER = { name: "dev", password: "dev" };
 const HUB_URL_TIMEOUT_MS = 60_000;
 
 let openInBrowser = true;
+let githubFake = false;
 for (const arg of process.argv.slice(2)) {
   if (arg === "--no-open") {
     openInBrowser = false;
     continue;
   }
-  console.error(`dev-hub: unknown argument: ${arg} (supported: --no-open)`);
+  if (arg === "--github-fake") {
+    githubFake = true;
+    continue;
+  }
+  console.error(`dev-hub: unknown argument: ${arg} (supported: --no-open, --github-fake)`);
   process.exit(2);
 }
 
@@ -44,7 +53,14 @@ const workspacePath = await fs.realpath(path.join(ROOT, "testdata", "watch-docs"
 const hub = spawn(
   process.execPath,
   [path.join(ROOT, "src", "cli.ts"), "hub", "--config", CONFIG_PATH, "--exit-on-stdin-close"],
-  { cwd: ROOT, stdio: ["pipe", "pipe", "inherit"], detached: true },
+  {
+    cwd: ROOT,
+    stdio: ["pipe", "pipe", "inherit"],
+    detached: true,
+    // The hub passes its environment to session children, so this one flag
+    // reaches every session's /api/github/* routes.
+    env: githubFake ? { ...process.env, UATU_GITHUB_FAKE: "1" } : process.env,
+  },
 );
 const hubExited = new Promise<number>(resolve => {
   hub.once("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
