@@ -6,6 +6,8 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
 
+import { createReadyLineScanner } from "../session-contract/spawn";
+
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const DOCS = path.join(REPO_ROOT, "testdata", "watch-docs");
 
@@ -26,16 +28,19 @@ async function serveWithPipedStdin(extraArgs: string[]): Promise<Served> {
   );
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
+  const scanner = createReadyLineScanner();
   let output = "";
   const deadline = Date.now() + 30_000;
-  while (!/http:\/\/\S+/.test(output)) {
+  for (;;) {
     if (Date.now() > deadline) {
       proc.kill();
       throw new Error(`server never printed a URL; output so far: ${output}`);
     }
     const { value, done } = await reader.read();
     if (done) break;
-    output += decoder.decode(value);
+    const chunk = decoder.decode(value);
+    output += chunk;
+    if (scanner.push(chunk)) break;
   }
   reader.releaseLock();
   return { proc, exited: proc.exited };

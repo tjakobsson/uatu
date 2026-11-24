@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { resolveUatuArgv } from "./backend";
+import { resolveUatuArgv } from "../session-contract/spawn";
 import {
   guardianMac,
   isBootId,

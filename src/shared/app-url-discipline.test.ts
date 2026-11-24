@@ -23,7 +23,7 @@ const ALLOWED_FILES = new Set([
   // OUTSIDE the session's base path, so appUrl() must not touch them.
   "src/shell/hub-nav.ts",
   // The brokered live stream is a hub route too (design D2): the protocol
-  // module names it and the child routes the hub subscribes to.
+  // module names it.
   "src/shared/live-protocol.ts",
   // The legacy-worker cleanup MATCHES a historical script path rather than
   // building a URL to request, and it has to match it at the origin root as
@@ -39,7 +39,10 @@ const ALLOWED_FILES = new Set([
   "src/terminal/server.ts",
 ]);
 
-const ALLOWED_DIRS = ["src/server/", "src/cli/", "src/watchdog/", "src/debug/", "src/hub/"];
+// src/session-contract/ is server-only (the browser-bundle discipline test
+// keeps the page out of it) and names the session-relative paths the Hub and
+// a workspace session agree on.
+const ALLOWED_DIRS = ["src/server/", "src/cli/", "src/watchdog/", "src/debug/", "src/hub/", "src/session-contract/"];
 
 // A root-relative URL literal is only an offense when it is not the direct
 // argument of the appUrl() chokepoint.

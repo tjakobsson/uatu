@@ -15,6 +15,7 @@ import path from "node:path";
 
 import { encodeReplayCursor } from "../chat/replay";
 import { LIVE_STREAM_PATH, liveSubscriptionsPath, parseLiveEnvelope, parseLiveHello, type LiveEnvelope, type LiveSubscription } from "../shared/live-protocol";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession, SessionBackend } from "./backend";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
@@ -124,14 +125,10 @@ beforeAll(async () => {
   await registry.register(path.join(tempRoot, "workspaces", "project"));
 
   const backend: SessionBackend = {
-    start: async (workspace): Promise<RunningSession> => ({
+    start: async (workspace): Promise<RunningSession> => testRunningSession({
       workspaceId: workspace.id,
-      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-      basePath: `/s/${workspace.id}/`,
-      endpoint: { hostname: "127.0.0.1", port: child!.port! },
+      port: child!.port!,
       token: "child-secret",
-      exited: new Promise<number | null>(() => undefined),
-      stop: async () => undefined,
     }),
   };
   sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);

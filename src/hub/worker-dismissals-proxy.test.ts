@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession } from "./backend";
 import { proxyHttp } from "./proxy";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.stop(true); });
 function session(server: ReturnType<typeof Bun.serve>): RunningSession {
-  return { workspaceId: "ws", instanceId: "synthetic", basePath: "/s/ws/", policyTrust: "unavailable", token: "synthetic", endpoint: { hostname: "127.0.0.1", port: server.port! }, exited: new Promise(() => {}), stop: async () => {} };
+  return testRunningSession({ workspaceId: "ws", basePath: "/s/ws/", token: "synthetic", port: server.port! });
 }
 const request = () => new Request("http://hub.invalid/s/ws/api/chat/conversations/opencode%3Aparent?cursor=old");
 

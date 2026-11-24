@@ -15,6 +15,10 @@ import path from "node:path";
 
 const SRC_ROOT = path.resolve(import.meta.dir, "..");
 const ENTRY = path.join(SRC_ROOT, "app.ts");
+// The session contract is server-only: the Hub and the workspace session
+// share it, the page never does. A pure-TypeScript contract file would pass
+// the Node built-in check, so reaching the folder at all is the offence.
+const SESSION_CONTRACT = path.join(SRC_ROOT, "session-contract") + path.sep;
 
 const IMPORT = /(?:^|\n)\s*(import|export)\s+(type\s+)?(?:[^'";]*?\sfrom\s+)?["']([^"']+)["']/g;
 // `typeof import("…")` is a type position and erased; only value imports count.
@@ -38,9 +42,10 @@ function resolveLocal(from: string, specifier: string): string | null {
   return null;
 }
 
-test("no module reachable from the page's entry imports a Node built-in", () => {
+test("no module reachable from the page's entry imports a Node built-in or the session contract", () => {
   const seen = new Set<string>();
   const offenders: string[] = [];
+  const contractImporters: string[] = [];
   const queue = [ENTRY];
   while (queue.length > 0) {
     const file = queue.pop()!;
@@ -57,6 +62,11 @@ test("no module reachable from the page's entry imports a Node built-in", () => 
       if (specifier.startsWith(".")) {
         const resolved = resolveLocal(file, specifier);
         if (resolved && !typeOnly) queue.push(resolved);
+        // Type-only imports count here too: the contract's types describe a
+        // private agreement the page has no part in.
+        if (resolved?.startsWith(SESSION_CONTRACT)) {
+          contractImporters.push(`${path.relative(SRC_ROOT, file)} imports "${specifier}"`);
+        }
       } else if (!typeOnly && isNodeBuiltin(specifier)) {
         offenders.push(`${path.relative(SRC_ROOT, file)} imports "${specifier}"`);
       }
@@ -64,4 +74,9 @@ test("no module reachable from the page's entry imports a Node built-in", () => 
   }
   expect(seen.size).toBeGreaterThan(50);
   expect(offenders).toEqual([]);
+  expect(contractImporters).toEqual([]);
+});
+
+test("the session-contract check resolves the folder it guards", () => {
+  expect(existsSync(path.join(SESSION_CONTRACT, "paths.ts"))).toBe(true);
 });
