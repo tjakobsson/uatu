@@ -4,7 +4,7 @@ import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions } from "./normalizati
 type RecordValue = Record<string, unknown>;
 
 // The thinking levels agy's legacy model ids end in, in picker order.
-const LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
+export const LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
 
 export type AcpCatalog = {
   models: ChatModel[];

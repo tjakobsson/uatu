@@ -32,6 +32,14 @@ describe("priceTurn (D11)", () => {
     expect(priceTurn({ input: 1_000_000 }, "gemini-pro-orchestrator-neon", TABLE)).toBe(1);
   });
 
+  test("a lone legacy thinking-level id borrows its family's price, and an exact price still wins", () => {
+    expect(ratesFor("gemini-4-neon-low", TABLE)).toEqual(TABLE.models["gemini-4-neon"]);
+    expect(priceTurn({ input: 1_000_000 }, "gemini-4-neon-low", TABLE)).toBe(1);
+    const exact: AntigravityPriceTable = { ...TABLE, models: { ...TABLE.models, "gemini-4-neon-medium": { input: 7, output: 7, from: "test" } } };
+    expect(priceTurn({ input: 1_000_000 }, "gemini-4-neon-medium", exact)).toBe(7);
+    expect(ratesFor("some-new-model-low", TABLE)).toBeUndefined();
+  });
+
   test("an unknown model contributes no cost rather than zero", () => {
     expect(priceTurn({ input: 1_000_000 }, "some-new-model", TABLE)).toBeUndefined();
     expect(priceTurn({ input: 1_000_000 }, undefined, TABLE)).toBeUndefined();

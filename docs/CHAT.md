@@ -1002,7 +1002,8 @@ future requests.
   at the output rate, cached reads at the cache-read rate, and cache writes
   are not priced. Base rates only: long-context tiers are not applied,
   because a turn's usage is not broken down per request. Thinking levels
-  share their model's rate, and the orchestrator models borrow their
+  share their model's rate, a model id naming one level (such as
+  `gemini-4-neon-low`) is priced as its model, and the orchestrator models borrow their
   family's price. A model the table cannot price leaves the turn without a
   cost rather than a zero. The figure is shown like other agents' costs,
   with no "estimated" marker; it is only as current as the snapshot, and a

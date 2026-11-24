@@ -16,7 +16,7 @@ import { catalogFromSession, legacyModelId, variantFor, withAdvertisedLevels, ty
 import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./connection";
 import { ANTIGRAVITY_AGENT } from "./descriptor";
 import { ANTIGRAVITY_PRICES } from "./prices";
-import { priceTurn, ratesFor, type AntigravityPriceTable } from "./pricing";
+import { ownRatesFor, priceTurn, type AntigravityPriceTable } from "./pricing";
 import { enrichReplay, historyFromTranscript, readSessionTranscript, transcriptModelFamily, transcriptTurns } from "./transcript";
 import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nextUserMessage, normalizeAcpUpdate, sealOpenBlock, toolItems, userMessageId, type AcpMemory } from "./normalization";
 
@@ -660,7 +660,7 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   private knownModel(id: string): boolean {
-    return this.catalog?.models.some(model => model.selection.modelId === id) === true || ratesFor(id, this.prices) !== undefined;
+    return this.catalog?.models.some(model => model.selection.modelId === id) === true || ownRatesFor(id, this.prices) !== undefined;
   }
 
   // ---- permissions --------------------------------------------------------

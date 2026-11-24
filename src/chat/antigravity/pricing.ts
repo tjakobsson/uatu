@@ -1,4 +1,5 @@
 import type { TokenUsage } from "../types";
+import { LEVELS } from "./catalog";
 import { ANTIGRAVITY_PRICES } from "./prices";
 
 /** USD per million tokens. A model without a cache-read rate prices cached reads as input. */
@@ -14,8 +15,19 @@ export type AntigravityPriceTable = {
   families: Record<string, string>;
 };
 
-/** The rates for an agy model (a family id; thinking levels share it), directly or through its family. */
+/**
+ * The rates for an agy model (a family id; thinking levels share it),
+ * directly or through its family. A legacy id that names one thinking level
+ * of a family (`gemini-4-neon-low`, offered alone so the picker keeps it as
+ * it is) is priced as that family when it has no price of its own.
+ */
 export function ratesFor(modelId: string, table: AntigravityPriceTable = ANTIGRAVITY_PRICES): ModelRates | undefined {
+  const level = LEVELS.find(name => modelId.endsWith(`-${name}`));
+  return ownRatesFor(modelId, table) ?? (level ? ownRatesFor(modelId.slice(0, -(level.length + 1)), table) : undefined);
+}
+
+/** The rates the table names for this exact id, or through its family: what makes an id a model of its own. */
+export function ownRatesFor(modelId: string, table: AntigravityPriceTable = ANTIGRAVITY_PRICES): ModelRates | undefined {
   return table.models[modelId] ?? (table.families[modelId] ? table.models[table.families[modelId]!] : undefined);
 }
 

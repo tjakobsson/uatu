@@ -350,7 +350,10 @@ test. Rules:
 - A model without its own entry borrows its family's price through a
   hand-kept map in the script: `gemini-pro-orchestrator-neon` uses Neon, and
   `gemini-pro-orchestrator-g1-pro` ("Orchestrator (Argon)") uses Argon.
-- Thinking levels do not change rates.
+- Thinking levels do not change rates. A legacy id naming one level of a
+  family (`gemini-4-neon-low`, kept as it is when agy offers it alone) with
+  no price of its own is priced as the family; an exact entry such as
+  `gpt-oss-120b-medium` still wins.
 - Base rates only: long-context price tiers are not applied, because a turn's
   usage is not broken down per request.
 
