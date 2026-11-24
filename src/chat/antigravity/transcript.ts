@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 
 import type { StoredMessageAccounting } from "../provider";
@@ -67,7 +67,10 @@ export async function readTranscript(file: string, maxBytes = TRANSCRIPT_MAX_BYT
   try {
     // The bound is on what one open handle yields, read to at most one byte
     // past it, not on a size read beforehand that a growing file outruns.
-    handle = await fs.open(file, "r");
+    // Non-blocking, then checked on the handle: a FIFO or device under the
+    // path is skipped instead of blocking the read until something writes.
+    handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    if (!(await handle.stat()).isFile()) return { skipped: "unreadable" };
     const buffer = Buffer.alloc(maxBytes + 1);
     let length = 0;
     for (;;) {

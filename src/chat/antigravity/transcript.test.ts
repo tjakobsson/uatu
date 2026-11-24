@@ -130,14 +130,14 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
     expect(carriers(items).map(item => item.id)).toEqual([`usage:${sessionId}.t1`, `usage:${sessionId}.t3`]);
   });
 
-  test.skipIf(process.platform === "win32")("the size bound holds on what is read, not on a size taken first", async () => {
-    // A pipe reports no size, then yields more than the bound.
-    const fifo = path.join(home, "growing.jsonl");
+  test.skipIf(process.platform === "win32")("a transcript path that is not a regular file is skipped without waiting on it", async () => {
+    // A pipe with no writer would block an ordinary open forever.
+    const fifo = path.join(home, "no-writer.jsonl");
     await Bun.$`mkfifo ${fifo}`;
-    const writer = Bun.spawn(["sh", "-c", `head -c 300 /dev/zero > '${fifo}'`]);
-    try { expect(await readTranscript(fifo, 100)).toEqual({ skipped: "too-large" }); }
-    finally { writer.kill(); await writer.exited; }
-  });
+    const started = Date.now();
+    expect(await readTranscript(fifo)).toEqual({ skipped: "unreadable" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  }, 5_000);
 
   test("while logged out every read comes from the transcript alone, never from replay read earlier, and not at all once it is gone", async () => {
     const file = await placeTranscript();
