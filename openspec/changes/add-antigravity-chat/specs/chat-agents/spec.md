@@ -127,11 +127,17 @@ An agent that takes a message into its running turn as soon as it is sent, but c
 - **AND** a held message is not switched to a steer while the turn runs
 
 ### Requirement: An immediate steer appears once in the timeline
-An immediate steer that the agent accepts SHALL appear in the timeline exactly once, as an ordinary user message at the point where the agent took it, both live and after the conversation is reopened. A steer the agent refuses SHALL NOT appear in the timeline. Its text and attachments SHALL return to the composer with the agent's reason. A steer whose admission is unknown SHALL be kept as an unconfirmed entry under the existing rules and SHALL NOT be resent automatically.
+An immediate steer that the agent accepts SHALL appear in the timeline exactly once, as a user message where the agent took it, live and after reopening, once the steer is confirmed. Until then its draft SHALL show as sent and awaiting confirmation. A refused steer SHALL NOT appear and SHALL return to the composer with the agent's reason. A steer whose admission is unknown SHALL stay unconfirmed and SHALL NOT be resent automatically.
+
+#### Scenario: A sent steer waits for its confirmation
+- **WHEN** an immediate steer has been sent to the running turn and the agent has not yet answered its prompt
+- **THEN** the steer's draft shows as sent and awaiting confirmation, with no user row in the timeline
+- **AND** further messages can be submitted meanwhile
 
 #### Scenario: An accepted steer is shown once
-- **WHEN** the agent accepts an immediate steer during a running turn
-- **THEN** the timeline shows it as one user message after the turn's content so far
+- **WHEN** the agent confirms an immediate steer, normally when the steer's own prompt answers
+- **THEN** the timeline shows it as one user message where the agent took it, after the turn's content that came before
+- **AND** the draft awaiting confirmation is settled by that row
 - **AND** reopening the conversation shows that message once, at the same position
 
 #### Scenario: A refused steer returns to the composer
