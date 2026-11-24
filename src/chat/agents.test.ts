@@ -2635,27 +2635,72 @@ describe("inventory", () => {
     subscription.cancel();
   });
 
-  test("a listing that is always slower than the bound still reaches the next read once it arrives", async () => {
+  // An agent whose every listing is healthy but slower than the bound.
+  function slowListing(options: { lateListingTtlMs?: number } = {}) {
     const a = new StubAgentService();
     const b = new StubAgentService();
     a.conversations = [summary("ready", 5)];
-    let reads = 0;
-    // Healthy but slow: every listing takes longer than the bound.
-    b.listConversations = () => { reads += 1; return Bun.sleep(80).then(() => [summary("slow", 9)]); };
+    const listed = { reads: 0, ids: ["slow"] };
+    b.listConversations = () => { listed.reads += 1; const ids = [...listed.ids]; return Bun.sleep(80).then(() => ids.map((id, index) => summary(id, 9 - index))); };
     const service = new MultiAgentChatService({
       workspacePath: process.cwd(),
       inventoryContributionTimeoutMs: 25,
+      ...options,
       agents: [
         { descriptor: OPENCODE_AGENT, service: a },
         { descriptor: CLAUDE_CODE_AGENT, service: b },
       ],
     });
+    const ids = async () => (await service.listConversations()).map(conversation => conversation.id);
+    const arrived = async () => { for (let attempt = 0; attempt < 200 && listed.reads > 0; attempt += 1) await Bun.sleep(5); };
+    return { a, b, service, listed, ids, arrived };
+  }
+
+  test("a listing slower than the bound serves every read until its TTL, without starting another", async () => {
+    const { service, listed, ids } = slowListing();
     const subscription = await service.subscribeInventory();
     await subscription.next();
-    expect((await service.listConversations()).map(conversation => conversation.id)).toEqual(["opencode:ready"]);
+    expect(await ids()).toEqual(["opencode:ready"]);
+    // Its late arrival ticks; from then on two readers both get it.
     expect(await subscription.next()).toEqual({ value: undefined, done: false });
-    expect((await service.listConversations()).map(conversation => conversation.id)).toEqual(["claude:slow", "opencode:ready"]);
-    expect(reads).toBe(1);
+    expect(await ids()).toEqual(["claude:slow", "opencode:ready"]);
+    expect(await ids()).toEqual(["claude:slow", "opencode:ready"]);
+    expect(listed.reads).toBe(1);
+    subscription.cancel();
+  });
+
+  test("a late listing ends with its TTL: the next read lists again", async () => {
+    const { service, listed, ids } = slowListing({ lateListingTtlMs: 150 });
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    await ids();
+    await subscription.next();
+    expect(await ids()).toEqual(["claude:slow", "opencode:ready"]);
+    await Bun.sleep(200);
+    expect(await ids()).toEqual(["opencode:ready"]);
+    expect(listed.reads).toBe(2);
+    subscription.cancel();
+  });
+
+  for (const change of ["creating a conversation", "an inventory tick from the agent"] as const) test(`${change} ends the late listing, and a listing started before it caches nothing`, async () => {
+    const { b, service, listed, ids } = slowListing();
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    // A cold listing is in flight when the conversation appears.
+    expect(await ids()).toEqual(["opencode:ready"]);
+    listed.ids = ["slow", "created"];
+    if (change === "creating a conversation") await service.createConversation("claude");
+    else {
+      b.inventory.invalidate();
+      // The agent's tick reaches clients too.
+      expect(await subscription.next()).toEqual({ value: undefined, done: false });
+    }
+    await Bun.sleep(120);
+    // Its stale answer was not kept: the read lists again and does not hide the new one.
+    expect(await ids()).toEqual(["opencode:ready"]);
+    expect(listed.reads).toBe(2);
+    await subscription.next();
+    expect(await ids()).toEqual(["claude:slow", "claude:created", "opencode:ready"]);
     subscription.cancel();
   });
 
