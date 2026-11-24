@@ -15,6 +15,7 @@
 //   pids                 the pid of every `agy acp` process started
 //   refuse-steer         present: a prompt sent during a run is refused (-32603)
 //   crash-on-steer       present: the process exits 1 on a prompt sent during a run
+//   no-usage             present: prompt results carry no usage
 //   end-then-refuse-steer present: a prompt sent during a run ends the earlier
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
@@ -281,7 +282,8 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       });
     }
   };
-  const cancelled = () => ({ stopReason: "cancelled", ...(script.usage ? { usage: script.usage } : {}) });
+  const usage = script.usage && !flag("no-usage") ? { usage: script.usage } : {};
+  const cancelled = () => ({ stopReason: "cancelled", ...usage });
   const title = readSessions().find(session => session.sessionId === sessionId)?.title;
   if (!title) {
     const next = script.title ?? "Fixture conversation";
@@ -312,7 +314,7 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       return cancelled();
     }
   }
-  return { stopReason: script.stopReason, ...(script.usage ? { usage: script.usage } : {}) };
+  return { stopReason: script.stopReason, ...usage };
 }
 
 const input = Bun.stdin.stream();

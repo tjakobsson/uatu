@@ -25,7 +25,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 async function setup(options: { idleReleaseMs?: number; prices?: AntigravityPriceTable; setupDeadlineMs?: number } = {}) {
   const fake = await installFakeAgy();
-  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs });
+  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs, homeDirectory: path.join(fake.stateDirectory, "home") });
   const events: NormalizedProviderEvent[] = [];
   const controller = new AbortController();
   void (async () => { for await (const event of provider.events(controller.signal)) events.push(event); })();
@@ -574,6 +574,24 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       // 8886 input and 32 output tokens (thinking inside output), no cached reads.
       expect(low!.usage!.costUsd).toBeCloseTo((8886 * 1 + 32 * 10) / 1_000_000, 12);
       expect(high!.usage!.costUsd).toBe(low!.usage!.costUsd!);
+    });
+
+    test("when agy reports no usage, the turn's tokens come from its transcript, once", async () => {
+      const { fake, provider, run, upserts, waitFor } = await setup({ prices });
+      const session = await provider.createSession("a");
+      await fake.setFlag("no-usage", true);
+      const file = path.join(fake.stateDirectory, "home", ".gemini", "antigravity-cli", "brain", session.id, ".system_generated", "logs", "transcript.jsonl");
+      await Bun.write(file, [
+        { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nSay hello\n</USER_REQUEST>" },
+        { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", input_tokens: 1000, output_tokens: 100, cache_read_tokens: 0, content: "Hello" },
+      ].map(step => JSON.stringify(step)).join("\n"));
+      await run(session.id, "Say hello");
+      await waitFor(() => carriers(upserts, session.id).length > 0, "the transcript's usage");
+      expect(carriers(upserts, session.id)).toEqual([expect.objectContaining({ usage: { input: 1000, output: 100, cacheRead: 0, costUsd: (1000 + 1000) / 1_000_000 }, model: { providerId: "antigravity", modelId: "gemini-4-neon" } })]);
+      // With ACP's usage present, the transcript is not consulted as well.
+      await fake.setFlag("no-usage", false);
+      await run(session.id, "Again");
+      expect(carriers(upserts, session.id).map(item => item.usage?.input)).toEqual([1000, 8886]);
     });
 
     test("a turn on an unpriced model has no cost", async () => {

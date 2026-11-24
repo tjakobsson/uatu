@@ -15,7 +15,7 @@ export type FakeAgy = {
   env: NodeJS.ProcessEnv;
   // Every request and notification the fake received, in order.
   log(): Promise<Array<{ method: string; params?: Record<string, unknown>; outcome?: Record<string, unknown> }>>;
-  setFlag(name: "auth-missing" | "crash-on-prompt" | "no-image" | "refuse-steer" | "crash-on-steer" | "hang-initialize" | "hang-list" | "orphan-child" | "slow-config" | "fail-load" | "legacy-only" | "no-legacy-models" | "end-then-refuse-steer", on: boolean): Promise<void>;
+  setFlag(name: "auth-missing" | "crash-on-prompt" | "no-image" | "refuse-steer" | "crash-on-steer" | "hang-initialize" | "hang-list" | "orphan-child" | "slow-config" | "fail-load" | "legacy-only" | "no-legacy-models" | "end-then-refuse-steer" | "no-usage", on: boolean): Promise<void>;
   sessions(): Promise<Array<{ sessionId: string; cwd: string; title: string | null; model: string; thoughtLevel: string; mode: string; replay: Array<Record<string, unknown>> }>>;
   // `agy acp` processes started for this fake that are still running.
   running(): Promise<number>;

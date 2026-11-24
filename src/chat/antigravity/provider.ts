@@ -35,8 +35,10 @@ const PROCESS_EXIT_WAIT_MS = 1_000;
 type Turn = {
   readonly id: string;
   readonly token: ChatTurnToken;
-  // The user message that opened it: its usage carrier is named after it.
+  // The user message that opened it: its usage carrier is named after it,
+  // and its words identify the turn in agy's transcript.
   readonly userIndex: number;
+  readonly request: string;
   readonly startedAt: number;
   // Prompts sent into it, counting steers; only the latest one's end is the turn's.
   latest: number;
@@ -322,7 +324,7 @@ export class AntigravityProvider implements ChatProvider {
     const now = this.now();
     const memory = conversation.memory;
     const user = nextUserMessage(memory, input.text, now, { attachments: attachmentRefs(input.attachments) });
-    const turn: Turn = { id: `${sessionId}.t${memory.userCount}`, token: provisionalTurn(), userIndex: memory.userCount, startedAt: now, latest: 0, requests: new Map(), usage: {}, ended: false };
+    const turn: Turn = { id: `${sessionId}.t${memory.userCount}`, token: provisionalTurn(), userIndex: memory.userCount, request: input.text, startedAt: now, latest: 0, requests: new Map(), usage: {}, ended: false };
     conversation.turn = turn;
     memory.turn = turn.token;
     memory.live = true;
@@ -456,14 +458,7 @@ export class AntigravityProvider implements ChatProvider {
     const carrierId = `${conversation.sessionId}.t${turn.userIndex}`;
     const model = memory.model;
     const hasUsage = Object.keys(turn.usage).length > 0;
-    // agy reports tokens only; the built-in table prices them (design D11).
-    // An unpriced model leaves the cost absent, which is not zero.
-    const costUsd = hasUsage ? priceTurn(turn.usage, model?.modelId, this.prices) : undefined;
-    if (costUsd !== undefined) turn.usage.costUsd = costUsd;
-    if (hasUsage) {
-      updates.push({ kind: "upsert", item: { id: `usage:${carrierId}`, type: "assistant_message", createdAt: now, markdown: "", usage: { ...turn.usage }, ...(model ? { model } : {}) } });
-      conversation.accounting.push({ messageId: carrierId, createdAt: now, usage: { ...turn.usage }, ...(model ? { model: model.modelId } : {}) });
-    }
+    if (hasUsage) updates.push(this.usageCarrier(conversation, carrierId, turn.usage, model, now));
     if (notice) updates.push({ kind: "upsert", item: notice });
     updates.push({ kind: "status", status, ...(message ? { message } : {}) });
     if (conversation.turn === turn) conversation.turn = undefined;
@@ -475,7 +470,34 @@ export class AntigravityProvider implements ChatProvider {
       notificationTurns: [{ sourceId: turn.id, phase, createdAt: now }],
       ...(hasUsage ? { assistantUsage: { messageId: carrierId, usage: { ...turn.usage } } } : {}),
     });
+    // ACP's per-prompt usage is unstable; when agy reported none for the
+    // turn, its transcript's tokens for the same request stand in (D10).
+    // Never both, so nothing is counted twice.
+    if (!hasUsage) void this.usageFromTranscript(conversation, turn, carrierId, model);
     this.scheduleIdle(conversation);
+  }
+
+  /** A turn's usage carrier, priced from the built-in table (D11), with its accounting. */
+  private usageCarrier(conversation: Conversation, carrierId: string, tokens: TokenUsage, model: ModelSelection | undefined, now: number): NormalizedProviderEvent["updates"][number] {
+    // An unpriced model leaves the cost absent, which is not zero.
+    const costUsd = priceTurn(tokens, model?.modelId, this.prices);
+    const usage: TokenUsage = { ...tokens, ...(costUsd !== undefined ? { costUsd } : {}) };
+    conversation.accounting.push({ messageId: carrierId, createdAt: now, usage, ...(model ? { model: model.modelId } : {}) });
+    return { kind: "upsert", item: { id: `usage:${carrierId}`, type: "assistant_message", createdAt: now, markdown: "", usage, ...(model ? { model } : {}) } };
+  }
+
+  private async usageFromTranscript(conversation: Conversation, turn: Turn, carrierId: string, model: ModelSelection | undefined): Promise<void> {
+    const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
+    if (!("steps" in read) || this.disposed) return;
+    const recorded = transcriptTurns(read.steps)[turn.userIndex - 1];
+    if (!recorded?.usage || recorded.request !== turn.request.trim()) return;
+    const recordedModel = recorded.model ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: transcriptModelFamily(recorded.model, id => this.knownModel(id)) } : model;
+    const update = this.usageCarrier(conversation, carrierId, recorded.usage, recordedModel, this.now());
+    this.emit(conversation, { updates: [update], outcome: "handled", eventType: "transcript.usage", assistantUsage: { messageId: carrierId, usage: (update as { item: { usage: TokenUsage } }).item.usage } });
+  }
+
+  private knownModel(id: string): boolean {
+    return this.catalog?.models.some(model => model.selection.modelId === id) === true || ratesFor(id, this.prices) !== undefined;
   }
 
   // ---- permissions --------------------------------------------------------
@@ -663,7 +685,7 @@ export class AntigravityProvider implements ChatProvider {
   /** Add what replay omits from agy's transcript, or leave replay as it is (design D10). */
   private async enrichFromTranscript(conversation: Conversation): Promise<void> {
     const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
-    const known = (id: string) => this.catalog?.models.some(model => model.selection.modelId === id) === true || ratesFor(id, this.prices) !== undefined;
+    const known = (id: string) => this.knownModel(id);
     const enriched = "steps" in read ? enrichReplay(conversation.items, conversation.sessionId, transcriptTurns(read.steps), {
       family: model => transcriptModelFamily(model, known),
       price: (usage, modelId) => priceTurn(usage, modelId, this.prices),
