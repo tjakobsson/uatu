@@ -428,10 +428,11 @@ export interface ChatProvider {
    * and a steer carries no model or mode to the session — a mid-turn switch
    * would retarget the turn being steered (D6). An agent declaring
    * `immediate-steering` is asked too, only while its turn runs: it takes the
-   * steer into that turn at once and resolves on acceptance, and it reports
-   * the turn's end once, after the steered part (add-antigravity-chat D9).
-   * Its steer rejects with OperationOutcomeUnknownError when the steer may
-   * have reached the agent; any other rejection is a definite refusal.
+   * steer into that turn at once, resolves only on the agent's evidence that
+   * it took it, and reports the turn's end once, after the steered part
+   * (add-antigravity-chat D9). Its steer rejects with
+   * OperationOutcomeUnknownError when the steer may have reached the agent;
+   * any other rejection is a definite refusal.
    * `createdAt`, when given, is the accepted message's timeline position.
    */
   prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt?: number }>;

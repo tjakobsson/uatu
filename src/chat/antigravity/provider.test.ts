@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { installFakeAgy } from "../../../tests/fixtures/antigravity/fake-agy-path";
-import type { NormalizedProviderEvent } from "../provider";
+import { OperationOutcomeUnknownError, type NormalizedProviderEvent } from "../provider";
 import { CHAT_TURN } from "../turn-liveness";
 import type { ConversationItem } from "../types";
 import { ConversationNotFoundError } from "../workspace";
@@ -291,6 +291,44 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       cleanups.push(() => reread.dispose());
       const users = (await reread.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
       expect(users.map(item => item.id)).toEqual([`message:${first.messageId}`, `message:${steer.messageId}`]);
+    });
+
+    test("a steer is accepted only once agy takes it, and its row appears only then", async () => {
+      const { provider, waitFor, upserts } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      const users = async () => (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message").map(item => item.id);
+      const before = await users();
+      const steering = provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" });
+      expect(await users()).toEqual(before);
+      const accepted = await steering;
+      expect(await users()).toEqual([...before, `message:${accepted.messageId}`]);
+      await waitFor(() => upserts(session.id).some(item => item.id === `message:${accepted.messageId}`), "the published steer row");
+    });
+
+    test("a steer agy refuses rejects with its reason, publishes no row, and leaves the turn running to its end", async () => {
+      const { fake, provider, waitFor, upserts, statuses, ended } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
+      await fake.setFlag("refuse-steer", true);
+      await expect(provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" })).rejects.toThrow("Antigravity is busy and did not take the message");
+      expect(upserts(session.id).filter(item => item.type === "user_message" && item.text === "Steer")).toEqual([]);
+      expect(statuses(session.id)).toEqual([]);
+      await provider.interrupt(session.id);
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["interrupted"]);
+    });
+
+    test("a steer whose process ends before agy answers has an unknown outcome", async () => {
+      const { fake, provider, waitFor, upserts } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
+      await fake.setFlag("crash-on-steer", true);
+      await expect(provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" })).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      expect(upserts(session.id).filter(item => item.type === "user_message" && item.text === "Steer")).toEqual([]);
     });
 
     test("a steer with no running turn is refused", async () => {

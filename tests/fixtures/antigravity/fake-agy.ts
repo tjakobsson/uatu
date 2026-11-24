@@ -13,6 +13,8 @@
 //   crash-on-prompt      present: the process exits 1 on the next prompt
 //   no-image             present: initialize advertises no image prompts
 //   pids                 the pid of every `agy acp` process started
+//   refuse-steer         present: a prompt sent during a run is refused (-32603)
+//   crash-on-steer       present: the process exits 1 on a prompt sent during a run
 //
 // A prompt whose first text starts with `<script>:` runs that fixture script;
 // anything else runs `text`. A second prompt during a running script is
@@ -187,8 +189,10 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   requireLogin();
   if (broken.has(params.sessionId)) throw new RequestError(-32603, `Failed to send user message: not_found: trajectory not found: ${params.sessionId}: not found`);
   const text = params.prompt.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
-  updateSession(params.sessionId, session => { session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text } }); });
   const running = runs.get(params.sessionId);
+  if (running && flag("refuse-steer")) throw new RequestError(-32603, "Antigravity is busy and did not take the message");
+  if (running && flag("crash-on-steer")) process.exit(1);
+  updateSession(params.sessionId, session => { session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text } }); });
   if (running) {
     // A steer: the earlier prompt ends now, and this one carries the run.
     return new Promise<PromptResult>(resolve => {
