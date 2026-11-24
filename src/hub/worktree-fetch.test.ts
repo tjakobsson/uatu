@@ -6,9 +6,11 @@ import path from "node:path";
 import {
   buildWorktreeFetchArguments,
   buildWorktreeFetchEnvironment,
+  classifyPullRequestFetchFailure,
   classifyWorktreeFetchFailure,
   createParentFetchPolicy,
   createWorktreeFetchRunner,
+  fetchPullRequestHead,
   fetchWorktreeRemotes,
   listWorktreeRemotes,
   parseWorktreeRemotes,
@@ -220,6 +222,57 @@ describe("no ambient or unselected credential can take part", () => {
 
   test("an option-like remote name never reaches an argument list", () => {
     expect(() => buildWorktreeFetchArguments("/srv/atlas", { name: "--upload-pack=evil", url: "https://example.test/a.git" })).toThrow();
+  });
+
+  test("a pull request's head is fetched alone, with the same credential arguments", () => {
+    const narrow = buildWorktreeFetchArguments("/srv/atlas", { name: "origin", url: "https://example.test/a.git" }, httpsSelection, "refs/pull/57/head:refs/uatu/worktree-pull-request/op");
+    expect(narrow.slice(narrow.indexOf("fetch"))).toEqual(["fetch", "--no-tags", "--no-write-fetch-head", "--", "origin", "refs/pull/57/head:refs/uatu/worktree-pull-request/op"]);
+    expect(narrow.filter(argument => argument.startsWith("credential.https://")).length).toBe(1);
+    expect(narrow).not.toContain("--prune");
+    expect(() => buildWorktreeFetchArguments("/srv/atlas", { name: "origin", url: "https://example.test/a.git" }, undefined, "--upload-pack=evil")).toThrow();
+  });
+});
+
+describe("a pull request's head", () => {
+  const origin = { name: "origin", url: "https://github.com/octo-org/uatu.git" };
+
+  test("a missing pull request ref says so, and that the remote may not be GitHub", () => {
+    const error = classifyPullRequestFetchFailure("fatal: couldn't find remote ref refs/pull/58/head", origin, 58);
+    expect(error).toEqual({
+      code: "ref-unavailable",
+      message: "Pull request #58 was not found on origin: it has no refs/pull/58/head. Check the number, and that origin is the pull request's GitHub repository. Nothing was created.",
+      retry: "none",
+    });
+  });
+
+  test("authentication and network failures say nothing was created", () => {
+    expect(classifyPullRequestFetchFailure("fatal: could not read Username for 'https://github.com': terminal prompts disabled", origin, 57))
+      .toMatchObject({ code: "fetch-authentication", retry: "retry-fetch", message: expect.stringContaining("Nothing was created") });
+    expect(classifyPullRequestFetchFailure("fatal: unable to access: Could not resolve host: github.com", origin, 57))
+      .toMatchObject({ code: "fetch-network", message: "Could not reach origin. Nothing was created; retry." });
+  });
+
+  test("against a real bare remote: the head is read back and the scratch ref removed", async () => {
+    const repository = await createRepository("pull-head");
+    const remote = path.join(path.dirname(repository), "remote.git");
+    await git(path.dirname(repository), ["clone", "--bare", repository, remote]);
+    await git(repository, ["remote", "add", "origin", remote]);
+    const head = (await git(repository, ["rev-parse", "HEAD"])).trim();
+    await git(remote, ["update-ref", "refs/pull/57/head", head]);
+    const env = await cleanEnvironment();
+    const run = createGitRunner({ env });
+    const common = {
+      run, repositoryPath: repository, parentWorkspaceId: "atlas", policy: policyFor([]),
+      env: { ...env, GIT_ALLOW_PROTOCOL: "file" }, runWith: createWorktreeFetchRunner({}), remote: "origin", scratchRef: "refs/uatu/worktree-pull-request/op-1",
+    };
+    expect(await fetchPullRequestHead({ ...common, number: 57 })).toEqual({ ok: true, headOid: head });
+    expect(await git(repository, ["for-each-ref", "refs/uatu/"])).toBe("");
+    // No branch, no tag, no remote-tracking ref was written.
+    expect((await git(repository, ["for-each-ref", "--format=%(refname)"])).trim().split("\n")).toEqual(["refs/heads/main"]);
+    const missing = await fetchPullRequestHead({ ...common, number: 58 });
+    expect(missing.ok === false && missing.error.code).toBe("ref-unavailable");
+    const unknown = await fetchPullRequestHead({ ...common, number: 57, remote: "upstream" });
+    expect(unknown.ok === false && unknown.error).toMatchObject({ code: "invalid-input", message: "This repository has no remote named upstream. Nothing was fetched or created." });
   });
 });
 

@@ -925,6 +925,12 @@ export function initHubNav(): void {
       return main ? main.displayName || main.id : "this repository";
     },
     canCreateWorktree: () => Boolean(worktreeApi && mainCheckout()?.createWorktree),
+    // A pull request checkout is created from the main checkout, through the
+    // Hub's published worktree family (shell/pull-request-checkout.ts).
+    worktreeSource: () => {
+      const main = mainCheckout();
+      return worktreeApi && main?.createWorktree ? { api: worktreeApi, sourceId: main.id } : null;
+    },
     footerLinks: () => [
       { label: "Hub dashboard", href: "/" },
       { label: "Settings", href: "/settings#personal-chat-preferences-pane" },

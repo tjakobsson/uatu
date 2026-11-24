@@ -20,12 +20,13 @@ import {
   type WorktreeCheckout,
   type WorktreeCreateRequest,
   type WorktreeInventory,
+  type WorktreePullRequestCreateRequest,
   type WorktreeOperationProgress,
   type WorktreeError,
   type WorktreeOperationResult,
   type WorktreeRefs,
 } from "../shared/worktree-contract";
-import { initialWorktreeBase } from "../shared/worktree-branches";
+import { initialWorktreeBase, pullRequestWorktreeBranch } from "../shared/worktree-branches";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
 import type { SessionManager } from "./sessions";
 import { WorktreeOperationCoordinator } from "./worktree-coordinator";
@@ -33,11 +34,15 @@ import {
   destinationOccupied,
   mainCheckoutPathFor,
   planWorktreeCreation,
+  readBranchUpstream,
+  runPullRequestBranch,
   runWorktreeAdd,
   type WorktreeCreationPlan,
+  type WorktreePullRequestFacts,
 } from "./worktree-create";
 import {
   createWorktreeFetchRunner,
+  fetchPullRequestHead,
   fetchWorktreeRemotes,
   type WorktreeFetchPolicy,
 } from "./worktree-fetch";
@@ -393,6 +398,40 @@ export class WorktreeService {
     }
   }
 
+  // The explicit fetch of a pull request's head with the PARENT's credential
+  // policy (as Fetch remote branches), and the existing `pr/<n>` branch's
+  // upstream when there is one. Called inside the repository's fence.
+  private async pullRequestFacts(
+    operationId: string,
+    view: RepositoryView,
+    request: WorktreePullRequestCreateRequest,
+  ): Promise<WorktreePullRequestFacts | { error: WorktreeError }> {
+    if (!this.options.fetchPolicy) {
+      return { error: WorktreeOperationError.of("fetch-authentication", "Remote fetch is unavailable on this Hub, so a pull request cannot be checked out.").detail };
+    }
+    const fetched = await fetchPullRequestHead({
+      run: this.run,
+      repositoryPath: view.source.path,
+      parentWorkspaceId: view.source.worktree?.parentWorkspaceId ?? view.source.id,
+      policy: this.options.fetchPolicy,
+      ...(this.options.fetchEnv === undefined ? {} : { env: this.options.fetchEnv }),
+      runWith: createWorktreeFetchRunner(this.options.git ?? {}),
+      remote: request.pullRequest.remote,
+      number: request.pullRequest.number,
+      scratchRef: `refs/uatu/worktree-pull-request/${operationId}`,
+    });
+    if (!fetched.ok) return { error: fetched.error };
+    const branch = pullRequestWorktreeBranch(request.pullRequest.number);
+    if (!view.refs.local.includes(branch)) return { headOid: fetched.headOid };
+    const tip = await this.run(["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`], view.source.path);
+    const existingOid = tip.exitCode === 0 && !tip.timedOut ? tip.stdout.trim() : undefined;
+    return {
+      headOid: fetched.headOid,
+      existingUpstream: await readBranchUpstream(this.run, view.source.path, branch),
+      ...(existingOid ? { existingOid } : {}),
+    };
+  }
+
   private async createWhileFenced(
     user: string,
     operationId: string,
@@ -401,15 +440,27 @@ export class WorktreeService {
   ): Promise<WorktreeOperationResult> {
     let plan: WorktreeCreationPlan;
     try {
+      // A pull request is fetched before anything is journaled: the fetch
+      // writes no branch and no checkout, only objects and a scratch ref it
+      // removes again, so a refusal here leaves nothing to recover.
+      const pullRequest = request.mode === "pull-request" ? await this.pullRequestFacts(operationId, view, request) : undefined;
+      if (pullRequest && "error" in pullRequest) {
+        return { ok: false, operationId, kind: "create", phase: "validating", error: pullRequest.error };
+      }
+      // An existing branch keeps the creation history recorded for it.
+      const existingBranch = request.mode === "existing-local" ? request.base.ref
+        : request.mode === "pull-request" && pullRequest?.existingUpstream ? pullRequestWorktreeBranch(request.pullRequest.number)
+          : undefined;
       plan = await planWorktreeCreation({
         request,
         mainPath: view.mainPath,
         refs: view.refs,
         records: view.records,
         occupied: destinationOccupied,
-        ...(request.mode === "existing-local"
-          ? await this.options.provenance.branchOrigin(view.repositoryId, request.base.ref).then(origin => origin === undefined ? {} : { branchOrigin: origin })
-          : {}),
+        ...(existingBranch === undefined
+          ? {}
+          : await this.options.provenance.branchOrigin(view.repositoryId, existingBranch).then(origin => origin === undefined ? {} : { branchOrigin: origin })),
+        ...(pullRequest === undefined ? {} : { pullRequest }),
       });
     } catch (error) {
       // Nothing was journaled and nothing ran: a pure refusal.
@@ -434,6 +485,15 @@ export class WorktreeService {
     });
     await this.options.journal.advance(operationId, "reserving");
     await this.options.journal.advance(operationId, "creating");
+
+    // A new `pr/<n>` is made just before its checkout. Branches are never
+    // deleted by Uatu, so one that outlives a failure below is reused by the
+    // retry (it has exactly the upstream the retry asks for).
+    const branched = await runPullRequestBranch(this.run, view.source.path, plan);
+    if (!branched.ok) {
+      await this.options.journal.clear(operationId);
+      return { ok: false, operationId, kind: "create", phase: "creating", error: branched.error.detail };
+    }
 
     const outcome = await runWorktreeAdd(this.run, view.source.path, plan);
     if (!outcome.ok) {
@@ -492,6 +552,7 @@ export class WorktreeService {
         checkout: { ...checkout, running: registration.started },
         registered: true,
         started: registration.started,
+        ...(plan.pullRequest === undefined ? {} : { pullRequestHead: plan.pullRequest.headOid.slice(0, 12) }),
         ...(registration.startError === undefined
           ? {}
           : { startError: WorktreeOperationError.of("start-failed", `The workspace could not be started: ${registration.startError}. It remains stopped; retry Start.`, { retry: "retry-start" }).detail }),
@@ -1102,6 +1163,7 @@ export class WorktreeService {
       locked: false,
       ...(plan.sourceRef === undefined ? {} : { sourceRef: plan.sourceRef }),
       ...(plan.upstream === undefined ? {} : { upstream: plan.upstream }),
+      ...(plan.pullRequest?.checkoutOid === undefined ? {} : { head: plan.pullRequest.checkoutOid.slice(0, 12) }),
     };
     return checkout;
   }

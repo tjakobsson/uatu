@@ -19,7 +19,12 @@
 //
 // Choosing a pull request that is not checked out asks first: View here
 // (show it in Files and Preview, nothing fetched or checked out) or Check
-// out as a worktree… (simulated while GitHub data is mocked, as before). One
+// out as a worktree…. With the Hub's worktree service, Create worktree
+// really creates it (shell/pull-request-checkout.ts): you stay where you
+// are, the new checkout is listed under Checkouts as `Creating…` (a failure
+// stays there as `Couldn't create · Retry`), the pull request's row reads
+// `Checking out…`, and a notice offers Go to once it is ready. Without that
+// service, mocked GitHub data still gets the labelled simulation. One
 // already checked out offers Go to its worktree first. "Viewing" also gets
 // one strip at the top of Files and Preview on touch (and in the preview on
 // desktop while the sidebar is collapsed), with ← Back to <branch>.
@@ -56,11 +61,13 @@ import {
   pullRequestRowName,
   shouldLookUp,
   sortPullRequests,
+  matchesSearch,
   switcherSpokenName,
   type LinePart,
   type Lookup,
   type PullRequestFilter,
 } from "./switcher-model";
+import { checkOutPullRequest } from "./pull-request-checkout";
 
 // Asks the page to show a pull request here (View here). The Pull request
 // pane, loaded from app.ts, performs the navigation.
@@ -106,6 +113,10 @@ export type SwitcherHub = {
   // The main checkout's name, for a new worktree's folder.
   repositoryName(): string;
   canCreateWorktree(): boolean;
+  // The Hub's worktree family and the main checkout to create from, when
+  // the Hub serves worktree operations; absent or null, checking a pull
+  // request out is only simulated.
+  worktreeSource?(): { api: string; sourceId: string } | null;
   footerLinks(): { label: string; href: string }[];
   refresh(): void;
 };
@@ -136,6 +147,11 @@ type Step =
   | { kind: "confirm"; pr: ChosenPullRequest }
   | { kind: "done"; pr: ChosenPullRequest };
 type ChosenPullRequest = Pick<PullRequestListItem, "number" | "title" | "headRefName" | "headOwner" | "isCrossRepository">;
+// A pull request being checked out as a worktree, until the Hub's list has
+// it. A failure stays here, with its reason, until retried.
+type Creation = { pr: ChosenPullRequest; branch: string; status: "creating" | "failed"; message?: string };
+// The notice that a created worktree is ready (the design's "Go to").
+type ReadyNotice = { branch: string; workspaceId: string; differs: boolean };
 
 // The dialog's state while open, and what it keeps between openings (the
 // list, the filter).
@@ -162,6 +178,10 @@ const state = {
   // Opened at Pull requests: kept in view until its list has arrived, since
   // the rows that arrive later are what lets the lists scroll that far.
   revealPullRequests: false,
+  // Checkouts being created from pull requests, by number. Closing the
+  // dialog cancels nothing.
+  creations: new Map<number, Creation>(),
+  ready: null as ReadyNotice | null,
 };
 
 const $ = <T extends HTMLElement>(selector: string) => document.querySelector<T>(selector);
@@ -171,8 +191,9 @@ export function initSwitcher(): void {
   // A new document (tests mount one each): nothing carries over.
   root = document;
   hub = null;
-  Object.assign(state, { open: false, opener: null, query: "", settledQuery: "", active: null, expanded: false, filter: "open", menu: null, list: null, listRepositoryId: null, listError: null, listNoCredential: false, loadingFor: null, step: null });
+  Object.assign(state, { open: false, opener: null, query: "", settledQuery: "", active: null, expanded: false, filter: "open", menu: null, list: null, listRepositoryId: null, listError: null, listNoCredential: false, loadingFor: null, step: null, ready: null });
   state.lookups.clear();
+  state.creations.clear();
   disposeStore?.();
   disposeStore = pullRequestStore.subscribe(() => {
     if (root !== document) return;
@@ -527,6 +548,18 @@ function wirePanel(panel: HTMLElement): void {
       chooseRepository(repositoryItem.dataset.switcherRepository!);
       return;
     }
+    const retry = target.closest<HTMLElement>("[data-creating-retry]");
+    if (retry) {
+      const creation = state.creations.get(Number(retry.dataset.creatingRetry));
+      if (creation) startCreation(creation.pr);
+      return;
+    }
+    const failed = target.closest<HTMLElement>("[data-creating-open]");
+    if (failed) {
+      const creation = state.creations.get(Number(failed.dataset.creatingOpen));
+      if (creation) openChoice(creation.pr);
+      return;
+    }
     const row = target.closest<HTMLElement>("[data-pr-row]");
     if (row) { choosePullRequest(Number(row.dataset.prRow)); return; }
     const choice = target.closest<HTMLElement>("[data-choice]")?.dataset.choice;
@@ -689,6 +722,116 @@ function renderCheckouts(panel: HTMLElement): void {
   }
   const empty = panel.querySelector<HTMLElement>("#switcher-checkouts-empty");
   if (empty) empty.hidden = true;
+  renderCreations(panel);
+  if (searching && !section.hidden) return;
+  if (searching) section.hidden = panel.querySelector("#switcher-creating [data-creating-row]") === null;
+}
+
+// --- Checking a pull request out ----------------------------------------------
+
+function creationFor(number: number): Creation | null {
+  return hubForPullRequests() ? state.creations.get(number) ?? null : null;
+}
+
+function creationLinePart(creation: Creation): LinePart {
+  return creation.status === "creating"
+    ? { text: "Checking out…", tone: "progress" }
+    : { text: "Couldn't create", tone: "danger" };
+}
+
+// The checkouts being created, under the Hub's own rows: listed at once as
+// `Creating…`, not enterable until ready; a failure stays as `Couldn't
+// create · Retry`, and its row opens the pull request's step with the reason.
+function renderCreations(panel: HTMLElement): void {
+  const container = panel.querySelector<HTMLElement>("#switcher-creating");
+  if (!container) return;
+  const rows = [...state.creations.values()]
+    .filter(creation => hubForPullRequests() && matchesSearch([creation.branch, `#${creation.pr.number}`, String(creation.pr.number), creation.pr.title], state.query))
+    .map(creation => {
+      const line1 = `<span class="switcher-row-line1"><span class="switcher-row-number">#${creation.pr.number}</span> <strong>${escapeHtml(creation.pr.title)}</strong></span>`;
+      if (creation.status === "creating") {
+        return `<div class="switcher-row switcher-creating-row" role="listitem" data-creating-row="${creation.pr.number}" aria-label="${escapeHtmlAttribute(`${creation.branch}, creating. Pull request ${creation.pr.number}`)}">
+          <span class="indicator-dot switcher-spinner" aria-hidden="true"></span>
+          <span class="switcher-row-text">${line1}<span class="switcher-row-line2">${lineHtml([{ text: creation.branch }, { text: "Creating…", tone: "progress" }])}</span></span>
+        </div>`;
+      }
+      return `<div class="switcher-row switcher-creating-row is-failed" role="listitem" data-creating-row="${creation.pr.number}">
+          <span class="indicator-dot is-hollow" aria-hidden="true"></span>
+          <button type="button" class="switcher-row-text switcher-creating-open" data-creating-open="${creation.pr.number}" aria-label="${escapeHtmlAttribute(`${creation.branch}, couldn't create. Pull request ${creation.pr.number}: show why`)}">${line1}<span class="switcher-row-line2">${lineHtml([{ text: creation.branch }, { text: "Couldn't create", tone: "danger" }])}</span></button>
+          <button type="button" class="gh-link-button switcher-creating-retry" data-creating-retry="${creation.pr.number}" aria-label="${escapeHtmlAttribute(`Retry creating ${creation.branch}`)}">Retry</button>
+        </div>`;
+    }).join("");
+  container.hidden = rows === "";
+  if (container.dataset.html === rows) return;
+  container.dataset.html = rows;
+  container.innerHTML = rows;
+}
+
+// Create worktree, for real: you stay where you are. Called from the
+// confirmation and from Retry.
+function startCreation(pr: ChosenPullRequest): void {
+  const source = hubForPullRequests()?.worktreeSource?.();
+  if (!source || state.creations.get(pr.number)?.status === "creating") return;
+  const branch = pullRequestLocalBranch(pr);
+  state.creations.set(pr.number, { pr, branch, status: "creating" });
+  const document_ = root;
+  announce(`Checking out #${pr.number} as ${branch}. You stay here; a notice says when it's ready.`);
+  refreshSwitcher();
+  void checkOutPullRequest(source.api, source.sourceId, {
+    number: pr.number,
+    headRefName: pr.headRefName,
+    isCrossRepository: pr.isCrossRepository,
+    // The GitHub repository's local remote name, when the session says it.
+    remote: currentList()?.remote ?? "origin",
+  }).then(outcome => {
+    if (root !== document_) return;
+    if (outcome.ok) {
+      state.creations.delete(pr.number);
+      // The Hub's list is re-read so the new checkout is a row to go to.
+      hub?.refresh();
+      showReady({ branch: outcome.branch, workspaceId: outcome.workspaceId, differs: outcome.differsFromHead });
+    } else {
+      state.creations.set(pr.number, { pr, branch, status: "failed", message: outcome.message });
+      announce(`Couldn't create ${branch}. ${outcome.message}`);
+    }
+    refreshSwitcher();
+  });
+}
+
+function showReady(notice: ReadyNotice): void {
+  state.ready = notice;
+  let element = $<HTMLElement>("#switcher-ready");
+  if (!element) {
+    element = document.createElement("div");
+    element.id = "switcher-ready";
+    element.className = "switcher-ready";
+    element.setAttribute("role", "status");
+    element.addEventListener("click", event => {
+      const target = event.target as HTMLElement;
+      const ready = state.ready;
+      if (target.closest("[data-ready-go]") && ready) {
+        dismissReady();
+        if (state.open) closeSwitcher({ restoreFocus: false });
+        hub?.goTo(ready.workspaceId);
+      } else if (target.closest("[data-ready-dismiss]")) {
+        dismissReady();
+      }
+    });
+    document.body.appendChild(element);
+  }
+  const differs = notice.differs
+    ? ` <span class="switcher-ready-note">It was already here and is not at the pull request's head; pull in its terminal to update it.</span>`
+    : "";
+  element.innerHTML = `<span class="switcher-ready-text"><strong>${escapeHtml(notice.branch)}</strong> is ready.${differs}</span>
+    <button type="button" class="gh-button gh-button-primary" data-ready-go aria-label="${escapeHtmlAttribute(`Go to ${notice.branch}`)}">Go to</button>
+    <button type="button" class="switcher-icon-button" data-ready-dismiss aria-label="Dismiss"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>`;
+  element.hidden = false;
+}
+
+function dismissReady(): void {
+  state.ready = null;
+  const element = $<HTMLElement>("#switcher-ready");
+  if (element) { element.hidden = true; element.innerHTML = ""; }
 }
 
 function renderFooter(panel: HTMLElement): void {
@@ -797,11 +940,15 @@ function pullRequestRowHtml(item: PullRequestListItem): string {
   const mark = facts.viewing
     ? `<span class="switcher-row-mark is-viewing" title="Viewing">${EYE_GLYPH}</span>`
     : facts.checkedOut ? `<span class="switcher-row-mark is-checked-out" title="Checked out">${BRANCH_GLYPH}</span>` : "";
-  const name = pullRequestRowName(item, facts, rowAction(facts));
+  // A checkout being created reads so on the pull request's row too, so the
+  // same pull request is not checked out twice.
+  const creation = creationFor(item.number);
+  const creationPart: LinePart[] = creation ? [creationLinePart(creation)] : [];
+  const name = `${pullRequestRowName(item, facts, rowAction(facts))}${creation ? `. ${creationLinePart(creation).text}` : ""}`;
   return `<div id="switcher-pr-${item.number}" class="switcher-row switcher-pr-row${facts.viewing ? " is-viewing" : ""}" role="option" aria-selected="false" data-pr-row="${item.number}" aria-label="${escapeHtmlAttribute(name)}">
       <span class="switcher-row-text">
         <span class="switcher-row-line1"><span class="switcher-row-number">#${item.number}</span> <strong>${escapeHtml(item.title)}</strong></span>
-        <span class="switcher-row-line2">${lineHtml(pullRequestLine2(item, facts.pending))}</span>
+        <span class="switcher-row-line2">${lineHtml([...pullRequestLine2(item, facts.pending), ...creationPart])}</span>
       </span>
       ${mark}
     </div>`;
@@ -1000,11 +1147,16 @@ export function choosePullRequest(number: number): void {
   }
   const pending = Math.max(currentList()?.pullRequests.find(item => item.number === number)?.viewerPendingComments ?? 0, pullRequestStore.pendingCount(number));
   // A pending review can only be finished in the view; outside a Hub there
-  // is nothing else to choose.
-  if (!hubForPullRequests() || (pending > 0 && checkout === null)) {
+  // is nothing else to choose. A checkout being created (or one that
+  // failed) is shown on the pull request's own step either way.
+  if (!hubForPullRequests() || (pending > 0 && checkout === null && !creationFor(number))) {
     viewHere(number);
     return;
   }
+  openChoice(pr);
+}
+
+function openChoice(pr: ChosenPullRequest): void {
   state.step = { kind: "choice", pr };
   renderPanel();
   document.querySelector<HTMLElement>("#switcher-step [data-choice]")?.focus({ preventScroll: true });
@@ -1050,10 +1202,22 @@ function runChoice(choice: string): void {
     document.querySelector<HTMLElement>("#switcher-step [data-switcher-step-back]")?.focus({ preventScroll: true });
     return;
   }
-  if (choice === "create") {
-    state.step = { kind: "done", pr };
+  if (choice === "create" || choice === "retry") {
+    if (!hubForPullRequests()?.worktreeSource?.()) {
+      // No worktree service: the labelled simulation of the mocked demo.
+      state.step = { kind: "done", pr };
+      renderPanel();
+      document.querySelector<HTMLElement>('#switcher-step [data-choice="view"]')?.focus({ preventScroll: true });
+      return;
+    }
+    // You stay here: back to the lists, where the new checkout is listed as
+    // Creating… until the notice says it is ready.
+    state.step = null;
+    startCreation(pr);
     renderPanel();
-    document.querySelector<HTMLElement>('#switcher-step [data-choice="view"]')?.focus({ preventScroll: true });
+    const search = $<HTMLInputElement>("#switcher-search");
+    if (touchMode() || !search) $<HTMLElement>("#hub-menu")?.focus({ preventScroll: true });
+    else search.focus({ preventScroll: true });
     return;
   }
   if (choice === "close") closeSwitcher();
@@ -1083,11 +1247,22 @@ function renderStep(element: HTMLElement, step: Step): void {
     const found = hubForPullRequests()?.findCheckout(pullRequestLocalBranch(pr)) ?? null;
     const view = choiceCard("view", "View here", `View #${pr.number} here`, viewLines, { primary: found === null });
     let cards: string;
+    const creation = creationFor(pr.number);
     if (found) {
       const state_ = found.state ? ` · <span class="switcher-part${found.tone ? ` is-${found.tone}` : ""}">${escapeHtml(found.state.toLowerCase())}</span>` : "";
       cards = choiceCard("go", "Go to its worktree", `Go to its worktree, ${found.label}`, [`Opens ${escapeHtml(found.label)}${state_}`, "Its own terminal and agent"], { primary: true }) + view;
+    } else if (creation?.status === "creating") {
+      cards = view + `<div class="switcher-choice is-pending" role="status">
+          <span class="switcher-choice-title"><span class="indicator-dot switcher-spinner" aria-hidden="true"></span> Checking out…</span>
+          <span class="switcher-choice-lines"><span class="switcher-choice-line">New folder ${escapeHtml(checkout.folderName)}, on branch ${escapeHtml(checkout.branch)}</span><span class="switcher-choice-line">A notice says when it's ready</span></span>
+        </div>`;
+    } else if (creation?.status === "failed") {
+      cards = view + choiceCard("retry", "Couldn't create · Retry", `Retry checking out #${pr.number} as a worktree`, [escapeHtml(creation.message ?? "The worktree could not be created."), `Tries ${escapeHtml(checkout.branch)} again`]);
     } else {
-      cards = view + (hubForPullRequests()?.canCreateWorktree()
+      // A real Hub worktree service creates it; mocked GitHub data without
+      // one still shows the labelled simulation.
+      const hub_ = hubForPullRequests();
+      cards = view + (hub_?.canCreateWorktree() || (hub_ && currentList()?.mock)
         ? choiceCard("check-out", "Check out as a worktree…", `Check out #${pr.number} as a worktree…`, [`New folder ${escapeHtml(checkout.folderName)}, on branch ${escapeHtml(checkout.branch)}`, "Its own terminal and agent"])
         : "");
     }
@@ -1099,9 +1274,12 @@ function renderStep(element: HTMLElement, step: Step): void {
     element.setAttribute("aria-labelledby", "switcher-step-title");
     return;
   }
-  const mock = Boolean(currentList()?.mock ?? true);
+  // Simulated only when the Hub serves no worktree operations.
+  const simulated = !hubForPullRequests()?.worktreeSource?.();
+  const mock = simulated && Boolean(currentList()?.mock ?? true);
   if (step.kind === "confirm") {
-    const source = pr.isCrossRepository ? `<code>pull/${pr.number}/head</code> from the base repository` : `<code>origin/${escapeHtml(pr.headRefName)}</code>`;
+    const remote = currentList()?.remote ?? "origin";
+    const source = pr.isCrossRepository ? `<code>pull/${pr.number}/head</code> from the base repository (${escapeHtml(remote)})` : `<code>${escapeHtml(remote)}/${escapeHtml(pr.headRefName)}</code>`;
     element.innerHTML = `${head(`Check out #${pr.number}`)}
       <div class="switcher-step-body">
         <div class="switcher-facts">

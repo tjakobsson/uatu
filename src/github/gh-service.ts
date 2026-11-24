@@ -408,6 +408,9 @@ export class GhGithubService implements GithubService {
       const value: PullRequestList = {
         mock: false,
         repository: { host: context.base.host, owner: context.base.owner, name: context.base.name },
+        // The base repository's local remote (D3), which a pull request
+        // check-out fetches from.
+        remote: context.base.remote,
         viewer: parsed.viewer,
         pullRequests: parsed.items,
         totalCount: parsed.totalCount,

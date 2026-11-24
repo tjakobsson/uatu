@@ -29,6 +29,13 @@
 - [x] 5.1 Group Checkouts by repository when there is more than one (`groupCheckouts` in `src/shell/hub-nav.ts`): one labelled `role="group"` per repository under a small, muted, sticky heading, the current repository first, others by name, `Other folders` last; no heading with one repository; rows keep their two lines and status order and drop the other-repository fact; search matches repository names. Verify `src/shell/hub-nav.test.ts` and the two-repository instance (`.local/ux-loop/fix-tools/start2.sh`).
 - [x] 5.2 Name the repository in the Pull requests heading (`Pull requests · octo-org/uatu`), a compact selector when the workspace has more than one Git repository (`pullRequestStore.chooseRepository`, also chosen by a `?repository=` pull request URL), and the status card's Viewing line names the repository when it is another than the workspace's first. Verify `src/shell/switcher.test.ts` and `src/github/pull-request-store.test.ts`.
 
+## 6. Phase 3: real check-out
+
+- [x] 6.1 Add `src/shell/pull-request-checkout.ts`: a fork's pull request as one `pull-request` creation, a same-repository one as `fetch` then `existing-local` or `remote-tracking`, refusals as one sentence, a reused branch's difference from the head. Verify `src/shell/pull-request-checkout.test.ts`.
+- [x] 6.2 Replace the simulated Create worktree when the Hub serves worktree operations (`worktreeSource()` from hub-nav): you stay, `Creating…` under Checkouts (`#switcher-creating`), `Checking out…` on the row, the `#switcher-ready` notice with Go to, `Couldn't create · Retry` with the reason on the pull request's step; keep the labelled simulation without the service; the folder preview follows `worktreeFolderName`. Verify `src/shell/switcher.test.ts` and `switcher-model.test.ts`.
+- [x] 6.3 Cover it through a real Hub and real Git. Verify `tests/e2e/pull-request-worktree.e2e.ts` (children serve the GitHub fake through `hubGithubFake`), and that `worktree-ui`, `worktree-integration` and `hub-switcher` still pass.
+- [x] 6.4 Update `ARCHITECTURE.md` and `docs/WORKTREES.md`. Verify by reading them against the code.
+
 ## Workflow follow-up
 
 - Archive after `add-github-pr-review`.

@@ -306,8 +306,9 @@ Uatu does not merge (owner decision). On 2026-10-01 GitHub made its async merge 
 
 Wherever the open-PR list ends up (Q2), it offers **Review in worktree** only in a Hub. The client matches each row to an existing checkout using the worktree inventory it already reads (`/api/hub/worktrees`), keyed by the PR's local branch name: `headRefName` for same-repository PRs, `pr/<n>` for forks. A match offers **Open** instead.
 
-- **Same-repository PR:** the client runs the existing worktree fetch, then sends the existing `remote-tracking` request for `<remote>/<headRefName>` against the repository's main workspace. No Hub change is needed, and the branch can be pushed to normally.
+- **Same-repository PR:** the client runs the existing worktree fetch, then sends the existing `remote-tracking` request for `<remote>/<headRefName>` against the repository's main workspace, or `existing-local` when a local branch of that name already exists (checked out as it is). No Hub change is needed, and the branch can be pushed to normally.
 - **Fork PR:** new mode `{ mode: "pull-request", pullRequest: { number, remote } }`. The Hub validates that the number is a positive integer and that `remote` is configured in the parent. It then fetches `refs/pull/<n>/head` with the parent's credentials through `worktree-fetch.ts`'s environment. If `pr/<n>` does not exist, it creates the branch at the fetched commit and sets `branch.pr/<n>.remote=<remote>` and `branch.pr/<n>.merge=refs/pull/<n>/head`, so `git pull` updates it and detection finds it (D4). An existing `pr/<n>` with that exact upstream is checked out as-is (never reset); any other existing `pr/<n>` is a conflict. The recorded creation origin is `refs/pull/<n>/head`.
+  - *As built:* the fetch writes `refs/pull/<n>/head` into an operation-scoped scratch ref under `refs/uatu/` (no branch, no `FETCH_HEAD`), reads the commit back and deletes the ref; a missing ref is `ref-unavailable`, whose message says the remote may not be the pull request's GitHub repository. After the journal reaches `creating`, a new `pr/<n>` gets its `remote`/`merge` configuration first and then `git branch --no-track` at that commit, so a crash leaves at most configuration, or a branch with exactly the upstream the retry reuses. A reused branch is never fast-forwarded; the success result's `pullRequestHead` (12 hex digits, beside `checkout.head`) lets the client say when it differs. The remote must be configured in the repository (checked with a read-only `git config`, before any fetch).
 
 Naming: `pr/<n>` is unambiguous, cannot collide with a fork's `main` or `patch-1`, and reads clearly in the worktree picker, whose child names are exact branch names. Destinations follow the existing `<main>.worktrees/<safe-branch-folder>` rule. The Hub never calls GitHub: the PR number and remote are all it needs.
 
@@ -338,7 +339,7 @@ The child renders each Markdown body (`body`, never GitHub's `bodyHTML`) with `r
 ### D16. Contract and revisions
 
 - `RepositorySnapshot.github` is an addition to a closed public schema: bump `WORKSPACE_API_REVISION` (currently 37).
-- The `pull-request` mode on `CreateWorktreeRequest` is a Hub API change: bump `HUB_API_REVISION` (currently 15).
+- The `pull-request` mode on `CreateWorktreeRequest` (and `pullRequestHead` on its result) is a Hub API change: `HUB_API_REVISION` 15 → 16, done with task 4.3.
 - Both go into `api/openapi.yaml`, `api/contract.json`, `x-uatu-revisions` and `api/CHANGELOG.md` under Unreleased, with examples, and must pass `bun run api:validate`.
 - `BUNDLED_WEB_REVISION` is unchanged: nothing existing is reshaped.
 

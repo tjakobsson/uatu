@@ -75,7 +75,17 @@ async function mount(options: { touch?: boolean; hub?: Partial<SwitcherHub> } = 
   const click = (element: Element) => element.dispatchEvent(new window.Event("click", { bubbles: true }));
   const key = (target: EventTarget, name: string) => target.dispatchEvent(Object.assign(new window.Event("keydown", { bubbles: true }), { key: name }));
   const settle = () => Bun.sleep(5);
-  return { document, window, menu, click, key, settle, events };
+  // Waits for what a test asserts on (a Hub answer handled, an announcement
+  // made), not for a fixed delay: under a loaded run the chain behind a
+  // released fetch can outlast one settle.
+  const until = async (ready: () => boolean, timeoutMs = 2_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!ready()) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for the switcher");
+      await settle();
+    }
+  };
+  return { document, window, menu, click, key, settle, until, events };
 }
 
 describe("the switcher's faces", () => {
@@ -264,6 +274,124 @@ describe("choosing a pull request in a Hub", () => {
     expect(page.menu.hidden).toBe(false);
     page.key(page.document, "Escape");
     expect(page.menu.hidden).toBe(true);
+  });
+
+  describe("with the Hub's worktree service: Check out as a worktree… creates it", () => {
+    const created = (branch: string, workspaceId: string) => ({
+      ok: true, operationId: "o1", kind: "create", phase: "complete", registered: true, started: false, pullRequestHead: "0123456789ab",
+      checkout: {
+        checkoutId: "c1", repositoryId: "r1", workspaceId, parentWorkspaceId: "uatu", path: `/src/uatu.worktrees/${workspaceId}`, branch,
+        detached: false, main: false, ownership: "uatu", availability: "present", registered: true, running: false, locked: false, head: "0123456789ab",
+      },
+    });
+    // A Hub whose answers wait until the test releases them.
+    function hubFetch(answer: unknown) {
+      const requests: { url: string; body: unknown }[] = [];
+      let release!: () => void;
+      const released = new Promise<void>(resolve => { release = resolve; });
+      setGlobal("fetch", async (url: string, init?: RequestInit) => {
+        requests.push({ url, body: JSON.parse(String(init?.body)) });
+        await released;
+        return Response.json(answer);
+      });
+      return { requests, release };
+    }
+
+    test("you stay here: Creating… under Checkouts, Checking out… on the row, then a notice offers Go to", async () => {
+      const goTo: string[] = [];
+      let refreshes = 0;
+      const page = await mount({ hub: {
+        worktreeSource: () => ({ api: "/api/hub/worktrees", sourceId: "uatu" }),
+        goTo: id => { goTo.push(id); },
+        refresh: () => { refreshes += 1; },
+      } });
+      const hub = hubFetch(created("pr/639", "pr-639"));
+      openSwitcher();
+      await page.settle();
+      page.click(page.menu.querySelector('[data-pr-row="639"]')!);
+      page.click(page.menu.querySelector('#switcher-step [data-choice="check-out"]')!);
+      const step = page.menu.querySelector<HTMLElement>("#switcher-step")!;
+      expect(step.textContent).not.toContain("Simulated");
+      expect(step.textContent).toContain("pull/639/head from the base repository (origin)");
+      page.click(step.querySelector('[data-choice="create"]')!);
+
+      // Back on the lists, nothing navigated.
+      expect(page.menu.hasAttribute("data-step")).toBe(false);
+      expect(page.menu.hidden).toBe(false);
+      expect(hub.requests).toEqual([{ url: "/api/hub/worktrees/create", body: { sourceWorkspaceId: "uatu", mode: "pull-request", pullRequest: { number: 639, remote: "origin" } } }]);
+      const creating = page.menu.querySelector<HTMLElement>('#switcher-creating [data-creating-row="639"]')!;
+      expect(creating.textContent).toContain("pr/639");
+      expect(creating.textContent).toContain("Creating…");
+      expect(page.menu.querySelector("#switcher-creating")!.hasAttribute("hidden")).toBe(false);
+      expect(page.menu.querySelector('[data-pr-row="639"]')!.textContent).toContain("Checking out…");
+      // Choosing it again cannot start it twice.
+      page.click(page.menu.querySelector('[data-pr-row="639"]')!);
+      expect([...step.querySelectorAll<HTMLElement>("[data-choice]")].map(choice => choice.dataset.choice)).toEqual(["view"]);
+      expect(step.textContent).toContain("Checking out…");
+      page.key(page.document, "Escape");
+      // Closing the dialog cancels nothing.
+      page.key(page.document, "Escape");
+      expect(page.menu.hidden).toBe(true);
+
+      hub.release();
+      await page.until(() => page.document.querySelector<HTMLElement>("#switcher-ready")?.hidden === false);
+      expect(refreshes).toBeGreaterThan(0);
+      const notice = page.document.querySelector<HTMLElement>("#switcher-ready")!;
+      expect(notice.hidden).toBe(false);
+      expect(notice.textContent).toContain("pr/639 is ready.");
+      openSwitcher();
+      expect(page.menu.querySelector('#switcher-creating [data-creating-row]')).toBeNull();
+      page.click(notice.querySelector("[data-ready-go]")!);
+      expect(goTo).toEqual(["pr-639"]);
+      expect(notice.hidden).toBe(true);
+    });
+
+    test("a failure stays on its row with the reason and Retry", async () => {
+      const page = await mount({ hub: { worktreeSource: () => ({ api: "/api/hub/worktrees", sourceId: "uatu" }) } });
+      const refusal = { ok: false, operationId: "o", kind: "create", phase: "validating", error: { code: "ref-unavailable", message: "Pull request #639 was not found on origin: it has no refs/pull/639/head.", retry: "none" } };
+      const hub = hubFetch(refusal);
+      hub.release();
+      openSwitcher();
+      await page.settle();
+      page.click(page.menu.querySelector('[data-pr-row="639"]')!);
+      page.click(page.menu.querySelector('#switcher-step [data-choice="check-out"]')!);
+      page.click(page.menu.querySelector('#switcher-step [data-choice="create"]')!);
+      await page.until(() => page.document.querySelector("#switcher-live")!.textContent!.includes("Couldn't create"));
+      const row = page.menu.querySelector<HTMLElement>('#switcher-creating [data-creating-row="639"]')!;
+      expect(row.textContent).toContain("Couldn't create");
+      expect(page.document.querySelector("#switcher-live")!.textContent).toContain("Couldn't create pr/639.");
+      page.click(row.querySelector("[data-creating-open]")!);
+      const step = page.menu.querySelector<HTMLElement>("#switcher-step")!;
+      expect(step.textContent).toContain("not found on origin");
+      expect([...step.querySelectorAll<HTMLElement>("[data-choice]")].map(choice => choice.dataset.choice)).toEqual(["view", "retry"]);
+      page.click(step.querySelector('[data-choice="retry"]')!);
+      expect(hub.requests).toHaveLength(2);
+      expect(page.menu.hasAttribute("data-step")).toBe(false);
+    });
+
+    test("a same-repository pull request fetches, then tracks its head branch", async () => {
+      const page = await mount({ hub: { worktreeSource: () => ({ api: "/api/hub/worktrees", sourceId: "uatu" }) } });
+      const requests: { url: string; body: unknown }[] = [];
+      setGlobal("fetch", async (url: string, init?: RequestInit) => {
+        requests.push({ url, body: JSON.parse(String(init?.body)) });
+        return Response.json(url.endsWith("/fetch")
+          ? { ok: true, refs: { local: ["main"], remote: ["origin/fix/pane-heights"], fetchedAt: 1 } }
+          : created("fix/pane-heights", "fix-pane-heights"));
+      });
+      openSwitcher();
+      await page.settle();
+      page.click(page.menu.querySelector("[data-switcher-show-all]")!);
+      page.click(page.menu.querySelector('[data-pr-row="636"]')!);
+      page.click(page.menu.querySelector('#switcher-step [data-choice="check-out"]')!);
+      expect(page.menu.querySelector("#switcher-step")!.textContent).not.toContain("From a fork");
+      page.click(page.menu.querySelector('#switcher-step [data-choice="create"]')!);
+      await page.settle();
+      expect(requests.map(request => request.body)).toEqual([
+        { sourceWorkspaceId: "uatu" },
+        { sourceWorkspaceId: "uatu", mode: "remote-tracking", base: { kind: "remote", ref: "origin/fix/pane-heights" } },
+      ]);
+      expect(page.document.querySelector("#switcher-ready")!.textContent).toContain("fix/pane-heights is ready.");
+    });
   });
 
   test("already checked out: Go to its worktree first, View here second", async () => {

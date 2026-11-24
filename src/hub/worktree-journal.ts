@@ -207,8 +207,15 @@ export function parseWorktreeIntent(value: unknown): WorktreeOperationIntent {
   const base = closed(record.base, ["kind", "ref"], "pending worktree operation base");
   if (base.kind !== "local" && base.kind !== "remote") throw new Error("invalid pending worktree operation base kind");
   const mode = record.mode;
-  if (mode !== "new-branch" && mode !== "existing-local" && mode !== "remote-tracking") {
+  if (mode !== "new-branch" && mode !== "existing-local" && mode !== "remote-tracking" && mode !== "pull-request") {
     throw new Error("invalid pending worktree operation mode");
+  }
+  // A pull request is checked out on its own local branch: `pr/<n>`, which
+  // exists by the time `git worktree add` runs. Recovery needs nothing more:
+  // a crash before the checkout leaves at most that branch (with the
+  // upstream a retry reuses), and after it the usual identity rules apply.
+  if (mode === "pull-request" && (base.kind !== "local" || base.ref !== record.branch)) {
+    throw new Error("a pending pull request checkout must name its own local branch");
   }
   return {
     ...common,

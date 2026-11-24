@@ -57,6 +57,43 @@ Opening the dialog does not fetch. Fetch preserves the name, query and valid
 selection. If a ref disappears, choose again. Authentication or network failure
 leaves cached refs available, without claiming they are fresh.
 
+### Check out a pull request
+
+In a Hub workspace whose session lists GitHub pull requests, open the
+switcher, choose a pull request under **Pull requests**, then **Check out as a
+worktree…** and **Create worktree**. You stay where you are. The new checkout
+is listed under Checkouts as `Creating…`, and the pull request's row reads
+`Checking out…`. Closing the switcher does not cancel it. When it is ready, a
+notice says `<branch> is ready.` and offers **Go to**, which starts the
+checkout and opens it. A pull request that already has a checkout offers **Go
+to its worktree** first. If creation fails, the row stays as `Couldn't create ·
+Retry`, and the pull request's own step shows why.
+
+| Pull request | Branch and upstream |
+| --- | --- |
+| From a branch of the same repository | Its head branch, such as `feature/login`, tracking `origin/feature/login`, after an explicit fetch. An existing local branch of that name is checked out as it is. You can push to it as usual. |
+| From a fork | `pr/<number>`, such as `pr/57`, at `refs/pull/57/head` fetched from the repository's GitHub remote. That ref is its upstream, so `git pull` brings in new commits. Pushes do not go back to the fork: treat it as read-only. |
+
+The folder follows the usual rule, for example `atlas.worktrees/pr-57`. The Hub
+asks GitHub nothing. It fetches only that pull request's ref, with the parent's
+credential policy, and never prompts. It never forces or resets a branch:
+
+- An existing `pr/57` that already tracks pull request #57 on that remote is
+  checked out as it is. If it is not at the pull request's head, the notice
+  says so; pull in its terminal to update it.
+- Any other existing `pr/57` is refused with `A branch named pr/57 already
+  exists and does not track pull request #57 on origin.` Rename or delete
+  that branch, then try again.
+- A pull request the remote does not publish is refused with `Pull request
+  #57 was not found on origin: it has no refs/pull/57/head.` Check the
+  number, and that the remote is the pull request's GitHub repository.
+
+Without the Hub's worktree service, the demo's mocked GitHub data shows a
+labelled simulation instead. Outside a Hub, a pull request can only be viewed
+here. The API is `POST /api/hub/worktrees/create` with
+`{ mode: "pull-request", pullRequest: { number, remote } }` (Hub API
+revision 16).
+
 ### Names, destinations and history
 
 The child name is its exact local branch, including slashes, up to 64
@@ -201,6 +238,9 @@ name remains available.
   not report the files as removed or silently clean up that registration.
 - If Git removal completes but metadata cleanup fails, retry cleanup. Recovery
   records completed removal and must not delete a new occupant at the old path.
+- If checking out a pull request stopped after `pr/<number>` was made but
+  before its checkout, the branch stays with its pull request upstream. The
+  next **Check out as a worktree…** checks that branch out as it is.
 
 ## Requirements and rollback
 

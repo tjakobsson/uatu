@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 15.37.0-experimental
+  version: 16.37.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 15 and workspace revision 37
+  summary: Hub revision 16 and workspace revision 37
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -21,7 +21,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 15
+    hubApiRevision: 16
     workspaceApiRevision: 37
 servers:
   - url: https://{hubHost}
@@ -149,7 +149,7 @@ paths:
                   summary: An ordinary workspace
                   value:
                     version: 0.5.1 (abcdef0)
-                    hubApiRevision: 15
+                    hubApiRevision: 16
                     workspaceApiRevision: 37
                     workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 37, shells: [{ attached: false, label: zsh }] }]
                     workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
@@ -1262,6 +1262,20 @@ paths:
         occupied destination or a ref that is not available is a refusal
         carrying the existing checkout to open instead.
 
+        `pull-request` checks out a GitHub pull request by number. The Hub
+        makes no GitHub call: it fetches `refs/pull/<number>/head` from the
+        named remote, which must be configured in the repository, with the
+        parent workspace's credential policy (as `fetch`), and never prompts.
+        The checkout is on local branch `pr/<number>`, whose upstream is
+        that ref on that remote, so a pull in the checkout follows the pull
+        request. An existing `pr/<number>` with exactly that upstream is
+        checked out as it is, never reset; `pullRequestHead` then tells a
+        caller whether it differs. Any other existing `pr/<number>` is
+        refused as `branch-exists`, and a pull request the remote does not
+        publish as `ref-unavailable`. A same-repository pull request can
+        instead be checked out on its head branch with `fetch` and then
+        `remote-tracking`, which keeps it pushable.
+
         A refusal is a completed request: it answers 200 with
         `ok: false` and a sanitized error, because the Hub processed the
         request and decided against it. HTTP statuses report transport-level
@@ -1278,6 +1292,9 @@ paths:
               remoteTracking:
                 summary: A tracking branch from a remote-qualified ref
                 value: { sourceWorkspaceId: atlas, mode: remote-tracking, base: { kind: remote, ref: origin/release } }
+              pullRequest:
+                summary: Pull request 57, from a fork, on branch pr/57
+                value: { sourceWorkspaceId: atlas, mode: pull-request, pullRequest: { number: 57, remote: origin } }
       responses:
         '200': { $ref: '#/components/responses/WorktreeOperation' }
         '400': { $ref: '#/components/responses/NoStoreError' }
@@ -1582,6 +1599,25 @@ components:
                 registered: true
                 started: false
                 checkout: { checkoutId: 7c2d, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, workspaceId: feature-login, parentWorkspaceId: atlas, path: /src/atlas.worktrees/feature-login, branch: feature/login, detached: false, main: false, ownership: uatu, availability: present, registered: true, running: false, locked: false, sourceRef: main }
+            pullRequest:
+              summary: A pull request checked out on pr/57 at its fetched head
+              value:
+                ok: true
+                operationId: 4c5d6e7f-8091-4a2b-b3c4-d5e6f708192a
+                kind: create
+                phase: complete
+                registered: true
+                started: false
+                pullRequestHead: 9f8e7d6c5b4a
+                checkout: { checkoutId: 8d3e, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, workspaceId: pr-57, parentWorkspaceId: atlas, path: /src/atlas.worktrees/pr-57, branch: pr/57, detached: false, main: false, ownership: uatu, availability: present, registered: true, running: false, locked: false, sourceRef: refs/pull/57/head, upstream: refs/pull/57/head, head: 9f8e7d6c5b4a }
+            pullRequestNotFound:
+              summary: The remote has no such pull request; nothing was created
+              value:
+                ok: false
+                operationId: 5d6e7f80-91a2-4b3c-84d5-e6f708192a3b
+                kind: create
+                phase: validating
+                error: { code: ref-unavailable, message: "Pull request #58 was not found on origin: it has no refs/pull/58/head. Check the number, and that origin is the pull request's GitHub repository. Nothing was created.", retry: none }
             refused:
               summary: Refused without force, naming the existing checkout
               value:
@@ -2929,7 +2965,7 @@ components:
         running: { type: boolean }
         locked: { type: boolean, description: "Whether Git reports the checkout locked. A locked checkout is never removed." }
         sourceRef: { type: string, minLength: 1, description: "Immutable branch-creation snapshot: the ref explicitly selected when Uatu created this branch. Not the upstream and not the starting revision, and never inferred from either. Absent means the origin is unknown." }
-        upstream: { type: string, minLength: 1 }
+        upstream: { type: string, minLength: 1, description: "The upstream a creation established or kept: a remote-qualified branch for remote-tracking, refs/pull/<number>/head (on the requested remote) for pull-request." }
         head: { type: string, minLength: 1, description: "Short revision, for diagnostics. Never provenance." }
       additionalProperties: false
     WorktreeRefs:
@@ -2993,6 +3029,7 @@ components:
         startError: { $ref: '#/components/schemas/WorktreeError', description: "An explicitly requested start that failed. It does not fail the operation: the workspace remains configured and stopped." }
         error: { $ref: '#/components/schemas/WorktreeError' }
         retainedCheckout: { $ref: '#/components/schemas/WorktreeCheckout', description: "Present when Git succeeded and a later step did not. Retry acts on this checkout; a second one is never created." }
+        pullRequestHead: { type: string, pattern: '^[0-9a-f]{12}$', description: "Successful pull-request creations only: the pull request's head as just fetched, 12 hex digits like checkout.head. It differs from checkout.head when an existing pr/<number> was reused as it was." }
       additionalProperties: false
       description: "A successful result carries phase, registered and started; a refusal carries error, and retainedCheckout when a checkout outlived it."
     CreateWorktreeRequest:
@@ -3000,8 +3037,8 @@ components:
       required: [mode]
       properties:
         sourceWorkspaceId: { $ref: '#/components/schemas/WorkspaceId', description: "Required." }
-        mode: { type: string, enum: [new-branch, existing-local, remote-tracking] }
-        branch: { type: string, minLength: 1, description: "The target local branch. Required for new-branch. For the other modes the Hub derives it — the existing local ref, or the remote ref minus its remote prefix — and rejects a mismatching guess. Held to Git's branch grammar before any repository is touched, so an option-like name or a revision expression never reaches a Git argument list." }
+        mode: { type: string, enum: [new-branch, existing-local, remote-tracking, pull-request] }
+        branch: { type: string, minLength: 1, description: "The target local branch. Required for new-branch. For the other modes the Hub derives it — the existing local ref, the remote ref minus its remote prefix, or pr/<number> — and rejects a mismatching guess. Held to Git's branch grammar before any repository is touched, so an option-like name or a revision expression never reaches a Git argument list." }
         base:
           type: object
           required: [kind, ref]
@@ -3009,8 +3046,16 @@ components:
             kind: { type: string, enum: [local, remote] }
             ref: { type: string, minLength: 1 }
           additionalProperties: false
-          description: "An exactly qualified starting ref. Mutually exclusive with baseRef."
+          description: "An exactly qualified starting ref. Mutually exclusive with baseRef. Not accepted with pull-request."
         baseRef: { type: string, minLength: 1, description: "A starting ref left for the Hub to qualify against the repository's own listing, for callers that have one name rather than a committed selection — feature/login is a valid local branch and origin/main a remote-qualified one, and only the listing tells them apart. A ref that is not in the listing is refused; one that is both is refused as ambiguous. Nothing is substituted for a near match. Ignored when base is present." }
+        pullRequest:
+          type: object
+          required: [number, remote]
+          properties:
+            number: { type: integer, minimum: 1, maximum: 2147483647 }
+            remote: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$', description: "A remote configured in the repository, by name. Names containing `..` or ending in `.lock` are refused." }
+          additionalProperties: false
+          description: "Required with pull-request, and accepted only with it. Validated before any Git runs."
         start: { type: boolean, description: "Post-commit intent. Creation leaves the workspace stopped by default, and a failed start does not fail the creation." }
       additionalProperties: false
     OpenWorktreeRequest:

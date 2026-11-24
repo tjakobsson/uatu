@@ -52,7 +52,7 @@ import { collectRepositorySnapshots } from "../../src/document/git-data";
 import { GitHubApi } from "../../src/github/api";
 import { FakeGithubService } from "../../src/github/fake";
 import { GhGithubService } from "../../src/github/gh-service";
-import type { GithubService } from "../../src/github/service";
+import { GITHUB_FAKE_ENV, GITHUB_FAKE_SCENARIO_ENV, type GithubService } from "../../src/github/service";
 import { FakeGitHub } from "../fixtures/github-fake";
 import {
   buildFetchFallback,
@@ -394,7 +394,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
     typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
   activeFollow = typeof body.follow === "boolean" ? body.follow : true;
   personalState = { version: 1 };
-  e2eGithub = body.github && body.github !== "transport" ? new FakeGithubService({ scenario: typeof body.github === "string" ? body.github : undefined }) : null;
+  e2eGithub = body.github && body.github !== "transport" ? new FakeGithubService({ scenario: typeof body.github === "string" ? body.github : undefined }) : environmentGithub();
 
   const previousWorkspaceRoot = activeWorkspaceRoot;
   activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
@@ -776,8 +776,17 @@ async function handleE2EChat(request: Request): Promise<Response> {
   return Response.json({ error: "invalid chat control" }, { status: 400 });
 }
 
-// The PR review fake for the current test, when its reset asked for one.
-let e2eGithub: GithubService | null = null;
+// The process's own GitHub backend: the in-memory fake when it opts in with
+// UATU_GITHUB_FAKE=1, as a real child has it (hub-fixtures.ts sets it for
+// `hubGithubFake` specs, whose children are never reset over HTTP). Never
+// the real `gh` transport (github-guard.test.ts checks this file).
+function environmentGithub(): GithubService | null {
+  return process.env[GITHUB_FAKE_ENV] === "1" ? new FakeGithubService({ scenario: process.env[GITHUB_FAKE_SCENARIO_ENV] }) : null;
+}
+
+// The PR review backend for the current test: what its reset asked for, else
+// the process's own.
+let e2eGithub: GithubService | null = environmentGithub();
 let server: ReturnType<typeof Bun.serve>;
 let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
 let workspaceRoutes!: ReturnType<typeof buildRoutes>;

@@ -8,13 +8,13 @@ A workspace page has two independent states: the checkout you work in (files on 
 
 - **Touch:** a fifth control in the bottom bar, about 1.5 tabs wide and outside the tablist, names the checkout you work in, carries an eye pill `#N` while a pull request is viewed and today's attention badge, and opens the switcher. The sidebar header's dropdown is gone on touch.
 - **The switcher:** one dialog (a full-height sheet on touch, a panel under the chip on desktop) with a status card (*Working in*, and *Viewing #N* with ← Back and "Not checked out · terminal stays on <branch>"), one search field over both lists, **Checkouts** (two-line rows ordered by who needs you, **+ New** in the heading), **Pull requests** (two-line rows, an `Open ▾` filter menu, the first three then `Show all n`), and a footer with Hub dashboard and Settings. **Sign out leaves the switcher**; it stays on the Hub's own pages.
-- **The choice:** choosing a pull request that is not checked out asks **View here** or **Check out as a worktree…** (the checkout stays simulated while GitHub data is mocked); one already checked out offers **Go to its worktree** first and **View here** second.
+- **The choice:** choosing a pull request that is not checked out asks **View here** or **Check out as a worktree…** (phase 3 makes it real on the Hub's `pull-request` create mode; it stays a labelled simulation only without the Hub's worktree operations); one already checked out offers **Go to its worktree** first and **View here** second.
 - **One Viewing strip** (`Viewing #N` · `← Back to <branch>`) on Files and Preview replaces the Pull request pane's "Picked" note, the preview header's "Picked · ← Back" chip and the Files scope bar's "← Back". On desktop the chip's second line says it instead; the strip shows in the preview only while the sidebar is collapsed.
 - **Vocabulary:** Picked → Viewing; Show in workspace → View here; Create worktree… (from a pull request) → Check out as a worktree…; Go to worktree → Go to its worktree; ← Back → ← Back to `<branch>`.
 - **BREAKING (UI):** the "Browse pull requests…" dialog is retired. The Pull request pane's search button and its no-pull-request state open the switcher at Pull requests; the fork menu's "From a pull request…" item is removed.
 - Change Overview's `Local branch` label reads the branch (`⎇ feat/view-pr`) while a pull request is viewed.
 
-Out of scope (later phases of the design): a real checkout from a pull request with its *Creating…* row and ready notice (needs the Hub's `pull-request` create mode and the real GitHub transport), and Navigator links.
+Phase 3 adds the real checkout from a pull request with its *Creating…* row and ready notice, on the Hub's `pull-request` create mode (`add-github-pr-review` D12). Out of scope: Navigator links (phase 4).
 
 ## Capabilities
 

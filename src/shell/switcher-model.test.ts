@@ -155,5 +155,7 @@ describe("the switcher's words", () => {
   test("a pull request's checkout: its branch and a folder beside the main checkout", () => {
     expect(pullRequestCheckout(item({ isCrossRepository: true }), "uatu")).toEqual({ branch: "pr/639", folderName: "pr-639", folder: "uatu.worktrees/pr-639" });
     expect(pullRequestCheckout(item({ headRefName: "fix/pane-heights" }), "uatu").folder).toBe("uatu.worktrees/fix-pane-heights");
+    // The Hub's folder rule: lowercase, and dots and slashes become dashes.
+    expect(pullRequestCheckout(item({ headRefName: "Release/v1.2" }), "uatu").folder).toBe("uatu.worktrees/release-v1-2");
   });
 });

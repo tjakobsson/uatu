@@ -16,7 +16,7 @@ See `proposal.md` for why, and `pr-mockups/switcher/design.md` (with its six wir
 - Keep every Hub behavior the old menu had: live activity, badges, stop reconcile, Start (now in the status card for the current session), unlock routing, stable row nodes, the viewed acknowledgement.
 
 **Non-Goals:**
-- A real checkout from a pull request (phase 3: the `pull-request` create mode and real transport). The confirmation stays simulated, as today, and there is no *Creating…* row or ready notice.
+- ~~A real checkout from a pull request~~: done as phase 3 (D8) once the Hub's `pull-request` create mode landed (`add-github-pr-review` D12); the real GitHub transport is still that change's.
 - Navigator links (phase 4); not on this branch.
 - A keyboard shortcut for the switcher.
 - `n changes` on checkout rows: the activity topic carries only four booleans per workspace (design A6), so there is nothing to count.
@@ -34,6 +34,8 @@ See `proposal.md` for why, and `pr-mockups/switcher/design.md` (with its six wir
 **D5. The picker's flows move into the choice step.** Lookup in any state, the other-repository sentence, the no-credential line and the simulated confirmation move from `pull-request-picker.ts` into the switcher; the module and its dialog are deleted, with its pure helpers and tests moved to `switcher-model.ts`.
 
 **D6. Two client-only items from phase 3 come along.** One search over both lists and status ordering of Checkouts are client-only and drawn in the approved wireframes; doing them now avoids a search that ignores half the sheet. The phase-3 items that need server work stay out.
+
+**D8. Phase 3: the real check-out, on the Hub's worktree family.** The Hub part registers `worktreeSource()` (the published family's path and the main checkout), and `src/shell/pull-request-checkout.ts` makes the requests: `pull-request` for a fork, `fetch` then `existing-local` or `remote-tracking` for the same repository (D12). The remote is the list's `remote`, else `origin`. The switcher keeps creations page-local by number, renders them in `#switcher-creating` under the Hub's own Checkouts rows (hub-nav's reconciled list is left alone), marks the pull request's row, and shows the `#switcher-ready` notice above the dialog on success. Without the worktree family, mocked data keeps the labelled simulation. Alternative: a Creating row inside hub-nav's list; rejected because that list is the Hub's authoritative inventory, and a pending row there would fight `reconcileMenuEntries`.
 
 **D7. + New belongs to the current repository.** The Checkouts heading's **+ New** opens today's worktree menu for the current repository's main checkout (without "From a pull request…"). Other repositories' fork controls remain on the Hub dashboard. Its accessible name is `New worktree in <repository>`.
 

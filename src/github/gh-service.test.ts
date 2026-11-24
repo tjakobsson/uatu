@@ -248,12 +248,20 @@ describe("detail", () => {
   test("the open list is cached for 30 s and counts what GitHub holds", async () => {
     const { fake, service, clock } = harness(await repository());
     const list = await service.pullRequests("repo");
-    expect(list).toMatchObject({ mock: false, viewer: "octo-reviewer", totalCount: 1, pullRequests: [{ number: 42, viewerReviewRequested: true }] });
+    expect(list).toMatchObject({ mock: false, remote: "origin", viewer: "octo-reviewer", totalCount: 1, pullRequests: [{ number: 42, viewerReviewRequested: true }] });
     await service.pullRequests("repo");
     expect(fake.operations()).toEqual(["UatuOpenPullRequests"]);
     clock.advance(31_000);
     await service.pullRequests("repo");
     expect(fake.operations()).toEqual(["UatuOpenPullRequests", "UatuOpenPullRequests"]);
+  });
+
+  test("the open list names the base repository's local remote, which a check-out fetches from", async () => {
+    // A fork layout: `origin` is the fork, `upstream` the base repository.
+    const { fake, service } = harness(await repository({ remotes: { origin: "git@github.com:me/widgets.git", upstream: "https://github.com/acme/widgets.git" } }));
+    const list = await service.pullRequests("repo");
+    expect(list).toMatchObject({ remote: "upstream", repository: { owner: "acme", name: "widgets" } });
+    expect(fake.calls[0]).toMatchObject({ operation: "UatuOpenPullRequests", variables: { owner: "acme", name: "widgets" } });
   });
 
   test("the file view's Git reader isn't built: heads read as not fetched", async () => {

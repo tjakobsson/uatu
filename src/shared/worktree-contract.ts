@@ -105,8 +105,9 @@ export type WorktreeInventory = {
 export const WORKTREE_OPERATION_KINDS = ["create", "register", "start", "fetch", "refresh", "delete", "forget"] as const;
 export type WorktreeOperationKind = (typeof WORKTREE_OPERATION_KINDS)[number];
 
-export const WORKTREE_CREATE_MODES = ["new-branch", "existing-local", "remote-tracking"] as const;
+export const WORKTREE_CREATE_MODES = ["new-branch", "existing-local", "remote-tracking", "pull-request"] as const;
 export type WorktreeCreateMode = (typeof WORKTREE_CREATE_MODES)[number];
+export type WorktreeRefCreateMode = Exclude<WorktreeCreateMode, "pull-request">;
 
 export type WorktreeRefSelection = {
   readonly kind: "local" | "remote";
@@ -115,16 +116,34 @@ export type WorktreeRefSelection = {
   readonly ref: string;
 };
 
-export type WorktreeCreateRequest = {
+// A pull request named by number on one of the parent's configured remotes.
+// The Hub never asks GitHub anything: it fetches `refs/pull/<number>/head`
+// from that remote and checks it out on local branch `pr/<number>`.
+export type WorktreePullRequestSelection = {
+  readonly number: number;
+  readonly remote: string;
+};
+
+export type WorktreeCreateRequest = WorktreeRefCreateRequest | WorktreePullRequestCreateRequest;
+
+export type WorktreeRefCreateRequest = {
   readonly sourceWorkspaceId: string;
-  readonly mode: WorktreeCreateMode;
-  // The target local branch. Required for "new-branch"; for the other two
-  // modes the service derives it (existing local ref, or the remote ref
-  // minus its remote prefix) and rejects a mismatching client guess.
+  readonly mode: WorktreeRefCreateMode;
+  // The target local branch. Required for "new-branch"; for the other
+  // modes the service derives it (existing local ref, the remote ref minus
+  // its remote prefix, or `pr/<number>`) and rejects a mismatching guess.
   readonly branch?: string;
   readonly base: WorktreeRefSelection;
   // Stopped by default; an explicit start is post-commit intent whose
   // failure leaves the configured workspace stopped.
+  readonly start?: boolean;
+};
+
+export type WorktreePullRequestCreateRequest = {
+  readonly sourceWorkspaceId: string;
+  readonly mode: "pull-request";
+  readonly branch?: string;
+  readonly pullRequest: WorktreePullRequestSelection;
   readonly start?: boolean;
 };
 
@@ -450,6 +469,10 @@ export type WorktreeOperationResult =
     // A failed explicit start does NOT fail the operation: the configured
     // workspace stays stopped and this reports why.
     readonly startError?: WorktreeError;
+    // A pull request checkout only: the pull request's head as just fetched
+    // (12 hex digits, like `checkout.head`). It differs from the checkout's
+    // head when an existing `pr/<n>` was reused as it was.
+    readonly pullRequestHead?: string;
   }
   | {
     readonly ok: false;
@@ -549,7 +572,7 @@ export function createWorktreeParsers(
 const { WORKTREE_OWNERSHIPS, WORKTREE_AVAILABILITIES, WORKTREE_INVENTORY_STATUSES,
   WORKTREE_UNKNOWN_REPOSITORY, WORKTREE_OPERATION_KINDS, WORKTREE_CREATE_MODES,
   WORKTREE_ERROR_CODES, WORKTREE_RETRY_ACTIONS, PHASES, WORKTREE_LOCAL_DATA_SAMPLE_LIMIT } = vocabulary;
-const { validWorktreeBranch } = branches;
+const { validWorktreeBranch, validPullRequestNumber, validWorktreeRemoteName, pullRequestWorktreeBranch } = branches;
 const { sanitizeWorktreeMessage } = messages;
 function isWorktreePhase(operation: WorktreePhasedOperation, value: unknown): value is WorktreePhase {
   return typeof value === "string" && (PHASES[operation] as readonly string[]).includes(value);
@@ -702,7 +725,7 @@ function unknownWorktreeInventory(sourceWorkspaceId: string, error: WorktreeErro
 function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
   const record = closed(
     value,
-    ["ok", "operationId", "kind", "phase", "checkout", "registered", "started", "startError", "error", "retainedCheckout"],
+    ["ok", "operationId", "kind", "phase", "checkout", "registered", "started", "startError", "error", "retainedCheckout", "pullRequestHead"],
     "worktree operation result",
   );
   const ok = flag(record, "ok", "worktree operation result");
@@ -721,6 +744,7 @@ function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
         ? record.phase as WorktreePhase
         : fail("worktree operation result has an unknown phase");
   if (!ok) {
+    if (record.pullRequestHead !== undefined) fail("a refused worktree operation result cannot carry a pull request head");
     return {
       ok: false,
       operationId,
@@ -742,7 +766,15 @@ function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
     registered: flag(record, "registered", "worktree operation result"),
     started,
     ...(record.startError === undefined ? {} : { startError: parseWorktreeError(record.startError) }),
+    ...(record.pullRequestHead === undefined ? {} : { pullRequestHead: pullRequestHead(record, kind) }),
   };
+}
+
+function pullRequestHead(record: Record<string, unknown>, kind: WorktreeOperationKind): string {
+  if (kind !== "create") fail("only a creation reports a pull request head");
+  const value = record.pullRequestHead;
+  if (typeof value !== "string" || !/^[0-9a-f]{12}$/.test(value)) fail("worktree operation result has an invalid pullRequestHead");
+  return value as string;
 }
 
 function fingerprintField(record: Record<string, unknown>, field: string, label: string): string {
@@ -843,8 +875,7 @@ function parseWorktreeRefsResponse(value: unknown): WorktreeRefsResponse {
 }
 
 function parseWorktreeCreateRequest(value: unknown): WorktreeCreateRequest {
-  const record = closed(value, ["sourceWorkspaceId", "mode", "branch", "base", "start"], "worktree create request");
-  const base = closed(record.base, ["kind", "ref"], "worktree create base");
+  const record = closed(value, ["sourceWorkspaceId", "mode", "branch", "base", "pullRequest", "start"], "worktree create request");
   const mode = member(record.mode, WORKTREE_CREATE_MODES, "worktree create mode");
   const branch = optionalString(record, "branch", "worktree create request");
   if (mode === "new-branch" && branch === undefined) fail("a new branch requires a name");
@@ -852,6 +883,26 @@ function parseWorktreeCreateRequest(value: unknown): WorktreeCreateRequest {
   // option-like name ("-f"), a revision expression or a traversal never
   // reaches a Git argument list.
   if (branch !== undefined && !validWorktreeBranch(branch)) fail("branch is not a valid branch name");
+  if (mode === "pull-request") {
+    // Everything is decided by the number and the remote: there is no base
+    // to select, and the branch is always `pr/<number>`.
+    if (record.base !== undefined) fail("a pull request checkout takes no base");
+    const pullRequest = closed(record.pullRequest, ["number", "remote"], "worktree create pull request");
+    if (!validPullRequestNumber(pullRequest.number)) fail("a pull request number must be a positive integer");
+    const remote = requiredString(pullRequest, "remote", "worktree create pull request");
+    if (!validWorktreeRemoteName(remote)) fail("remote is not a valid remote name");
+    const number = pullRequest.number as number;
+    if (branch !== undefined && branch !== pullRequestWorktreeBranch(number)) fail("a pull request checkout's branch is pr/<number>");
+    return {
+      sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree create request"),
+      mode,
+      ...(branch === undefined ? {} : { branch }),
+      pullRequest: { number, remote },
+      ...(record.start === undefined ? {} : { start: flag(record, "start", "worktree create request") }),
+    };
+  }
+  if (record.pullRequest !== undefined) fail("only a pull request checkout names a pull request");
+  const base = closed(record.base, ["kind", "ref"], "worktree create base");
   const kind = member(base.kind, ["local", "remote"] as const, "worktree create base kind");
   if (mode === "existing-local" && kind !== "local") fail("an existing local branch requires a local ref");
   if (mode === "remote-tracking" && kind !== "remote") fail("a tracking branch requires a remote ref");

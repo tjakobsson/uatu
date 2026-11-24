@@ -63,6 +63,9 @@ type WorkerOptions = {
   hubChatPolicy: boolean;
   hubChatPolicyTrust: boolean;
   hubWorkerDismissals: boolean;
+  // Children serve the in-memory GitHub fake (src/github/fake.ts), so the
+  // switcher lists pull requests.
+  hubGithubFake: boolean;
 };
 
 export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
@@ -74,9 +77,10 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubChatPolicy: [false, { option: true, scope: "worker" }],
   hubChatPolicyTrust: [true, { option: true, scope: "worker" }],
   hubWorkerDismissals: [false, { option: true, scope: "worker" }],
+  hubGithubFake: [false, { option: true, scope: "worker" }],
 
   hubProcess: [
-    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts, hubChatPolicy, hubChatPolicyTrust, hubWorkerDismissals }, use, workerInfo) => {
+    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts, hubChatPolicy, hubChatPolicyTrust, hubWorkerDismissals, hubGithubFake }, use, workerInfo) => {
       const { hubPort, end } = hubPortBlock(workerInfo.parallelIndex);
       if (hubWorkspaces.length >= HUB_PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${HUB_PORTS_PER_WORKER - 1} workspaces`);
@@ -95,6 +99,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_CHAT_POLICY: hubChatPolicy ? "1" : "0",
           UATU_E2E_HUB_CHAT_POLICY_TRUST: hubChatPolicyTrust ? "1" : "0",
           UATU_E2E_HUB_WORKER_DISMISSALS: hubWorkerDismissals ? "1" : "0",
+          UATU_GITHUB_FAKE: hubGithubFake ? "1" : "0",
           UATU_E2E_HUB_PUSH: hubPush ? "1" : "0",
           UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },

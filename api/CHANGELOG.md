@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 16 / Workspace 37 - Unreleased (pull request worktrees)
+
+Compatibility: breaking (Hub schema); additive (accepted requests)
+
+### Changes
+
+- `POST /api/hub/worktrees/create` accepts `mode: "pull-request"` with `pullRequest: { number, remote }` and no `base` or `baseRef`. The Hub makes no GitHub call. It fetches `refs/pull/<number>/head` from that configured remote with the parent workspace's credential policy, as `fetch` does, and never prompts. It then checks the commit out on local branch `pr/<number>`, whose upstream is that ref on that remote. The recorded creation origin (`sourceRef`) and the checkout's `upstream` are `refs/pull/<number>/head`.
+- An existing `pr/<number>` whose upstream is exactly that ref on that remote is checked out as it is, never reset or fast-forwarded. Any other existing `pr/<number>` is refused as `branch-exists`. A pull request the remote does not publish is refused as `ref-unavailable`, with a message saying the remote may not be the pull request's GitHub repository. A remote the repository does not have, a number that is not a positive integer and a malformed remote name are refused as `invalid-input`. None of these refusals creates a branch or a checkout.
+- A successful pull-request creation reports `pullRequestHead`, the fetched head as 12 hex digits, and its checkout carries `head`. They differ when an existing branch was reused.
+- `CreateWorktreeRequest.mode` gains `pull-request`, the request gains `pullRequest`, and `WorktreeOperationResult` gains `pullRequestHead`. Both schemas are closed, so the revision increments even though every existing request remains valid.
+
+### Migration
+
+Hub clients that generate request and result types from OpenAPI must regenerate against Hub revision 16. Strict validators for revision 15 reject the new mode, the `pullRequest` request field and the `pullRequestHead` result field. Existing `new-branch`, `existing-local` and `remote-tracking` requests are unchanged. To check out a pull request from a fork, send `{ mode: "pull-request", pullRequest: { number, remote } }` and expect branch `pr/<number>`. A same-repository pull request can still use `fetch` and then `remote-tracking` on its head branch, which keeps it pushable. Older Hubs refuse the new mode as `invalid-input`.
+
 ## Hub 15 / Workspace 37 - Unreleased (inline assistant visuals and recovery intent)
 
 Compatibility: breaking (Hub and workspace)
