@@ -924,6 +924,9 @@ export class ChatAdapter {
   private readonly nativeAccountingReads = new Map<string, { controller: AbortController; promise: Promise<void>; callers: number; sources: WorkerSourceRead }>();
   private readonly automaticBackgroundTimeoutMs: number;
   private readonly steerAdmissionTimeoutMs: number;
+  // Immediate steers awaiting the agent's answer, per conversation: Stop
+  // does not queue behind them.
+  private readonly immediateSteers = new Map<string, number>();
   private inboxClock = 0;
   // Internal held-submission order survives delivery switches and uncertain
   // admissions. Retained only on bounded pending owners/admission fences, not
@@ -3665,8 +3668,12 @@ export class ChatAdapter {
       ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
     }));
     let accepted: { messageId: string; createdAt?: number };
+    this.immediateSteers.set(conversationId, (this.immediateSteers.get(conversationId) ?? 0) + 1);
     try {
-      accepted = await this.boundedSteerAdmission(admission, input.messageId);
+      accepted = await this.boundedSteerAdmission(admission, input.messageId).finally(() => {
+        const left = (this.immediateSteers.get(conversationId) ?? 1) - 1;
+        if (left > 0) this.immediateSteers.set(conversationId, left); else this.immediateSteers.delete(conversationId);
+      });
     } catch (error) {
       if (error instanceof OperationOutcomeUnknownError) {
         // Late evidence, never a resend: an acceptance that arrives after the
@@ -3923,7 +3930,10 @@ export class ChatAdapter {
     // dormant flag alone, so cancellation waits for it to finish admitting
     // and then interrupts the turn it just started — while deliveries that
     // have not started find the queue paused.
-    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
+    // An immediate steer holds the lane until the agent answers it, which
+    // may be the end of the turn being stopped: Stop goes ahead of it, and
+    // the steer then settles as refused or unknown (add-antigravity-chat D9).
+    const stopNow = async (): Promise<{ cancelled: true }> => {
       await this.requireSession(conversationId);
       // Cancel means stop: held messages stay queued and removable, and none
       // of them rides the idle transition this interrupt causes. Paused
@@ -3957,7 +3967,10 @@ export class ChatAdapter {
         if (stop.resumed) this.projection(conversationId);
         this.stoppingTurns.delete(conversationId);
       }
-    }));
+    };
+    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => (this.immediateSteers.get(conversationId) ?? 0) > 0
+      ? stopNow()
+      : this.enqueuePromptAdmission(conversationId, stopNow));
   }
 
   undo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
