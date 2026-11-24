@@ -289,6 +289,28 @@ test.describe("chat and agent logins", () => {
     await expect(session.locator(".chat-configuration-model").first()).toBeVisible();
   });
 
+  test("on a Hub-served page, Antigravity's login notice names agy and Agent accounts has no Antigravity card", async ({ hub, hubContext }, testInfo) => {
+    const workspace = hub.workspaces[0]!;
+    await childChatControl(workspace, { action: "agents", count: 3 });
+    try {
+      await childChatControl(workspace, { action: "login", agent: "antigravity", login: "missing" });
+      const session = await openSessionTab(hubContext, workspace);
+      await openChatPanel(session);
+      await session.locator("#chat-new-conversation").click();
+      await session.locator("#chat-agent-menu .chat-agent-menu__item", { hasText: "Antigravity" }).click();
+      const notice = session.locator("#chat-login-notice");
+      await expect(notice).toContainText("Antigravity is not logged in.");
+      await expect(notice).toContainText("Run agy where UatuCode runs.");
+      await expect(notice.locator("a")).toHaveCount(0);
+      await captureScreenshot(session, testInfo, "antigravity-login-notice-hub");
+      const settings = await hubContext.newPage();
+      await openSettings(settings);
+      await expect(settings.locator('.agent-account-card[data-agent="antigravity"]')).toHaveCount(0);
+    } finally {
+      await childChatControl(workspace, { action: "agents", count: 1 });
+    }
+  });
+
   test("a login made outside UatuCode clears the notice, even after a status read failed", async ({ hub, hubContext }) => {
     const workspace = hub.workspaces[0]!;
     await childChatControl(workspace, { action: "login", login: "missing" });

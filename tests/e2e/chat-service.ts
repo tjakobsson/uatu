@@ -51,6 +51,9 @@ type FakeE2EChatServiceOptions = {
   // Capabilities this fake declares beyond the shared default set (a
   // Claude-shaped fixture declares typed model ids; the OpenCode one does not).
   extraCapabilities?: ChatCapability[];
+  // The whole declaration instead of the default set, for a fixture shaped
+  // like an agent that lacks some of the defaults (Antigravity).
+  capabilities?: ChatCapability[];
 };
 
 export type UsageReadOutcome = {
@@ -155,7 +158,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   private defaultCapabilities(): ChatCapability[] {
-    return [...FakeE2EChatService.DEFAULT_CAPABILITIES, ...(this.options.extraCapabilities ?? [])];
+    return [...this.options.capabilities ?? FakeE2EChatService.DEFAULT_CAPABILITIES, ...(this.options.extraCapabilities ?? [])];
   }
 
   private static defaultModels(): ChatModel[] {
