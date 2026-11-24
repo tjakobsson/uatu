@@ -61,7 +61,8 @@ type Conversation = {
   configuration: ConversationConfiguration;
   applied: ConversationConfiguration | null;
   turn?: Turn;
-  reads: number;
+  // History reads and prompts being prepared: the process is in use.
+  holds: number;
   idle?: ReturnType<typeof setTimeout>;
   readonly cancels: Set<() => void>;
   permissions: number;
@@ -238,9 +239,9 @@ export class AntigravityProvider implements ChatProvider {
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
     const conversation = this.conversation(sessionId);
     if (!conversation.seeded) {
-      conversation.reads += 1;
+      conversation.holds += 1;
       try { await this.ensureProcess(conversation); }
-      finally { conversation.reads -= 1; this.scheduleIdle(conversation); }
+      finally { conversation.holds -= 1; this.scheduleIdle(conversation); }
     }
     const items = conversation.items;
     const end = historyPageEnd(options.cursor, conversation.version, items.length);
@@ -279,9 +280,23 @@ export class AntigravityProvider implements ChatProvider {
     if (conversation.turn) throw new Error("Antigravity is still answering this conversation");
     // A login made through `agy` since the last listing clears the notice.
     if (this.login === "missing") await this.listSessions().catch(() => undefined);
+    // Held while it is prepared, so idle release cannot end the process
+    // between loading it and sending the prompt.
+    conversation.holds += 1;
+    try {
+      return await this.startTurn(conversation, input);
+    } finally {
+      conversation.holds -= 1;
+      this.scheduleIdle(conversation);
+    }
+  }
+
+  private async startTurn(conversation: Conversation, input: { text: string; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt: number }> {
+    const sessionId = conversation.sessionId;
     const process = await this.ensureProcess(conversation);
     await this.applyConfiguration(conversation, process, input);
     const blocks = await this.promptBlocks(input);
+    if (conversation.turn) throw new Error("Antigravity is still answering this conversation");
     const now = this.now();
     const memory = conversation.memory;
     const user = nextUserMessage(memory, input.text, now, { attachments: attachmentRefs(input.attachments) });
@@ -616,10 +631,10 @@ export class AntigravityProvider implements ChatProvider {
   private scheduleIdle(conversation: Conversation): void {
     clearTimeout(conversation.idle);
     conversation.idle = undefined;
-    if (!conversation.process || conversation.turn || conversation.permissions > 0 || conversation.reads > 0 || this.disposed) return;
+    if (!conversation.process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0 || this.disposed) return;
     const timer = setTimeout(() => {
       const process = conversation.process;
-      if (!process || conversation.turn || conversation.permissions > 0 || conversation.reads > 0) return;
+      if (!process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0) return;
       conversation.process = undefined;
       conversation.applied = null;
       void this.closeProcess(process);
@@ -722,7 +737,7 @@ export class AntigravityProvider implements ChatProvider {
     if (!conversation) {
       conversation = {
         sessionId, memory: createAcpMemory(sessionId, this.workspacePath), items: [], accounting: [], seeded: false, version: randomUUID(),
-        loading: false, configuration: {}, applied: null, reads: 0, cancels: new Set(), permissions: 0,
+        loading: false, configuration: {}, applied: null, holds: 0, cancels: new Set(), permissions: 0,
       };
       this.conversations.set(sessionId, conversation);
     }

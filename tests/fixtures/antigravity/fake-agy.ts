@@ -16,6 +16,7 @@
 //   refuse-steer         present: a prompt sent during a run is refused (-32603)
 //   crash-on-steer       present: the process exits 1 on a prompt sent during a run
 //   hang-initialize      present: `initialize` never answers
+//   slow-config          present: `session/set_config_option` answers after 300 ms
 //   hang-list            present: `session/list` never answers
 //   orphan-child         present: each process starts a `sleep 30` worker in its
 //                        group, its pid in `orphans`
@@ -172,8 +173,9 @@ app.onRequest(methods.agent.session.load, async ({ params, client }) => {
   return sessionAnswer({ ...session, model: fixture.defaultModel, thoughtLevel: fixture.defaultThoughtLevel, mode: fixture.modes.currentModeId }) as never;
 });
 
-app.onRequest(methods.agent.session.setConfigOption, ({ params }) => {
+app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
   log({ method: "session/set_config_option", params });
+  if (flag("slow-config")) await Bun.sleep(300);
   let answer: ReturnType<typeof configOptions> = [];
   updateSession(params.sessionId, session => {
     const value = String(params.value);

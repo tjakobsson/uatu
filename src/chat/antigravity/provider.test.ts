@@ -71,6 +71,17 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(methods.indexOf("session/load")).toBeGreaterThan(methods.indexOf("session/new"));
     });
 
+    test("idle release waits for a prompt that is still being prepared", async () => {
+      const { fake, provider, ended, statuses } = await setup({ idleReleaseMs: 30 });
+      const session = await provider.createSession("a");
+      await fake.setFlag("slow-config", true);
+      // Applying the model outlasts the idle bound several times over.
+      await provider.prompt(session.id, { id: "p", text: "Say hello", delivery: "queue", model: { providerId: "antigravity", modelId: "gemini-4-argon" } });
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["completed"]);
+      expect((await fake.log()).filter(entry => entry.method === "initialize")).toHaveLength(1);
+    });
+
     test("dispose ends every process it started", async () => {
       const { fake, provider } = await setup();
       await provider.createSession("a");
