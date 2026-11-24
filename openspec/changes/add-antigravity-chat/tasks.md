@@ -63,7 +63,7 @@ commit that passes `bun run test:ci` on its own.
 
 - [x] 6.1 Add the e2e Antigravity fake to `tests/e2e/server.ts` and an e2e case for the picker order, the login notice with `agy` and no Agent accounts link on a Hub-served page, a basic conversation, and a mid-turn steer. Verify that it passes in `bun run test:e2e` for that file.
 - [x] 6.2 Add `extractAntigravity()` to `scripts/agent-coverage.ts` and `src/chat/antigravity/sdk-coverage.ts`. Verify that `bun run coverage:agents` prints an Antigravity section and that `scripts/agent-coverage.test.ts` passes, including a stale-annotation failure.
-- [ ] 6.3 Update `docs/CHAT.md`. Cover:
+- [x] 6.3 Update `docs/CHAT.md`. Cover:
   - Antigravity prerequisites: install `agy`, sign in by running `agy`, and check that `agy --version` works in the server's environment.
   - Google's consumer-plan policy note, with its three links.
   - The agent list and vocabulary, cost provenance and limits, and the untested areas.
