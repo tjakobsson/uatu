@@ -70,7 +70,7 @@ commit that passes `bun run test:ci` on its own.
   - The Scope section, which no longer says Chat does not implement ACP.
 
   Verify that every documented command and path matches the code.
-- [ ] 6.4 Update `ARCHITECTURE.md`'s agent sections, the `CLAUDE.md` folder map (`chat/antigravity/`), and CONTRIBUTING.md's list of agent SDKs. Verify that the folder map matches `ls src/chat/antigravity`.
+- [x] 6.4 Update `ARCHITECTURE.md`'s agent sections, the `CLAUDE.md` folder map (`chat/antigravity/`), and CONTRIBUTING.md's list of agent SDKs. Verify that the folder map matches `ls src/chat/antigravity`.
 
 ## 7. Integration
 
