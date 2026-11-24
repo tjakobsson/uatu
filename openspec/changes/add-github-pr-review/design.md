@@ -126,7 +126,10 @@ The field stays well under 8 KB. It is absent for non-Git repositories.
 | `GET /api/github/pull-requests` | Open PR list (≤100), cached 30 s, with the viewer's pending comment count per PR. |
 | `GET /api/github/pull-request/files?number=` | Changed paths, used for the anchoring check and file markers. |
 | `POST /api/github/refresh` | Manual refresh. |
-| `POST /api/github/fetch-refs` | D7. |
+| `POST /api/github/fetch-refs` | D7: the explicit, narrow fetch of a pull request's head into `refs/uatu/pull/<n>/head`. Answers `{ headOid }` or a classified failure. |
+| `GET /api/github/pull-request/file?number=&path=&rev=head\|base&view=rendered\|source` | D17: the file view's payload, a rendered document (`id = pr:<n>@<oid>:<path>`) plus `revision: { number, rev, oid, blobBase }`, `bytes` and `lfsPointer`. 409 `{ state: "not-fetched" }`, 404 outside the tree, 415 binary, 413 over 1 MB. |
+| `GET /api/github/pull-request/tree?number=` | D17: `{ headOid, paths[], truncated }` for All files, exposure-filtered, at most 50,000 paths. |
+| `GET /api/github/pr-blob/<repoKey>/<n>/<oid>/<path…>` | D17: raw bytes for a rendered file's images and assets. Path-based, so the preview's `<base href>` resolves relative URLs with no HTML rewriting. |
 | `POST /api/github/comments` | Conversation comment. |
 | `POST /api/github/review/threads` | New inline comment. |
 | `POST /api/github/review/threads/:threadId/replies` | Thread reply. |
@@ -160,9 +163,38 @@ Refresh is event-driven; there is no timer (owner decision). A timer spends the 
 
 `CompareBaseMode` gains `pull-request`, and `CompareBase` carries `pullRequest: { number, exact }`. The anchor stays `<remote>/<baseRefName>`, so "Since base" labels are unchanged. `diff.ts`'s per-repo context cache adds the override identity (number + `baseRefOid`) to its HEAD key, so a new PR base invalidates it.
 
-**Fetch pull request refs** is an explicit child action, the only Git mutation the child makes. It runs `git fetch --no-tags <remote> +refs/heads/<base>:refs/remotes/<remote>/<base>`, plus `+refs/heads/<head>:refs/remotes/<remote>/<head>` for same-repository PRs or `refs/pull/<n>/head` (objects only) for forks, with the session's Git credentials and `GIT_TERMINAL_PROMPT=0`. It never touches the working tree, the index or local branches, and never runs automatically.
+**Fetch pull request refs** is an explicit child action, the only Git mutation the child makes. Narrowed for the file view (D17), it fetches the pull request's head into a private ref:
+
+```
+git -c fetch.fsckObjects=true fetch --no-tags <remote> +refs/pull/<n>/head:refs/uatu/pull/<n>/head
+```
+
+`refs/pull/<n>/head` lives in the base repository, so forks work the same way. The base branch (`+refs/heads/<base>:refs/remotes/<remote>/<base>`) is fetched only when a comparison or the file view's base revision needs a base commit that isn't local. A shallow repository fetches with `--depth=1`. The fetch runs with the session's Git credentials and `GIT_TERMINAL_PROMPT=0`, never touches the working tree, the index, local branches or remote-tracking refs other than the base's, and never runs automatically.
+
+`refs/uatu/*` sits outside every refspec, so `fetch --prune` leaves it alone. The namespace is the owner's choice (Q4 of the file view design): the refs show in `git log --all` and to agents in the terminal, and are shared by linked worktrees, and Uatu keeps at most 20 per repository, pruning the oldest first and a merged or closed pull request's ref when the reviewer leaves it. The earlier note that fetch-refs could be dropped unless D8 returned no longer applies: the file view needs it.
 
 *Alternative:* fetch automatically when the base is missing. Rejected: the child otherwise only observes repositories, and silent network fetches with credentials should be a user decision.
+
+### D17. The pull request file view
+
+A changed file opens at the pull request's head in the document preview's own Rendered / Source / Diff chooser (`?pr=<n>&path=<path>[&rev=base]`), as a third state of the `pull-request` preview mode. Diff is Files changed limited to that file (`mountFilesChanged(…, { only })`), so threads, the composer and the pending review are the same; Rendered and Source show a threads bar with Show in Diff, and Source marks thread lines (exact: a current RIGHT-side thread's line is a head line). Commenting stays in Diff (D8 is unchanged). Files changed has no per-file Rendered switch: Mermaid, the outline, Find, split layout and the `<base href>` are built for one mounted preview, so each header gets View file instead.
+
+- **Contents come from Git**, not the contents API: exact bytes at `headRefOid`, offline after one fetch, no API budget, any size within uatu's caps, forks through `refs/pull/<n>/head`. The seam (`GithubService.fetchPullRequestHead`, `pullRequestBlob`, `pullRequestTree`) answers bytes; the real service reads them with `git cat-file --batch` and `git ls-tree -r -z -l` on the local head (no checkout, filters or textconv), `cat-file -e <oid>^{commit}` deciding present or not fetched. The in-memory fake answers a changed file's `new` / `old` text and the seed's `headTree`.
+- **One render pipeline.** `renderDocument` splits into a pure `renderDocumentSource({ id, name, relativePath, kind, source }, view)` and its filesystem wrapper; the file route feeds it blob text (classified with `classifyBytes`, the in-memory `sniffBinary`), so sanitizing, highlighting and titles are the document preview's. Payloads are cached per (repository, commit, path, view), about 200, never invalidated because the key is a commit.
+- **The blob route** serves only the pull request's current head or base commit for a known repository key (a short hash of the repository id), with `nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, an immutable private cache lifetime and never `text/html`; the exposure deny list applies. A rendered link that resolves under it opens that path's file view (`src/preview/anchors.ts`).
+- **The mount** takes a context (`MountContext`): a pull request file skips the workspace's image revisions and selection guard; the view guards its own loads. The view chooser, layout and Wrap reach the file view through a small host registry (`src/preview/view-host.ts`).
+- **All files** lists the head's tree in the Files pane's PR scope with only the exposure deny list applied.
+- **The branch's own pull request** compares the file's text with the checkout's through the same source renderer: equal text says `Same as your checkout` with Open in workspace; otherwise `local edits` (HEAD at the PR head) or `checkout at <sha>`. Comparing the file rather than requiring `HEAD == headRefOid` and a clean file lets an unchanged file read as the same even when commits differ; the PR head stays on screen either way.
+
+Owner decisions on the design's questions:
+
+- **Q1, consent:** a card per pull request before fetching (`Get #639's files`, naming the private ref and that the checkout is untouched), with Review the diff instead and Open on GitHub ↗. A per-workspace "fetch when I open a file" setting may come later. The fake shows the card through its `head-not-fetched` scenario; Fetch succeeds at once.
+- **Q2, private repositories without a Git credential:** the card says it couldn't fetch and offers Open on GitHub ↗; no contents-API fallback, so there is one content path.
+- **Q3, default mode for PR-scope rows:** the shared view preference (`appState.viewMode`), not always Diff. A reviewer reading documents stays in Rendered from file to file, Diff is one segment away, and it matches how documents open; View file from Files changed opens Rendered for documents (Source otherwise) when the preference was Diff, since it asks to leave the diff.
+- **Q4, `refs/uatu/pull/*`:** accepted, at most 20 per repository (D7).
+- **Q5, ignore rules for All files:** only the exposure deny list (VCS metadata, OS litter), not `.uatu.json` ignore rules: those describe the working tree and what the checkout exposes, while the PR's tree is what GitHub already shows every reviewer, and hiding part of it would hide what is being merged.
+
+**Phasing.** Phase 1 (the file view on the fake) and phase 3 (All files and the base revision) are built against the fake; phase 4's Source markers are built, Rendered block markers are not. Phase 2, the Git reader (`src/document/git-objects.ts`), the narrow fetch with pruning and the shallow rule, the real own-PR head check and the new-commits notice against a moving head, waits for the `gh` transport and is testable now against temporary repositories and a bare remote holding `refs/pull/<n>/head` (D15).
 
 ### D8. Anchoring rule: comment only on a provably identical diff
 

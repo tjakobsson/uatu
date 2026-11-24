@@ -3,7 +3,11 @@
 // workspace switcher), the Files pane lists that PR's changed files as a tree
 // in place of the workspace tree, with each file's open threads, pending
 // comments and line counts, under a bar naming it (`PR #618` and its title).
-// Picking a file opens its diff in the PR's Files changed view. The way back
+// Picking a file opens it in the pull request file view
+// (src/preview/pull-request-file.ts) in the shared view mode: Rendered,
+// Source, or Diff, where its review happens. A switch below the bar lists
+// Changed files only, or All files: every path at the PR head (the head's
+// tree, exposure-filtered), so unchanged files can be read too. The way back
 // is the switcher's (its Viewing strip, chip and status card), which
 // dispatches SHOW_BRANCH_EVENT: showBranchPullRequest returns the pane, the
 // preview and the Files pane to the checked-out branch: its pull request's
@@ -27,6 +31,7 @@
 
 import { FileTree } from "@pierre/trees";
 
+import { githubApi, GithubRequestError } from "../github/client";
 import { staleNotice } from "../github/availability";
 import { pullRequestStore } from "../github/pull-request-store";
 import { clockTime } from "../github/present";
@@ -47,12 +52,20 @@ const scopeElement = document.querySelector<HTMLElement>("#pr-scope")!;
 const barElement = document.querySelector<HTMLElement>("#pr-scope-bar")!;
 const treeElement = document.querySelector<HTMLElement>("#pr-scope-tree")!;
 const messageElement = document.querySelector<HTMLElement>("#pr-scope-message")!;
+const switchElement = document.querySelector<HTMLElement>("#pr-scope-switch")!;
 const overviewNote = document.querySelector<HTMLElement>("#change-overview-scope");
 
 let tree: FileTree | null = null;
 let rows = new Map<string, PullRequestFileRow>();
 let pathsKey = "";
 let shownCount: number | null = null;
+// Changed files only, or every file at the head (page-local).
+let scopeMode: "changed" | "all" = "changed";
+// The head's tree per pull request, read once per head.
+type TreeState = { status: "loading" } | { status: "ready"; headOid: string; paths: string[]; truncated: boolean } | { status: "not-fetched" } | { status: "failed"; message: string };
+const trees = new Map<number, TreeState & { headOid?: string }>();
+let selectedPath: string | null = null;
+let treeMode: "changed" | "all" = "changed";
 
 export function initPullRequestScope(): void {
   setFilesScopeCount(() => shownCount);
@@ -65,8 +78,83 @@ export function initPullRequestScope(): void {
     const row = event.composedPath().find((target): target is Element =>
       target instanceof Element && target.matches('button[data-type="item"][data-item-path]'));
     const path = row?.getAttribute("data-item-path");
-    if (path && rows.has(path)) openFile(path);
+    if (path && (rows.has(path) || (scopeMode === "all" && allPaths().has(path)))) openFile(path);
   });
+  switchElement.addEventListener("click", event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-pr-scope-mode]");
+    if (button) setScopeMode(button.dataset.prScopeMode as "changed" | "all", false);
+  });
+  // A radio group: the arrow keys move and choose.
+  switchElement.addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    setScopeMode(scopeMode === "changed" ? "all" : "changed", true);
+  });
+  messageElement.addEventListener("click", event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-pr-scope-fetch]");
+    if (button) void fetchHead(button);
+  });
+  // The file view says which file is open: its row is the selected one.
+  document.addEventListener("uatu:pull-request-file-open", event => {
+    selectedPath = (event as CustomEvent<{ path: string | null }>).detail.path;
+    syncSelection();
+  });
+  // Fetched from the file view's consent card, or reset by the dev scenario
+  // switch: the tree is read again.
+  document.addEventListener("uatu:pull-request-head-fetched", () => { trees.clear(); renderPullRequestScope(); });
+  document.addEventListener("uatu:github-scenario", () => { trees.clear(); renderPullRequestScope(); });
+}
+
+function setScopeMode(next: "changed" | "all", focus: boolean): void {
+  if (next === scopeMode) return;
+  scopeMode = next;
+  renderPullRequestScope();
+  if (focus) switchElement.querySelector<HTMLElement>(`[data-pr-scope-mode="${next}"]`)?.focus();
+}
+
+function allPaths(): Set<string> {
+  const number = pullRequestStore.scopedNumber();
+  const tree = number === null ? undefined : trees.get(number);
+  return new Set(tree?.status === "ready" ? tree.paths : []);
+}
+
+async function loadTree(number: number, headOid: string): Promise<void> {
+  const repositoryId = pullRequestStore.state.repositoryId;
+  if (!repositoryId) return;
+  trees.set(number, { status: "loading", headOid });
+  try {
+    const tree = await githubApi.pullRequestTree({ repository: repositoryId, number });
+    trees.set(number, { status: "ready", headOid: tree.headOid, paths: tree.paths, truncated: tree.truncated });
+  } catch (error) {
+    trees.set(number, error instanceof GithubRequestError && error.state === "not-fetched"
+      ? { status: "not-fetched", headOid }
+      : { status: "failed", headOid, message: error instanceof Error ? error.message : "The request failed." });
+  }
+  if (pullRequestStore.scopedNumber() === number) renderPullRequestScope();
+}
+
+// All files needs the head locally: the same explicit fetch as the file
+// view's consent card.
+async function fetchHead(button: HTMLButtonElement): Promise<void> {
+  const number = pullRequestStore.scopedNumber();
+  const repositoryId = pullRequestStore.state.repositoryId;
+  if (number === null || !repositoryId) return;
+  button.disabled = true;
+  button.textContent = "Fetching…";
+  try {
+    await githubApi.fetchHead({ repository: repositoryId, number });
+    document.dispatchEvent(new CustomEvent("uatu:pull-request-head-fetched", { detail: { number } }));
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = `Fetch #${number}'s head`;
+    messageElement.querySelector("[data-pr-scope-fetch-status]")!.textContent = `Couldn't fetch: ${error instanceof Error ? error.message : "the request failed."}`;
+  }
+}
+
+function syncSelection(): void {
+  if (!tree) return;
+  for (const path of tree.getSelectedPaths()) if (path !== selectedPath) tree.getItem(path)?.deselect();
+  if (selectedPath && pullRequestStore.scopedNumber() !== null) tree.getItem(selectedPath)?.select();
 }
 
 // Returns the workspace to the checked-out branch: the pane shows its pull
@@ -96,9 +184,8 @@ function openFile(path: string): void {
   const repositoryId = pullRequestStore.state.repositoryId;
   if (number === null || !repositoryId) return;
   revealPreviewSurface();
-  activatePullRequestPreview({ repositoryId, number, tab: "files", file: path }, { pushHistory: true });
-  // Also when the URL already names this file: tapping it again scrolls back.
-  document.dispatchEvent(new CustomEvent("uatu:pull-request-reveal", { detail: { number, path } }));
+  // The file view, in the shared view mode (Diff is where it is reviewed).
+  activatePullRequestPreview({ repositoryId, number, tab: "file", path, rev: "head" }, { pushHistory: true });
 }
 
 // "Local branch" on Change Overview whenever what it compares differs from
@@ -153,6 +240,7 @@ export function renderPullRequestScope(): void {
     // The Files count and the pane heights follow the scope.
     renderSidebar();
   }
+  switchElement.hidden = !scoped;
   if (!scoped) return;
 
   const pr = detail?.summary;
@@ -169,16 +257,43 @@ export function renderPullRequestScope(): void {
     messageElement.textContent = `Reading pull request #${number}…`;
     return;
   }
-  messageElement.hidden = detail.files.length > 0;
-  messageElement.textContent = "This pull request changes no files.";
-  treeElement.hidden = detail.files.length === 0;
   rows = new Map(pullRequestFileRows(detail).map(row => [row.path, row]));
-  const paths = [...rows.keys()];
-  const nextKey = `${number}\n${paths.join("\n")}`;
+  syncSwitch(detail.files.length);
+  let paths = [...rows.keys()];
+  if (scopeMode === "all") {
+    const cached = trees.get(number);
+    if (!cached || (cached.headOid && cached.headOid !== detail.summary.headRefOid)) void loadTree(number, detail.summary.headRefOid);
+    const state = trees.get(number)!;
+    if (state.status !== "ready") {
+      treeElement.hidden = true;
+      messageElement.hidden = false;
+      messageElement.innerHTML = state.status === "loading" ? `Reading #${number}'s files…`
+        : state.status === "not-fetched" ? `Listing every file needs #${number}'s head on this machine: uatu fetches it into a private ref; your branch and files stay as they are. <button type="button" class="gh-button" data-pr-scope-fetch>Fetch #${number}'s head</button> <span data-pr-scope-fetch-status role="status"></span>`
+        : `Couldn't list #${number}'s files: ${escapeHtml(state.message)}`;
+      return;
+    }
+    paths = state.paths;
+  }
+  messageElement.hidden = paths.length > 0;
+  messageElement.textContent = scopeMode === "all" ? "The pull request's head has no files." : "This pull request changes no files.";
+  treeElement.hidden = paths.length === 0;
+  treeElement.setAttribute("aria-label", scopeMode === "all" ? `Every file at #${number}'s head` : "Files changed in the pull request");
+  const nextKey = `${number}\n${scopeMode}\n${paths.join("\n")}`;
+  // All files opens only the changed files' folders.
+  const expanded = scopeMode === "all" ? [...new Set([...rows.keys()].flatMap(ancestorPaths))] : [...new Set(paths.flatMap(ancestorPaths))];
+  // All files starts with only the changed files' folders open: a new tree
+  // when the list switches (the library's expansion default is per tree).
+  if (tree !== null && treeMode !== scopeMode) {
+    tree.cleanUp();
+    treeElement.replaceChildren();
+    tree = null;
+  }
+  treeMode = scopeMode;
   if (tree === null) {
     tree = new FileTree({
       paths,
-      initialExpansion: "open",
+      initialExpansion: scopeMode === "all" ? "closed" : "open",
+      ...(scopeMode === "all" ? { initialExpandedPaths: expanded } : {}),
       icons: { set: "standard", colored: true },
       search: false,
       renderRowDecoration: ({ row }) => {
@@ -189,12 +304,24 @@ export function renderPullRequestScope(): void {
     applyTreeTheme(treeElement, activeColorScheme());
     tree.render({ fileTreeContainer: treeElement });
   } else if (nextKey !== pathsKey) {
-    tree.resetPaths(paths, { initialExpandedPaths: [...new Set(paths.flatMap(ancestorPaths))] });
+    tree.resetPaths(paths, { initialExpandedPaths: expanded });
   } else {
     // Same files, new marks: repaint the decorations.
     tree.setComposition(tree.getComposition());
   }
   pathsKey = nextKey;
   tree.setGitStatus([...rows.values()].map(row => ({ path: row.path, status: row.status })));
+  syncSelection();
+}
+
+function syncSwitch(changed: number): void {
+  const count = switchElement.querySelector<HTMLElement>("[data-pr-scope-changed-count]");
+  if (count) count.textContent = String(changed);
+  for (const button of switchElement.querySelectorAll<HTMLButtonElement>("[data-pr-scope-mode]")) {
+    const active = button.dataset.prScopeMode === scopeMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
 }
 

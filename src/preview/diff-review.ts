@@ -32,6 +32,11 @@
 // sending control says why it waits. Opening the composer keeps the line it
 // comments on in view above it, and its actions clear of the touch tab bar.
 //
+// The pull request file view (src/preview/pull-request-file.ts) mounts the
+// same view for one file (`only`) as its Diff mode: the same threads,
+// composers and pending review. Each file header here has View file, which
+// opens that file in the file view (`onViewFile`).
+//
 // The diffs come from the GitHub service. With the fake they are synthetic,
 // so every displayed line is the PR's own line and commenting is always
 // offered; the real service applies the anchoring rule (D8) first.
@@ -78,6 +83,15 @@ export type FilesChangedView = {
 
 // Split needs room for two code columns; below this the diff stays Unified.
 export const SPLIT_MIN_WIDTH = 600;
+
+export type FilesChangedOptions = {
+  // One file only: the file view's Diff.
+  only?: string;
+  // View file on each header: open that file in the file view.
+  onViewFile?: (path: string) => void;
+};
+
+const VIEW_FILE_ICON = `<svg class="pr-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/></svg>`;
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   md: "markdown", ts: "typescript", tsx: "tsx", js: "javascript", json: "json", css: "css", html: "html", yaml: "yaml", yml: "yaml",
@@ -152,7 +166,7 @@ export function reviewBarShownOn(surface: ReviewBarSurface, layout: { touch: boo
 // The keys that comment on a line, said in the desktop bar.
 export const REVIEW_KEYS_HINT = "Click a line number (or hover a line and click <kbd>+</kbd>) to comment on it. From the keyboard: <kbd>Tab</kbd> to a file's line numbers, move with <kbd>↑</kbd> <kbd>↓</kbd>, and press <kbd>Enter</kbd>.";
 
-export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail, repositoryId: string): FilesChangedView {
+export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail, repositoryId: string, options: FilesChangedOptions = {}): FilesChangedView {
   let detail = initial;
   let version = 0;
   const draftTarget = { repositoryId, number: initial.summary.number };
@@ -183,8 +197,8 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     if (timer !== undefined) clearTimeout(timer);
     justResolved.delete(threadId);
   };
-  // The files in tree order, as the Files pane lists them.
-  const orderedFiles = () => inTreeOrder(detail.files);
+  // The files in tree order, as the Files pane lists them (or the one file).
+  const orderedFiles = () => inTreeOrder(options.only === undefined ? detail.files : detail.files.filter(file => file.path === options.only));
   const handles = new Map<string, DiffReviewHandle<AnnotationData>>();
   const target = () => ({ repository: repositoryId, number: detail.summary.number });
   let diffStyle: DiffStyle = appState.diffStyle;
@@ -347,7 +361,11 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   function renderSummary() {
     const pr = detail.summary;
     const refs = `Compared against the pull request's base, ${pr.baseRefName} at ${shortOid(pr.baseRefOid)}; head ${shortOid(pr.headRefOid)}`;
-    host.querySelector("[data-pr-files-summary]")!.innerHTML = `<strong>${plural(pr.changedFiles, "file", "files")}</strong> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span> · <span class="pr-files-refs" title="${escapeHtmlAttribute(refs)}"><span class="sr-only">base </span><code>${escapeHtml(pr.baseRefName)}@${escapeHtml(shortOid(pr.baseRefOid))}</code> <span aria-hidden="true">←</span><span class="sr-only"> head </span> <code>${escapeHtml(shortOid(pr.headRefOid))}</code></span>${detail.mock ? ` · <span class="gh-mock-label" title="Mocked diffs: served by the in-memory fake; nothing reaches GitHub">Mocked</span>` : ""}`;
+    const only = options.only === undefined ? null : detail.files.find(file => file.path === options.only) ?? null;
+    const counts = only
+      ? `<strong>This file</strong> · <span class="gh-add">+${only.additions}</span> <span class="gh-del">−${only.deletions}</span>`
+      : `<strong>${plural(pr.changedFiles, "file", "files")}</strong> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span>`;
+    host.querySelector("[data-pr-files-summary]")!.innerHTML = `${counts} · <span class="pr-files-refs" title="${escapeHtmlAttribute(refs)}"><span class="sr-only">base </span><code>${escapeHtml(pr.baseRefName)}@${escapeHtml(shortOid(pr.baseRefOid))}</code> <span aria-hidden="true">←</span><span class="sr-only"> head </span> <code>${escapeHtml(shortOid(pr.headRefOid))}</code></span>${detail.mock ? ` · <span class="gh-mock-label" title="Mocked diffs: served by the in-memory fake; nothing reaches GitHub">Mocked</span>` : ""}`;
     for (const button of host.querySelectorAll<HTMLButtonElement>("[data-diff-style]")) {
       const active = button.dataset.diffStyle === effectiveStyle();
       button.classList.toggle("is-active", active);
@@ -364,88 +382,19 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
     }
   }
 
-  // Jump to file: every file in tree order, with its counts; the file being
-  // read is marked. A filter field over the list narrows it by path (focused
-  // on desktop; on touch, where it would raise the keyboard, a tap away):
-  // Enter there opens the first match, and the arrow keys move between the
-  // filter and the rows. Picking one scrolls to it and focuses its header.
+  // Jump to file (openFileJumpDialog): picking one scrolls to it and
+  // focuses its header.
   function openJumpDialog(opener: HTMLElement) {
-    const marks = reviewMarksByPath(detail);
-    // The file being read.
-    const current = currentSection()?.dataset.filePath ?? null;
-    const files = orderedFiles();
-    const dialog = document.createElement("dialog");
-    dialog.className = "gh-dialog pr-jump-dialog";
-    dialog.setAttribute("aria-labelledby", "pr-jump-title");
-    dialog.innerHTML = `<div class="gh-dialog-body">
-        <h2 class="gh-dialog-title" id="pr-jump-title">Jump to file</h2>
-        <p class="gh-dialog-sub">${plural(files.length, "file", "files")} in #${detail.summary.number}</p>
-        <input type="search" class="gh-input pr-jump-filter" data-jump-filter placeholder="Filter by path" aria-label="Filter files by path" aria-controls="pr-jump-list" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
-        <p class="pr-muted pr-jump-empty" data-jump-empty role="status" hidden></p>
-        <ul class="pr-jump-list" id="pr-jump-list">${files.map(file => `<li data-jump-row="${escapeHtmlAttribute(file.path)}"><button type="button" class="pr-jump-item" data-jump-path="${escapeHtmlAttribute(file.path)}"${file.path === current ? ` aria-current="true"` : ""}>
-            <span class="pr-jump-path">${escapeHtml(file.path)}</span>
-            ${reviewMarkBadges(marks.get(file.path))}
-            <span class="pr-jump-counts"><span class="gh-add">+${file.additions}</span> <span class="gh-del">−${file.deletions}</span></span>
-          </button></li>`).join("")}</ul>
-        <div class="gh-dialog-footer"><span></span><span class="gh-dialog-actions"><button type="button" class="gh-button" data-dialog-cancel>Close</button></span></div>
-      </div>`;
-    document.body.append(dialog);
-    const filter = dialog.querySelector<HTMLInputElement>("[data-jump-filter]")!;
-    const empty = dialog.querySelector<HTMLElement>("[data-jump-empty]")!;
-    const shownItems = () => [...dialog.querySelectorAll<HTMLElement>("[data-jump-row]:not([hidden]) [data-jump-path]")];
-    filter.addEventListener("input", () => {
-      const matches = new Set(filterJumpPaths(files.map(file => file.path), filter.value));
-      for (const row of dialog.querySelectorAll<HTMLElement>("[data-jump-row]")) row.hidden = !matches.has(row.dataset.jumpRow!);
-      empty.hidden = matches.size > 0;
-      empty.textContent = matches.size > 0 ? "" : `No file path contains “${filter.value.trim()}”.`;
+    openFileJumpDialog(detail, opener, {
+      current: currentSection()?.dataset.filePath ?? null,
+      onPick: picked => {
+        view.reveal({ path: picked });
+        // The URL follows (pull-request-view.ts), so a reload lands here too.
+        document.dispatchEvent(new CustomEvent("uatu:pull-request-anchor", { detail: { number: detail.summary.number, file: picked } }));
+        void rendered.then(() => requestAnimationFrame(() => requestAnimationFrame(() =>
+          filesElement.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(picked)}"] [data-file-toggle]`)?.focus({ preventScroll: true }))));
+      },
     });
-    let picked: string | null = null;
-    filter.addEventListener("keydown", event => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        const first = shownItems()[0];
-        if (first) { picked = first.dataset.jumpPath!; dialog.close(); }
-        return;
-      }
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        shownItems()[0]?.focus();
-      }
-    });
-    dialog.querySelector(".pr-jump-list")!.addEventListener("keydown", event => {
-      const key = (event as KeyboardEvent).key;
-      const items = shownItems();
-      const index = items.indexOf(event.target as HTMLElement);
-      if (index < 0) return;
-      if (key === "ArrowUp" && index === 0) {
-        event.preventDefault();
-        filter.focus();
-        return;
-      }
-      const next = moveLineIndex(index, key, items.length);
-      if (next === null) return;
-      event.preventDefault();
-      items[next]!.focus();
-    });
-    dialog.addEventListener("close", () => {
-      dialog.remove();
-      if (picked === null) { if (opener.isConnected) opener.focus({ preventScroll: true }); return; }
-      view.reveal({ path: picked });
-      // The URL follows (pull-request-view.ts), so a reload lands here too.
-      document.dispatchEvent(new CustomEvent("uatu:pull-request-anchor", { detail: { number: detail.summary.number, file: picked } }));
-      void rendered.then(() => requestAnimationFrame(() => requestAnimationFrame(() =>
-        filesElement.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(picked!)}"] [data-file-toggle]`)?.focus({ preventScroll: true }))));
-    });
-    dialog.addEventListener("click", event => {
-      if (event.target === dialog) { dialog.close(); return; }
-      const item = (event.target as HTMLElement).closest<HTMLElement>("[data-jump-path]");
-      if (item) { picked = item.dataset.jumpPath!; dialog.close(); }
-    });
-    dialog.querySelector("[data-dialog-cancel]")!.addEventListener("click", () => dialog.close());
-    trackDialogFooter(dialog);
-    dialog.showModal();
-    if (touchMode()) (dialog.querySelector<HTMLElement>('[aria-current="true"]') ?? dialog.querySelector<HTMLElement>("[data-jump-path]"))?.focus();
-    else filter.focus();
   }
 
   // A file's header toggles its diff; Comment on a line opens its composer.
@@ -1027,6 +976,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
             <span class="pr-file-badges" data-file-badges>${reviewMarkBadges(marks.get(file.path))}</span>
           </button>
           <span class="pr-file-actions">
+            ${options.onViewFile ? `<button type="button" class="pr-file-action" data-file-view aria-label="View ${escapeHtmlAttribute(file.path)} at the pull request's head" title="View file: Rendered, Source or Diff">${VIEW_FILE_ICON}<span class="pr-file-action-label" aria-hidden="true">View</span></button>` : ""}
             ${detail.summary.state === "OPEN" ? `<button type="button" class="pr-file-action" data-file-comment aria-label="Comment on a line in ${escapeHtmlAttribute(file.path)}" title="Comment on a line…">${COMMENT_PLUS_ICON}<span class="pr-file-action-label" aria-hidden="true">Comment</span></button>` : ""}
           </span>
         </div>
@@ -1034,6 +984,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
       filesElement.append(section);
       section.querySelector("[data-file-toggle]")!.addEventListener("click", () => setFileOpen(section, section.classList.contains("is-collapsed")));
       section.querySelector("[data-file-comment]")?.addEventListener("click", event => commentOnFile(file.path, event.currentTarget as HTMLElement));
+      section.querySelector("[data-file-view]")?.addEventListener("click", () => options.onViewFile?.(file.path));
       if (index === 0) syncBarHeight();
       const diffHost = section.querySelector<HTMLElement>(".pr-file-diff")!;
       const handle = await renderReviewDiff<AnnotationData>(diffHost, {
@@ -1180,6 +1131,86 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
   return view;
 }
 
+// Jump to file: every file in tree order, with its counts; the file being
+// read is marked. A filter field over the list narrows it by path (focused
+// on desktop; on touch, where it would raise the keyboard, a tap away):
+// Enter there opens the first match, and the arrow keys move between the
+// filter and the rows. Files changed scrolls to the pick; the file view
+// opens it.
+export function openFileJumpDialog(detail: PullRequestDetail, opener: HTMLElement, options: { current: string | null; onPick: (path: string) => void }): void {
+  const marks = reviewMarksByPath(detail);
+  const current = options.current;
+  const files = inTreeOrder(detail.files);
+  const dialog = document.createElement("dialog");
+  dialog.className = "gh-dialog pr-jump-dialog";
+  dialog.setAttribute("aria-labelledby", "pr-jump-title");
+  dialog.innerHTML = `<div class="gh-dialog-body">
+      <h2 class="gh-dialog-title" id="pr-jump-title">Jump to file</h2>
+      <p class="gh-dialog-sub">${plural(files.length, "file", "files")} in #${detail.summary.number}</p>
+      <input type="search" class="gh-input pr-jump-filter" data-jump-filter placeholder="Filter by path" aria-label="Filter files by path" aria-controls="pr-jump-list" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+      <p class="pr-muted pr-jump-empty" data-jump-empty role="status" hidden></p>
+      <ul class="pr-jump-list" id="pr-jump-list">${files.map(file => `<li data-jump-row="${escapeHtmlAttribute(file.path)}"><button type="button" class="pr-jump-item" data-jump-path="${escapeHtmlAttribute(file.path)}"${file.path === current ? ` aria-current="true"` : ""}>
+          <span class="pr-jump-path">${escapeHtml(file.path)}</span>
+          ${reviewMarkBadges(marks.get(file.path))}
+          <span class="pr-jump-counts"><span class="gh-add">+${file.additions}</span> <span class="gh-del">−${file.deletions}</span></span>
+        </button></li>`).join("")}</ul>
+      <div class="gh-dialog-footer"><span></span><span class="gh-dialog-actions"><button type="button" class="gh-button" data-dialog-cancel>Close</button></span></div>
+    </div>`;
+  document.body.append(dialog);
+  const filter = dialog.querySelector<HTMLInputElement>("[data-jump-filter]")!;
+  const empty = dialog.querySelector<HTMLElement>("[data-jump-empty]")!;
+  const shownItems = () => [...dialog.querySelectorAll<HTMLElement>("[data-jump-row]:not([hidden]) [data-jump-path]")];
+  filter.addEventListener("input", () => {
+    const matches = new Set(filterJumpPaths(files.map(file => file.path), filter.value));
+    for (const row of dialog.querySelectorAll<HTMLElement>("[data-jump-row]")) row.hidden = !matches.has(row.dataset.jumpRow!);
+    empty.hidden = matches.size > 0;
+    empty.textContent = matches.size > 0 ? "" : `No file path contains “${filter.value.trim()}”.`;
+  });
+  let picked: string | null = null;
+  filter.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const first = shownItems()[0];
+      if (first) { picked = first.dataset.jumpPath!; dialog.close(); }
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      shownItems()[0]?.focus();
+    }
+  });
+  dialog.querySelector(".pr-jump-list")!.addEventListener("keydown", event => {
+    const key = (event as KeyboardEvent).key;
+    const items = shownItems();
+    const index = items.indexOf(event.target as HTMLElement);
+    if (index < 0) return;
+    if (key === "ArrowUp" && index === 0) {
+      event.preventDefault();
+      filter.focus();
+      return;
+    }
+    const next = moveLineIndex(index, key, items.length);
+    if (next === null) return;
+    event.preventDefault();
+    items[next]!.focus();
+  });
+  dialog.addEventListener("close", () => {
+    dialog.remove();
+    if (picked === null) { if (opener.isConnected) opener.focus({ preventScroll: true }); return; }
+    options.onPick(picked);
+  });
+  dialog.addEventListener("click", event => {
+    if (event.target === dialog) { dialog.close(); return; }
+    const item = (event.target as HTMLElement).closest<HTMLElement>("[data-jump-path]");
+    if (item) { picked = item.dataset.jumpPath!; dialog.close(); }
+  });
+  dialog.querySelector("[data-dialog-cancel]")!.addEventListener("click", () => dialog.close());
+  trackDialogFooter(dialog);
+  dialog.showModal();
+  if (touchMode()) (dialog.querySelector<HTMLElement>('[aria-current="true"]') ?? dialog.querySelector<HTMLElement>("[data-jump-path]"))?.focus();
+  else filter.focus();
+}
+
 // The review bar, on Files changed and (while a review is pending) on
 // Conversation, or on touch in the preview header's tabs row
 // (reviewBarShownOn). One review button everywhere: Review, which opens the
@@ -1192,7 +1223,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
 export function renderReviewBar(bar: HTMLElement, detail: PullRequestDetail, repositoryId: string, options: {
   surface: ReviewBarSurface;
   // The pull request view's tab (the header surface follows it).
-  tab?: "files" | "conversation";
+  tab?: "files" | "conversation" | "file";
   // Where focus goes once Finish review has published the review and the
   // bar's Finish is gone (Files changed: the bar, or the file being read).
   fallbackFocus?: () => HTMLElement | null;

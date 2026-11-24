@@ -11,7 +11,7 @@
 // write answers the pull request's fresh detail. The pull requests on screen
 // (`watch`) are re-read with it. Never on file-content events.
 
-import type { GithubSummary, PullRequestDetail, PullRequestList } from "../shared/github-contract";
+import type { GithubSummary, PullRequestDetail, PullRequestList, PullRequestRevision } from "../shared/github-contract";
 import type { RepositorySnapshot } from "../shared/types";
 import { githubApi, GithubRequestError } from "./client";
 
@@ -61,22 +61,31 @@ export type PullRequestRepositoryOption = { id: string; label: string; github: s
 export type PullRequestPreviewParams = {
   repositoryId: string;
   number: number;
-  tab?: "conversation" | "files";
+  // "file" is the pull request file view (`path=`), a changed or unchanged
+  // file at the pull request's head (or its base, `rev=base`).
+  tab?: "conversation" | "files" | "file";
   // A file to scroll to on Files changed, or a review thread to scroll to
   // and focus there (it wins over a file).
   file?: string;
   thread?: string;
+  path?: string;
+  rev?: PullRequestRevision;
 };
 
 // `?pr=<n>` names a pull request of the workspace's pull request repository
 // (`defaultRepositoryId`); `repository=<id>` may name it outright, as older
 // URLs and the commit preview's do. Null without a usable number, or with no
-// repository to read it from.
+// repository to read it from. `path=` opens the file view (and wins over a
+// `tab=`).
 export function pullRequestPreviewParams(params: URLSearchParams, defaultRepositoryId: string | null): PullRequestPreviewParams | null {
   const named = params.get("repository");
   const repositoryId = named && named.trim() ? named : defaultRepositoryId;
   const pr = params.get("pr");
   if (!repositoryId || !pr || !/^\d{1,9}$/.test(pr) || Number(pr) < 1) return null;
+  const path = params.get("path");
+  if (path && path.trim() && path.length <= 4096) {
+    return { repositoryId, number: Number(pr), tab: "file", path, rev: params.get("rev") === "base" ? "base" : "head" };
+  }
   const tab = params.get("tab") === "files" ? "files" : "conversation";
   const file = tab === "files" ? params.get("file") ?? undefined : undefined;
   const thread = tab === "files" ? params.get("thread") ?? undefined : undefined;

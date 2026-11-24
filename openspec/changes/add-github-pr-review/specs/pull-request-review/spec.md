@@ -228,13 +228,18 @@ Files changed in the pull request view SHALL render GitHub's own diff of the pul
 - **WHEN** the reviewer opens the review dialog from any review button, types a summary, chooses a verdict and chooses `Add line comments`
 - **THEN** the dialog closes, keeping the summary and the verdict as drafts, and Files changed opens from its top, right under the pinned preview header, with a comment composer on the first file's first non-blank changed line (an added one when there is one), focus in its text so typing goes there, and the line picker one Shift+Tab back
 - **AND** no row sits partly under the header, Cancel or Escape on the empty composer closes it with nothing written, and the review dialog opens again with the summary and verdict as they were left
-
-This replaces the earlier decision that `Start review` opened Files changed directly and `Review without line comments…` opened the dialog: one `Review` button now opens the dialog everywhere.
+- **AND** there is no separate `Start review` or `Review without line comments…` control: one `Review` button opens the dialog everywhere
 
 #### Scenario: Each file's header
 - **WHEN** Files changed lists a file
 - **THEN** its header is one row, pinned while the file's diff scrolls: a toggle that folds the diff (the path, shortened from its start so the file name stays, the line counts and review marks), then `Comment on a line in <path>`: an icon with a tooltip on desktop, an icon and a visible `Comment` label on touch, at least 44×44
 - **AND** it opens a composer on the file's first non-blank changed line with focus on its line picker, and no separate row holds the action
+- **AND** before it, `View <path> at the pull request's head` (an icon on desktop, an icon and `View` on touch, at least 44×44) opens the file view on that file
+
+#### Scenario: The file view's Diff is Files changed for one file
+- **WHEN** the reviewer shows a file of the pull request in the file view's Diff
+- **THEN** it is that file's Files changed: GitHub's diff, its threads, the gutter `+`, line taps, Comment on a line, the composer, pending comments and the review bar, with the same drafts as Files changed itself, and the same anchoring
+- **AND** the file view's Rendered and Source never offer a composer: their threads bar's Show in Diff is the way to comment
 
 #### Scenario: Jumping to a file
 - **WHEN** the reviewer chooses Jump to file, the one button at the end of the pinned tabs row on Files changed (named `Jump to file (9 files)`; its words show on a desktop, its icon on touch)

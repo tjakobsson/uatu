@@ -13883,3 +13883,101 @@ html[data-ui-mode="touch"] .pr-file-action[data-file-comment] .pr-file-action-la
   padding: 0.55rem; border: 1px solid var(--border-medium); border-radius: 0.7rem;
   background: var(--surface); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
 }
+
+/* ---- The pull request file view (src/preview/pull-request-file.ts) ------
+   One file of a pull request in the document view chooser. The tabs row
+   adds the file as a crumb tab and ‹ n of m ›; the facts line and the
+   threads bar sit above the content (.pr-file-bar, a sibling before the
+   layout toolbar and #preview). */
+#pr-tab-file, #pr-file-nav, .pr-file-bar { display: none; }
+html[data-preview-kind="pull-request"] #pr-tab-file:not([hidden]) {
+  display: inline-flex; align-items: center; gap: 0.3rem; max-width: 16rem; min-width: 0;
+}
+#pr-tab-file .pr-icon { flex: 0 0 auto; }
+#pr-tab-file .pr-tab-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html[data-preview-kind="pull-request"] #pr-file-nav:not([hidden]) {
+  display: inline-flex; flex: 0 0 auto; align-items: stretch; gap: 0.25rem; margin-left: auto;
+}
+.pr-file-nav button {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 2rem; min-height: 2rem; padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border-medium); border-radius: 0.5rem; background: var(--surface); color: var(--text-strong);
+  font: inherit; font-size: 0.82rem; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer;
+}
+.pr-file-nav .pr-file-step { font-size: 1.05rem; line-height: 1; padding-inline: 0.45rem; }
+.pr-file-nav .pr-file-count { border-color: transparent; background: none; color: var(--text-subtle); }
+.pr-file-nav button:hover:not(:disabled) { border-color: var(--accent); }
+.pr-file-nav button:disabled { opacity: 0.45; cursor: default; }
+.pr-file-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pr-file-count-short { display: none; }
+html[data-ui-mode="touch"] .pr-file-nav button { min-width: 44px; min-height: 44px; }
+html[data-ui-mode="touch"] .pr-file-nav .pr-file-count { min-width: 44px; padding-inline: 0.2rem; }
+html[data-ui-mode="touch"] .pr-file-count-long { display: none; }
+html[data-ui-mode="touch"] .pr-file-count-short { display: inline; }
+/* Desktop: the review button and Jump to file stay after the stepper. */
+html[data-ui-mode="desktop"][data-preview-kind="pull-request"] #pr-file-nav:not([hidden]) ~ #pr-view-review { margin-left: 0; }
+
+/* Touch: the pinned row is "‹ Files", ‹ n/m ›, Review. The file's name is
+   the title row (#n · path); Conversation is a step back through Files. */
+html[data-ui-mode="touch"] #pr-view-control[data-file-open] [data-pr-tab="conversation"],
+html[data-ui-mode="touch"] #pr-view-control[data-file-open] #pr-tab-file,
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-control[data-file-open] ~ .pr-view-jump { display: none; }
+html[data-ui-mode="touch"] #pr-view-control[data-file-open] [data-pr-tab="files"]::before { content: "‹"; margin-right: 0.3rem; font-size: 1.1rem; line-height: 1; }
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] #pr-view-control[data-file-open] ~ #pr-file-nav:not([hidden]) { margin-left: 0; }
+
+html[data-preview-kind="pull-request"] .preview-shell > .pr-file-bar {
+  display: flex; flex-direction: column; gap: 0.45rem; margin: 0.6rem 0 0.2rem;
+}
+.pr-file-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.75rem; }
+.pr-file-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-left: auto; }
+.pr-file-modes:not(:has(> :not([hidden]))) { display: none; }
+.pr-file-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem; min-width: 0; color: var(--text-subtle); font-size: 0.82rem; }
+.pr-file-facts code { font-size: 0.78rem; }
+.pr-file-facts .view-control { padding: 2px; }
+.pr-file-facts .view-segment { padding: 0.15rem 0.6rem; font-size: 0.78rem; }
+html[data-ui-mode="touch"] .pr-file-facts .view-segment { min-height: 44px; min-width: 44px; }
+.pr-file-local.is-same { color: var(--success-strong); }
+.pr-file-local .gh-link-button, .pr-file-note .gh-link-button { margin-left: 0.25rem; }
+html[data-ui-mode="touch"] .pr-file-bar .gh-link-button { min-height: 44px; }
+.pr-file-note.is-attention { color: var(--gh-attention-fg); }
+.pr-file-threads {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0.5rem; padding: 0.45rem 0.75rem;
+  border: 1px solid var(--gh-attention-border); border-radius: 0.5rem; background: var(--gh-attention-soft);
+  color: var(--text-strong); font-size: 0.84rem;
+}
+.pr-file-threads-text { flex: 1 1 14rem; min-width: 0; }
+.pr-file-threads-excerpt { color: var(--text-subtle); }
+.pr-file-threads-show { flex: 0 0 auto; font-weight: 600; }
+html[data-ui-mode="touch"] .pr-file-threads { flex-wrap: nowrap; padding-block: 0; }
+html[data-ui-mode="touch"] .pr-file-threads-text { flex: 1 1 auto; }
+/* The type chip ("markdown") gives its room to the file's name. */
+html[data-ui-mode="touch"][data-preview-kind="pull-request"] #preview-type { display: none; }
+.pr-file-rev-slot:empty { display: none; }
+.pr-file-rev-slot { display: contents; }
+html[data-ui-mode="touch"] .pr-file-threads-excerpt { display: none; }
+
+/* Source: a line holding a review thread (read-only: Show in Diff to read
+   or reply). */
+pre.uatu-source-pre .uatu-cl.has-pr-thread { background: var(--gh-attention-soft); box-shadow: inset 3px 0 0 var(--gh-attention-border); }
+pre.uatu-source-pre .uatu-cl.has-pr-thread.is-resolved { background: none; box-shadow: inset 3px 0 0 var(--border-medium); }
+
+.pr-file-loading { margin: 1rem 0; }
+.pr-fetch-card { max-width: 40rem; }
+.pr-fetch-card h3 { font-size: 1rem; }
+.pr-fetch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.pr-fetch-actions a.gh-button { text-decoration: none; }
+html[data-ui-mode="touch"] .pr-fetch-actions .gh-button { min-height: 44px; display: inline-flex; align-items: center; }
+.pr-fetch-status:empty { display: none; }
+.pr-file-diff-view { max-width: none; }
+
+/* Files changed: View file beside Comment, labelled on touch. */
+html[data-ui-mode="touch"] .pr-file-action[data-file-view] { display: inline-flex; gap: 0.3rem; width: auto; padding: 0 0.55rem; color: var(--text-strong); }
+html[data-ui-mode="touch"] .pr-file-action[data-file-view] .pr-file-action-label { display: inline; font-size: 0.8rem; font-weight: 600; }
+
+/* The Files pane's PR scope: Changed n | All files. */
+.pr-scope-switch[hidden] { display: none; }
+.pr-scope-switch { display: flex; align-self: flex-start; margin: 0.35rem 0.6rem; }
+.pr-scope-switch .view-segment { padding: 0.15rem 0.7rem; font-size: 0.8rem; }
+html[data-ui-mode="touch"] .pr-scope-switch .view-segment { min-height: 44px; display: inline-flex; align-items: center; }
+.pr-scope-switch-count { margin-left: 0.3rem; color: var(--text-subtle); font-variant-numeric: tabular-nums; }
+.pr-scope .tree-empty .gh-button { margin-top: 0.4rem; }
+html[data-ui-mode="touch"] .pr-file-modes .view-segment { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }

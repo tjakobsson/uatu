@@ -187,31 +187,39 @@ async function sniffBinary(absolutePath: string): Promise<DocumentKind> {
   try {
     const buffer = Buffer.alloc(SNIFF_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, SNIFF_BYTES, 0);
-    if (bytesRead === 0) {
-      return "text";
-    }
-
-    let nonPrintable = 0;
-    for (let i = 0; i < bytesRead; i += 1) {
-      const byte = buffer[i]!;
-      if (byte === 0) {
-        return "binary";
-      }
-
-      const isAllowedControl = byte === 0x09 || byte === 0x0a || byte === 0x0d;
-      const isLowControl = byte < 0x20 && !isAllowedControl;
-      const isDel = byte === 0x7f;
-      if (isLowControl || isDel) {
-        nonPrintable += 1;
-      }
-    }
-
-    if (nonPrintable / bytesRead > NON_PRINTABLE_THRESHOLD) {
-      return "binary";
-    }
-
-    return "text";
+    return sniffBinaryBytes(buffer.subarray(0, bytesRead));
   } finally {
     await handle.close().catch(() => undefined);
   }
+}
+
+// The same sniff over bytes already in memory (a blob read from Git for a
+// pull request's file view): only the first SNIFF_BYTES are looked at.
+export function sniffBinaryBytes(bytes: Uint8Array): "text" | "binary" {
+  const length = Math.min(bytes.length, SNIFF_BYTES);
+  if (length === 0) {
+    return "text";
+  }
+
+  let nonPrintable = 0;
+  for (let i = 0; i < length; i += 1) {
+    const byte = bytes[i]!;
+    if (byte === 0) {
+      return "binary";
+    }
+
+    const isAllowedControl = byte === 0x09 || byte === 0x0a || byte === 0x0d;
+    const isLowControl = byte < 0x20 && !isAllowedControl;
+    const isDel = byte === 0x7f;
+    if (isLowControl || isDel) {
+      nonPrintable += 1;
+    }
+  }
+
+  return nonPrintable / length > NON_PRINTABLE_THRESHOLD ? "binary" : "text";
+}
+
+// Classifies a file whose bytes are in memory: by name first, then by sniff.
+export function classifyBytes(fileName: string, bytes: Uint8Array): DocumentKind {
+  return classifyFileName(fileName) ?? sniffBinaryBytes(bytes);
 }

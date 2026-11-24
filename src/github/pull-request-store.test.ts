@@ -217,6 +217,14 @@ describe("pull request URLs", () => {
     // A thread belongs to Files changed.
     expect(pullRequestPreviewParams(new URLSearchParams("pr=642&thread=T1"), repo)).toEqual({ repositoryId: repo, number: 642, tab: "conversation" });
   });
+  test("`path=` opens the file view, at the head unless `rev=base`", () => {
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=639&path=docs%2Fterminal.md"), repo)).toEqual({ repositoryId: repo, number: 639, tab: "file", path: "docs/terminal.md", rev: "head" });
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=639&path=docs/terminal.md&rev=base"), repo)?.rev).toBe("base");
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=639&path=docs/terminal.md&rev=tip"), repo)?.rev).toBe("head");
+    // The file wins over a tab.
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=639&tab=files&path=a.md"), repo)?.tab).toBe("file");
+    expect(pullRequestPreviewParams(new URLSearchParams("pr=639&path=%20"), repo)?.tab).toBe("conversation");
+  });
   test("older URLs that name the repository keep working", () => {
     expect(pullRequestPreviewParams(new URLSearchParams(`repository=${encodeURIComponent("/other")}&pr=7`), repo)?.repositoryId).toBe("/other");
     expect(pullRequestPreviewParams(new URLSearchParams("repository=&pr=7"), repo)?.repositoryId).toBe(repo);

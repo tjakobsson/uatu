@@ -6,7 +6,13 @@
 // Enabled only by UATU_GITHUB_FAKE=1 (see githubServiceFromEnvironment in
 // ./service.ts). The scenario switch reproduces the empty and error states of
 // the mockups: `ready`, `no-pull-request`, `no-credential`, `rate-limited`
-// and `unavailable`.
+// and `unavailable`; `head-not-fetched` answers like `ready` while no pull
+// request's head but the checked-out branch's is local, so the file view's
+// consent card shows (its Fetch succeeds at once).
+//
+// File contents: a changed file's head is its `new` text and its base its
+// `old` text; the seed's `headTree` holds the files a pull request leaves
+// unchanged (the same at head and base).
 
 import { renderMarkdownToHtml } from "../render/markdown";
 import {
@@ -21,6 +27,7 @@ import {
   type PullRequestDetail,
   type PullRequestFile,
   type PullRequestList,
+  type PullRequestRevision,
   type PullRequestState,
   type PullRequestSummary,
   type ReviewDecision,
@@ -38,7 +45,7 @@ import {
   type SeedCheck,
   type SeedPullRequest,
 } from "./fake-data";
-import type { GithubService, NewThreadInput, SubmitReviewInput } from "./service";
+import type { GithubService, NewThreadInput, PullRequestBlob, PullRequestTreeAnswer, SubmitReviewInput } from "./service";
 
 const HOUR_MS = 3_600_000;
 // How long the fake pretends the rate limit lasts.
@@ -58,12 +65,15 @@ type PullRequestRecord = {
 };
 
 export class FakeGithubService implements GithubService {
+  readonly mock = true;
   private readonly now: () => number;
   private scenario: GithubFakeScenario;
   private seededAt = 0;
   private lastGoodAt = 0;
   private sequence = 0;
   private records = new Map<number, PullRequestRecord>();
+  // Pull requests whose head the reviewer fetched (head-not-fetched only).
+  private fetched = new Set<number>();
 
   constructor(options: { scenario?: string; now?: () => number } = {}) {
     this.now = options.now ?? Date.now;
@@ -76,16 +86,19 @@ export class FakeGithubService implements GithubService {
     this.seededAt = this.now();
     this.lastGoodAt = this.seededAt;
     this.sequence = 0;
+    this.fetched.clear();
     this.records = new Map(seedPullRequests().map(seed => [seed.number, this.recordFrom(seed)]));
   }
 
   setScenario(scenario: GithubFakeScenario): void {
     this.scenario = scenario;
-    if (scenario === "ready" || scenario === "no-pull-request") this.lastGoodAt = this.now();
+    // Choosing it again shows the consent card again.
+    if (scenario === "head-not-fetched") this.fetched.clear();
+    if (scenario === "ready" || scenario === "no-pull-request" || scenario === "head-not-fetched") this.lastGoodAt = this.now();
   }
 
   async summary(_repositoryId: string): Promise<GithubSummary> {
-    const base = { mock: true, repository: { ...FAKE_REPOSITORY } };
+    const base = { mock: true, repository: { ...FAKE_REPOSITORY }, mockScenario: this.scenario };
     switch (this.scenario) {
       case "no-credential":
         return { ...base, status: "no-credential", viewer: null, checkedAt: this.now(), stale: false,
@@ -101,6 +114,7 @@ export class FakeGithubService implements GithubService {
         return { ...base, status: "unavailable", viewer: FAKE_VIEWER, checkedAt: this.lastGoodAt, stale: true,
           message: "GitHub did not answer (connection timed out).", pullRequest: this.toSummary(this.current()) };
       case "ready":
+      case "head-not-fetched":
         this.lastGoodAt = this.now();
         return { ...base, status: "ready", viewer: FAKE_VIEWER, checkedAt: this.lastGoodAt, stale: false,
           pullRequest: this.toSummary(this.current()) };
@@ -254,7 +268,53 @@ export class FakeGithubService implements GithubService {
     return this.toDetail(record);
   }
 
+  // The fetch is local Git work against origin: it needs no API budget, so
+  // only an unreachable remote (`unavailable`) refuses it.
+  async fetchPullRequestHead(_repositoryId: string, number: number): Promise<{ headOid: string }> {
+    this.assertReadable();
+    if (this.scenario === "unavailable") throw new GithubError(503, "Couldn't reach origin to fetch the pull request's head.");
+    const record = this.record(number);
+    this.fetched.add(number);
+    return { headOid: record.seed.headRefOid };
+  }
+
+  async pullRequestBlob(_repositoryId: string, number: number, input: { path: string; rev: PullRequestRevision }): Promise<PullRequestBlob> {
+    this.assertReadable();
+    const record = this.record(number);
+    if (!this.headIsLocal(record)) return { state: "not-fetched" };
+    const text = this.textAt(record, input.path, input.rev);
+    if (text === null) throw new GithubError(404, `${input.path} is not in #${number} at its ${input.rev}.`);
+    return { oid: input.rev === "base" ? record.seed.baseRefOid : record.seed.headRefOid, bytes: new TextEncoder().encode(text) };
+  }
+
+  async pullRequestTree(_repositoryId: string, number: number): Promise<PullRequestTreeAnswer> {
+    this.assertReadable();
+    const record = this.record(number);
+    if (!this.headIsLocal(record)) return { state: "not-fetched" };
+    const paths = new Set(Object.keys(record.seed.headTree ?? {}));
+    for (const file of record.files) {
+      if (file.status === "removed") paths.delete(file.path);
+      else paths.add(file.path);
+    }
+    return { headOid: record.seed.headRefOid, paths: [...paths].sort(), truncated: false };
+  }
+
   // --- internals -------------------------------------------------------
+
+  // The checked-out branch's head is local already; every other one only
+  // after its Fetch (in head-not-fetched; every other scenario has them all).
+  private headIsLocal(record: PullRequestRecord): boolean {
+    return this.scenario !== "head-not-fetched" || record.seed.number === FAKE_CURRENT_PULL_REQUEST || this.fetched.has(record.seed.number);
+  }
+
+  private textAt(record: PullRequestRecord, path: string, rev: PullRequestRevision): string | null {
+    const changed = record.files.find(file => file.path === path);
+    if (changed) {
+      if (rev === "head") return changed.status === "removed" ? null : changed.newContents;
+      return changed.status === "added" ? null : changed.oldContents;
+    }
+    return record.seed.headTree?.[path] ?? null;
+  }
 
   private recordFrom(seed: SeedPullRequest): PullRequestRecord {
     const createdAt = this.seededAt - seed.createdHoursAgo * HOUR_MS;

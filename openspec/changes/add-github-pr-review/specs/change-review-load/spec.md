@@ -25,13 +25,30 @@ When a repository's checked-out branch has a detected pull request, the `base` t
 - **THEN** the next repository update uses the default base resolution again
 
 ### Requirement: Fetching pull request refs is explicit and narrow
-The fetch action SHALL run only when the user activates it. It SHALL fetch the pull request's base branch and head into remote-tracking refs and object storage, and MUST NOT change the working tree, the index, or any local branch.
+The fetch action SHALL run only when the user activates it. It SHALL fetch the pull request's head (`refs/pull/<n>/head` on the base repository's remote) into the private ref `refs/uatu/pull/<n>/head` and object storage, and fetch the base branch only when a comparison or the base revision needs it. It MUST NOT change the working tree, the index, any local branch, or any remote-tracking ref. Uatu SHALL keep at most 20 `refs/uatu/pull/*` refs per repository, pruning the oldest first.
 
-#### Scenario: Fetching refs
-- **WHEN** the user activates Fetch pull request refs for pull request #42 with base `main`
-- **THEN** `origin/main` and the pull request head commit are updated locally and the repository data refreshes
-- **AND** the checked-out branch, its files, and other local branches are unchanged
+#### Scenario: Fetching a pull request's head
+- **WHEN** the user activates Fetch for pull request #42 (the file view's card, All files, or Change Overview's fetch action)
+- **THEN** `git -c fetch.fsckObjects=true fetch --no-tags <remote> +refs/pull/42/head:refs/uatu/pull/42/head` runs with the session's Git credentials and `GIT_TERMINAL_PROMPT=0`, and #42's head commit is local
+- **AND** the checked-out branch, its files, the index, other local branches and remote-tracking refs are unchanged
+
+#### Scenario: The base is fetched when needed
+- **WHEN** the base comparison or the file view's base revision needs a base commit that isn't local
+- **THEN** the same explicit action also fetches the base branch, into its remote-tracking ref
+
+#### Scenario: The private refs stay bounded and out of the way
+- **WHEN** heads of more than 20 pull requests of one repository have been fetched
+- **THEN** the oldest `refs/uatu/pull/<n>/head` refs are deleted until 20 remain, and a merged or closed pull request's ref is deleted when the reviewer leaves it
+- **AND** the refs are outside every refspec, so `git fetch --prune` leaves them alone; they show in `git log --all` and are shared by the repository's linked worktrees
+
+#### Scenario: A shallow repository
+- **WHEN** the repository is shallow (`git rev-parse --is-shallow-repository`)
+- **THEN** the fetch adds `--depth=1`
+
+#### Scenario: The branch's own pull request needs no fetch
+- **WHEN** the pull request's head commit is already local, as it usually is for the checked-out branch's own pull request
+- **THEN** nothing is fetched and no card asks for it
 
 #### Scenario: Fetch fails
 - **WHEN** the fetch fails for authentication or network reasons
-- **THEN** the failure is shown and the previous comparison remains
+- **THEN** the failure is shown, the previous comparison remains, and the file view points to Open on GitHub ↗

@@ -178,7 +178,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
     if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
     return null;
-  });
+  }, { repositoryIds: () => (getSession().getRepositories() ?? []).map(repository => repository.id) });
 
   const modeRoutes =
     deps.mode === "prod"
@@ -470,6 +470,12 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     [p("/api/github/review/threads/:threadId/resolution")]: { POST: github.resolve },
     [p("/api/github/review/comments/:commentId")]: { PATCH: github.editPendingComment, DELETE: github.deletePendingComment },
     [p("/api/github/dev/scenario")]: { POST: github.devScenario },
+    // The pull request file view: its explicit head fetch, a file rendered
+    // at head or base, the head's tree, and raw blobs for relative images.
+    [p("/api/github/fetch-refs")]: { POST: github.fetchRefs },
+    [p("/api/github/pull-request/file")]: { GET: github.pullRequestFile },
+    [p("/api/github/pull-request/tree")]: { GET: github.pullRequestTree },
+    [p("/api/github/pr-blob/*")]: { GET: github.pullRequestBlob },
     [p("/api/events")]: {
       GET: (request: Request) => {
         const context = requestContext(request);

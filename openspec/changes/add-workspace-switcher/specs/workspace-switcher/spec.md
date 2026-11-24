@@ -163,6 +163,7 @@ While a pull request other than the checked-out branch's own is viewed, one acce
 #### Scenario: The Files scope keeps its heading
 - **WHEN** #618 is viewed
 - **THEN** the Files pane's scope bar keeps `PR #618` and the title as the tree's heading, without a Back of its own
+- **AND** the `Changed n | All files` switch under it (the pull request file view, `add-github-pr-review`) changes only which of #618's files are listed, never what is viewed
 - **AND** Change Overview's `Local branch` label reads the branch (`⎇ feat/view-pr`), its tooltip saying why
 
 #### Scenario: The viewed pull request's branch gets checked out here

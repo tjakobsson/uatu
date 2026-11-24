@@ -257,6 +257,9 @@ async function runScenario(input: Parameters<typeof githubApi.setScenario>[0]): 
     // the store). Not a navigation: that would count the shown pull request
     // as viewed once the branch has none.
     if (mode.kind === "pull-request") await pullRequestStore.loadDetail(mode.number, mode.repositoryId).catch(() => undefined);
+    // The file view and the Files pane's All files read contents again (a
+    // head may no longer be local).
+    document.dispatchEvent(new CustomEvent("uatu:github-scenario"));
   } finally {
     scenarioBusy = false;
   }
@@ -643,7 +646,7 @@ function scenarioControl(): string {
       ${mockNotice(true)}
       <label>Mock scenario
         <select data-pr-scenario>
-          ${GITHUB_FAKE_SCENARIOS.map(scenario => `<option value="${scenario}"${scenario === summary.status ? " selected" : ""}>${scenario}</option>`).join("")}
+          ${GITHUB_FAKE_SCENARIOS.map(scenario => `<option value="${scenario}"${scenario === (summary.mockScenario ?? summary.status) ? " selected" : ""}>${scenario}</option>`).join("")}
         </select>
       </label>
       <button type="button" class="gh-link-button" data-pr-reset title="Re-seed the fake: deletes every comment, review and pending comment made so far">Reset data…</button>

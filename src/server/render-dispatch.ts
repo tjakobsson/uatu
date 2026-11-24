@@ -92,12 +92,34 @@ export async function renderDocument(
     source,
     includeGit: false,
   });
-  const requestedView: ViewMode = options.view ?? "rendered";
+  const rendered = await renderDocumentSource({
+    id: document.id,
+    name: document.name,
+    relativePath: document.relativePath,
+    kind: document.kind,
+    source,
+  }, options.view ?? "rendered");
+  const fileFacts = await fileFactsPromise;
+  return { ...rendered, ...(fileFacts ? { fileFacts } : {}) };
+}
+
+// A document's text, from wherever it came: the workspace file above, or a
+// blob at a pull request's head or base (src/github/http.ts). One pipeline,
+// so both previews render, sanitize and title documents the same way.
+export type DocumentSource = {
+  id: string;
+  name: string;
+  relativePath: string;
+  kind: "markdown" | "asciidoc" | "text";
+  source: string;
+};
+
+export async function renderDocumentSource(input: DocumentSource, requestedView: ViewMode = "rendered"): Promise<RenderedDocument> {
   // Text / source files have no separate rendered representation, so a
   // request for "rendered" still produces source rendering. Markdown and
   // AsciiDoc honor the requested view.
   const effectiveView: ViewMode =
-    document.kind === "markdown" || document.kind === "asciidoc"
+    input.kind === "markdown" || input.kind === "asciidoc"
       ? requestedView
       : "source";
 
@@ -106,48 +128,37 @@ export async function renderDocument(
   let language: string | null;
   let title: string;
 
-  if (effectiveView === "source") {
+  if (effectiveView === "source" || input.kind === "text") {
     // Whole-file source rendering: `<pre class="uatu-source-pre"><code>...`,
     // syntax-highlighted by file kind. Markdown / AsciiDoc files highlight
     // as their own markup languages (see file-languages.ts).
-    language = languageForName(document.name) ?? null;
-    html = renderCodeAsHtml(source, language ?? undefined);
+    language = languageForName(input.name) ?? null;
+    html = renderCodeAsHtml(input.source, language ?? undefined);
     metadata = undefined;
-    title = document.name;
-  } else if (document.kind === "markdown") {
-    const rendered = renderMarkdownToHtml(source);
+    title = input.name;
+  } else if (input.kind === "markdown") {
+    const rendered = renderMarkdownToHtml(input.source);
     html = rendered.html;
     metadata = sanitizeMetadata(rendered.metadata);
     language = null;
-    title = extractTitle(html, document.name);
-  } else if (document.kind === "asciidoc") {
-    const rendered = await renderAsciidocToHtml(source);
-    html = rendered.html;
-    metadata = sanitizeMetadata(rendered.metadata);
-    language = null;
-    title = extractTitle(html, document.name);
+    title = extractTitle(html, input.name);
   } else {
-    // `effectiveView === "rendered"` was forced to "source" above for any
-    // non-markdown/non-asciidoc kind, so this branch is unreachable. Kept as
-    // an exhaustive guard for the type-checker.
-    language = languageForName(document.name) ?? null;
-    html = renderCodeAsHtml(source, language ?? undefined);
-    metadata = undefined;
-    title = document.name;
+    const rendered = await renderAsciidocToHtml(input.source);
+    html = rendered.html;
+    metadata = sanitizeMetadata(rendered.metadata);
+    language = null;
+    title = extractTitle(html, input.name);
   }
 
-  const fileFacts = await fileFactsPromise;
-
   return {
-    id: document.id,
-    path: document.relativePath,
+    id: input.id,
+    path: input.relativePath,
     title,
     html,
-    kind: document.kind,
+    kind: input.kind,
     view: effectiveView,
     language,
     ...(metadata ? { metadata } : {}),
-    ...(fileFacts ? { fileFacts } : {}),
   };
 }
 

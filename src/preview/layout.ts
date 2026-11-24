@@ -12,6 +12,7 @@ import { appState, safeLocalStorage } from "../shell/state";
 import { applyDocumentPayload, documentViewCache, loadDocument, type RenderedDocument } from "./mount";
 import { syncViewToggle } from "./view-mode";
 import { ensureLayoutToolbar } from "./layout-toolbar";
+import { activePreviewViewHost } from "./view-host";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 const previewShellElementMaybe = document.querySelector<HTMLElement>(".preview-shell");
@@ -45,6 +46,12 @@ export function applyViewLayout(next: ViewLayout): void {
   }
   appState.viewLayout = next;
   writeViewLayoutPreference(safeLocalStorage(), next);
+  // The pull request file view renders its own payloads into the new layout.
+  const host = activePreviewViewHost();
+  if (host) {
+    host.rerender();
+    return;
+  }
   // Reflect the new state on both controls before re-rendering so the chooser
   // visually responds even if the re-render is async.
   syncLayoutChooser(currentRenderedPayload());

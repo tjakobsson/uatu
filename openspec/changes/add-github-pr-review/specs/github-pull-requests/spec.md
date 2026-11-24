@@ -395,7 +395,8 @@ Choosing **View here** for a pull request SHALL make it what Files and Preview s
 
 #### Scenario: Opening a file from the pull request scope
 - **WHEN** the user picks a file in the Files pane's pull request scope
-- **THEN** the pull request view opens on Files changed, scrolled to that file's diff, and the URL names the file
+- **THEN** the pull request file view opens on that file (`?pr=639&path=<path>`) in the shared view mode: Rendered or Source to read it, or Diff, which is that file's review diff with its threads and the composer
+- **AND** the file's row is the scope's selected row
 
 #### Scenario: Returning to the checked-out branch
 - **WHEN** the user chooses `← Back to feat/view-pr`
@@ -403,7 +404,7 @@ Choosing **View here** for a pull request SHALL make it what Files and Preview s
 
 #### Scenario: Touch mode
 - **WHEN** the user views a pull request on a touch device
-- **THEN** the Preview tab comes forward with the pull request's conversation, the Files tab lists its files one tap away, and picking a file there brings the Preview tab back with that file's diff
+- **THEN** the Preview tab comes forward with the pull request's conversation, the Files tab lists its files one tap away, and picking a file there brings the Preview tab back with that file in the file view
 
 #### Scenario: One way back
 - **WHEN** a viewed pull request is shown
@@ -413,6 +414,95 @@ Choosing **View here** for a pull request SHALL make it what Files and Preview s
 #### Scenario: Focus after viewing a pull request
 - **WHEN** the user views a pull request from the switcher, including from a simulated worktree's result, or opens one from the pane while the preview is out of sight (a narrow window stacking the sidebar above the preview, or touch mode's Files tab)
 - **THEN** the preview comes into view and its heading takes focus
+
+### Requirement: A pull request's file opens at its head in the preview
+The pull request view SHALL have a file view (`?pr=<n>&path=<path>[&rev=base]`) showing one file in the document Rendered / Source / Diff chooser and preference. Rendered and Source SHALL show the file at the pull request's head, read from Git and rendered by the document pipeline, never the checkout's file. Diff SHALL be that file's review diff, the only place to comment. A head that isn't local SHALL be fetched only after the reviewer agrees.
+
+#### Scenario: Reading a changed document rendered
+- **WHEN** the reviewer opens `docs/terminal.md` of #639 in Rendered
+- **THEN** the preview shows it rendered at #639's head with the document preview's machinery: the metadata card, Mermaid diagrams, the outline, Find, text size, and Side by side / Stacked
+- **AND** the tabs row adds the file as a crumb tab after Conversation and Files changed, with ‹ n of m ›, Jump to file and the review button
+- **AND** a facts line says `at c0ffee1 (PR head) · 439 B` beside the view chooser
+
+#### Scenario: Relative images and links resolve at the pull request's head
+- **WHEN** the rendered file embeds `./images/reflow.svg` and links to `hub.md`
+- **THEN** the image is the blob at #639's head, served by the session's blob route (`pr-blob/<repoKey>/<n>/<oid>/<path>`) with no HTML rewriting
+- **AND** activating the link opens `docs/hub.md`'s file view at the same commit, not the checkout's `docs/hub.md`
+
+#### Scenario: The blob route serves only the pull request's commits, never as a page
+- **WHEN** anything requests a blob
+- **THEN** it answers only for the pull request's current head or base commit and a known repository, refuses parent segments and VCS metadata, never answers `text/html`, and sends `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'` and an immutable private cache lifetime
+- **AND** an SVG from a pull request loads only as an image
+
+#### Scenario: The view mode carries over
+- **WHEN** the reviewer reads `docs/terminal.md` in Source and steps to the next file
+- **THEN** the next file opens in Source too; a file without that mode (a TypeScript file has no Rendered; an unchanged file has no Diff) shows its first mode without changing the preference
+- **AND** a row of the Files pane's pull request scope opens in the preference as well, not always in Diff
+
+#### Scenario: Threads beside Rendered and Source
+- **WHEN** the file has review threads and is shown in Rendered or Source
+- **THEN** a bar above it says `1 thread on this file`, with the first thread's author, line and an excerpt, and **Show in Diff**, which switches to Diff and focuses that thread
+- **AND** Source marks each line holding a current thread (read-only; a current thread's line is a head line, so the mark is exact)
+- **AND** neither Rendered nor Source offers a composer
+
+#### Scenario: Stepping through the files
+- **WHEN** the reviewer activates › on `docs/terminal.md` of #639
+- **THEN** the next changed file in tree order opens, the counter reads `3 of 4`, the mode stays, focus stays on ›, and each step is a history entry; at either end the step is disabled and focus moves to the other one
+- **AND** the counter opens Jump to file, whose pick opens that file's view
+
+#### Scenario: Viewing a file from Files changed
+- **WHEN** the reviewer activates View file on a Files changed header
+- **THEN** that file's view opens, in Rendered for a document and Source otherwise when the preference was Diff
+
+#### Scenario: Direct arrival, reload, Back and Forward
+- **WHEN** the reviewer reloads `?pr=639&path=docs/terminal.md`, or goes Back and Forward between files, or from a file to Files changed
+- **THEN** the same file, revision and tab are shown again, and Conversation and Files changed keep their drafts while a file is open
+
+#### Scenario: Every file at the head
+- **WHEN** the reviewer chooses All files in the Files pane's pull request scope
+- **THEN** the scope lists every path at #639's head (`git ls-tree`), with only the changed files' folders open and the changed files keeping their marks; the list stops at 50,000 paths
+- **AND** only the exposure deny list (VCS metadata, OS litter) is applied, not the workspace's `.uatu.json` ignore rules, which describe the working tree, not the pull request
+- **AND** an unchanged file opens in the file view without Diff, its facts saying it is not changed
+
+#### Scenario: The file at the base
+- **WHEN** the reviewer chooses Base on a file the pull request modifies
+- **THEN** the URL adds `rev=base` and the file is shown at the pull request's base commit, the facts naming the base branch; a deleted file shows its base, an added one has no Base
+
+#### Scenario: Binary and large files
+- **WHEN** the file is an image, another binary, larger than 1 MB, or a Git LFS pointer
+- **THEN** an image shows from the blob route; another binary or a large file says why it isn't shown, with Open on GitHub ↗; an LFS pointer shows as its pointer text with a note, and no LFS fetch runs
+
+#### Scenario: The head isn't fetched yet
+- **WHEN** the reviewer opens a file of #639 and #639's head commit is not local
+- **THEN** a card says uatu needs #639's head, that it fetches it into the private ref `refs/uatu/pull/639/head`, and that the branch, the files and the index stay as they are, with **Fetch #639's head**, Review the diff instead, and Open on GitHub ↗
+- **AND** nothing is fetched until the reviewer activates Fetch; then the file is shown
+- **AND** All files says the same, with the same Fetch
+
+#### Scenario: The head can't be fetched
+- **WHEN** the fetch fails, for example a private repository with a GitHub credential but no Git credential for the remote
+- **THEN** the card says it couldn't fetch and why, and points to Open on GitHub ↗; uatu does not fall back to GitHub's contents API
+
+#### Scenario: The checked-out branch's own pull request
+- **WHEN** the reviewer opens a file of the checked-out branch's own pull request at its head
+- **THEN** the head is local without a fetch, and the facts line compares the file with the checkout: `Same as your checkout` with **Open in workspace**, which opens the live document, or that the checkout differs (`local edits` or `checkout at <sha>`) with Open your copy
+- **AND** the pull request's head stays on screen: local edits never show in the file view, and the file view never replaces the workspace document
+
+#### Scenario: The pull request moves on
+- **WHEN** the summary's head commit moves past the commit a shown file was read at
+- **THEN** the facts line says the pull request has new commits, with Reload; nothing is re-read silently
+
+#### Scenario: Touch
+- **WHEN** the file view is shown on a touch device
+- **THEN** it is the Preview tab, with the Viewing strip unchanged above it; the title row reads `#639 docs/terminal.md`; the pinned row holds `‹ Files`, ‹ n/m › and Review; the chooser, Head / Base and the threads bar sit under it; every control is at least 44px
+- **AND** Rendered is the reading mode and Diff the commenting mode, with no new gestures
+
+#### Scenario: Follow leaves it alone
+- **WHEN** a workspace file changes while a file view is shown
+- **THEN** Follow does not replace it: the file view is a pull request preview
+
+#### Scenario: Not enabled
+- **WHEN** the session serves no GitHub data
+- **THEN** the file, tree, blob and fetch routes answer 404, as every `/api/github/*` route does, and no file view control is shown
 
 ### Requirement: Only another pull request counts as viewed, and the list is always at hand
 Only a pull request other than the checked-out branch's own SHALL count as viewed. The Pull request pane SHALL offer a way to the repository's pull requests whatever it shows.

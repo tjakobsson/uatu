@@ -30,8 +30,13 @@ switcher's Pull requests then work against an in-memory fake
 (`octo-org/uatu`, PR #642, viewer `octo-reviewer`). Comments and reviews
 change only that memory; nothing reaches GitHub, and every surface says the
 data is mocked. uatu never merges: the pane shows merge readiness and links
-to GitHub. The pane's "Mock scenario" control switches between
-`ready`, `no-pull-request`, `no-credential`, `rate-limited` and
+to GitHub. The PR file view reads the fake's file contents (each changed
+file's two sides, plus a few unchanged files per pull request: #639 has a
+Markdown file with Mermaid and a relative image, and an AsciiDoc file). The
+pane's "Mock scenario" control switches between
+`ready`, `head-not-fetched` (every pull request but the branch's own asks
+for its head to be fetched before its files show; Fetch succeeds at once),
+`no-pull-request`, `no-credential`, `rate-limited` and
 `unavailable`, and resets the data after asking. `UATU_GITHUB_FAKE_SCENARIO=<name>` picks
 the starting scenario. Without the flag, every `/api/github/*` route answers
 404.

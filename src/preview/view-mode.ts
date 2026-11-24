@@ -13,6 +13,7 @@ import { prewarmDiffView } from "./diff-view";
 import { mountLayoutToolbar } from "./layout";
 import { applyDocumentPayload, documentViewCache, loadDocument } from "./mount";
 import { refreshOutline } from "./outline";
+import { activePreviewViewHost } from "./view-host";
 
 const viewControlElementMaybe = document.querySelector<HTMLDivElement>("#view-control");
 const viewRenderedButtonMaybe = document.querySelector<HTMLButtonElement>("#view-rendered");
@@ -87,8 +88,11 @@ export function firstAvailableViewMode(payload: ViewChooserPayload): ViewMode | 
 // the active document does not have a separate rendered representation
 // (text / source / code files), whenever the preview is not in document mode,
 // and whenever the layout is split (both representations are already visible).
-export function syncViewToggle(payload: ViewChooserPayload): void {
+// `diff: false` leaves Diff out for a file that has no diff (a pull
+// request's unchanged file).
+export function syncViewToggle(payload: ViewChooserPayload, options: { diff?: boolean } = {}): void {
   const available = availableViewModes(payload);
+  if (options.diff === false) available.delete("diff");
   // The view chooser stays visible whenever the document has at least one
   // view to choose. In split layout Source and Rendered are both already
   // visible — clicking them in that state only updates the persisted
@@ -166,6 +170,12 @@ export function applyViewMode(next: ViewMode): void {
   }
   appState.viewMode = next;
   persistPersonalWorkspaceState({ previewMode: next });
+  // The pull request file view uses the same chooser and preference.
+  const host = activePreviewViewHost();
+  if (host) {
+    host.rerender();
+    return;
+  }
   // Re-render the active document in the new view. Prefer the cached
   // payload when both representations are already in memory — this is what
   // makes Source ↔ Rendered toggling feel instantaneous and avoids a flash
@@ -197,6 +207,11 @@ export function applyWrap(next: boolean): void {
   writePreviewWrapPreference(safeLocalStorage(), next);
   wrapToggleButton.setAttribute("aria-pressed", String(next));
 
+  const host = activePreviewViewHost();
+  if (host) {
+    host.wrapChanged();
+    return;
+  }
   if (appState.previewMode.kind !== "document" || !appState.selectedId) {
     return;
   }

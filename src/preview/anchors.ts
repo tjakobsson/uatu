@@ -3,7 +3,7 @@
 // lives in one module. Both handlers are attached to `#preview` and decide
 // per-click whether to override the browser's default navigation.
 
-import { appDocumentRelativePath } from "../shared/app-url";
+import { appDocumentRelativePath, appPathname } from "../shared/app-url";
 import { findDocumentById, findDocumentByRelativePath } from "../shell/storage";
 import { buildInPageAnchorUrl } from "./anchor-url";
 import { loadDocument } from "./mount";
@@ -152,6 +152,16 @@ export function initCrossDocAnchorHandler() {
     // needs the prefix stripped. Outside-prefix same-origin URLs (the hub
     // dashboard, sibling sessions) resolve to "" and fall through to a real
     // browser navigation, which is where they must go.
+    // A pull request file's relative link (the preview's <base href> is the
+    // pull request's blob route): the target's file view at the same commit
+    // (src/preview/pull-request-file.ts). Passed still encoded.
+    const blobPath = appPathname(resolved.pathname)?.replace(/^\/+/, "") ?? "";
+    if (appState.previewMode.kind === "pull-request" && blobPath.startsWith("api/github/pr-blob/")) {
+      event.preventDefault();
+      document.dispatchEvent(new CustomEvent("uatu:pull-request-file-link", { detail: { path: blobPath, hash: resolved.hash } }));
+      return;
+    }
+
     const relativePath = appDocumentRelativePath(resolved.pathname);
     if (!relativePath) {
       return;

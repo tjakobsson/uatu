@@ -34,6 +34,12 @@
 // thread last jumped to (`file=`, `thread=`), so a reload or Back / Forward
 // lands there again.
 //
+// A third state shows one file of the pull request (`path=`, the file view in
+// src/preview/pull-request-file.ts): the tabs row adds the file as a crumb
+// tab, and ‹ n of m › steps through the changed files in tree order, keeping
+// the view mode. Meanwhile the Conversation / Files changed panels are set
+// aside (kept, drafts and all) and the file's content is the preview.
+//
 // The module also follows which pull requests are on screen (this view's and
 // the workspace's current one): write dialogs for any other one close, and
 // leaving a pull request with a pending review says the review is still
@@ -73,8 +79,20 @@ import { mountFilesChanged, renderReviewBar, type FilesChangedView } from "./dif
 import { onUiModeChange } from "../shell/ui-mode";
 import { revealPreviewSurface } from "../shell/tab-bar";
 import { ADD_LINE_COMMENTS_EVENT, closePullRequestDialogsOutside, showToast } from "./review-dialogs";
+import { openFileJumpDialog } from "./diff-review";
+import { inTreeOrder } from "../shared/tree-order";
+import { applyViewMode } from "./view-mode";
+import type { PullRequestRenderOptions } from "../shell/url";
+import {
+  closePullRequestFile,
+  kindOfPath,
+  pullRequestFileShowing,
+  showPullRequestFile,
+  updatePullRequestFile,
+  type FileTarget,
+} from "./pull-request-file";
 
-export type PullRequestTab = "conversation" | "files";
+export type PullRequestTab = "conversation" | "files" | "file";
 type Mode = { kind: "pull-request"; repositoryId: string; number: number };
 
 const previewElement = document.querySelector<HTMLElement>("#preview")!;
@@ -85,6 +103,8 @@ const tabControl = document.querySelector<HTMLElement>("#pr-view-control");
 const githubLink = document.querySelector<HTMLAnchorElement>("#pr-view-github");
 const headerReview = document.querySelector<HTMLElement>("#pr-view-review");
 const jumpButton = document.querySelector<HTMLButtonElement>("#pr-view-jump");
+const fileTab = document.querySelector<HTMLButtonElement>("#pr-tab-file");
+const fileNav = document.querySelector<HTMLElement>("#pr-file-nav");
 
 type Mounted = {
   repositoryId: string;
@@ -100,11 +120,18 @@ type Mounted = {
   // alone; a tab switch forgets it, so Forward lands there again).
   pendingAnchor: Anchor | null;
   revealedAnchor: string | null;
+  // The file the file view shows (or last showed: its crumb tab returns
+  // there).
+  fileTarget: FileTarget | null;
 };
 type Anchor = { file?: string; thread?: string };
 const anchorKey = (anchor: Anchor) => `${anchor.file ?? ""}\n${anchor.thread ?? ""}`;
 
 let mounted: Mounted | null = null;
+
+// The view is still the preview: its panels are mounted, or (file view) its
+// file is.
+const isLive = (view: Mounted) => view.tab === "file" ? pullRequestFileShowing() : view.root.isConnected;
 // Add line comments asked for this pull request: Files changed opens its
 // first composer once mounted.
 let addLinesFor: number | null = null;
@@ -118,7 +145,7 @@ let addLinesFor: number | null = null;
 // and jumps land below it.
 const previewHeader = document.querySelector<HTMLElement>(".preview-header");
 function syncStickyTop(): void {
-  if (!mounted || !previewHeader) return;
+  if (!mounted || !previewHeader || appState.previewMode.kind !== "pull-request") return;
   const heading = previewHeader.querySelector<HTMLElement>(".preview-heading");
   const toolbar = previewHeader.querySelector<HTMLElement>(".preview-toolbar");
   const stacked = heading && toolbar && toolbar.offsetTop >= heading.offsetTop + heading.offsetHeight - 1;
@@ -128,19 +155,33 @@ function syncStickyTop(): void {
   const keep = Math.min(parseFloat(headerStyle.paddingTop) || 0, parseFloat(headerStyle.rowGap) || 0);
   const hide = stacked ? Math.max(0, toolbar.offsetTop - keep) : 0;
   previewHeader.style.setProperty("--pr-header-hide", `${hide}px`);
+  // The title row's end holds Open on GitHub and the document actions (text
+  // size; in the file view also copy and the outline): their measured width,
+  // so the title and ↗ clear them.
+  const actions = previewHeader.querySelector<HTMLElement>("#preview-action-bar");
+  if (actions) {
+    const width = actions.getBoundingClientRect().width;
+    previewHeader.style.setProperty("--pr-text-size-width", `${Math.ceil(width) + 4}px`);
+    const github = previewHeader.querySelector<HTMLElement>("#pr-view-github");
+    const githubWidth = github && !github.hidden ? github.getBoundingClientRect().width + 8 : 0;
+    previewHeader.style.setProperty("--pr-heading-actions", `${Math.ceil(width + githubWidth) + 12}px`);
+  }
   const style = getComputedStyle(previewHeader);
   const pinned = style.position === "sticky" || style.position === "fixed";
   // Whole pixels, tucked 1px under the header's bottom edge (which paints
   // over what pins below it): no gap, however the header's height rounds.
   const top = pinned ? Math.max(0, Math.floor(previewHeader.getBoundingClientRect().height + (parseFloat(style.top) || 0)) - 1) : 0;
   mounted.root.style.setProperty("--pr-sticky-top", `${top}px`);
-  const panel = mounted.root.querySelector<HTMLElement>(`[data-pr-panel="${mounted.tab}"]`);
+  // The file view's Diff is mounted in #preview itself.
+  previewElement.style.setProperty("--pr-sticky-top", `${top}px`);
+  const panel = mounted.tab === "file" ? previewElement : mounted.root.querySelector<HTMLElement>(`[data-pr-panel="${mounted.tab}"]`);
   const bar = panel?.querySelector<HTMLElement>(".pr-review-bar.is-active")?.offsetHeight ?? 0;
-  const fileHeader = mounted.tab === "files" ? panel?.querySelector<HTMLElement>(".pr-file-header")?.offsetHeight ?? 0 : 0;
+  const fileHeader = mounted.tab !== "conversation" ? panel?.querySelector<HTMLElement>(".pr-file-header")?.offsetHeight ?? 0 : 0;
   document.documentElement.style.setProperty("--pr-pinned", `${top + bar + fileHeader}px`);
 }
 const stickyObserver = typeof ResizeObserver === "function" ? new ResizeObserver(syncStickyTop) : null;
 if (previewHeader) stickyObserver?.observe(previewHeader);
+stickyObserver?.observe(previewElement);
 window.addEventListener("resize", syncStickyTop);
 
 // "Add line comments" (the review dialog, from any review button): open the
@@ -151,7 +192,7 @@ document.addEventListener(ADD_LINE_COMMENTS_EVENT, event => {
   const target = (event as CustomEvent<{ repositoryId: string; number: number }>).detail;
   addLinesFor = target.number;
   revealPreviewSurface();
-  if (mounted?.number === target.number && mounted.root.isConnected && appState.previewMode.kind === "pull-request") showTab("files");
+  if (mounted?.number === target.number && isLive(mounted) && appState.previewMode.kind === "pull-request") showTab("files");
   else activatePullRequestPreview({ repositoryId: target.repositoryId, number: target.number, tab: "files" }, { pushHistory: true });
   if (mounted?.number === target.number) addPendingLines(mounted);
 });
@@ -166,11 +207,16 @@ function addPendingLines(view: Mounted): void {
 // file count.
 jumpButton?.addEventListener("click", () => {
   if (mounted?.tab === "files") mounted.files?.openJump(jumpButton);
+  else if (mounted?.tab === "file") openFileJump(mounted, jumpButton);
 });
+function openFileJump(view: Mounted, opener: HTMLElement): void {
+  if (!view.detail) return;
+  openFileJumpDialog(view.detail, opener, { current: view.fileTarget?.path ?? null, onPick: path => openFile({ path, rev: "head" }) });
+}
 function syncJumpButton(view: Mounted): void {
   if (!jumpButton || mounted !== view) return;
   const count = view.detail?.files.length ?? 0;
-  jumpButton.hidden = !(view.tab === "files" && view.detail && count > 0);
+  jumpButton.hidden = !((view.tab === "files" || view.tab === "file") && view.detail && count > 0);
   const name = `Jump to file (${count} ${count === 1 ? "file" : "files"})`;
   jumpButton.setAttribute("aria-label", name);
   jumpButton.title = name;
@@ -189,10 +235,20 @@ tabControl?.addEventListener("click", event => {
   showTab(button.dataset.prTab as PullRequestTab);
 });
 
+// ‹ n of m ›: the previous or next changed file, in tree order; the counter
+// opens Jump to file.
+fileNav?.addEventListener("click", event => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-pr-file-step], [data-pr-file-count]");
+  if (!button || !mounted || button.disabled) return;
+  if (button.dataset.prFileCount !== undefined) { openFileJump(mounted, button); return; }
+  const path = button.dataset.prFileStep;
+  if (path) openFile({ path, rev: "head" }, { keepFocus: button.dataset.prFileDirection });
+});
+
 // Tabs pattern: Left / Right (wrapping), Home and End move to a tab and
 // show it.
 tabControl?.addEventListener("keydown", event => {
-  const tabs = [...(tabControl.querySelectorAll<HTMLButtonElement>("[data-pr-tab]"))];
+  const tabs = [...(tabControl.querySelectorAll<HTMLButtonElement>("[data-pr-tab]:not([hidden])"))];
   const next = tabKeyIndex(tabs.indexOf(event.target as HTMLButtonElement), event.key, tabs.length);
   if (next === null || !mounted) return;
   event.preventDefault();
@@ -237,8 +293,9 @@ function syncShown(): void {
 pullRequestStore.subscribe(() => {
   syncShown();
   if (!mounted) return;
-  if (!mounted.root.isConnected || appState.previewMode.kind !== "pull-request") {
+  if (!isLive(mounted) || appState.previewMode.kind !== "pull-request") {
     pullRequestStore.watch("view", null);
+    if (mounted.tab === "file") closePullRequestFile();
     mounted = null;
     return;
   }
@@ -301,11 +358,16 @@ export function revealPullRequestHeading(options: { always?: boolean } = {}): vo
   });
 }
 
-export function renderPullRequestPreview(mode: Mode, options: { tab?: PullRequestTab; file?: string; thread?: string } = {}): void {
+export function renderPullRequestPreview(mode: Mode, options: PullRequestRenderOptions = {}): void {
   if (deferHiddenPreview(() => {
     if (appState.previewMode.kind === "pull-request") renderPullRequestPreview(appState.previewMode, options);
   })) return;
-  if (mounted && mounted.root.isConnected && mounted.repositoryId === mode.repositoryId && mounted.number === mode.number) {
+  const fileTarget: FileTarget | null = options.tab === "file" && options.path ? { path: options.path, rev: options.rev ?? "head" } : null;
+  if (mounted && isLive(mounted) && mounted.repositoryId === mode.repositoryId && mounted.number === mode.number) {
+    if (fileTarget) {
+      openFile(fileTarget, { fromUrl: true });
+      return;
+    }
     if (options.tab && options.tab !== mounted.tab) {
       showTab(options.tab, { fromUrl: true });
       mounted.revealedAnchor = null;
@@ -315,6 +377,7 @@ export function renderPullRequestPreview(mode: Mode, options: { tab?: PullReques
   }
   releaseMediaPreview();
   closeMermaidViewer();
+  closePullRequestFile();
   clearPreviewType();
   hideViewToggle();
   previewBaseElement.href = new URL(appUrl("/"), window.location.origin).toString();
@@ -322,17 +385,18 @@ export function renderPullRequestPreview(mode: Mode, options: { tab?: PullReques
   previewTitleElement.textContent = `Pull request #${mode.number}`;
   previewTitleElement.removeAttribute("data-expanded");
   previewPathElement.textContent = "Reading GitHub…";
-  previewElement.innerHTML = `<section class="pr-view">
-      <div class="pr-view-banner" data-pr-banner hidden></div>
+  const root = document.createElement("section");
+  root.className = "pr-view";
+  root.innerHTML = `<div class="pr-view-banner" data-pr-banner hidden></div>
       <div class="pr-view-meta" data-pr-meta></div>
       <div id="pr-panel-conversation" role="tabpanel" aria-labelledby="pr-tab-conversation" data-pr-panel="conversation"><p class="pr-muted">Reading the pull request…</p></div>
-      <div id="pr-panel-files" role="tabpanel" aria-labelledby="pr-tab-files" data-pr-panel="files" hidden></div>
-    </section>`;
-  const root = previewElement.querySelector<HTMLElement>(".pr-view")!;
+      <div id="pr-panel-files" role="tabpanel" aria-labelledby="pr-tab-files" data-pr-panel="files" hidden></div>`;
+  // The file view's content takes the preview; the panels wait aside.
+  if (!fileTarget) previewElement.replaceChildren(root);
   // Another pull request starts at its top, not at the last one's offset.
   previewScrollRoot().scrollTop = 0;
   if (mounted) stickyObserver?.unobserve(mounted.root);
-  mounted = { repositoryId: mode.repositoryId, number: mode.number, tab: options.tab ?? "conversation", root, detail: null, files: null, composer: null, loading: false, pendingAnchor: null, revealedAnchor: null };
+  mounted = { repositoryId: mode.repositoryId, number: mode.number, tab: options.tab === "files" ? "files" : "conversation", root, detail: null, files: null, composer: null, loading: false, pendingAnchor: null, revealedAnchor: null, fileTarget: null };
   // A review bar or file header appearing (or changing height) changes
   // what is pinned.
   stickyObserver?.observe(root);
@@ -348,6 +412,7 @@ export function renderPullRequestPreview(mode: Mode, options: { tab?: PullReques
   syncTabs(mounted);
   const cached = pullRequestStore.detail(mode.number);
   if (cached) present(mounted, cached);
+  if (fileTarget) openFile(fileTarget, { fromUrl: true });
   revealAnchor(mounted, anchorOf(options));
   void load(mounted);
   // Opening a pull request view is a refresh trigger (design D6).
@@ -394,21 +459,87 @@ async function load(view: Mounted): Promise<void> {
 // already wrote it, including any `file=` or `thread=`.
 function showTab(tab: PullRequestTab, options: { fromUrl?: boolean; anchor?: Anchor } = {}): void {
   if (!mounted) return;
+  if (tab === "file") {
+    if (mounted.fileTarget) openFile(mounted.fileTarget, { fromUrl: options.fromUrl });
+    return;
+  }
   if ((mounted.tab !== tab || options.anchor) && !options.fromUrl) {
     pushPullRequestPreview(mounted.repositoryId, mounted.number, tab, tab === "files" ? options.anchor : undefined);
   }
   if (options.anchor) mounted.revealedAnchor = anchorKey(options.anchor);
+  if (mounted.tab === "file") leaveFile(mounted);
   mounted.tab = tab;
   syncTabs(mounted);
   if (tab === "files" && mounted.detail && !mounted.files) mountFiles(mounted, mounted.detail);
   renderHeaderReview(mounted);
   syncJumpButton(mounted);
+  syncFileNav(mounted);
+  syncTitle(mounted);
   addPendingLines(mounted);
+}
+
+// Opens a file of this pull request in the file view: from the Files pane's
+// PR scope, View file, ‹ ›, Jump to file, a relative link, or the URL.
+function openFile(target: FileTarget, options: { fromUrl?: boolean; keepFocus?: string } = {}): void {
+  const view = mounted;
+  if (!view) return;
+  if (!options.fromUrl) pushPullRequestPreview(view.repositoryId, view.number, "file", { path: target.path, rev: target.rev });
+  if (view.tab !== "file") {
+    // Set aside, not destroyed: drafts and the diff wait for the way back.
+    view.root.remove();
+    view.tab = "file";
+  }
+  view.fileTarget = target;
+  syncTabs(view);
+  renderHeaderReview(view);
+  syncJumpButton(view);
+  syncFileNav(view);
+  syncTitle(view);
+  showPullRequestFile({ repositoryId: view.repositoryId, number: view.number, open: next => openFile(next) }, target, view.detail);
+  syncStickyTop();
+  // The Files pane's PR scope selects its row.
+  document.dispatchEvent(new CustomEvent("uatu:pull-request-file-open", { detail: { path: target.path } }));
+  // ‹ and › keep focus on themselves while stepping (or on the other one at
+  // either end).
+  if (options.keepFocus) {
+    const step = fileNav?.querySelector<HTMLButtonElement>(`[data-pr-file-direction="${options.keepFocus}"]`);
+    const other = fileNav?.querySelector<HTMLButtonElement>(`[data-pr-file-direction="${options.keepFocus === "next" ? "previous" : "next"}"]`);
+    (step && !step.disabled ? step : other)?.focus({ preventScroll: true });
+  }
+}
+
+// View file (a Files changed header): the file itself, Rendered for
+// documents and Source otherwise; a reviewer reading in Diff leaves it.
+function viewFile(path: string): void {
+  if (appState.viewMode === "diff") {
+    const kind = kindOfPath(path);
+    // Before the file view is up, so the switch reloads nothing.
+    applyViewMode(kind === "markdown" || kind === "asciidoc" ? "rendered" : "source");
+  }
+  revealPreviewSurface();
+  openFile({ path, rev: "head" });
+}
+
+// Back to Conversation or Files changed: the file view's chrome goes and the
+// panels return.
+function leaveFile(view: Mounted): void {
+  closePullRequestFile();
+  previewElement.replaceChildren(view.root);
+  document.dispatchEvent(new CustomEvent("uatu:pull-request-file-open", { detail: { path: null } }));
 }
 
 function syncTabs(view: Mounted): void {
   // Files changed leaves out the facts band (styles.css).
   view.root.dataset.prTab = view.tab;
+  if (fileTab) {
+    fileTab.hidden = view.fileTarget === null;
+    const label = fileTab.querySelector<HTMLElement>("[data-pr-tab-file-name]");
+    const path = view.fileTarget?.path ?? "";
+    if (label) label.textContent = path.split("/").at(-1) ?? path;
+    fileTab.title = path;
+    fileTab.setAttribute("aria-label", path ? `File ${path}${view.fileTarget?.rev === "base" ? " at the base" : ""}` : "File");
+  }
+  tabControl?.toggleAttribute("data-file-open", view.tab === "file");
   for (const button of tabControl?.querySelectorAll<HTMLButtonElement>("[data-pr-tab]") ?? []) {
     const active = button.dataset.prTab === view.tab;
     button.classList.toggle("is-active", active);
@@ -420,9 +551,47 @@ function syncTabs(view: Mounted): void {
   }
 }
 
+// ‹ n of m › in the tabs row while a file is open.
+function syncFileNav(view: Mounted): void {
+  if (!fileNav || mounted !== view) return;
+  const target = view.fileTarget;
+  if (view.tab !== "file" || !target || !view.detail) {
+    fileNav.hidden = true;
+    return;
+  }
+  const files = inTreeOrder(view.detail.files);
+  const index = files.findIndex(file => file.path === target.path);
+  const previous = index > 0 ? files[index - 1]! : null;
+  const next = index >= 0 && index < files.length - 1 ? files[index + 1]! : null;
+  const count = index >= 0 ? `${index + 1} of ${files.length}` : `${files.length} changed`;
+  const focused = fileNav.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.prFileDirection ?? "count" : null;
+  fileNav.hidden = false;
+  fileNav.innerHTML = `<button type="button" class="pr-file-step" data-pr-file-direction="previous"${previous ? ` data-pr-file-step="${escapeHtmlAttribute(previous.path)}" aria-label="Previous file: ${escapeHtmlAttribute(previous.path)}" title="Previous file: ${escapeHtmlAttribute(previous.path)}"` : ` disabled aria-label="Previous file (this is the first)"`}>‹</button>
+    <button type="button" class="pr-file-count" data-pr-file-count aria-label="${index >= 0 ? `File ${index + 1} of ${files.length} changed files` : `Not a changed file; ${files.length} files changed`}: jump to file" title="Jump to file"><span class="pr-file-count-long">${count}</span><span class="pr-file-count-short" aria-hidden="true">${index >= 0 ? `${index + 1}/${files.length}` : `–/${files.length}`}</span></button>
+    <button type="button" class="pr-file-step" data-pr-file-direction="next"${next ? ` data-pr-file-step="${escapeHtmlAttribute(next.path)}" aria-label="Next file: ${escapeHtmlAttribute(next.path)}" title="Next file: ${escapeHtmlAttribute(next.path)}"` : ` disabled aria-label="Next file (this is the last)"`}>›</button>`;
+  if (focused) {
+    const again = focused === "count" ? fileNav.querySelector<HTMLButtonElement>("[data-pr-file-count]") : fileNav.querySelector<HTMLButtonElement>(`[data-pr-file-direction="${focused}"]`);
+    (again && !again.disabled ? again : fileNav.querySelector<HTMLButtonElement>("button:not(:disabled)"))?.focus({ preventScroll: true });
+  }
+}
+
+// The title: the pull request's, or on touch while a file is open, the file
+// (the number stays beside it).
+function syncTitle(view: Mounted): void {
+  if (mounted !== view) return;
+  const touch = document.documentElement.dataset.uiMode === "touch";
+  if (view.tab === "file" && view.fileTarget && touch) {
+    previewTitleElement.textContent = view.fileTarget.path;
+    previewTitleElement.title = view.detail ? view.detail.summary.title : "";
+  } else {
+    previewTitleElement.textContent = view.detail ? view.detail.summary.title : `Pull request #${view.number}`;
+    previewTitleElement.removeAttribute("title");
+  }
+}
+
 function mountFiles(view: Mounted, detail: PullRequestDetail): void {
   const panel = view.root.querySelector<HTMLElement>('[data-pr-panel="files"]')!;
-  view.files = mountFilesChanged(panel, detail, view.repositoryId);
+  view.files = mountFilesChanged(panel, detail, view.repositoryId, { onViewFile: viewFile });
 }
 
 function present(view: Mounted, detail: PullRequestDetail): void {
@@ -434,7 +603,7 @@ function present(view: Mounted, detail: PullRequestDetail): void {
     for (const panel of view.root.querySelectorAll<HTMLElement>("[data-pr-panel]")) panel.innerHTML = "";
     view.files = null;
   }
-  previewTitleElement.textContent = pr.title;
+  syncTitle(view);
   renderPathLine(detail);
   setHeaderDetail(detail);
   view.root.querySelector<HTMLElement>("[data-pr-meta]")!.innerHTML = `${stateBadge(pr)}
@@ -453,8 +622,10 @@ function present(view: Mounted, detail: PullRequestDetail): void {
   }
   if (view.files) view.files.update(detail);
   else if (view.tab === "files") mountFiles(view, detail);
+  if (view.tab === "file") updatePullRequestFile(detail);
   syncAvailability(view);
   syncJumpButton(view);
+  syncFileNav(view);
   revealAnchor(view, null);
   addPendingLines(view);
 }
@@ -534,8 +705,11 @@ function renderHeaderReview(view: Mounted): void {
   syncStickyTop();
 }
 
-// The review button's place follows the mode.
-const relayout = () => { if (mounted?.detail) syncAvailability(mounted); };
+// The review button's place follows the mode, and so does the title.
+const relayout = () => {
+  if (mounted?.detail) syncAvailability(mounted);
+  if (mounted) syncTitle(mounted);
+};
 onUiModeChange(relayout);
 
 // Stale data (rate-limited or unreachable) stays visible under a banner that
@@ -739,6 +913,12 @@ function renderUnavailable(view: Mounted, error: unknown): void {
   previewPathElement.textContent = [`#${view.number}`, repository, noCredential ? "GitHub not connected" : "unavailable"].filter(Boolean).join(" · ");
   pathLineHtml = "";
   view.root.querySelector<HTMLElement>("[data-pr-meta]")!.innerHTML = noCredential ? mockNotice(Boolean(summary?.mock)) : "";
+  // The file view gives way too: the card shows on the panels.
+  if (view.tab === "file") {
+    leaveFile(view);
+    view.tab = "conversation";
+    if (fileNav) fileNav.hidden = true;
+  }
   // What was shown (and its composers) goes: it can't be refreshed or sent.
   view.detail = null;
   view.files = null;

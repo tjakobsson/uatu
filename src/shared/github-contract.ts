@@ -82,6 +82,9 @@ export type GithubSummary = {
   message?: string;
   // Present for `ready`, and as last known data while `stale`.
   pullRequest?: PullRequestSummary;
+  // The fake's dev scenario (only while `mock`): the Mock scenario menu
+  // shows it, since `head-not-fetched` answers `ready`.
+  mockScenario?: GithubFakeScenario;
 };
 
 export type GithubComment = {
@@ -200,9 +203,37 @@ export type PullRequestList = {
   pullRequests: PullRequestListItem[];
 };
 
+// A pull request's file at its head or its base commit (the file view).
+export type PullRequestRevision = "head" | "base";
+
+// What the file view's payload adds to a rendered document: which commit it
+// shows, and where that commit's blobs are served for relative images and
+// links (`blobBase`, session-relative: `api/github/pr-blob/<repoKey>/<n>/<oid>/`).
+export type PullRequestFileRevision = { number: number; rev: PullRequestRevision; oid: string; blobBase: string };
+export type PullRequestFileFacts = {
+  mock: boolean;
+  bytes: number;
+  // A Git LFS pointer, shown as its text: uatu never runs an LFS fetch.
+  lfsPointer: boolean;
+  revision: PullRequestFileRevision;
+};
+
+// Every path at the pull request's head ("All files"), exposure-filtered.
+export type PullRequestTree = { mock: boolean; headOid: string; paths: string[]; truncated: boolean };
+
+// The answer of the explicit, narrow fetch of a pull request's head.
+export type PullRequestHeadFetch = { mock: boolean; headOid: string };
+
+// Why a pull request's file can't be shown from local Git: its head isn't
+// fetched yet (the consent card), or it is too large or binary.
+export type PullRequestFileRefusal = "not-fetched" | "too-large" | "binary" | "not-found";
+
 // The fake's dev-only scenario switch (item 6 of the mockups).
+// `head-not-fetched` answers like `ready`, but no pull request's head except
+// the checked-out branch's is local until its consent card's Fetch.
 export const GITHUB_FAKE_SCENARIOS = [
   "ready",
+  "head-not-fetched",
   "no-pull-request",
   "no-credential",
   "rate-limited",

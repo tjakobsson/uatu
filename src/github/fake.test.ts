@@ -199,3 +199,31 @@ describe("countLineChanges", () => {
     expect(countLineChanges("", "a\nb\n")).toEqual({ additions: 2, deletions: 0 });
   });
 });
+
+describe("FakeGithubService file contents", () => {
+  test("head-not-fetched answers like ready, keeps other heads remote until fetched, and re-arms on reset", async () => {
+    const service = new FakeGithubService({ scenario: "head-not-fetched" });
+    const summary = await service.summary(REPO);
+    expect(summary.status).toBe("ready");
+    expect(summary.mockScenario).toBe("head-not-fetched");
+    expect(await service.pullRequestBlob(REPO, 639, { path: "docs/terminal.md", rev: "head" })).toEqual({ state: "not-fetched" });
+    expect("bytes" in await service.pullRequestBlob(REPO, 642, { path: "docs/pr-review.md", rev: "head" })).toBe(true);
+    await service.fetchPullRequestHead(REPO, 639);
+    expect("bytes" in await service.pullRequestBlob(REPO, 639, { path: "docs/terminal.md", rev: "head" })).toBe(true);
+    service.reset();
+    expect(await service.pullRequestTree(REPO, 639)).toEqual({ state: "not-fetched" });
+  });
+
+  test("a changed file's head and base are its two sides; unchanged files come from the head tree", async () => {
+    const service = new FakeGithubService();
+    const text = async (path: string, rev: "head" | "base") => {
+      const blob = await service.pullRequestBlob(REPO, 639, { path, rev });
+      return "bytes" in blob ? new TextDecoder().decode(blob.bytes) : null;
+    };
+    expect(await text("docs/terminal.md", "head")).toContain("mermaid");
+    expect(await text("docs/terminal.md", "base")).not.toContain("mermaid");
+    expect(await text("docs/hub.md", "base")).toBe(await text("docs/hub.md", "head"));
+    expect((await refusal(() => service.pullRequestBlob(REPO, 639, { path: "docs/terminal-links.adoc", rev: "base" }))).httpStatus).toBe(404);
+    expect((await refusal(() => service.fetchPullRequestHead(REPO, 9))).httpStatus).toBe(404);
+  });
+});

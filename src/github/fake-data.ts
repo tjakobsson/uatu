@@ -23,6 +23,10 @@ export const FAKE_REPOSITORY_SETTINGS: {
 export const FAKE_CURRENT_PULL_REQUEST = 642;
 
 export type SeedFile = { path: string; old: string; new: string };
+// Files at the pull request's head that it does not change (the same at its
+// base): what "All files" browses besides the changed ones, and what
+// relative links and images in a changed document resolve to.
+export type SeedTree = Record<string, string>;
 export type SeedCheck = CheckRun & { finishesAfterMs?: number; finishedDetail?: string };
 export type SeedComment = { author: string; body: string; hoursAgo: number };
 export type SeedThread = { id: string; path: string; line: number; comments: SeedComment[] };
@@ -59,6 +63,7 @@ export type SeedPullRequest = {
   threads: SeedThread[];
   comments: SeedComment[];
   conflicting?: boolean;
+  headTree?: SeedTree;
 };
 
 const PR_REVIEW_DOC_OLD = `# Pull request review
@@ -92,6 +97,18 @@ Request changes, then submit them together.
 The Pull request pane says whether GitHub would merge now and why not.
 Merge on GitHub itself: **Merge on GitHub ↗** opens the pull request
 there. Nothing in your local worktree changes.
+
+## How a review flows
+
+\`\`\`mermaid
+flowchart LR
+  read[Read the file] --> diff[Open Diff]
+  diff --> pending[Add line comments]
+  pending --> finish[Finish review]
+  finish --> github[(GitHub)]
+\`\`\`
+
+See [the hub guide](hub.md) for where the checks come from.
 `;
 
 const HUB_DOC_OLD = `# Hub
@@ -328,6 +345,78 @@ const TERMINAL_DOC_NEW = `# Terminal
 
 Links printed with OSC 8 open in a new tab, also after the terminal
 reflows a wrapped row.
+
+## How a link survives reflow
+
+\`\`\`mermaid
+flowchart LR
+  open[OSC 8 open] --> wrapped[wrapped row]
+  wrapped --> carry[carryOpenLink]
+  carry --> close[OSC 8 close]
+\`\`\`
+
+See [the hub guide](hub.md) for terminals in a hub, and
+[the link rules](terminal-links.adoc) for the details.
+
+![A wrapped row keeps its link](./images/reflow.svg)
+`;
+
+const TERMINAL_LINKS_ADOC = `= Terminal links
+:toc:
+
+Links printed with OSC 8 stay clickable across a reflow.
+
+== Rules
+
+[cols="1,2"]
+|===
+|Case |What happens
+
+|Link ends inside the row
+|Closed where it ends.
+
+|Link reaches the row's end
+|Carried into the continuation row by \`carryOpenLink\`.
+|===
+
+NOTE: A link that ends exactly at the row boundary is closed, not carried.
+
+== Example
+
+[source,typescript]
+----
+const ranges = linkRanges(line, wrapped);
+----
+
+image::images/reflow.svg[A wrapped row keeps its link]
+`;
+
+const REFLOW_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="140" viewBox="0 0 480 140" role="img" aria-label="A wrapped row keeps its OSC 8 link">
+  <rect x="1" y="1" width="478" height="138" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <rect x="24" y="28" width="300" height="32" rx="6" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="36" y="49" font-family="monospace" font-size="14" fill="#0969da">https://example.com/docs</text>
+  <rect x="24" y="76" width="160" height="32" rx="6" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="36" y="97" font-family="monospace" font-size="14" fill="#0969da">/page</text>
+  <text x="340" y="49" font-family="sans-serif" font-size="13" fill="#57606a">row 1</text>
+  <text x="200" y="97" font-family="sans-serif" font-size="13" fill="#57606a">row 2: same link</text>
+</svg>
+`;
+
+const ARCHITECTURE_STUB = `# Architecture
+
+uatu is a local Bun-served PWA that watches a docs tree and previews
+Markdown and AsciiDoc next to an embedded terminal.
+
+- \`src/preview/\` renders documents.
+- \`src/terminal/\` runs the embedded terminal.
+- \`src/github/\` reads pull requests.
+`;
+
+const DOCS_INDEX = `# uatu docs
+
+- [Hub](hub.md)
+- [Pull request review](pr-review.md)
+- [Terminal](terminal.md)
 `;
 
 const STATE_TEST_OLD = `test("reads the default pane layout", () => {
@@ -456,6 +545,11 @@ export function seedPullRequests(): SeedPullRequest[] {
       comments: [
         { author: "octo-author", body: "Thanks! Linked `docs/hub.md` in `9f8e7d6`; it lists every check source.", hoursAgo: 3 },
       ],
+      headTree: {
+        "ARCHITECTURE.md": ARCHITECTURE_STUB,
+        "docs/index.md": DOCS_INDEX,
+        "docs/terminal.md": TERMINAL_DOC_OLD,
+      },
     },
     {
       number: 639,
@@ -476,6 +570,7 @@ export function seedPullRequests(): SeedPullRequest[] {
         { path: "src/terminal/links.ts", old: TERMINAL_OLD, new: TERMINAL_NEW },
         { path: "src/terminal/links.test.ts", old: "", new: TERMINAL_TEST_NEW },
         { path: "docs/terminal.md", old: TERMINAL_DOC_OLD, new: TERMINAL_DOC_NEW },
+        { path: "docs/terminal-links.adoc", old: "", new: TERMINAL_LINKS_ADOC },
       ],
       checks: ["unit", "e2e (leg 1)", "e2e (leg 2)", "perf", "licenses"].map(name => ({ name, state: "SUCCESS" as const, detail: "passed" })),
       requestedReviewers: ["octo-reviewer"],
@@ -499,10 +594,26 @@ export function seedPullRequests(): SeedPullRequest[] {
             { author: "octo-maintainer", body: "Does `carryOpenLink` also close a link that ends exactly at the row boundary?", hoursAgo: 4 },
           ],
         },
+        {
+          id: "thread-639-docs",
+          path: "docs/terminal.md",
+          line: 3,
+          comments: [
+            { author: "octo-maintainer", body: "Does carryOpenLink also close a link that ends at the row's last cell? Worth saying here.", hoursAgo: 4 },
+          ],
+        },
       ],
       comments: [
         { author: "octo-contrib", body: "Repro: `printf` a long OSC 8 link in a narrow terminal, then widen it.", hoursAgo: 29 },
       ],
+      headTree: {
+        "ARCHITECTURE.md": ARCHITECTURE_STUB,
+        "README.md": README_OLD,
+        "docs/index.md": DOCS_INDEX,
+        "docs/hub.md": HUB_DOC_OLD,
+        "docs/pr-review.md": PR_REVIEW_DOC_OLD,
+        "docs/images/reflow.svg": REFLOW_SVG,
+      },
     },
     {
       number: 636,

@@ -8,12 +8,18 @@ import type {
   GithubFakeScenario,
   GithubSummary,
   PullRequestDetail,
+  PullRequestFileFacts,
+  PullRequestHeadFetch,
   PullRequestList,
+  PullRequestRevision,
+  PullRequestTree,
   ReviewEvent,
 } from "../shared/github-contract";
+import type { RenderedDocument } from "../preview/mount";
 
 export class GithubRequestError extends Error {
-  constructor(readonly status: number, message: string) {
+  // The file view's refusals name their reason (`not-fetched`, `binary`, …).
+  constructor(readonly status: number, message: string, readonly state: string | null = null, readonly body: Record<string, unknown> | null = null) {
     super(message);
   }
 }
@@ -36,9 +42,9 @@ async function request<T>(method: string, path: string, query: Record<string, st
   } catch {
     throw new GithubRequestError(0, "This workspace did not answer. Check the connection and try again.");
   }
-  const payload = await response.json().catch(() => null) as (T & { error?: string }) | null;
+  const payload = await response.json().catch(() => null) as (T & { error?: string; state?: string }) | null;
   if (!response.ok || payload === null) {
-    throw new GithubRequestError(response.status, payload?.error ?? `Request failed (${response.status}).`);
+    throw new GithubRequestError(response.status, payload?.error ?? `Request failed (${response.status}).`, typeof payload?.state === "string" ? payload.state : null, payload as Record<string, unknown> | null);
   }
   return payload;
 }
@@ -65,6 +71,11 @@ export const githubApi = {
   submitReview: (target: Target, event: ReviewEvent, body: string) =>
     request<PullRequestDetail>("POST", appUrl("/api/github/review/submit"), null, { ...target, event, body }),
   discardReview: (target: Target) => request<PullRequestDetail>("DELETE", appUrl("/api/github/review"), null, target),
+  // The pull request file view (design D5).
+  pullRequestFile: (target: Target, input: { path: string; rev: PullRequestRevision; view: "rendered" | "source" }) =>
+    request<RenderedDocument & PullRequestFileFacts>("GET", appUrl("/api/github/pull-request/file"), { ...target, ...input }),
+  pullRequestTree: (target: Target) => request<PullRequestTree>("GET", appUrl("/api/github/pull-request/tree"), target),
+  fetchHead: (target: Target) => request<PullRequestHeadFetch>("POST", appUrl("/api/github/fetch-refs"), null, target),
   setScenario: (input: { scenario?: GithubFakeScenario; reset?: boolean }) =>
     request<{ ok: true }>("POST", appUrl("/api/github/dev/scenario"), null, input),
 };

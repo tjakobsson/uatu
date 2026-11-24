@@ -266,18 +266,27 @@ export function firstAvailableViewMode(payload: RenderedDocument | null): ViewMo
   return null;
 }
 
+// What a mount shows. A workspace document's images follow their files'
+// revisions, and its loads are owned by the selection. A pull request file
+// (src/preview/pull-request-file.ts) is fixed content at one commit: the
+// preview's <base href> already points at that commit's blobs, and its view
+// guards its own loads (`isCurrent`).
+export type MountContext = { kind: "document" } | { kind: "pull-request-file" };
+const DOCUMENT_MOUNT: MountContext = { kind: "document" };
+
 // Render a single-pane layout for the given payload. This is the legacy
 // (pre-split) DOM shape: #preview itself carries the body content directly.
 export async function renderSinglePayload(
   payload: RenderedDocument,
   isCurrent: () => boolean = alwaysCurrent,
+  context: MountContext = DOCUMENT_MOUNT,
 ): Promise<void> {
   if (!isCurrent()) return;
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
-  refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
+  if (context.kind === "document") refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
   // preview body so users can switch between Single / Side by side /
@@ -377,10 +386,13 @@ export async function renderSplitPayloads(
   sourcePayload: RenderedDocument,
   renderedPayload: RenderedDocument,
   isCurrent: () => boolean = alwaysCurrent,
+  context: MountContext = DOCUMENT_MOUNT,
 ): Promise<void> {
-  const ownsLoad = isCurrent;
-  const revision = documentRevisionKey(sourcePayload.id);
-  isCurrent = () => ownsLoad() && documentRevisionKey(sourcePayload.id) === revision && appState.selectedId === sourcePayload.id;
+  if (context.kind === "document") {
+    const ownsLoad = isCurrent;
+    const revision = documentRevisionKey(sourcePayload.id);
+    isCurrent = () => ownsLoad() && documentRevisionKey(sourcePayload.id) === revision && appState.selectedId === sourcePayload.id;
+  }
   if (!isCurrent()) return;
   const orientation: "split-h" | "split-v" =
     appState.viewLayout === "split-v" ? "split-v" : "split-h";
@@ -411,7 +423,7 @@ export async function renderSplitPayloads(
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
-  refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
+  if (context.kind === "document") refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
 
   attachMetadataCardToggleListener(renderedPane);

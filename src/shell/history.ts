@@ -98,23 +98,32 @@ export function pushCommitPreview(repositoryId: string, sha: string) {
 
 // `?pr=<n>` addresses a pull request preview; `tab=files` opens it on Files
 // changed, and `file=<path>` scrolls to one file there, `thread=<id>` to one
-// review thread (focused). The repository (its
+// review thread (focused). `path=<path>` opens the pull request file view on
+// that file at the head (`rev=base`: at the base). The repository (its
 // root path) is left out when it is the workspace's pull request repository,
 // as it is for every pull request the pane shows; `repository=<id>` URLs
-// keep working. Switching Conversation / Files changed pushes an entry too,
-// so Back returns to the other tab before it leaves the pull request.
-export function buildPullRequestPreviewPath(repositoryId: string, number: number, tab: "conversation" | "files" = "conversation", anchor?: string | { file?: string; thread?: string }): string {
-  const { file, thread } = typeof anchor === "string" ? { file: anchor, thread: undefined } : anchor ?? {};
+// keep working. Switching Conversation / Files changed / a file pushes an
+// entry too, so Back returns to the other tab before it leaves the pull
+// request.
+export type PullRequestPreviewTab = "conversation" | "files" | "file";
+export type PullRequestPreviewAnchor = { file?: string; thread?: string; path?: string; rev?: "head" | "base" };
+
+export function buildPullRequestPreviewPath(repositoryId: string, number: number, tab: PullRequestPreviewTab = "conversation", anchor?: string | PullRequestPreviewAnchor): string {
+  const { file, thread, path, rev } = typeof anchor === "string" ? { file: anchor, thread: undefined, path: undefined, rev: undefined } : anchor ?? {};
   const url = new URL(appUrl("/"), window.location.origin);
   if (repositoryId !== pullRequestRepository(appState.repositories)?.id) url.searchParams.set("repository", repositoryId);
   url.searchParams.set("pr", String(number));
+  if (tab === "file" && path) {
+    url.searchParams.set("path", path);
+    if (rev === "base") url.searchParams.set("rev", "base");
+  }
   if (tab === "files") url.searchParams.set("tab", "files");
   if (tab === "files" && thread) url.searchParams.set("thread", thread);
   else if (tab === "files" && file) url.searchParams.set("file", file);
   return carryNotificationTarget(`${url.pathname}${url.search}`, window.location.search);
 }
 
-export function pushPullRequestPreview(repositoryId: string, number: number, tab: "conversation" | "files" = "conversation", anchor?: string | { file?: string; thread?: string }) {
+export function pushPullRequestPreview(repositoryId: string, number: number, tab: PullRequestPreviewTab = "conversation", anchor?: string | PullRequestPreviewAnchor) {
   const nextPath = buildPullRequestPreviewPath(repositoryId, number, tab, anchor);
   if (`${window.location.pathname}${window.location.search}` === nextPath) return;
   window.history.pushState({ pullRequestRepositoryId: repositoryId, pullRequest: number }, "", nextPath);
@@ -122,7 +131,7 @@ export function pushPullRequestPreview(repositoryId: string, number: number, tab
 
 // The same entry, now anchored elsewhere (a jump within Files changed): the
 // URL follows without adding a Back step.
-export function replacePullRequestPreview(repositoryId: string, number: number, tab: "conversation" | "files", anchor?: { file?: string; thread?: string }) {
+export function replacePullRequestPreview(repositoryId: string, number: number, tab: PullRequestPreviewTab, anchor?: PullRequestPreviewAnchor) {
   const nextPath = buildPullRequestPreviewPath(repositoryId, number, tab, anchor);
   if (`${window.location.pathname}${window.location.search}` === nextPath) return;
   window.history.replaceState({ pullRequestRepositoryId: repositoryId, pullRequest: number }, "", nextPath);

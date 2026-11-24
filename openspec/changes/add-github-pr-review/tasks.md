@@ -62,6 +62,16 @@ Tasks marked **(provisional: Q1)** or **(provisional: Q2)** depend on the open s
 - [ ] 8.3 Assemble PR evidence by running the relevant e2e suites with `UATU_E2E_SCREENSHOTS_DIR=openspec/changes/add-github-pr-review/screenshots`. Verify the screenshots cover each phase's main flow and the no-credential state.
 - [ ] 8.4 Update `CLAUDE.md` and `ARCHITECTURE.md` for the final module layout, including the surface chosen for Q1/Q2, then run `openspec validate add-github-pr-review --strict`. Verify validation passes and both documents name every new module.
 
+## 9. Pull request file view (D17)
+
+- [x] 9.1 Split `renderDocument` into the pure `renderDocumentSource` and its filesystem wrapper; add `classifyBytes`/`sniffBinaryBytes`. Verify `render-dispatch` tests pass unchanged.
+- [x] 9.2 Add `fetchPullRequestHead`, `pullRequestBlob` and `pullRequestTree` to the `GithubService` seam and the fake (changed files' two sides, `headTree`, the `head-not-fetched` scenario), and the fetch, file, tree and blob routes in `src/github/http.ts` and `buildRoutes`. Verify `http.test.ts` and `fake.test.ts` cover rendering at head and base, unsafe paths, binaries, the 409 until Fetch, the fetch as a guarded write, the tree, the blob route's headers and commit check, and 404 without a service.
+- [x] 9.3 Build the file view on the fake: `src/preview/pull-request-file.ts` (Rendered / Source through the mount's pull request context, Diff as one-file Files changed, the threads bar, Source thread marks, the facts line with Head / Base and the own-PR comparison, the consent card, binary and refusal cards), the crumb tab, ‹ n of m ›, Jump to file and URL handling in `pull-request-view.ts`, View file in Files changed, relative links in `anchors.ts`, and the PR scope's rows and Changed / All files switch. Verify `.local/ux-loop` probes (`fv-checks.ts`, run by `r3-hits.ts`) on desktop and touch, and `pull-request-file-model.test.ts`.
+- [ ] 9.4 Add `src/document/git-objects.ts` (`cat-file -e`, `cat-file --batch`, `ls-tree -r -z -l`, LFS pointer detection) and the narrow fetch into `refs/uatu/pull/<n>/head` with pruning beyond 20, deletion on leaving a merged or closed PR, the shallow rule and `fetch.fsckObjects`, behind the real service. Verify with temporary repositories and a bare remote holding `refs/pull/<n>/head`: no change to the working tree, index, branches or remote-tracking refs.
+- [ ] 9.5 Verify the new-commits notice (built, but the fake's heads never move) against a fake transport that pushes a new head, and the own-PR comparison against a real checkout behind and ahead of the head.
+- [ ] 9.6 Add `tests/e2e/pull-request-file.e2e.ts` once the e2e harness serves GitHub data (task 2.4).
+- [ ] 9.7 Phase 4, optional: Rendered block markers from Markdown source positions (an allowed `data-source-line`), AsciiDoc through Asciidoctor's `sourcemap`, and replies from a marker popover.
+
 ## Workflow follow-up
 
 - Archive the change after review and merge, then verify that the archived specs contain the new capabilities and the modified requirements.

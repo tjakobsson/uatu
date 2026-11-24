@@ -13,6 +13,10 @@ The `Files` tab's surface SHALL be the existing sidebar pane stack rendered full
 - **WHEN** the user expands a directory in the Files tab, switches to Preview, and returns
 - **THEN** the expansion state is exactly as they left it
 
+#### Scenario: A viewed pull request's file opens in Preview
+- **WHEN** a pull request is viewed and the user taps a file in the Files tab's pull request scope
+- **THEN** the Preview tab comes forward on that file's pull request file view, in the shared view mode, with the Viewing strip above it
+
 #### Scenario: Tapping a pane's title expands it and folds the others
 - **GIVEN** a 390×844 touch device showing Pull request, Change Overview and Files, with Files expanded
 - **WHEN** the user taps the Pull request header anywhere except its actions
