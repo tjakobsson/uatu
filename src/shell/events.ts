@@ -41,7 +41,7 @@ import { applyWatchContext } from "../shared/watch-context";
 import { replaceSelection } from "./history";
 import { setSelectedId, getPendingDocumentPath, getSelectionActivation, getSelectionGeneration } from "./selection";
 import { appState, isSurfacePreview } from "./state";
-import { renderSurfacePreview } from "./url";
+import { renderSurfacePreview, resolvePendingPullRequestPreview } from "./url";
 import { contextualAppUrl, currentWatchContext, setClientScope } from "./watch-context";
 import { mediaKind } from "../shared/media";
 import { mediaPlayer } from "../media/controller";
@@ -333,6 +333,8 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   for (const doc of contentUpserts) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
   for (const doc of patch.removals) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
   noteSearchCorpusChange();
+  // A `?pr=` arrival waiting for Git data opens once it names a repository.
+  if ((patch.repositories || patch.repositoryState) && resolvePendingPullRequestPreview()) return;
   if (isSurfacePreview(mode)) {
     renderSidebarPatch(patch);
     if (patch.repositories) renderSurfacePreview(mode);
@@ -432,6 +434,8 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
     markSearchResultsStale(payload.changedId);
   }
 
+  // A `?pr=` arrival waiting for Git data opens once it names a repository.
+  if (resolvePendingPullRequestPreview()) return;
   // Local snapshot so the discriminant narrowing survives into the closure.
   const previewMode = appState.previewMode;
   if (isSurfacePreview(previewMode)) {

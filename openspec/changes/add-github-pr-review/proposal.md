@@ -34,7 +34,7 @@ Uatu already shows a branch's changed files, per-file diffs and commit history, 
 - Client: review annotations on `src/preview/diff-view.ts` through `@pierre/diffs` line annotations, and URL and history handling in `src/shell/`. The PR summary, list and view surfaces land in `src/sidebar/`, `src/preview/` or `src/shell/` depending on the UX review's outcome. Requirement deltas for `sidebar-shell` or `document-routing` are added then, if the chosen surface needs them.
 - Git data: `src/document/git-base-ref.ts`, `git-data.ts` and `diff.ts` accept a pull request base override; `CompareBaseMode` gains `pull-request`.
 - Hub: `src/hub/worktree-create.ts`, `worktree-fetch.ts` and `src/shared/worktree-contract.ts` gain the `pull-request` mode.
-- Public contract: `RepositorySnapshot` gains an optional `github` summary (workspace revision bump), and `CreateWorktreeRequest` gains the `pull-request` mode (Hub revision bump), with `api/openapi.yaml`, `api/contract.json`, `src/shared/version.ts` and `api/CHANGELOG.md` updated.
+- Public contract: `CreateWorktreeRequest` gains the `pull-request` mode (Hub revision bump), with `api/openapi.yaml`, `api/contract.json`, `src/shared/version.ts` and `api/CHANGELOG.md` updated. The pull request summary stays on the session's internal routes, read on demand; `RepositorySnapshot` and the workspace revision are unchanged (design D5).
 - No new dependency. `gh` is already a Hub-managed tool; uatu does not add a token path of its own.
 - Tests never call GitHub: the child's transport is a seam with an in-memory fake for e2e and a fake `gh` executable for unit tests.
 - Docs: `CLAUDE.md` folder map, `ARCHITECTURE.md` and user-facing docs.

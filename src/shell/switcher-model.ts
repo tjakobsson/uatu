@@ -9,7 +9,7 @@
 // No DOM and no imports beyond types and the contract's pure helpers, so
 // both the Hub's part (hub-nav.ts) and the switcher can use it.
 
-import { pullRequestLocalBranch, type GithubRepositoryRef, type PullRequestListItem, type PullRequestSummary } from "../shared/github-contract";
+import { pullRequestLocalBranch, type GithubRepositoryRef, type PullRequestList, type PullRequestListItem, type PullRequestSummary } from "../shared/github-contract";
 import { worktreeFolderName } from "../shared/worktree-branches";
 
 // --- The button and the chip ------------------------------------------------
@@ -53,6 +53,15 @@ export const PULL_REQUEST_FILTERS: readonly { value: PullRequestFilter; label: s
 
 // How many pull request rows show before "Show all n".
 export const PULL_REQUESTS_FOLDED = 3;
+
+// The open list holds at most 100 pull requests; GitHub may have more. Said
+// under the whole list (folded rows aside), with a link to GitHub's own list.
+export function morePullRequestsOnGithub(list: Pick<PullRequestList, "repository" | "pullRequests" | "totalCount">): { count: number; href: string } | null {
+  const count = (list.totalCount ?? 0) - list.pullRequests.length;
+  if (count <= 0) return null;
+  const { host, owner, name } = list.repository;
+  return { count, href: `https://${host}/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls` };
+}
 
 export function filterPullRequests(items: readonly PullRequestListItem[], filter: PullRequestFilter, viewer: string | null): PullRequestListItem[] {
   return items.filter(item => filter === "open"

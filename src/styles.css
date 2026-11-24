@@ -1201,6 +1201,10 @@ html:not([data-ui-mode="touch"]) .switcher-lists > .switcher-head {
   font-weight: 400;
 }
 
+/* The open pull requests beyond the 100 the list reads: a link to GitHub's
+   own list, as tall as Show all. */
+.switcher-more-on-github { display: inline-flex; align-items: center; min-height: 44px; padding: 0 0.25rem; font-size: 0.9rem; }
+
 /* + New, the filter toggle and Show all: accent text buttons, 44px tall. */
 .switcher-new,
 .switcher-filter-toggle,
@@ -3948,16 +3952,27 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 [data-pane-id="files"][data-files-scope] :is(.files-toolbar, #recent-files, #tree-empty-message, .files-options) { display: none; }
 [data-pane-id="files"][data-files-scope] #tree { display: none !important; }
 .pr-scope:not([hidden]) { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.pr-scope-bar {
-  display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.4rem;
-  padding: 0.3rem 0.75rem; border-bottom: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface)); font-size: 0.72rem;
+/* The bar and the Changed | All files switch share one row on desktop: the
+   pane's chrome (`.pane-toolbar`), counted into its minimum height, so the
+   tree keeps rows below it in a short stack. Touch stacks them. */
+.pr-scope-head {
+  display: flex; flex: 0 0 auto; align-items: center; gap: 0.2rem 0.4rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
 }
+.pr-scope-bar {
+  display: flex; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.4rem;
+  padding: 0.3rem 0 0.3rem 0.75rem; font-size: 0.72rem;
+}
+/* Desktop: one line, the title giving way; a stale-data status wraps under. */
+html:not([data-ui-mode="touch"]) .pr-scope-bar:not(:has(.pr-scope-status)) { flex-wrap: nowrap; }
+html[data-ui-mode="touch"] .pr-scope-head { flex-wrap: wrap; padding-bottom: 0.35rem; }
+html[data-ui-mode="touch"] .pr-scope-bar { flex-basis: 100%; padding-right: 0.75rem; }
 .pr-scope-label {
   flex: 0 0 auto; padding: 0.05rem 0.4rem; border-radius: 999px;
   background: var(--accent); color: var(--surface); font-weight: 600;
 }
-.pr-scope-title { flex: 1 1 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
+.pr-scope-title { flex: 1 1 2rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
 .pr-scope-bar .gh-mock-label { flex: 0 0 auto; }
 html[data-ui-mode="touch"] .pr-scope-bar { min-height: 44px; padding-block: 0.25rem; box-sizing: border-box; }
 .pr-scope-status { flex-basis: 100%; color: var(--danger); }
@@ -13306,6 +13321,13 @@ html[data-ui-mode="touch"] .pr-review-bar.is-active .gh-button { min-height: 44p
 .pr-review-bar.is-active .pr-review-bar-text { color: var(--text-strong); }
 .pr-review-bar-actions { display: inline-flex; gap: 0.45rem; margin-left: auto; }
 .pr-review-bar kbd { padding: 0 0.3rem; border: 1px solid var(--border-medium); border-radius: 0.25rem; font-size: 0.8em; }
+/* What GitHub's answer left out (more entries, threads or files than were
+   read; a section GitHub refused), with the link to the pull request. */
+.pr-omitted-slot:empty { display: none; }
+.pr-omitted { margin: 0.5rem 0; padding: 0.4rem 0.6rem; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-subtle); font-size: 0.85rem; }
+.pr-conversation .pr-omitted { margin: 0 0 1rem calc(2rem + 0.85rem); }
+html[data-ui-mode="touch"] .pr-omitted .gh-external { display: inline-flex; align-items: center; min-height: 44px; }
+
 /* One line under the review bar: the counts and base ← head. */
 .pr-files-toolbar {
   display: flex;
@@ -14090,6 +14112,35 @@ html[data-ui-mode="touch"] .pr-file-threads-excerpt { display: none; }
    or reply). */
 pre.uatu-source-pre .uatu-cl.has-pr-thread { background: var(--gh-attention-soft); box-shadow: inset 3px 0 0 var(--gh-attention-border); }
 pre.uatu-source-pre .uatu-cl.has-pr-thread.is-resolved { background: none; box-shadow: inset 3px 0 0 var(--border-medium); }
+/* Rendered: the block holding a thread's line, a bar beside it and a marker
+   at its top right that opens the thread in Diff (read-only). The marker
+   sits in a zero-height anchor before the block, so the block's own
+   structure (lists, tables, code) is untouched and Find reads no text. */
+#preview .has-pr-thread-block { box-shadow: -6px 0 0 0 var(--gh-attention-border); }
+#preview .has-pr-thread-block.is-resolved { box-shadow: -6px 0 0 0 var(--border-medium); }
+.pr-block-thread-anchor { position: relative; height: 0; }
+.pr-block-thread {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  min-height: 24px;
+  padding: 0 0.4rem;
+  border: 1px solid var(--gh-attention-border);
+  border-radius: 999px;
+  background: var(--gh-attention-soft);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.pr-block-thread::before { content: "💬"; }
+.pr-block-thread::after { content: attr(data-count); font-weight: 600; }
+.pr-block-thread.is-resolved { border-color: var(--border-medium); background: var(--surface-muted); }
+html[data-ui-mode="touch"] .pr-block-thread { min-height: 44px; min-width: 44px; justify-content: center; }
 
 .pr-file-loading { margin: 1rem 0; }
 .pr-fetch-card { max-width: 40rem; }
@@ -14106,7 +14157,8 @@ html[data-ui-mode="touch"] .pr-file-action[data-file-view] .pr-file-action-label
 
 /* The Files pane's PR scope: Changed n | All files. */
 .pr-scope-switch[hidden] { display: none; }
-.pr-scope-switch { display: flex; align-self: flex-start; margin: 0.35rem 0.6rem; }
+.pr-scope-switch { display: flex; flex: 0 0 auto; margin: 0.25rem 0.6rem 0.25rem 0; }
+html[data-ui-mode="touch"] .pr-scope-switch { margin: 0 0.6rem; }
 .pr-scope-switch .view-segment { padding: 0.15rem 0.7rem; font-size: 0.8rem; }
 html[data-ui-mode="touch"] .pr-scope-switch .view-segment { min-height: 44px; display: inline-flex; align-items: center; }
 .pr-scope-switch-count { margin-left: 0.3rem; color: var(--text-subtle); font-variant-numeric: tabular-nums; }

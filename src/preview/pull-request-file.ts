@@ -29,7 +29,7 @@
 import { githubApi, GithubRequestError } from "../github/client";
 import { pullRequestStore } from "../github/pull-request-store";
 import { shortOid } from "../github/present";
-import type { PullRequestDetail, PullRequestFileFacts, PullRequestFileRevision, PullRequestRevision } from "../shared/github-contract";
+import type { PullRequestDetail, PullRequestFileFacts, PullRequestFileRevision, PullRequestRevision, ReviewThread } from "../shared/github-contract";
 import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { ViewMode } from "../shared/types";
@@ -52,7 +52,7 @@ import { refreshOutline } from "./outline";
 import { observePreviewSvgImages, preparePreviewHtml } from "./svg-images";
 import { hideViewToggle, syncViewToggle } from "./view-mode";
 import { registerPreviewViewHost } from "./view-host";
-import { effectiveRevision, effectiveViewMode, fileViewModes, formatBytes, kindOfPath, parseBlobLink } from "./pull-request-file-model";
+import { blockHoldingLine, effectiveRevision, effectiveViewMode, fileViewModes, formatBytes, kindOfPath, parseBlobLink } from "./pull-request-file-model";
 
 export { kindOfPath } from "./pull-request-file-model";
 export type FileTarget = { path: string; rev: PullRequestRevision };
@@ -140,7 +140,7 @@ export function updatePullRequestFile(detail: PullRequestDetail): void {
   }
   state.diff?.update(detail);
   renderBar(state);
-  markThreadLines(state);
+  markThreads(state);
   // The branch's pull request and the workspace's documents may only now be
   // known (a reload straight into the file view).
   maybeCompare(state);
@@ -309,7 +309,7 @@ async function renderNow(current: State, options: { force?: boolean }): Promise<
     syncViewToggle({ kind: primary.kind }, { diff: changed !== null });
     current.shownKey = key;
     current.shownNode = previewElement.firstElementChild;
-    markThreadLines(current);
+    markThreads(current);
     renderBar(current);
     if (current.fragment) {
       scrollToFragment(current.fragment);
@@ -566,16 +566,24 @@ function truncate(text: string, length: number): string {
   return flat.length > length ? `${flat.slice(0, length - 1)}…` : flat;
 }
 
-// Source (single or split): the lines holding a review thread at the head.
-function markThreadLines(current: State): void {
-  if (state !== current || effectiveRev(current) !== "head") return;
+// The head's lines that hold a review thread (a current RIGHT-side thread's
+// line is a head line): Source marks those lines, Rendered the blocks that
+// hold them. Read-only; replies are written in Diff.
+function markThreads(current: State): void {
+  if (state !== current) return;
+  const head = effectiveRev(current) === "head";
+  const threads = head ? threadsOn(current).filter(thread => thread.side === "RIGHT" && thread.line !== null) : [];
+  markThreadLines(threads);
+  markThreadBlocks(threads);
+}
+
+function markThreadLines(threads: readonly ReviewThread[]): void {
   const byLine = new Map<number, { count: number; resolved: boolean }>();
-  for (const thread of threadsOn(current)) {
-    if (thread.side !== "RIGHT" || thread.line === null) continue;
-    const entry = byLine.get(thread.line) ?? { count: 0, resolved: true };
+  for (const thread of threads) {
+    const entry = byLine.get(thread.line!) ?? { count: 0, resolved: true };
     entry.count += 1;
     entry.resolved &&= thread.isResolved;
-    byLine.set(thread.line, entry);
+    byLine.set(thread.line!, entry);
   }
   for (const line of previewElement.querySelectorAll<HTMLElement>("pre.uatu-source-pre .uatu-cl")) {
     const mark = byLine.get(Number(line.dataset.ln));
@@ -583,6 +591,46 @@ function markThreadLines(current: State): void {
     line.classList.toggle("is-resolved", Boolean(mark?.resolved));
     if (mark) line.title = `${mark.count} review ${mark.count === 1 ? "thread" : "threads"} on this line: Show in Diff to read or reply`;
     else line.removeAttribute("title");
+  }
+}
+
+// Rendered Markdown and AsciiDoc: each block carries the source line it
+// starts on (`data-source-line`, from the file route). A thread's line
+// belongs to the last block, in document order, that starts at or before it,
+// so nested AsciiDoc blocks resolve to the innermost. The block gets a bar
+// and a marker beside it that opens the thread in Diff.
+function markThreadBlocks(threads: readonly ReviewThread[]): void {
+  for (const anchor of previewElement.querySelectorAll(".pr-block-thread-anchor")) anchor.remove();
+  for (const block of previewElement.querySelectorAll(".has-pr-thread-block")) block.classList.remove("has-pr-thread-block", "is-resolved");
+  if (threads.length === 0) return;
+  const blocks = [...previewElement.querySelectorAll<HTMLElement>("[data-source-line]")]
+    .map(element => ({ element, line: Number(element.dataset.sourceLine) }))
+    .filter(block => Number.isInteger(block.line));
+  const byBlock = new Map<HTMLElement, ReviewThread[]>();
+  for (const thread of threads) {
+    const holder = blockHoldingLine(blocks, thread.line!);
+    if (!holder) continue;
+    byBlock.set(holder.element, [...(byBlock.get(holder.element) ?? []), thread]);
+  }
+  for (const [block, held] of byBlock) {
+    const resolved = held.every(thread => thread.isResolved);
+    block.classList.add("has-pr-thread-block");
+    block.classList.toggle("is-resolved", resolved);
+    const first = held.find(thread => !thread.isResolved) ?? held[0]!;
+    const lineNumbers = [...new Set(held.map(thread => thread.line!))].sort((a, b) => a - b);
+    const anchor = document.createElement("div");
+    anchor.className = "pr-block-thread-anchor";
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.className = `pr-block-thread${resolved ? " is-resolved" : ""}`;
+    marker.dataset.prBlockThread = first.id;
+    marker.dataset.count = String(held.length);
+    const what = `${held.length} review ${held.length === 1 ? "thread" : "threads"}${resolved ? " (resolved)" : ""} on ${lineNumbers.length === 1 ? "line" : "lines"} ${lineNumbers.join(", ")}`;
+    marker.setAttribute("aria-label", `${what}: Show in Diff`);
+    marker.title = `${what}: Show in Diff to read or reply`;
+    marker.addEventListener("click", () => showPullRequestFileThread(first.id));
+    anchor.append(marker);
+    block.before(anchor);
   }
 }
 

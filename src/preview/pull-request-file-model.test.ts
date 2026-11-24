@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { effectiveRevision, effectiveViewMode, fileViewModes, formatBytes, kindOfPath, parseBlobLink } from "./pull-request-file-model";
+import { blockHoldingLine, effectiveRevision, effectiveViewMode, fileViewModes, formatBytes, kindOfPath, parseBlobLink } from "./pull-request-file-model";
 
 describe("pull request file view rules", () => {
   test("a path's kind decides the modes; Diff only for a changed file", () => {
@@ -40,5 +40,19 @@ describe("pull request file view rules", () => {
     expect(parseBlobLink("api/github/pr-blob/k/639/c0ffee1/docs%2F..%2Fx")).toBeNull();
     expect(parseBlobLink("api/github/pr-blob/k/639/c0ffee1")).toBeNull();
     expect(parseBlobLink("docs/hub.md")).toBeNull();
+  });
+});
+
+describe("blockHoldingLine", () => {
+  test("a line belongs to the last block starting at or before it; nested blocks win", () => {
+    // AsciiDoc order: a section at 5 holding paragraphs at 7 and 10.
+    const blocks = [{ line: 3, name: "intro" }, { line: 5, name: "section" }, { line: 7, name: "para" }, { line: 10, name: "list" }];
+    expect(blockHoldingLine(blocks, 1)).toBeNull();
+    expect(blockHoldingLine(blocks, 3)?.name).toBe("intro");
+    expect(blockHoldingLine(blocks, 4)?.name).toBe("intro");
+    expect(blockHoldingLine(blocks, 5)?.name).toBe("section");
+    expect(blockHoldingLine(blocks, 8)?.name).toBe("para");
+    expect(blockHoldingLine(blocks, 40)?.name).toBe("list");
+    expect(blockHoldingLine([], 4)).toBeNull();
   });
 });

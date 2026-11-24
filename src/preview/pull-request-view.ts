@@ -57,6 +57,8 @@ import {
   clockTimeWithSeconds,
   mergeLinkHtml,
   mockNotice,
+  omittedNoteHtml,
+  omittedNotes,
   reviewDecisionBadge,
   stateBadge,
 } from "../github/present";
@@ -771,6 +773,7 @@ function mountConversation(view: Mounted, detail: PullRequestDetail): void {
   panel.innerHTML = `<div class="pr-conversation">
       <div class="pr-review-bar" data-pr-conversation-bar role="region" aria-label="Your review" hidden></div>
       <div class="pr-timeline" data-pr-timeline></div>
+      <div class="pr-omitted-slot" data-pr-conversation-omitted></div>
       <div class="pr-event pr-merge-box" data-pr-merge-box></div>
       <div class="pr-event pr-event-composer">
         ${avatar(detail.viewer)}
@@ -815,6 +818,8 @@ function renderTimeline(view: Mounted, detail: PullRequestDetail): void {
     const text = item?.textContent?.trim().replace(/\s+/g, " ") ?? "";
     if (text && !checkbox.hasAttribute("aria-label")) checkbox.setAttribute("aria-label", text);
   }
+  const omitted = view.root.querySelector<HTMLElement>("[data-pr-conversation-omitted]");
+  if (omitted) omitted.innerHTML = omittedNoteHtml(omittedNotes(detail, "conversation"), pr.url);
   renderMergeBox(view, detail);
   for (const button of timeline.querySelectorAll<HTMLButtonElement>("[data-view-in-diff]")) {
     button.addEventListener("click", () => {

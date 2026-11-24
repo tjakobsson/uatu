@@ -6,6 +6,7 @@ import {
   lookupText,
   matchesSearch,
   middleTruncate,
+  morePullRequestsOnGithub,
   nextListSelection,
   otherRepositoryName,
   pullRequestCheckout,
@@ -157,5 +158,17 @@ describe("the switcher's words", () => {
     expect(pullRequestCheckout(item({ headRefName: "fix/pane-heights" }), "uatu").folder).toBe("uatu.worktrees/fix-pane-heights");
     // The Hub's folder rule: lowercase, and dots and slashes become dashes.
     expect(pullRequestCheckout(item({ headRefName: "Release/v1.2" }), "uatu").folder).toBe("uatu.worktrees/release-v1-2");
+  });
+});
+
+describe("morePullRequestsOnGithub", () => {
+  test("names the open pull requests beyond the list, with GitHub's own list", () => {
+    const pullRequests = [] as PullRequestListItem[];
+    expect(morePullRequestsOnGithub({ repository, pullRequests })).toBeNull();
+    expect(morePullRequestsOnGithub({ repository, pullRequests, totalCount: 0 })).toBeNull();
+    const hundred = Array.from({ length: 100 }, () => ({}) as PullRequestListItem);
+    expect(morePullRequestsOnGithub({ repository, pullRequests: hundred, totalCount: 100 })).toBeNull();
+    expect(morePullRequestsOnGithub({ repository, pullRequests: hundred, totalCount: 143 }))
+      .toEqual({ count: 43, href: "https://github.com/octo-org/uatu/pulls" });
   });
 });

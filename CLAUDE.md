@@ -75,7 +75,9 @@ src/
 │                   workspace switcher: the tab bar's fifth button, the
 │                   desktop chip, one dialog saying where you work and what
 │                   you view, its Pull requests and the view-or-check-out
-│                   choice; switcher-model holds its pure rules) + hub-nav
+│                   choice; switcher-model holds its pure rules;
+│                   pull-request-checkout creates a pull request's
+│                   worktree through the Hub's worktree family) + hub-nav
 │                   (the Hub's part: workspace list, live activity, the
 │                   Checkouts rows), worktree-dialog
 │                   (the one client worktree dialog, embedded in both
@@ -85,9 +87,19 @@ src/
 │                   notice for other workspaces) — the app-wide chrome and
 │                   the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
-│                   chooser, layout (split/stacked), diff view (and
+│                   chooser (view-host lets the PR file view take it),
+│                   layout (split/stacked), diff view (and
 │                   diff-pr-review: its pull request threads, inline only
-│                   when the session proves it is the PR's diff),
+│                   when the session proves it is the PR's diff;
+│                   pr-file-link: "Review this file in #n"), the pull
+│                   request preview: pull-request-view (Conversation /
+│                   Files changed / the file crumb), diff-review (Files
+│                   changed with inline review; diff-review-lines its
+│                   keyboard and line mapping), pull-request-file (one file
+│                   at the PR head in Rendered / Source / Diff, thread
+│                   marks; pure rules in pull-request-file-model),
+│                   pr-composer + pr-drafts (composer and its page-local
+│                   drafts), review-dialogs (finish / discard),
 │                   svg-images (visibility-bound image loading and suspension),
 │                   mermaid trigger, anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
@@ -99,7 +111,10 @@ src/
 │                   ignored-visibility (Files options), panes
 │                   shell/render, change-overview, git-log, files-filter,
 │                   search-pane (⇧⌘F project search: pane + result model +
-│                   open-and-jump); in touch mode the whole pane stack
+│                   open-and-jump), pull-request-pane (the branch's or the
+│                   viewed pull request: summary, review, merge readiness),
+│                   pull-request-scope (+ -model: the Files pane's tree of a
+│                   viewed PR's changed or all files); in touch mode the whole pane stack
 │                   renders fullscreen as the Files tab
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
@@ -135,7 +150,9 @@ src/
 │                   refs/uatu/pull/<n>/head, pruned to 20), pull-request-base
 │                   (the branch's pull request base that `base` resolves
 │                   from, set by the GitHub service; no src/github import)
-├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
+├── render/         source → HTML (markdown, asciidoc, mermaid sanitization;
+│                   `sourceLines` adds each block's `data-source-line` for
+│                   the PR file view's Rendered thread markers)
 ├── ignore/         engine + config (the `.uatu.json ignore` block — explicit
 │                   exposure excludes, narrow build/dist output includes, and
 │                   legacy initial ignored-visibility defaults)
@@ -163,7 +180,7 @@ src/
 ├── github/         GitHub pull request review — service (the GithubService
 │                   seam and the UATU_GITHUB off|read|full choice) + gh-service
 │                   (the real one: detection, event-driven refresh, writes
-│                   with re-checks) over gh (the `gh api` transport: argv,
+│                   with re-checks; error: the routes' refusal type) over gh (the `gh api` transport: argv,
 │                   stdin bodies, --include) + api + classify (statuses from
 │                   status/headers/GraphQL errors) + remote (base repository,
 │                   branch facts) + ops/ (one pinned query and soft parser per
@@ -186,7 +203,10 @@ src/
                     branch/destination rules shared by client and Hub),
                     document-updates (versioned snapshots/patches and the
                     keyed reducer used by Hub and browser), git-fetch-failure
-                    (what a failed `git fetch` said, for Hub and child)
+                    (what a failed `git fetch` said, for Hub and child),
+                    github-contract (the pull request wire types shared by
+                    child and browser), tree-order (the Files pane's path
+                    order, shared by the PR scope and Files changed)
 ```
 
 Outside `src/`: `desktop/macos/` is **UatuCode Desktop**, the SwiftUI macOS

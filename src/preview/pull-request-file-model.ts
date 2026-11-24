@@ -60,3 +60,12 @@ export function parseBlobLink(sessionPath: string): { number: number; oid: strin
   if (path.split("/").some(segment => segment === "" || segment === "." || segment === "..")) return null;
   return { number: Number(number), oid, path };
 }
+
+// Rendered thread markers: the block holding a source line is the last one,
+// in document order, that starts at or before it (blocks carry their start
+// line; nested ones come after their parent, so the innermost wins).
+export function blockHoldingLine<T extends { line: number }>(blocks: readonly T[], line: number): T | null {
+  let holder: T | null = null;
+  for (const block of blocks) if (block.line <= line) holder = block;
+  return holder;
+}

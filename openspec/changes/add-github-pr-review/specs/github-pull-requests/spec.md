@@ -101,16 +101,16 @@ The server SHALL detect the pull request whose head is the repository's checked-
 - **WHEN** the only pull request for the branch has been merged
 - **THEN** the summary names it with state Merged
 
-### Requirement: The summary reaches clients with repository updates
-The pull request summary SHALL ride each repository's snapshot on the existing document live updates. It MUST NOT add a browser connection, topic, or polling loop. The summary SHALL be bounded and SHALL include number, title, URL, state, draft flag, author, base and head branch names, base and head commit ids, review decision, a checks rollup, requested reviewers, and update time.
+### Requirement: Clients read the summary from the session on demand
+Each client SHALL read the pull request summary from its session on request, on the refresh events below. The summary MUST NOT add a browser connection, live topic or polling loop, and it SHALL stay off the public repository snapshot. The summary SHALL be bounded and SHALL include number, title, URL, state, draft flag, author, base and head branch names, base and head commit ids, review decision, a checks rollup, requested reviewers, and update time.
 
-#### Scenario: A summary change reaches open clients
-- **WHEN** a pull request's review decision changes on GitHub and the next refresh sees it
-- **THEN** every open client of that workspace receives the new summary through its existing live connection
+#### Scenario: Several tabs ask at once
+- **WHEN** two tabs of a workspace ask for the summary within a few seconds, for the same branch and HEAD
+- **THEN** the session asks GitHub once and answers both from that answer
 
 #### Scenario: A summary change does not re-collect Git data
 - **WHEN** only the pull request summary changed
-- **THEN** the repository snapshot is republished from the last Git collection without running Git again
+- **THEN** no repository collection runs; Git data is collected again only when the pull request association or its base changed, or a fetch brought the pull request's refs
 
 ### Requirement: Pull request data refreshes on events, never on a timer
 Pull request data SHALL refresh when the checked-out branch, its upstream, or HEAD changes, when a pull request view opens, when the user returns to the page (window focus or the page becoming visible), after each of the user's own writes, and when the user asks. It MUST NOT refresh on a timer, and it MUST NOT contact GitHub because a file was edited. Returning to the page SHALL refresh at most once per short interval, however often focus changes.
@@ -269,7 +269,7 @@ The workspace SHALL list the resolved repository's open pull requests in the wor
 
 #### Scenario: More than 100 open pull requests
 - **WHEN** the repository has 140 open pull requests
-- **THEN** `Show all` lists the 100 most recently updated and a link to the rest on GitHub
+- **THEN** `Show all` lists the 100 most recently updated, and the list ends with `40 more on GitHub ↗`, a link to the repository's pull requests on GitHub
 
 #### Scenario: Opening the list from the Pull request pane
 - **WHEN** the user activates the Pull request pane's search control, or `Browse pull requests…` in its no-pull-request state
@@ -327,6 +327,10 @@ The pull request view SHALL render the description and the conversation in time 
 - **WHEN** a pull request has more conversation items than the bound
 - **THEN** the view shows the most recent items and a link to the full conversation on GitHub
 
+#### Scenario: GitHub leaves part of the answer out
+- **WHEN** GitHub's answer skips timeline entries, holds more threads or changed files than were read, or refuses a section (the checks, the threads, the files) while the rest answers
+- **THEN** Conversation says what it lacks, for example `2 more timeline entries on GitHub.`, and Files changed what its files and threads lack, each with **Open on GitHub ↗**
+
 #### Scenario: The parts read apart on a phone
 - **WHEN** the pull request view is shown at phone width (390px), in the light or the dark theme
 - **THEN** the pull request's facts, the description, each review and comment, the merge box and the composer are each set apart: a full-width band with a tinted header strip (author · action · time) or tinted surface, hairlines above and below, and the same gap between parts, with no width given to side borders
@@ -344,6 +348,10 @@ The pull request view SHALL have a same-origin URL naming the pull request numbe
 #### Scenario: Direct arrival and refresh
 - **WHEN** a user opens or refreshes a URL naming pull request #42 of a repository the workspace can read
 - **THEN** the pull request view for #42 is shown
+
+#### Scenario: Direct arrival while the session is still reading Git
+- **WHEN** a user opens `?pr=642` just after the workspace started, before its Git data is collected
+- **THEN** the preview says it is reading the repository, and the pull request view for #642 opens once the repository is known, never the default document in between; with no Git repository after all, the notice below is shown
 
 #### Scenario: A short URL
 - **WHEN** a user opens `?pr=642` in a workspace whose Git repository has pull request #642
@@ -444,6 +452,11 @@ The pull request view SHALL have a file view (`?pr=<n>&path=<path>[&rev=base]`) 
 - **THEN** a bar above it says `1 thread on this file`, with the first thread's author, line and an excerpt, and **Show in Diff**, which switches to Diff and focuses that thread
 - **AND** Source marks each line holding a current thread (read-only; a current thread's line is a head line, so the mark is exact)
 - **AND** neither Rendered nor Source offers a composer
+
+#### Scenario: Thread markers beside rendered blocks
+- **WHEN** a Markdown or AsciiDoc file with a current thread on line 3 is shown in Rendered
+- **THEN** the rendered block that holds line 3 (the last block starting at or before it) has a bar and a 💬 marker beside it, named `1 review thread on line 3: Show in Diff`, which opens the thread in Diff; the marker adds no text to the document
+- **AND** block lines come from the renderer (`data-source-line`, digits only), never from the author: an author-written attribute or a lookalike comment or role is dropped, and the sanitizer is otherwise unchanged
 
 #### Scenario: Stepping through the files
 - **WHEN** the reviewer activates › on `docs/terminal.md` of #639

@@ -399,6 +399,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   personalState = { version: 1 };
   clearPullRequestBases();
   e2eGithubTransport = null;
+  e2eGithubBare = null;
   await Promise.all(e2eGithubRemotes.splice(0).map(remote => fs.rm(remote, { recursive: true, force: true })));
   e2eGithub = body.github && body.github !== "transport" ? new FakeGithubService({ scenario: typeof body.github === "string" ? body.github : undefined }) : environmentGithub();
 
@@ -802,6 +803,10 @@ let e2eGithub: GithubService | null = environmentGithub();
 let e2eGithubTransport: FakeGitHub | null = null;
 const e2eGithubRemotes: string[] = [];
 
+// The bare remote standing in for GitHub's Git side of #42, once
+// `own-pull-request` made it (`push-head` commits there).
+let e2eGithubBare: string | null = null;
+
 // `/__e2e/github` (transport mode only): makes fixture pull request #42 the
 // workspace's own. The checkout moves to its head branch `feature/login` at
 // HEAD; a local bare clone stands in for GitHub's Git side (it publishes
@@ -810,8 +815,12 @@ const e2eGithubRemotes: string[] = [];
 // files, with the patches Git computes against `main`. `base` picks D7's case:
 // `exact` (GitHub's base commit is `main`, local), `stale` (GitHub's base is
 // one commit past the local `origin/main`, published only on the bare remote)
-// or `missing` (a base branch that exists nowhere locally).
-async function makeOwnPullRequest(body: { files?: string[]; base?: "exact" | "stale" | "missing" }): Promise<Response> {
+// or `missing` (a base branch that exists nowhere locally). `commit` writes
+// and commits files on the branch first (their paths may then be `files`);
+// `threadPath` moves #42's line threads (a current one, an old-side one and
+// an outdated one) to that file.
+type OwnPullRequestBody = { files?: string[]; base?: "exact" | "stale" | "missing"; commit?: Record<string, string>; threadPath?: string };
+async function makeOwnPullRequest(body: OwnPullRequestBody): Promise<Response> {
   const fake = e2eGithubTransport;
   if (!fake) return Response.json({ error: "reset with github: \"transport\" first" }, { status: 409 });
   const root = activeWorkspaceRoot;
@@ -825,6 +834,14 @@ async function makeOwnPullRequest(body: { files?: string[]; base?: "exact" | "st
   e2eGithubRemotes.push(bare);
   await git(os.tmpdir(), ["clone", "--quiet", "--bare", root, bare]);
   await git(root, ["checkout", "--quiet", "-b", "feature/login"]);
+  if (body.commit) {
+    for (const [relativePath, contents] of Object.entries(body.commit)) {
+      await fs.writeFile(path.join(root, relativePath), contents, "utf8");
+      await git(root, ["add", "--", relativePath]);
+    }
+    await git(root, ["commit", "--quiet", "-m", "pull request files"]);
+    await git(bare, ["fetch", "--quiet", root, "feature/login"]);
+  }
   const head = await git(root, ["rev-parse", "HEAD"]);
   await git(bare, ["update-ref", "refs/pull/42/head", head]);
   await git(root, ["config", `url.${bare}.insteadOf`, "git@github.com:acme/widgets.git"]);
@@ -850,7 +867,39 @@ async function makeOwnPullRequest(body: { files?: string[]; base?: "exact" | "st
     files.push({ filename: file, status: diff.includes("new file mode") ? "added" : "modified", additions, deletions, changes: additions + deletions, patch });
   }
   fake.setFiles(42, files);
+  if (body.threadPath) {
+    for (const thread of fake.record(42).reviewThreads.nodes) {
+      if (thread.subjectType === "LINE") thread.path = body.threadPath;
+    }
+  }
+  e2eGithubBare = bare;
   return Response.json({ ok: true, head, main });
+}
+
+// `/__e2e/github { action: "push-head", files }`: #42 gets a new commit on
+// GitHub only. The commit is made in the bare remote (root-level `files`
+// rewritten), published as `refs/pull/42/head`, and named by the transport
+// fake; the checkout doesn't have it until a fetch.
+async function pushOwnPullRequestHead(body: { files?: Record<string, string> }): Promise<Response> {
+  const fake = e2eGithubTransport;
+  const bare = e2eGithubBare;
+  if (!fake || !bare) return Response.json({ error: "make the own pull request first" }, { status: 409 });
+  const git = async (args: string[], input?: string) => {
+    const result = await safeGit(bare, ["-c", "commit.gpgsign=false", "-c", "user.name=GitHub", "-c", "user.email=github@example.test", ...args], input === undefined ? {} : { input });
+    if (!result.ok) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const previous = await git(["rev-parse", "refs/pull/42/head"]);
+  const entries = new Map((await git(["ls-tree", previous])).split("\n").filter(Boolean).map(line => [line.slice(line.indexOf("\t") + 1), line]));
+  for (const [name, contents] of Object.entries(body.files ?? {})) {
+    const blob = await git(["hash-object", "-w", "--stdin"], contents);
+    entries.set(name, `100644 blob ${blob}\t${name}`);
+  }
+  const tree = await git(["mktree"], `${[...entries.values()].join("\n")}\n`);
+  const head = await git(["commit-tree", tree, "-p", previous, "-m", "more work on GitHub"]);
+  await git(["update-ref", "refs/pull/42/head", head]);
+  fake.pushHead(42, head);
+  return Response.json({ ok: true, head });
 }
 let server: ReturnType<typeof Bun.serve>;
 let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
@@ -928,8 +977,9 @@ const inner = Bun.serve({
     // fallback answers 404 itself.
     const pathname = stripBasePath(url.pathname, E2E_BASE_PATH);
     if (pathname === "/__e2e/github" && request.method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { action?: string; files?: string[]; base?: "exact" | "stale" | "missing" };
-      if (body.action === "own-pull-request") return makeOwnPullRequest(body);
+      const body = (await request.json().catch(() => ({}))) as { action?: string };
+      if (body.action === "own-pull-request") return makeOwnPullRequest(body as OwnPullRequestBody);
+      if (body.action === "push-head") return pushOwnPullRequestHead(body as { files?: Record<string, string> });
       return Response.json({ error: "unknown action" }, { status: 400 });
     }
     if (pathname === "/__e2e/terminal-sessions-delay") {

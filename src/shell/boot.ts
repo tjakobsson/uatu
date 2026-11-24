@@ -38,6 +38,7 @@ import { pullRequestStore } from "../github/pull-request-store";
 import { setShowIgnored } from "./ignored-visibility";
 import { resolveIgnoredVisibility } from "./ignored-default";
 import {
+  awaitPullRequestRepository,
   commitPreviewParamsFromUrl,
   pullRequestPreviewParamsFromUrl,
   renderSurfacePreview,
@@ -98,17 +99,19 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   const initialCommitPreview = commitPreviewParamsFromUrl();
   const initialPullRequestPreview = initialCommitPreview ? null : pullRequestPreviewParamsFromUrl();
   // `?pr=` that names nothing showable says so, over the default document
-  // it falls back to.
+  // it falls back to. A valid number with Git data still being collected
+  // waits for the repositories instead (resolvePendingPullRequestPreview).
   const unresolvedPullRequest = initialCommitPreview || initialPullRequestPreview || urlRelativePath
     ? null : new URL(window.location.href).searchParams.get("pr");
-  if (unresolvedPullRequest !== null) {
-    showToast(/^\d{1,9}$/.test(unresolvedPullRequest) && Number(unresolvedPullRequest) > 0
-      ? `Pull request #${unresolvedPullRequest} can't be shown: this workspace has no Git repository to read it from.`
-      : `“${unresolvedPullRequest}” isn't a pull request number, so the workspace's default view is shown.`, "alert");
-  }
+  const awaitedPullRequest = unresolvedPullRequest !== null && /^\d{1,9}$/.test(unresolvedPullRequest) && Number(unresolvedPullRequest) > 0
+    && appState.repositoryFreshness.status === "pending" ? Number(unresolvedPullRequest) : null;
+  const sayPullRequestUnresolved = (value: string) => showToast(/^\d{1,9}$/.test(value) && Number(value) > 0
+    ? `Pull request #${value} can't be shown: this workspace has no Git repository to read it from.`
+    : `“${value}” isn't a pull request number, so the workspace's default view is shown.`, "alert");
+  if (unresolvedPullRequest !== null && awaitedPullRequest === null) sayPullRequestUnresolved(unresolvedPullRequest);
   // A commit surface is not document resumption. Preserve browser-local
   // close intent so a later root arrival remains empty.
-  if (hasExplicitRoute && !initialCommitPreview && !initialPullRequestPreview) resumeDocumentSelection();
+  if (hasExplicitRoute && !initialCommitPreview && !initialPullRequestPreview && awaitedPullRequest === null) resumeDocumentSelection();
 
   if (initialCommitPreview) {
     setFollowEnabled(false);
@@ -120,6 +123,21 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
     setPreviewMode({ kind: "pull-request", repositoryId: initialPullRequestPreview.repositoryId, number: initialPullRequestPreview.number });
     pullRequestStore.chooseRepository(initialPullRequestPreview.repositoryId);
     pullRequestStore.select(initialPullRequestPreview.number);
+  } else if (awaitedPullRequest !== null) {
+    setFollowEnabled(false);
+    setSelectedId(null);
+    setPreviewMode({ kind: "empty" });
+    awaitPullRequestRepository(awaitedPullRequest, () => {
+      // Git data came with no repository: the notice, over the default view.
+      sayPullRequestUnresolved(String(awaitedPullRequest));
+      const fallback = payload.defaultDocumentId;
+      setSelectedId(fallback);
+      setPreviewMode({ kind: "document" });
+      renderSidebar();
+      if (fallback) void loadDocument(fallback);
+      else renderEmptyPreview("No document selected", "Waiting for viewable files");
+    });
+    directLinkMessage = { title: `Pull request #${awaitedPullRequest}`, body: "Reading the repository…" };
   } else if (!hasExplicitRoute && readSelectionCleared()) {
     clearDocumentSelection();
     setFollowEnabled(false);
@@ -189,7 +207,7 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   // while the initial preview request is pending: never drop those writes or
   // overwrite them later with the initial route's intent.
   enablePersonalStatePersistence();
-  if (initialCommitPreview || initialPullRequestPreview || hasExplicitRoute) {
+  if (initialCommitPreview || initialPullRequestPreview || awaitedPullRequest !== null || hasExplicitRoute) {
     persistPersonalWorkspaceState({
       follow: false,
       ...(explicitDocumentPath ? { documentPath: explicitDocumentPath } : {}),

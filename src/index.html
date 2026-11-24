@@ -411,12 +411,16 @@
               <!-- A picked pull request's changed files, in place of the
                    toolbar and the workspace tree (sidebar/pull-request-scope.ts). -->
               <div id="pr-scope" class="pr-scope" hidden>
-                <div id="pr-scope-bar" class="pr-scope-bar pane-toolbar"></div>
-                <!-- Changed files only, or every file at the PR head (the head's
-                     tree; opening one shows it in the PR file view). -->
-                <div id="pr-scope-switch" class="view-control pr-scope-switch" role="radiogroup" aria-label="Files to list">
-                  <button type="button" class="view-segment is-active" role="radio" aria-checked="true" data-pr-scope-mode="changed">Changed <span class="pr-scope-switch-count" data-pr-scope-changed-count></span></button>
-                  <button type="button" class="view-segment" role="radio" aria-checked="false" tabindex="-1" data-pr-scope-mode="all">All files</button>
+                <!-- One toolbar row on desktop (the pane's chrome, so its
+                     minimum height keeps tree rows below it); two on touch. -->
+                <div class="pr-scope-head pane-toolbar">
+                  <div id="pr-scope-bar" class="pr-scope-bar"></div>
+                  <!-- Changed files only, or every file at the PR head (the head's
+                       tree; opening one shows it in the PR file view). -->
+                  <div id="pr-scope-switch" class="view-control pr-scope-switch" role="radiogroup" aria-label="Files to list">
+                    <button type="button" class="view-segment is-active" role="radio" aria-checked="true" data-pr-scope-mode="changed">Changed <span class="pr-scope-switch-count" data-pr-scope-changed-count></span></button>
+                    <button type="button" class="view-segment" role="radio" aria-checked="false" tabindex="-1" data-pr-scope-mode="all">All files</button>
+                  </div>
                 </div>
                 <div id="pr-scope-tree" class="tree" aria-label="Files changed in the pull request"></div>
                 <p id="pr-scope-message" class="tree-empty" hidden></p>

@@ -42,7 +42,7 @@
 import { connectGithubHtml } from "../github/connect";
 import { githubApi, GithubRequestError } from "../github/client";
 import { errorMessage, pullRequestStore } from "../github/pull-request-store";
-import { clockTime } from "../github/present";
+import { clockTime, externalLink } from "../github/present";
 import { pullRequestLocalBranch, type PullRequestList, type PullRequestListItem, type PullRequestSummary } from "../shared/github-contract";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import {
@@ -50,6 +50,7 @@ import {
   LOOKUP_DELAY_MS,
   lookupText,
   middleTruncate,
+  morePullRequestsOnGithub,
   nextListSelection,
   otherRepositoryName,
   PULL_REQUEST_FILTERS,
@@ -1087,8 +1088,11 @@ function renderPullRequests(panel: HTMLElement): void {
   const shown = searching || state.expanded ? visible : visible.slice(0, PULL_REQUESTS_FOLDED);
   set(notes, noteParts.join(""));
   set(listbox, shown.map(pullRequestRowHtml).join("") + lookupRow);
+  // Under the whole list: the open pull requests beyond the 100 read.
+  const beyond = !searching && state.filter === "open" ? morePullRequestsOnGithub(list) : null;
   set(more, !searching && !state.expanded && visible.length > PULL_REQUESTS_FOLDED
-    ? `<button type="button" class="gh-link-button switcher-show-all" data-switcher-show-all>Show all ${visible.length}</button>` : "");
+    ? `<button type="button" class="gh-link-button switcher-show-all" data-switcher-show-all>Show all ${visible.length}</button>`
+    : beyond ? externalLink(beyond.href, `${beyond.count} more on GitHub`, "gh-external switcher-more-on-github") : "");
   // While searching, a section with nothing to show folds away.
   section.hidden = searching && shown.length === 0 && lookupRow === "" && noteParts.length === 0;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { age, checkGlyph, checksSummaryHtml, externalLink, mergeLinkHtml } from "./present";
+import { age, checkGlyph, checksSummaryHtml, externalLink, mergeLinkHtml, omittedNoteHtml, omittedNotes } from "./present";
 
 const text = (html: string) => html.replace(/<span class="sr-only">([^<]*)<\/span>/g, "$1").replace(/<span[^>]*aria-hidden="true"[^>]*>[^<]*<\/span>/g, "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
 
@@ -46,5 +46,40 @@ describe("mergeLinkHtml", () => {
     const blocked = mergeLinkHtml("https://github.com/o/r/pull/1", false, "x");
     expect(text(blocked)).toBe("View on GitHub (opens in a new tab)");
     expect(blocked).toContain('class="gh-button x"');
+  });
+});
+
+describe("omittedNotes", () => {
+  const omitted = (value: Partial<{ timeline: number; threads: boolean; files: boolean; unavailable: string[] }>) =>
+    ({ omitted: { timeline: 0, threads: false, files: false, unavailable: [], ...value } });
+
+  test("say nothing for a complete answer, or one from the fake", () => {
+    expect(omittedNotes({}, "conversation")).toEqual([]);
+    expect(omittedNotes(omitted({}), "conversation")).toEqual([]);
+    expect(omittedNotes(omitted({}), "files")).toEqual([]);
+    expect(omittedNoteHtml([], "https://github.com/acme/widgets/pull/42")).toBe("");
+  });
+
+  test("Conversation names timeline entries left out, threads and checks", () => {
+    expect(omittedNotes(omitted({ timeline: 1 }), "conversation")).toEqual(["1 more timeline entry on GitHub"]);
+    expect(omittedNotes(omitted({ timeline: 7, threads: true, unavailable: ["checks"] }), "conversation"))
+      .toEqual(["7 more timeline entries on GitHub", "More review threads on GitHub", "GitHub didn't send the checks"]);
+    expect(omittedNotes(omitted({ threads: true, unavailable: ["threads"] }), "conversation")).toEqual(["GitHub didn't send the review threads"]);
+    // Files are Files changed's to say.
+    expect(omittedNotes(omitted({ files: true, unavailable: ["files"] }), "conversation")).toEqual([]);
+  });
+
+  test("Files changed names files and threads", () => {
+    expect(omittedNotes(omitted({ files: true }), "files")).toEqual(["More changed files on GitHub than shown here"]);
+    expect(omittedNotes(omitted({ files: true, unavailable: ["files", "threads"] }), "files"))
+      .toEqual(["GitHub didn't send the changed files", "GitHub didn't send the review threads"]);
+    expect(omittedNotes(omitted({ timeline: 3, unavailable: ["checks"] }), "files")).toEqual([]);
+  });
+
+  test("the note links to GitHub and escapes nothing it didn't write", () => {
+    const html = omittedNoteHtml(["2 more timeline entries on GitHub"], "https://github.com/acme/widgets/pull/42");
+    expect(text(html)).toBe("2 more timeline entries on GitHub. Open on GitHub (opens in a new tab)");
+    expect(html).toContain('href="https://github.com/acme/widgets/pull/42"');
+    expect(html).toContain('role="note"');
   });
 });

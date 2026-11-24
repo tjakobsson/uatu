@@ -7,9 +7,15 @@
 // files; in tree order docs/terminal-links.adoc, docs/terminal.md,
 // src/terminal/links.test.ts, src/terminal/links.ts.
 
+import { execFileSync } from "node:child_process";
+import { promises as fs } from "node:fs";
+
 import type { APIRequestContext, Page } from "@playwright/test";
 
+import { workspacePath, workspaceRoot } from "./config";
+import { captureScreenshot } from "./evidence";
 import { expect, standardBeforeEach, test } from "./fixtures";
+import { ownPullRequest, pushPullRequestHead, refreshPullRequest } from "./pull-request-helpers";
 
 const HEAD = "c0ffee1";
 
@@ -47,7 +53,7 @@ test.describe("desktop", () => {
     await resetGithub(page, request);
   });
 
-  test("Rendered shows the file at the PR head with its facts, Mermaid and the blob-route image", async ({ page }) => {
+  test("Rendered shows the file at the PR head with its facts, Mermaid and the blob-route image", async ({ page }, testInfo) => {
     await openFile(page, "pr=639&path=docs/terminal.md");
     await chooseMode(page, "rendered");
     await expect(page.locator("#pr-tab-file")).toContainText("terminal.md");
@@ -62,6 +68,31 @@ test.describe("desktop", () => {
     await image.scrollIntoViewIfNeeded();
     await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 100 && img.currentSrc.includes("/api/github/pr-blob/")))
       .toBe(true);
+    await page.locator("#preview h1").scrollIntoViewIfNeeded();
+    await captureScreenshot(page, testInfo, "pr-file-rendered-desktop");
+  });
+
+  test("Rendered marks the block holding the thread's line, and its marker opens the thread in Diff", async ({ page }, testInfo) => {
+    await openFile(page, "pr=639&path=docs/terminal.md");
+    await chooseMode(page, "rendered");
+    await expect(page.locator("#preview svg").first()).toBeVisible();
+    // The thread is on line 3, inside the paragraph that starts there.
+    const block = page.locator("#preview .has-pr-thread-block");
+    await expect(block).toHaveCount(1);
+    await expect(block).toHaveAttribute("data-source-line", "3");
+    await expect(block).toContainText("Links printed with OSC 8 open in a new tab");
+    const marker = page.locator("#preview .pr-block-thread");
+    await expect(marker).toHaveCount(1);
+    await expect(marker).toHaveAttribute("aria-label", "1 review thread on line 3: Show in Diff");
+    // Read-only: no composer, and the marker adds no text to the document.
+    await expect(page.locator("#preview [data-file-comment]")).toHaveCount(0);
+    await expect(marker).toHaveText("");
+    await captureScreenshot(page, testInfo, "pr-file-rendered-thread-marker");
+
+    await marker.click();
+    await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
+    await expect.poll(() => page.evaluate(() => document.activeElement?.closest("[data-thread-id]")?.getAttribute("data-thread-id") ?? null))
+      .toBe("thread-639-docs");
   });
 
   test("Source marks the thread's line, and Show in Diff focuses the thread in Diff", async ({ page }) => {
@@ -132,8 +163,8 @@ test.describe("desktop", () => {
     await page.locator('[data-pr-scope-mode="all"]').click();
     const row = page.locator('#pr-scope-tree button[data-item-path="ARCHITECTURE.md"]');
     await expect(row).toBeAttached();
-    // The scope's tree scrolls inside its pane; activate the row as a tap would.
-    await row.dispatchEvent("click");
+    await row.scrollIntoViewIfNeeded();
+    await row.click();
     await expect.poll(() => param(page, "path")).toBe("ARCHITECTURE.md");
     await expect(facts(page)).toContainText("not changed by this pull request");
     await expect(page.locator("#view-diff")).toBeHidden();
@@ -158,17 +189,80 @@ test.describe("head not fetched", () => {
     await resetGithub(page, request, "head-not-fetched");
   });
 
-  test("the consent card fetches nothing until Fetch, then shows the file", async ({ page }) => {
+  test("the consent card fetches nothing until Fetch, then shows the file", async ({ page }, testInfo) => {
     await page.goto("/?pr=639&path=docs/terminal.md");
     const card = page.locator("#preview .pr-fetch-card");
     await expect(card).toBeVisible();
     await expect(card).toContainText("refs/uatu/pull/639/head");
     await expect(card.locator("[data-pr-file-show-diff]")).toBeVisible();
+    await captureScreenshot(page, testInfo, "pr-file-consent-card");
 
     await card.locator("[data-pr-file-fetch]").click();
     await expect(card).toHaveCount(0);
     await expect(page.locator("#preview h1", { hasText: "Terminal" })).toBeVisible();
     await expect(facts(page)).toContainText(`at ${HEAD} (PR head)`);
+  });
+});
+
+// The branch's own pull request on the real service over the transport fake
+// (#42, tests/e2e/pull-request-helpers.ts): the facts line compares the PR
+// head's file with the checkout, and a head that moves on GitHub says so.
+test.describe("the branch's own pull request", () => {
+  test.beforeEach(async ({ page, request }) => {
+    await standardBeforeEach(page, request);
+  });
+
+  test("Same as your checkout, then the new-commits notice when GitHub's head moves; Reload asks to fetch it", async ({ page, request }, testInfo) => {
+    await ownPullRequest(page, request);
+    await openFile(page, "pr=42&path=feature.md");
+    await chooseMode(page, "rendered");
+    await expect(page.locator("#preview")).toContainText("Committed branch change.");
+    await expect(facts(page)).toContainText("Same as your checkout");
+    await expect(facts(page).locator("[data-pr-file-open-local]")).toHaveText("Open in workspace");
+
+    const head = await pushPullRequestHead(request, { "feature.md": "# Feature\n\nCommitted branch change.\n\nMore work on GitHub.\n" });
+    await refreshPullRequest(page);
+    const notice = facts(page).locator('[role="status"]');
+    await expect(notice).toContainText("#42 has new commits since this file was read.");
+    // The file read before stays until Reload.
+    await expect(page.locator("#preview")).not.toContainText("More work on GitHub.");
+    await captureScreenshot(page, testInfo, "pr-file-new-commits");
+
+    // The new head isn't local: Reload asks before fetching it.
+    await notice.locator("[data-pr-file-reload]").click();
+    const card = page.locator("#preview .pr-fetch-card");
+    await expect(card).toBeVisible();
+    await card.locator("[data-pr-file-fetch]").click();
+    await expect(card).toHaveCount(0);
+    await expect(page.locator("#preview")).toContainText("More work on GitHub.");
+    await expect(facts(page)).toContainText(`at ${head.slice(0, 7)} (PR head)`);
+    // The checkout is now behind the head.
+    const checkout = execFileSync("git", ["rev-parse", "--short=7", "HEAD"], { cwd: workspaceRoot(), encoding: "utf8" }).trim();
+    await expect(facts(page)).toContainText(new RegExp(`Your checkout differs \\(checkout at ${checkout}[0-9a-f]*\\); showing the PR head\\.`));
+  });
+
+  test("a checkout ahead of the head, or with local edits, differs; Open your copy opens the workspace file", async ({ page, request }) => {
+    await ownPullRequest(page, request);
+    // Local edits on the PR head.
+    await fs.writeFile(workspacePath("feature.md"), "# Feature\n\nCommitted branch change.\n\nA local edit.\n", "utf8");
+    await openFile(page, "pr=42&path=feature.md");
+    await chooseMode(page, "rendered");
+    await expect(facts(page)).toContainText("Your checkout differs (local edits); showing the PR head.");
+    await expect(page.locator("#preview")).not.toContainText("A local edit.");
+
+    // Committed: the checkout is ahead of the head.
+    const git = (...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: workspaceRoot(), encoding: "utf8" }).trim();
+    git("commit", "--quiet", "-am", "local work");
+    const checkout = git("rev-parse", "--short=7", "HEAD");
+    // Once the session's Git data has the new commit, a fresh view compares.
+    await expect.poll(async () => JSON.stringify(await (await request.get("/api/state")).json())).toContain(checkout);
+    await page.reload();
+    await chooseMode(page, "rendered");
+    await expect(facts(page)).toContainText(new RegExp(`Your checkout differs \\(checkout at ${checkout}[0-9a-f]*\\); showing the PR head\\.`));
+
+    await facts(page).locator("[data-pr-file-open-local]").click();
+    await expect(page.locator("#preview-path")).toHaveText("feature.md");
+    await expect(page.locator("#preview")).toContainText("A local edit.");
   });
 });
 

@@ -47,7 +47,7 @@
 import { githubWritesPausedReason, sendBlockedReason } from "../github/availability";
 import { githubApi } from "../github/client";
 import { pullRequestStore } from "../github/pull-request-store";
-import { age, avatar, shortOid } from "../github/present";
+import { age, avatar, omittedNoteHtml, omittedNotes, shortOid } from "../github/present";
 import type { DiffSide, PendingComment, PullRequestDetail, PullRequestFile, ReviewThread } from "../shared/github-contract";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
@@ -243,6 +243,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
         <button type="button" class="view-segment" role="radio" data-diff-style="split">Split</button>
       </div>
     </div>
+    <div class="pr-omitted-slot" data-pr-files-omitted></div>
     <div class="pr-files" data-pr-files></div>`;
   const bar = host.querySelector<HTMLElement>("[data-pr-review-bar]")!;
   const filesElement = host.querySelector<HTMLElement>("[data-pr-files]")!;
@@ -373,6 +374,14 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
       ? `<strong>This file</strong> · <span class="gh-add">+${only.additions}</span> <span class="gh-del">−${only.deletions}</span>`
       : `<strong>${plural(pr.changedFiles, "file", "files")}</strong> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span>`;
     host.querySelector("[data-pr-files-summary]")!.innerHTML = `${counts} · <span class="pr-files-refs" title="${escapeHtmlAttribute(refs)}"><span class="sr-only">base </span><code>${escapeHtml(pr.baseRefName)}@${escapeHtml(shortOid(pr.baseRefOid))}</code> <span aria-hidden="true">←</span><span class="sr-only"> head </span> <code>${escapeHtml(shortOid(pr.headRefOid))}</code></span>${detail.mock ? ` · <span class="gh-mock-label" title="Mocked diffs: served by the in-memory fake; nothing reaches GitHub">Mocked</span>` : ""}`;
+    // One file of it (`only`) leaves the others out by design: only what
+    // GitHub's answer lacks is said.
+    const omitted = host.querySelector<HTMLElement>("[data-pr-files-omitted]")!;
+    const omittedHtml = options.only === undefined ? omittedNoteHtml(omittedNotes(detail, "files"), `${pr.url}/files`) : "";
+    if (omitted.dataset.html !== omittedHtml) {
+      omitted.dataset.html = omittedHtml;
+      omitted.innerHTML = omittedHtml;
+    }
     for (const button of host.querySelectorAll<HTMLButtonElement>("[data-diff-style]")) {
       const active = button.dataset.diffStyle === effectiveStyle();
       button.classList.toggle("is-active", active);

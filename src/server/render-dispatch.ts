@@ -114,7 +114,10 @@ export type DocumentSource = {
   source: string;
 };
 
-export async function renderDocumentSource(input: DocumentSource, requestedView: ViewMode = "rendered"): Promise<RenderedDocument> {
+// `sourceLines`: rendered Markdown and AsciiDoc blocks carry the source line
+// they start on (`data-source-line`), for the pull request file view's
+// thread markers.
+export async function renderDocumentSource(input: DocumentSource, requestedView: ViewMode = "rendered", options: { sourceLines?: boolean } = {}): Promise<RenderedDocument> {
   // Text / source files have no separate rendered representation, so a
   // request for "rendered" still produces source rendering. Markdown and
   // AsciiDoc honor the requested view.
@@ -137,13 +140,13 @@ export async function renderDocumentSource(input: DocumentSource, requestedView:
     metadata = undefined;
     title = input.name;
   } else if (input.kind === "markdown") {
-    const rendered = renderMarkdownToHtml(input.source);
+    const rendered = renderMarkdownToHtml(input.source, { sourceLines: options.sourceLines });
     html = rendered.html;
     metadata = sanitizeMetadata(rendered.metadata);
     language = null;
     title = extractTitle(html, input.name);
   } else {
-    const rendered = await renderAsciidocToHtml(input.source);
+    const rendered = await renderAsciidocToHtml(input.source, { sourceLines: options.sourceLines });
     html = rendered.html;
     metadata = sanitizeMetadata(rendered.metadata);
     language = null;

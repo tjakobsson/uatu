@@ -31,6 +31,11 @@ describe("replaceMermaidCodeBlocks", () => {
 
     expect(transformed).toBe('<div class="mermaid">graph TD\nA--&gt;B</div>');
   });
+
+  test("keeps the block's source line on the diagram", () => {
+    const html = '<pre data-source-line="12"><code class="language-mermaid">graph TD</code></pre>';
+    expect(replaceMermaidCodeBlocks(html)).toBe('<div class="mermaid" data-source-line="12">graph TD</div>');
+  });
 });
 
 describe("rendered diagram normalization", () => {

@@ -446,3 +446,33 @@ Body.
     expect(html.startsWith('<pre><code class="hljs">')).toBe(true);
   });
 });
+
+describe("renderAsciidocToHtml with sourceLines", () => {
+  const lines = (html: string) => [...html.matchAll(/class="([\w ]+)" data-source-line="(\d+)"/g)].map(match => `${match[1]!.split(" ")[0]}:${match[2]}`);
+
+  test("marks blocks with the source line Asciidoctor's sourcemap gives them", async () => {
+    const source = [
+      "= Title", "", // 1-2
+      "Intro paragraph.", "", // 3-4
+      "== Section", "", // 5-6
+      "Para one", "line two.", "", // 7-9
+      "* a", "* b", "", // 10-12
+      "[source,js]", "----", "code", "----", "", // 13-17
+      "NOTE: careful", // 18
+    ].join("\n");
+    const { html } = await renderAsciidocToHtml(source, { sourceLines: true });
+    expect(lines(html)).toEqual(["paragraph:3", "sect1:5", "paragraph:7", "ulist:10", "listingblock:14", "admonitionblock:18"]);
+    // Highlighting is unchanged.
+    expect(html).toContain('<code class="hljs language-js">');
+  });
+
+  test("an author's marker-shaped role never passes, with or without the option", async () => {
+    const source = "= Title\n\n[.uatu-source-line-guess-2]\nText.\n";
+    for (const options of [{}, { sourceLines: true }]) {
+      const { html } = await renderAsciidocToHtml(source, options);
+      expect(html).not.toContain("uatu-source-line");
+      expect(html).not.toContain('data-source-line="2"');
+    }
+    expect((await renderAsciidocToHtml(source)).html).not.toContain("data-source-line");
+  });
+});

@@ -361,10 +361,12 @@ export async function __drainMermaidQueueForTests(): Promise<void> {
   }
 }
 
+// A source line the block carries (the pull request file view's rendered
+// Markdown) moves to the diagram.
 export function replaceMermaidCodeBlocks(html: string): string {
   return html.replaceAll(
-    /<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g,
-    (_match, source) => `<div class="mermaid">${source}</div>`,
+    /<pre( data-source-line="\d+")?><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g,
+    (_match, line: string | undefined, source: string) => `<div class="mermaid"${line ?? ""}>${source}</div>`,
   );
 }
 

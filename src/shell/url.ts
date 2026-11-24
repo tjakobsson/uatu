@@ -118,6 +118,39 @@ export function pullRequestPreviewParamsFromUrl(): PullRequestPreviewParams | nu
   return pullRequestPreviewParams(url.searchParams, pullRequestRepository(appState.repositories)?.id ?? null);
 }
 
+// A `?pr=<n>` arrival before the session has collected Git data (a session
+// just started: documents are served first, repositories after) can't name
+// its repository yet. Boot waits instead of falling back to the default
+// document; the first repository update then opens the pull request, or,
+// once Git data is in with no repository to read it from, says so.
+let pendingPullRequest: { number: number; unavailable: () => void } | null = null;
+
+// `unavailable` runs when Git data arrives without a repository to read it
+// from (boot's notice over the default view).
+export function awaitPullRequestRepository(number: number, unavailable: () => void): void {
+  pendingPullRequest = { number, unavailable };
+}
+
+// Called after every repository update. True when it opened the preview.
+export function resolvePendingPullRequestPreview(): boolean {
+  const pending = pendingPullRequest;
+  if (pending === null) return false;
+  // The reader went elsewhere meanwhile: their choice stands.
+  if (appState.previewMode.kind !== "empty") {
+    pendingPullRequest = null;
+    return false;
+  }
+  const params = pullRequestPreviewParamsFromUrl();
+  if (params) {
+    pendingPullRequest = null;
+    activatePullRequestPreview(params, { pushHistory: false });
+    return true;
+  }
+  if (appState.repositoryFreshness.status === "pending") return false;
+  pendingPullRequest = null;
+  pending.unavailable();
+  return true;
+}
 
 // Opening a pull request's preview also makes it the workspace's current pull
 // request (the branch's own, or a picked one), so the URL restores the pick on

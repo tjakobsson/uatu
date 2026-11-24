@@ -223,7 +223,7 @@ export function githubRouteHandlers(
         relativePath: filePath,
         kind: lfsPointer || kind === "binary" ? "text" : kind,
         source,
-      }, view);
+      }, view, { sourceLines: true });
       const payload: FilePayload = {
         ...rendered,
         mock: service.mock,

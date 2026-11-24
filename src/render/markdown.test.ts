@@ -304,3 +304,63 @@ describe("renderCodeAsHtml", () => {
     expect(html).not.toContain("language-javascript");
   });
 });
+
+describe("renderMarkdownToHtml with sourceLines", () => {
+  const lines = (html: string) => [...html.matchAll(/<(\w+) data-source-line="(\d+)"/g)].map(match => `${match[1]}:${match[2]}`);
+
+  test("marks each top-level block with the source line it starts on, after frontmatter", () => {
+    const source = [
+      "---", "title: Login", "---", // 1-3
+      "# Login", "", // 4-5
+      "First paragraph", "continues here.", "", // 6-8
+      "- one", "- two", "", // 9-11
+      "[ref]: https://example.com", "", // 12-13
+      "| a | b |", "|---|---|", "| 1 | 2 |", "", // 14-17
+      "```ts", "const x = 1;", "```", // 18-20
+      "> quoted", "", // 21-22
+      "Setext", "------", "", // 23-25
+      "***", // 26
+    ].join("\n");
+    const { html } = renderMarkdownToHtml(source, { sourceLines: true });
+    expect(lines(html)).toEqual(["h1:4", "p:6", "ul:9", "table:14", "pre:18", "blockquote:21", "h2:23", "hr:26"]);
+    // Code blocks are still highlighted with their line.
+    expect(html).toContain('<pre data-source-line="18"><code class="hljs language-ts">');
+    // Nested blocks carry none.
+    expect(html).not.toMatch(/<li data-source-line/);
+  });
+
+  test("a paragraph after link definitions starts on its own line", () => {
+    const { html } = renderMarkdownToHtml("[a]: https://example.com\nText after it.\n", { sourceLines: true });
+    expect(lines(html)).toEqual(["p:2"]);
+  });
+
+  test("an author's data-source-line and marker-shaped comments are dropped, and sanitizing still holds", () => {
+    const source = [
+      '<p data-source-line="99" onclick="x()">raw</p>',
+      "",
+      "<!--uatu-source-line:guess:7-->",
+      "<div>block</div>",
+      "",
+      "<script>alert(1)</script>",
+      "",
+      '<img src=x onerror="alert(1)">',
+    ].join("\n");
+    const { html } = renderMarkdownToHtml(source, { sourceLines: true });
+    expect(html).not.toContain('data-source-line="99"');
+    expect(html).not.toContain('data-source-line="7"');
+    expect(html).toContain('<p data-source-line="1">raw</p>');
+    // The comment is a raw HTML block of its own; the div starts line 4.
+    expect(html).toContain('<div data-source-line="4">block</div>');
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("onerror");
+    expect(html).not.toContain("onclick");
+    expect(html).not.toContain("<!--");
+  });
+
+  test("without the option nothing changes, and an author's attribute never passes", () => {
+    const source = '# Title\n\n<p data-source-line="3">raw</p>\n';
+    const { html } = renderMarkdownToHtml(source);
+    expect(html).not.toContain("data-source-line");
+    expect(html).toBe(renderMarkdownToHtml(source, {}).html);
+  });
+});

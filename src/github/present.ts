@@ -8,6 +8,7 @@ import { formatCommitAge } from "../shared/relative-time";
 import type {
   CheckState,
   GithubSummary,
+  PullRequestDetail,
   PullRequestSummary,
   ReviewDecision,
   ReviewerState,
@@ -120,4 +121,33 @@ export function clockTime(ms: number): string {
 // new.
 export function clockTimeWithSeconds(ms: number): string {
   return new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+// What GitHub's answer left out (`omitted`, the real service): entries and
+// sections beyond what was read, and sections GitHub refused while the rest
+// answered. Conversation says what its timeline, threads and checks lack;
+// Files changed what its files and threads lack. Each surface links to the
+// pull request on GitHub after these.
+export function omittedNotes(detail: Pick<PullRequestDetail, "omitted">, surface: "conversation" | "files"): string[] {
+  const omitted = detail.omitted;
+  if (!omitted) return [];
+  const unavailable = new Set(omitted.unavailable);
+  const notes: string[] = [];
+  const threads = unavailable.has("threads") ? "GitHub didn't send the review threads"
+    : omitted.threads ? "more review threads on GitHub" : null;
+  if (surface === "conversation") {
+    if (omitted.timeline > 0) notes.push(`${omitted.timeline} more timeline ${omitted.timeline === 1 ? "entry" : "entries"} on GitHub`);
+    if (threads) notes.push(threads);
+    if (unavailable.has("checks")) notes.push("GitHub didn't send the checks");
+  } else {
+    if (unavailable.has("files")) notes.push("GitHub didn't send the changed files");
+    else if (omitted.files) notes.push("more changed files on GitHub than shown here");
+    if (threads) notes.push(threads);
+  }
+  return notes.map(note => note[0]!.toUpperCase() + note.slice(1));
+}
+
+export function omittedNoteHtml(notes: readonly string[], href: string): string {
+  if (notes.length === 0) return "";
+  return `<p class="pr-omitted" role="note" data-pr-omitted>${notes.map(note => escapeHtml(note)).join(". ")}. ${externalLink(href, "Open on GitHub")}</p>`;
 }

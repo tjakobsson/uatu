@@ -46,6 +46,7 @@ cognitive debt.
 - [All / Recent / Changed Files views](./docs/FILES.md), with disk-write ordering, filename/path filtering, and a saved per-workspace view
 - [Audio/video previews and quick auditioning](./docs/FILES.md#audio-and-video), with one persistent player, captured Previous/Next order, current-clip Loop, and explicit Reload for new renders
 - Git-aware workspaces: adding a folder outside a repository offers `git init`
+- [GitHub pull requests](./docs/PULL-REQUESTS.md): the checked-out branch's pull request and any other open one beside your files — conversation, Files changed, a file view in Rendered / Source / Diff, line comments and your pending review through your own `gh`, and read-only merge readiness with merging left to GitHub
 - [Git worktree workspaces](./docs/WORKTREES.md): create and switch branch checkouts from the workspace picker, with independent terminals and conversations, parent credential policy and guarded cleanup
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
 - Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and inline images/SVG, tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
@@ -296,7 +297,9 @@ In a file's Diff, you can comment on the pull request only when that Diff is
 provably GitHub's diff of the file: your HEAD is the pull request's head, the
 file has no local changes, and Since base uses the pull request's exact base.
 Otherwise the Diff says why and lists the file's review threads, each opening
-in the pull request's Files changed, where you can always comment.
+in the pull request's Files changed, where you can always comment. See
+[GitHub pull requests](./docs/PULL-REQUESTS.md) for connecting GitHub, reviews
+and merge readiness.
 
 Files at or above 1 MB render without syntax highlighting to keep the
 browser responsive. Binary files appear with VS Code-style icons; images use

@@ -1,4 +1,5 @@
 import { type Document, Extensions, load } from "@asciidoctor/core";
+import type { Root, RootContent } from "hast";
 import { fromHtml } from "hast-util-from-html";
 import { defaultSchema, sanitize, type Schema } from "hast-util-sanitize";
 import { toHtml } from "hast-util-to-html";
@@ -131,6 +132,15 @@ const ALLOWED_ASCIIDOC_CLASSES = new Set([
   "attribution",
 ]);
 
+// With `sourceLines`, the blocks below carry the 1-based source line they
+// start on (Asciidoctor's sourcemap), first as a role whose class survives
+// the sanitizer, then as `data-source-line` (see addSourceLines).
+const SOURCE_LINE_CONTEXTS = new Set([
+  "section", "paragraph", "ulist", "olist", "dlist", "colist", "listing", "literal", "admonition",
+  "table", "image", "quote", "verse", "example", "sidebar", "open", "thematic_break",
+]);
+const SOURCE_LINE_CLASS = /^uatu-source-line-/;
+
 // Build the sanitize schema for AsciiDoc: start from the existing GitHub-modeled
 // default, broaden the `className` allowlist on the elements Asciidoctor uses
 // for structure, and pick up the Markdown sanitize allowances for `align`/etc.
@@ -147,6 +157,8 @@ const sanitizeSchema: Schema = (() => {
       ...ALLOWED_ASCIIDOC_CLASSES,
       // language-X for code listings (matches hljs's expectation later).
       /^language-/,
+      // Source lines (`sourceLines`), turned into attributes after sanitize.
+      SOURCE_LINE_CLASS,
       // hljs-X tokens added by the highlight pass downstream.
       /^hljs/,
     ],
@@ -204,7 +216,7 @@ export type RenderedAsciidoc = {
   metadata: DocumentMetadata | undefined;
 };
 
-export async function renderAsciidocToHtml(source: string): Promise<RenderedAsciidoc> {
+export async function renderAsciidocToHtml(source: string, options: { sourceLines?: boolean } = {}): Promise<RenderedAsciidoc> {
   // Match the Markdown size threshold: above the limit, skip Asciidoctor
   // entirely and render as plain escaped text so the browser stays responsive.
   if (source.length >= SYNTAX_HIGHLIGHT_BYTES_LIMIT) {
@@ -229,18 +241,45 @@ export async function renderAsciidocToHtml(source: string): Promise<RenderedAsci
     standalone: false,
     attributes: { showtitle: true, relfilesuffix: ".adoc", toclevels: 5 },
     extension_registry: mermaidExtensionRegistry,
+    ...(options.sourceLines ? { sourcemap: true } : {}),
   });
+  // A per-render nonce, so an author's own roles can't pose as lines.
+  const marker = options.sourceLines ? `uatu-source-line-${crypto.randomUUID()}-` : null;
+  if (marker) {
+    for (const block of doc.findBy()) {
+      const line = block.getLineNumber();
+      if (line !== undefined && SOURCE_LINE_CONTEXTS.has(block.getContext())) block.addRole(`${marker}${line}`);
+    }
+  }
   const rawHtml = await doc.convert();
 
   const html = typeof rawHtml === "string" ? rawHtml : "";
   const normalized = normalizeAsciidoctorListings(html);
   const tree = fromHtml(normalized, { fragment: true });
   const safe = sanitize(tree, sanitizeSchema);
+  addSourceLines(safe, marker);
   markExternalAnchors(safe);
   return {
     html: highlightCodeBlocks(rewriteInPageAnchors(toHtml(safe))),
     metadata: extractAsciidocMetadata(doc),
   };
+}
+
+// The marker role becomes `data-source-line` (digits only); every other
+// `uatu-source-line-*` class, which only an author could have written, goes
+// (in every render: the sanitizer lets the class pattern through).
+function addSourceLines(node: Root | RootContent, marker: string | null): void {
+  if (node.type === "element") {
+    const classes = node.properties.className;
+    if (Array.isArray(classes) && classes.some(name => SOURCE_LINE_CLASS.test(String(name)))) {
+      const ours = marker ? classes.map(String).find(name => name.startsWith(marker) && /^\d+$/.test(name.slice(marker.length))) : undefined;
+      if (marker && ours) node.properties.dataSourceLine = ours.slice(marker.length);
+      const kept = classes.filter(name => !SOURCE_LINE_CLASS.test(String(name)));
+      if (kept.length > 0) node.properties.className = kept;
+      else delete node.properties.className;
+    }
+  }
+  if ("children" in node) for (const child of node.children) addSourceLines(child, marker);
 }
 
 // Asciidoctor exposes the document title via `getDocumentTitle()` and every
