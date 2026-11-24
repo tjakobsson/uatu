@@ -714,6 +714,23 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(provider.loginState()).toBe("ok");
     });
 
+    test("once agy's login is back, a conversation read while logged out loads afresh, not from the process it had", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      const first = await run(session.id, "Say hello");
+      const loads = async () => (await fake.log()).filter(entry => entry.method === "session/load").length;
+      await fake.setFlag("auth-missing", true);
+      await provider.listSessions();
+      // No transcript: the logged-out read has nothing to show.
+      await expect(provider.listMessages(session.id, { limit: 100 })).rejects.toBeInstanceOf(AgentLoginRequiredError);
+      await fake.setFlag("auth-missing", false);
+      await provider.listSessions();
+      const before = await loads();
+      const users = (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
+      expect(users.map(item => item.id)).toEqual([`message:${first.messageId}`]);
+      expect(await loads()).toBe(before + 1);
+    });
+
     test("a resumed prompt whose load agy refuses for its login shows the login notice", async () => {
       const { fake, provider, run, upserts, waitFor } = await setup({ idleReleaseMs: 50 });
       const session = await provider.createSession("a");

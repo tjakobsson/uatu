@@ -302,11 +302,14 @@ export class AntigravityProvider implements ChatProvider {
     if (this.login === "missing" && !conversation.turn) {
       // Logged out, the transcript is the only history (D10), reread on every
       // read: never a replay seeded earlier, and nothing once the file is gone.
+      // The process's history no longer backs the store, so it goes too:
+      // once agy's login is back, the next read loads the session afresh.
+      if (conversation.permissions === 0 && conversation.holds === 0) this.releaseProcess(conversation);
       if (!await this.seedFromTranscript(conversation)) {
         this.forgetHistory(conversation);
         throw new AgentLoginRequiredError(NO_TRANSCRIPT_MESSAGE);
       }
-    } else if (!conversation.seeded) {
+    } else if (!conversation.seeded || conversation.fromTranscript) {
       conversation.holds += 1;
       try { await this.ensureProcess(conversation); }
       catch (error) {
@@ -844,15 +847,24 @@ export class AntigravityProvider implements ChatProvider {
     conversation.idle = undefined;
     if (!conversation.process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0 || this.disposed) return;
     conversation.idle = this.idleTimer(() => {
-      const process = conversation.process;
-      if (!process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0) return;
-      conversation.process = undefined;
-      conversation.applied = null;
+      if (conversation.turn || conversation.permissions > 0 || conversation.holds > 0) return;
       // uatu keeps no copy of its own (D10): the history goes with the
       // process, and the next read loads it again, replay and transcript.
+      this.releaseProcess(conversation);
       this.forgetHistory(conversation);
-      void this.closeProcess(process);
     }, this.idleReleaseMs);
+  }
+
+  // Ends the conversation's process, so the next read or prompt loads the
+  // session afresh rather than reusing what the process holds.
+  private releaseProcess(conversation: Conversation): void {
+    const process = conversation.process;
+    conversation.idle?.();
+    conversation.idle = undefined;
+    if (!process) return;
+    conversation.process = undefined;
+    conversation.applied = null;
+    void this.closeProcess(process);
   }
 
   private refreshAdvertisedLevels(configOptions: unknown): void {
