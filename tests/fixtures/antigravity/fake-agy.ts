@@ -15,6 +15,10 @@
 //   pids                 the pid of every `agy acp` process started
 //   refuse-steer         present: a prompt sent during a run is refused (-32603)
 //   crash-on-steer       present: the process exits 1 on a prompt sent during a run
+//   hang-initialize      present: `initialize` never answers
+//   hang-list            present: `session/list` never answers
+//   orphan-child         present: each process starts a `sleep 30` worker in its
+//                        group, its pid in `orphans`
 //
 // A prompt whose first text starts with `<script>:` runs that fixture script;
 // anything else runs `text`. A second prompt during a running script is
@@ -66,6 +70,8 @@ if (!stateDir) {
 const sessionsFile = path.join(stateDir, "sessions.json");
 appendFileSync(path.join(stateDir, "pids"), `${process.pid}\n`);
 const flag = (name: string) => existsSync(path.join(stateDir, name));
+// A worker in agy's process group that outlives it if nobody reaps the group.
+if (flag("orphan-child")) appendFileSync(path.join(stateDir, "orphans"), `${Bun.spawn(["sleep", "30"], { stdio: ["ignore", "ignore", "ignore"] }).pid}\n`);
 const log = (entry: unknown) => appendFileSync(path.join(stateDir, "log.jsonl"), `${JSON.stringify(entry)}\n`);
 const readSessions = (): StoredSession[] => existsSync(sessionsFile) ? JSON.parse(readFileSync(sessionsFile, "utf8")) as StoredSession[] : [];
 const writeSessions = (sessions: StoredSession[]) => {
@@ -127,15 +133,17 @@ app.onNotification(methods.agent.session.cancel, ({ params }) => {
   for (const waiter of run.cancelWaiters.splice(0)) waiter();
 });
 
-app.onRequest(methods.agent.initialize, ({ params }) => {
+app.onRequest(methods.agent.initialize, async ({ params }) => {
   log({ method: "initialize", params });
+  if (flag("hang-initialize")) await new Promise(() => undefined);
   const answer = structuredClone(fixture.initialize);
   if (flag("no-image")) answer.agentCapabilities.promptCapabilities.image = false;
   return answer as never;
 });
 
-app.onRequest(methods.agent.session.list, ({ params }) => {
+app.onRequest(methods.agent.session.list, async ({ params }) => {
   log({ method: "session/list", params });
+  if (flag("hang-list")) await new Promise(() => undefined);
   requireLogin();
   return { sessions: readSessions().filter(session => !params.cwd || session.cwd === params.cwd).map(session => ({ sessionId: session.sessionId, cwd: session.cwd, ...(session.title ? { title: session.title } : {}), updatedAt: session.updatedAt })) };
 });

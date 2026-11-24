@@ -6,10 +6,13 @@ import { BoundedTextCapture, ManagedProcess, settlesWithin } from "../managed-pr
 export const AUTH_REQUIRED_CODE = -32000;
 
 const STDERR_LIMIT_BYTES = 16 * 1024;
-// Closing stdin ends agy within about 200 ms (design D2); after this, the
-// shared helper escalates with SIGTERM, a grace and SIGKILL to the group.
-const STDIN_CLOSE_GRACE_MS = 1_000;
-const TERM_GRACE_MS = 2_000;
+// Shutdown fits inside the Hub's kill deadline (SIGTERM_GRACE_MS in
+// hub/backend.ts, which a test holds these to): closing stdin ends agy
+// within about 200 ms (design D2); after that the shared helper sends
+// SIGTERM to the group and escalates to SIGKILL, waiting at most three
+// TERM_GRACE_MS in all.
+export const STDIN_CLOSE_GRACE_MS = 300;
+export const TERM_GRACE_MS = 600;
 
 export type AcpHandlers = {
   // Raw `session/update` params: the normalizer reads them defensively, so
@@ -50,31 +53,36 @@ const defaultSpawn: AcpSpawn = (argv, options) => Bun.spawn(argv, {
 /**
  * One `agy acp` process and its ACP v1 connection (add-antigravity-chat D1,
  * D2). The client advertises no file-system or terminal capability, so agy
- * never asks UatuCode to read files or run commands for it. `close()` ends
- * stdin first and then escalates through the shared process helpers.
+ * never asks UatuCode to read files or run commands for it.
+ *
+ * The owner holds it from spawn, before `initialize` answers, so a child
+ * stuck there is still ended by `close()`. `close()` ends stdin first and
+ * then escalates through the shared process helpers; a leader that exits
+ * on its own has its process group reaped too, and `settled` resolves once
+ * nothing it started is left.
  */
 export class AcpProcess {
+  readonly exited: Promise<number | null>;
+  // Resolves with agy's `initialize` answer; rejects if it never comes.
+  readonly ready: Promise<InitializeResponse>;
+  // Resolves once the process and its group are gone, by close() or exit.
+  readonly settled: Promise<void>;
+  private answer: InitializeResponse | undefined;
   private closing: Promise<void> | null = null;
   private exitedFlag = false;
+  private readonly managed: ManagedProcess;
+  private readonly connection: ClientConnection;
+  private readonly stdin: ReturnType<AcpSpawn>["stdin"];
+  private readonly capture: BoundedTextCapture;
+  private readonly stdinCloseGraceMs: number;
 
-  private constructor(
-    private readonly managed: ManagedProcess,
-    private readonly connection: ClientConnection,
-    private readonly stdin: ReturnType<AcpSpawn>["stdin"],
-    private readonly capture: BoundedTextCapture,
-    readonly exited: Promise<number | null>,
-    private readonly stdinCloseGraceMs: number,
-    readonly initialized: InitializeResponse,
-  ) {
-    void exited.then(() => { this.exitedFlag = true; }, () => { this.exitedFlag = true; });
-  }
-
-  static async start(options: AcpProcessOptions): Promise<AcpProcess> {
+  private constructor(options: AcpProcessOptions) {
     const spawned = (options.spawn ?? defaultSpawn)([options.executable, "acp"], { cwd: options.cwd, env: options.env ?? process.env });
-    const capture = new BoundedTextCapture(STDERR_LIMIT_BYTES);
-    capture.consume(spawned.stderr);
-    const managed = new ManagedProcess(spawned, { capture, termGraceMs: options.termGraceMs ?? TERM_GRACE_MS, escalation: "group" });
-    const stdin = spawned.stdin;
+    this.capture = new BoundedTextCapture(STDERR_LIMIT_BYTES);
+    this.capture.consume(spawned.stderr);
+    this.managed = new ManagedProcess(spawned, { capture: this.capture, termGraceMs: options.termGraceMs ?? TERM_GRACE_MS, escalation: "group" });
+    this.stdinCloseGraceMs = options.stdinCloseGraceMs ?? STDIN_CLOSE_GRACE_MS;
+    const stdin = this.stdin = spawned.stdin;
     const output = new WritableStream<Uint8Array>({
       write: async chunk => { stdin.write(chunk); await stdin.flush?.(); },
       close: () => { try { stdin.end(); } catch { /* already closed */ } },
@@ -82,23 +90,33 @@ export class AcpProcess {
     const app = client({ name: "uatu" })
       .onNotification("session/update", (value: unknown) => value, ({ params }) => options.handlers.update(params))
       .onRequest("session/request_permission", ({ params, signal }) => options.handlers.permission(params, signal));
-    const connection = app.connect(ndJsonStream(output, spawned.stdout));
-    const exited = spawned.exited.then(code => code, () => null);
-    // A process that ends closes its connection, rejecting whatever waits.
-    void exited.then(() => connection.close(new Error("Antigravity exited")));
-    try {
-      const initialized = await connection.agent.request("initialize", {
-        protocolVersion: 1,
-        clientCapabilities: {},
-        clientInfo: { name: "uatu", title: "UatuCode", version: "1" },
-      });
-      return new AcpProcess(managed, connection, stdin, capture, exited, options.stdinCloseGraceMs ?? STDIN_CLOSE_GRACE_MS, initialized);
-    } catch (error) {
-      connection.close();
-      try { stdin.end(); } catch { /* already closed */ }
-      await managed.terminate();
-      throw withStderr(error, capture.snapshot());
-    }
+    const connection = this.connection = app.connect(ndJsonStream(output, spawned.stdout));
+    this.exited = spawned.exited.then(code => code, () => null);
+    // A process that ends closes its connection, rejecting whatever waits,
+    // and whatever it left in its group is reaped.
+    const reaped = this.exited.then(async () => {
+      this.exitedFlag = true;
+      connection.close(new Error("Antigravity exited"));
+      await this.managed.terminate();
+    });
+    this.settled = reaped.then(() => undefined, () => undefined);
+    this.ready = connection.agent.request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {},
+      clientInfo: { name: "uatu", title: "UatuCode", version: "1" },
+    }).then(answer => { this.answer = answer; return answer; }, error => { throw withStderr(error, this.capture.snapshot()); });
+    void this.ready.catch(() => undefined);
+  }
+
+  /** Spawn `agy acp` and send `initialize`; the caller owns the process at once. */
+  static spawn(options: AcpProcessOptions): AcpProcess {
+    return new AcpProcess(options);
+  }
+
+  /** agy's `initialize` answer; only after `ready` has resolved. */
+  get initialized(): InitializeResponse {
+    if (!this.answer) throw new Error("Antigravity has not answered initialize");
+    return this.answer;
   }
 
   get agent(): ClientConnection["agent"] {

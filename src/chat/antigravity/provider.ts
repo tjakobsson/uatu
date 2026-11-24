@@ -497,7 +497,7 @@ export class AntigravityProvider implements ChatProvider {
 
   private async startProcess(): Promise<AcpProcess> {
     if (this.disposed) throw new Error("Antigravity chat has shut down");
-    const process = await AcpProcess.start({
+    const process = AcpProcess.spawn({
       executable: this.executable,
       cwd: this.workspacePath,
       env: this.env,
@@ -509,8 +509,16 @@ export class AntigravityProvider implements ChatProvider {
         permission: (request, signal) => this.permission(request, signal),
       },
     });
+    // Owned from spawn until it and its group are gone, so dispose() ends a
+    // child still in `initialize` and whatever a crashed leader left behind.
     this.processes.add(process);
-    void process.exited.then(() => this.processes.delete(process));
+    void process.settled.then(() => this.processes.delete(process));
+    try {
+      await process.ready;
+    } catch (error) {
+      await this.closeProcess(process);
+      throw error;
+    }
     this.imageInput = process.initialized.agentCapabilities?.promptCapabilities?.image === true;
     if (this.disposed) { await this.closeProcess(process); throw new Error("Antigravity chat has shut down"); }
     return process;
@@ -750,7 +758,9 @@ export class AntigravityProvider implements ChatProvider {
       clearTimeout(conversation.idle);
       this.interactions.abandon(conversation.sessionId, INTERRUPTED_REASON);
     }
-    await Promise.all([...this.processes].map(process => this.closeProcess(process)));
+    const processes = [...this.processes];
+    await Promise.all(processes.map(process => this.closeProcess(process)));
+    await Promise.all(processes.map(process => process.settled));
     this.events_.close();
   }
 }

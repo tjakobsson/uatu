@@ -15,10 +15,12 @@ export type FakeAgy = {
   env: NodeJS.ProcessEnv;
   // Every request and notification the fake received, in order.
   log(): Promise<Array<{ method: string; params?: Record<string, unknown>; outcome?: Record<string, unknown> }>>;
-  setFlag(name: "auth-missing" | "crash-on-prompt" | "no-image" | "refuse-steer" | "crash-on-steer", on: boolean): Promise<void>;
+  setFlag(name: "auth-missing" | "crash-on-prompt" | "no-image" | "refuse-steer" | "crash-on-steer" | "hang-initialize" | "hang-list" | "orphan-child", on: boolean): Promise<void>;
   sessions(): Promise<Array<{ sessionId: string; cwd: string; title: string | null; model: string; thoughtLevel: string; mode: string; replay: Array<Record<string, unknown>> }>>;
   // `agy acp` processes started for this fake that are still running.
   running(): Promise<number>;
+  // Workers the `orphan-child` flag started that are still running.
+  orphans(): Promise<number>;
   remove(): Promise<void>;
 };
 
@@ -50,10 +52,13 @@ export async function installFakeAgy(): Promise<FakeAgy> {
     async sessions() {
       return JSON.parse(await readFile(path.join(stateDirectory, "sessions.json"), "utf8").catch(() => "[]"));
     },
-    async running() {
-      const pids = (await readFile(path.join(stateDirectory, "pids"), "utf8").catch(() => "")).split("\n").filter(Boolean).map(Number);
-      return pids.filter(pid => { try { process.kill(pid, 0); return true; } catch { return false; } }).length;
-    },
+    running: () => alive(path.join(stateDirectory, "pids")),
+    orphans: () => alive(path.join(stateDirectory, "orphans")),
     remove: () => rm(root, { recursive: true, force: true }),
   };
+}
+
+async function alive(file: string): Promise<number> {
+  const pids = (await readFile(file, "utf8").catch(() => "")).split("\n").filter(Boolean).map(Number);
+  return pids.filter(pid => { try { process.kill(pid, 0); return true; } catch { return false; } }).length;
 }

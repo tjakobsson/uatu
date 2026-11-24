@@ -11,6 +11,8 @@ import { pathAgentRuntime } from "../path-agent-runtime";
 import { LazyChatService } from "../service";
 import type { AntigravityPriceTable } from "./pricing";
 import { ChatAdapter } from "../adapter";
+import { SIGTERM_GRACE_MS } from "../../hub/backend";
+import { STDIN_CLOSE_GRACE_MS, TERM_GRACE_MS } from "./connection";
 import { AntigravityProvider } from "./provider";
 import { AntigravityRuntime } from "./runtime";
 
@@ -76,6 +78,35 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await fake.running()).toBeGreaterThanOrEqual(2);
       await provider.dispose();
       expect(await fake.running()).toBe(0);
+    });
+
+    for (const stuck of ["hang-initialize", "hang-list"] as const) test(`dispose ends a process stuck in ${stuck === "hang-initialize" ? "initialize" : "session/list"}`, async () => {
+      const { fake, provider, waitFor } = await setup();
+      await fake.setFlag(stuck, true);
+      const listing = provider.listSessions();
+      void listing.catch(() => undefined);
+      for (let i = 0; i < 400 && !(await fake.log()).some(entry => entry.method === (stuck === "hang-initialize" ? "initialize" : "session/list")); i++) await Bun.sleep(5);
+      expect(await fake.running()).toBe(1);
+      await provider.dispose();
+      expect(await fake.running()).toBe(0);
+      await expect(listing).rejects.toThrow();
+    });
+
+    test("a crashed leader's process group is reaped", async () => {
+      const { fake, provider, ended } = await setup();
+      await fake.setFlag("orphan-child", true);
+      const session = await provider.createSession("a");
+      expect(await fake.orphans()).toBe(1);
+      await fake.setFlag("crash-on-prompt", true);
+      await provider.prompt(session.id, { id: "x", text: "Go", delivery: "queue" });
+      await ended(session.id);
+      for (let i = 0; i < 600 && await fake.orphans() > 0; i++) await Bun.sleep(5);
+      expect(await fake.orphans()).toBe(0);
+    });
+
+    test("shutdown fits inside the Hub's kill deadline", () => {
+      // Closing stdin, then the group's SIGTERM, grace and SIGKILL waits.
+      expect(STDIN_CLOSE_GRACE_MS + 3 * TERM_GRACE_MS).toBeLessThan(SIGTERM_GRACE_MS);
     });
 
     test("a crashed process fails its own turn only", async () => {
