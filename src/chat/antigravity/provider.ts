@@ -917,7 +917,10 @@ export class AntigravityProvider implements ChatProvider {
     let applied = before;
     // Each change agy confirms is recorded as it lands, so a later step
     // failing leaves what agy runs known: a retry sends what still differs,
-    // and the turn is priced under the model agy has.
+    // and the turn is priced under the model agy has. Each call has the
+    // setup deadline: a change agy leaves unanswered retires the process,
+    // so the conversation's next submission or Stop is not held behind it.
+    const call = <T>(promise: Promise<T>, step: string) => withDeadline(promise, this.setupDeadlineMs, step);
     try {
       const modelChanged = model !== undefined && applied.model?.modelId !== model.modelId;
       if (model && this.catalog?.selection === "legacy") {
@@ -925,27 +928,33 @@ export class AntigravityProvider implements ChatProvider {
         if (modelChanged || applied.variant !== variant) {
           const legacyId = legacyModelId(this.catalog, model.modelId, variant);
           if (!legacyId) throw new UnsupportedVariantSelectionError(`Antigravity offers no model id for ${model.modelId}`);
-          await process.agent.request<unknown>("session/set_model", { sessionId, modelId: legacyId });
+          await call(process.agent.request<unknown>("session/set_model", { sessionId, modelId: legacyId }), "session/set_model");
           applied = { ...applied, model, ...(variant ? { variant } : {}) };
           if (!variant) delete applied.variant;
         }
       } else if (modelChanged) {
-        const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "model", value: model.modelId });
+        const answer = await call(process.agent.request("session/set_config_option", { sessionId, configId: "model", value: model.modelId }), "session/set_config_option");
         applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
         // The answer advertises the new model's thinking levels.
         this.refreshAdvertisedLevels(answer.configOptions);
         variant = variantFor(this.catalog, model.modelId, wantedVariant);
       }
       if (this.catalog?.selection !== "legacy" && variant && (modelChanged || applied.variant !== variant)) {
-        const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "thought_level", value: variant });
+        const answer = await call(process.agent.request("session/set_config_option", { sessionId, configId: "thought_level", value: variant }), "session/set_config_option");
         applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
       }
       if (mode && applied.mode !== mode) {
-        await process.agent.request("session/set_mode", { sessionId, modeId: mode });
+        await call(process.agent.request("session/set_mode", { sessionId, modeId: mode }), "session/set_mode");
         applied = { ...applied, mode };
       }
+    } catch (error) {
+      if (error instanceof DeadlineError && conversation.process === process) {
+        this.releaseProcess(conversation);
+        this.forgetHistory(conversation);
+      }
+      throw error;
     } finally {
-      if (applied !== before) conversation.applied = applied;
+      if (applied !== before && conversation.process === process) conversation.applied = applied;
     }
     conversation.applied = applied;
     conversation.configuration = { ...(model ? { model } : {}), ...(variant ? { variant } : {}), ...(mode ? { mode } : {}) };
@@ -1067,11 +1076,14 @@ function armIdleTimer(release: () => void, milliseconds: number): () => void {
   return () => clearTimeout(timer);
 }
 
+/** agy did not answer a call within its deadline. */
+class DeadlineError extends Error {}
+
 /** The promise's outcome, or a failure naming the step once the deadline passes. */
 function withDeadline<T>(promise: Promise<T>, milliseconds: number, step: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Antigravity did not answer ${step} within ${Math.round(milliseconds / 1000)}s`)), milliseconds);
+    timer = setTimeout(() => reject(new DeadlineError(`Antigravity did not answer ${step} within ${Math.round(milliseconds / 1000)}s`)), milliseconds);
   });
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }

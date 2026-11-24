@@ -22,8 +22,8 @@
 //   hang-initialize      present: `initialize` never answers
 //   fail-thought-level   present: setting `thought_level` fails
 //   refuse-next-steer    present: the next steer is refused, and the flag removed
-//   hold-config          present: `session/set_config_option` waits to answer until
-//                        it is removed
+//   hold-config          present: `session/set_config_option` and `session/set_mode`
+//                        wait to answer until it is removed
 //   fail-load            present: `session/load` fails after sending its replay
 //   legacy-only          present: no config options; models are chosen by legacy
 //                        id through `session/set_model`
@@ -228,8 +228,9 @@ app.onRequest("session/set_model", (value: unknown) => value as { sessionId: str
   return {};
 });
 
-app.onRequest(methods.agent.session.setMode, ({ params }) => {
+app.onRequest(methods.agent.session.setMode, async ({ params }) => {
   log({ method: "session/set_mode", params });
+  while (flag("hold-config")) await Bun.sleep(5);
   updateSession(params.sessionId, session => { session.mode = params.modeId; });
   return {};
 });

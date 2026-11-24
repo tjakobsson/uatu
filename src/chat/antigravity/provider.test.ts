@@ -163,6 +163,20 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await fake.running()).toBe(0);
     });
 
+    for (const change of ["model", "mode"] as const) test(`a ${change} change agy leaves unanswered fails at its deadline and retires the process, so the next submission goes through`, async () => {
+      const { fake, provider, run } = await setup({ setupDeadlineMs: 600 });
+      const session = await provider.createSession("a");
+      await fake.setFlag("hold-config", true);
+      const selection = change === "model" ? { model: { providerId: "antigravity", modelId: "gemini-4-argon" } } : { mode: "plan" };
+      await expect(provider.prompt(session.id, { id: "p1", text: "Say hello", delivery: "queue", ...selection })).rejects.toThrow(`did not answer session/${change === "model" ? "set_config_option" : "set_mode"}`);
+      for (let i = 0; i < 600 && await fake.running() > 0; i++) await Bun.sleep(5);
+      expect(await fake.running()).toBe(0);
+      await fake.setFlag("hold-config", false);
+      await run(session.id, "Say hello again");
+      // A new process took the conversation over.
+      expect((await fake.log()).filter(entry => entry.method === "session/load")).toHaveLength(1);
+    });
+
     test("a crashed leader's process group is reaped", async () => {
       const { fake, provider, ended } = await setup();
       await fake.setFlag("orphan-child", true);
