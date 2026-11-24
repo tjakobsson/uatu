@@ -28,15 +28,15 @@ function walk(node: Nodes | RootContent | ElementContent): void {
     if ((node as Element).tagName === "a") {
       markIfExternal(node as Element);
     }
-    visitChildren(node as Element);
+    walkChildren(node as Element);
     return;
   }
   if (node.type === "root") {
-    visitChildren(node as Root);
+    walkChildren(node as Root);
   }
 }
 
-function visitChildren(parent: Parent): void {
+function walkChildren(parent: Parent): void {
   for (const child of parent.children) {
     walk(child);
   }
@@ -89,4 +89,37 @@ function toRelTokens(value: unknown): string[] {
     return value.split(/\s+/).filter(token => token !== "");
   }
   return [];
+}
+
+// Resolves relative `href`s and `src`s against `baseUrl`, after sanitizing
+// (so only URLs the schema already allowed are touched). In-page fragments
+// (`#heading`) stay as they are. A result that isn't http(s) is dropped.
+export function resolveRelativeUrls(tree: Nodes, baseUrl: string): void {
+  const visit = (node: Nodes | RootContent | ElementContent): void => {
+    if (node.type === "element") {
+      const element = node as Element;
+      const attribute = element.tagName === "a" ? "href" : element.tagName === "img" ? "src" : null;
+      const value = attribute ? element.properties?.[attribute] : undefined;
+      // Only relative values: an absolute one already passed the schema's
+      // protocol allowlist.
+      if (attribute && typeof value === "string" && value !== "" && !value.startsWith("#") && !/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+        let absolute: URL | null = null;
+        try {
+          absolute = new URL(value, baseUrl);
+        } catch {
+          absolute = null;
+        }
+        if (absolute && (absolute.protocol === "https:" || absolute.protocol === "http:")) element.properties![attribute] = absolute.href;
+        else delete element.properties![attribute];
+      }
+      visitChildren(element, visit);
+      return;
+    }
+    if (node.type === "root") visitChildren(node as Root, visit);
+  };
+  visit(tree);
+}
+
+function visitChildren(parent: Parent, visit: (node: RootContent | ElementContent) => void): void {
+  for (const child of parent.children) visit(child);
 }

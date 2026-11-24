@@ -1,8 +1,8 @@
 // HTTP adapter for the `/api/github/*` routes. src/server/routes.ts owns the
 // route table (keys and methods); each entry delegates to one handler here,
 // which validates the request, calls the GithubService seam, and maps a
-// GithubError to its status. With no service configured every handler
-// answers 404, so a session that did not opt in exposes nothing.
+// GithubError to its status. With no service (UATU_GITHUB=off, or an e2e test
+// that didn't ask for one) every handler answers 404.
 //
 // The pull request file view (design D5) reads bytes through the seam and
 // classifies and renders them here, with the workspace preview's own

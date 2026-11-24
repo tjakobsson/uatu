@@ -4,8 +4,12 @@
 //
 // Names follow openspec/changes/add-github-pr-review/design.md (D5) where it
 // was cheap. The summary is fetched on demand from `/api/github/summary`
-// rather than riding `RepositorySnapshot.github`; that keeps this mocked
-// stage out of the public workspace contract.
+// rather than riding `RepositorySnapshot.github`, which keeps these internal
+// routes out of the public workspace contract.
+//
+// Two backends answer in this shape: the real `gh api` service
+// (src/github/gh-service.ts) and the in-memory fake (src/github/fake.ts).
+// Fields only one of them fills are optional.
 
 // Every repository's GitHub summary carries exactly one status.
 export const GITHUB_STATUSES = [
@@ -85,6 +89,9 @@ export type GithubSummary = {
   // The fake's dev scenario (only while `mock`): the Mock scenario menu
   // shows it, since `head-not-fetched` answers `ready`.
   mockScenario?: GithubFakeScenario;
+  // The session's GitHub setting is `read` (UATU_GITHUB=read): pull requests
+  // show, nothing is sent.
+  readOnly?: boolean;
 };
 
 export type GithubComment = {
@@ -99,8 +106,11 @@ export type GithubComment = {
 export type ReviewThread = {
   id: string;
   path: string;
-  // Null once GitHub can no longer place the thread on the current diff.
+  // Null once GitHub can no longer place the thread on the current diff, and
+  // for a thread on the whole file (`subjectType: "FILE"`).
   line: number | null;
+  // Set for a thread on a whole file rather than a line.
+  subjectType?: "FILE";
   side: DiffSide;
   isResolved: boolean;
   isOutdated: boolean;
@@ -139,17 +149,25 @@ export type TimelineItem =
       submittedAt: string;
       threadIds: string[];
     }
-  | { kind: "merged"; actor: string; method: MergeMethod; at: string; deletedBranch: boolean };
+  // `method` only when known: GitHub's merged event doesn't say it.
+  | { kind: "merged"; actor: string; method?: MergeMethod; at: string; deletedBranch: boolean };
 
 export type PullRequestFile = {
   path: string;
+  // GitHub's renamed, copied and changed files read as modified.
   status: "added" | "modified" | "removed";
   additions: number;
   deletions: number;
-  // Both sides of the file, so the existing diff renderer can show
-  // expandable context. Synthetic in the fake.
-  oldContents: string;
-  newContents: string;
+  // A renamed or copied file's earlier path.
+  previousPath?: string;
+  // Both sides of the file, so the diff renderer can show expandable
+  // context (the fake).
+  oldContents?: string;
+  newContents?: string;
+  // GitHub's unified diff of the file, with file headers (the real service).
+  // Neither contents nor patch: GitHub sent no patch (a binary or very large
+  // file), and the file is shown on GitHub.
+  patch?: string;
 };
 
 // Whether GitHub would merge the pull request now, read-only: uatu shows it
@@ -178,6 +196,11 @@ export type PullRequestDetail = {
   pendingReview: PendingReview | null;
   files: PullRequestFile[];
   mergeReadiness: MergeReadiness;
+  // What the answer leaves out (the real service): timeline entries GitHub
+  // holds beyond those shown or of kinds uatu skips, more threads or files
+  // than were read, and sections GitHub refused while the rest answered
+  // (`checks`, `threads`, `files`).
+  omitted?: { timeline: number; threads: boolean; files: boolean; unavailable: string[] };
 };
 
 export type PullRequestListItem = {
@@ -201,6 +224,8 @@ export type PullRequestList = {
   repository: GithubRepositoryRef;
   viewer: string;
   pullRequests: PullRequestListItem[];
+  // How many are open on GitHub (the list shows at most 100).
+  totalCount?: number;
 };
 
 // A pull request's file at its head or its base commit (the file view).

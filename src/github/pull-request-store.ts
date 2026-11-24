@@ -307,7 +307,9 @@ export class PullRequestStore {
     if (summary.pullRequest) this.knownPending.set(summary.pullRequest.number, summary.pullRequest.viewerPendingComments);
     if (summary.repository && this.state.repositoryId) this.githubNames.set(this.state.repositoryId, `${summary.repository.owner}/${summary.repository.name}`);
     const retry = retryAfterSummary(this.state.retry, this.state.summary?.status ?? null, summary.status);
-    this.state = { ...this.state, enabled: true, summary, loading: false, error: null, retry };
+    // A repository that isn't on GitHub has no pull request surfaces, as
+    // when the session serves none.
+    this.state = { ...this.state, enabled: summary.status !== "not-github", summary, loading: false, error: null, retry };
   }
 
   // `repositoryId` defaults to the active repository; a URL-addressed preview

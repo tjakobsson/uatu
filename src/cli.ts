@@ -56,7 +56,7 @@ import { setGitMetricsSink } from "./document/git-base-ref";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
 import { consumeChildPolicyDescriptor } from "./hub/child-policy-bootstrap";
 import type { readChildPolicyBootstrap } from "./hub/child-policy";
-import { githubServiceFromEnvironment } from "./github/service";
+import { githubServiceFromEnvironment, type GithubService } from "./github/service";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -185,6 +185,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
   let chatService: MultiAgentChatService | null = null;
+  let githubService: GithubService | null = null;
 
   // Resolve the actual port to bind. When the user passed `--port`, honor it
   // strictly (no roll). When they didn't, pre-flight probe for a free port
@@ -271,9 +272,14 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
 
     let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
     let workspaceRoutes!: ReturnType<typeof buildRoutes>;
-    // Null unless the process opted in to the mocked GitHub backend
-    // (UATU_GITHUB_FAKE=1); then every /api/github/* route answers 404.
-    const github = githubServiceFromEnvironment();
+    // GitHub pull requests through the session's own `gh` (UATU_GITHUB =
+    // off | read | full, default full), or the in-memory fake with
+    // UATU_GITHUB_FAKE=1. Null with `off`: every /api/github/* route answers
+    // 404 (src/github/service.ts).
+    const github = githubServiceFromEnvironment(process.env, {
+      repositoryRoot: id => watchSession?.getRepositories()?.find(repository => repository.id === id)?.rootPath ?? null,
+    });
+    githubService = github;
     const mediaPath = `${options.basePath}api/media`;
     const inner = Bun.serve({
       hostname: "127.0.0.1",
@@ -415,6 +421,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     }
     shuttingDown = true;
     childPolicy?.dispose();
+    githubService?.dispose?.();
     console.error("uatu: shutting down");
 
     // The OpenCode child is detached as its own process group, so dispose it

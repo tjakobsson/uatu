@@ -991,6 +991,7 @@ export function mountFilesChanged(host: HTMLElement, initial: PullRequestDetail,
         path: file.path,
         oldContents: file.oldContents,
         newContents: file.newContents,
+        patch: file.patch,
         languageHint: languageFor(file.path),
       }, {
         diffStyle: style,

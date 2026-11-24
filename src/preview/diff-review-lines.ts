@@ -232,11 +232,43 @@ export function lineOptionText(line: ReviewLine, text: string): string {
 
 // The commented line's code on one line, for lists of comments away from the
 // diff; empty when the file or line is not in the pull request.
-export function lineExcerpt(files: readonly { path: string; oldContents: string; newContents: string }[], anchor: Anchor, max = 72): string {
+export function lineExcerpt(files: readonly { path: string; oldContents?: string; newContents?: string; patch?: string }[], anchor: Anchor, max = 72): string {
   const file = files.find(candidate => candidate.path === anchor.path);
   const contents = anchor.side === "LEFT" ? file?.oldContents : file?.newContents;
-  const text = contents?.split("\n")[anchor.line - 1]?.trim().replace(/\s+/g, " ") ?? "";
+  const line = contents !== undefined ? contents.split("\n")[anchor.line - 1] : file?.patch ? patchLine(file.patch, anchor.side, anchor.line) : undefined;
+  const text = line?.trim().replace(/\s+/g, " ") ?? "";
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// One side's line from a unified diff (GitHub's patch carries no whole
+// file): undefined when the line is outside every hunk.
+export function patchLine(patch: string, side: "LEFT" | "RIGHT", line: number): string | undefined {
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  for (const text of patch.split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || text.startsWith("\\")) continue;
+    const marker = text[0];
+    if (marker === "-") {
+      if (side === "LEFT" && oldLine === line) return text.slice(1);
+      oldLine += 1;
+    } else if (marker === "+") {
+      if (side === "RIGHT" && newLine === line) return text.slice(1);
+      newLine += 1;
+    } else if (marker === " " || text === "") {
+      if ((side === "LEFT" ? oldLine : newLine) === line) return text.slice(1);
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return undefined;
 }
 
 // Where a composer opened for a whole file goes ("Add line comments", a

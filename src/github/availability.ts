@@ -6,7 +6,7 @@
 
 import type { GithubSummary, PullRequestSummary } from "../shared/github-contract";
 
-type SummaryFacts = Pick<GithubSummary, "status" | "retryAt" | "message"> | null;
+type SummaryFacts = Pick<GithubSummary, "status" | "retryAt" | "message" | "readOnly"> | null;
 
 export function minutesUntil(ms: number, now = Date.now()): number {
   return Math.max(1, Math.ceil((ms - now) / 60_000));
@@ -15,6 +15,7 @@ export function minutesUntil(ms: number, now = Date.now()): number {
 // Why GitHub as a whole can't take writes now (null when it can, or when the
 // session hasn't answered yet).
 export function githubWritesPausedReason(summary: SummaryFacts, now = Date.now()): string | null {
+  if (summary?.readOnly) return "This session reads GitHub only (its GitHub setting is read), so nothing can be sent.";
   switch (summary?.status) {
     case "no-credential":
       return "GitHub isn't connected for this workspace, so nothing can be sent.";

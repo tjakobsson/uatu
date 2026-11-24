@@ -49,6 +49,11 @@ import { createWatchSession } from "../../src/server/watch-session";
 import { startMediaHttpBoundary, type MediaHttpBoundary } from "../../src/server/media-http-boundary";
 import { classifyFile } from "../../src/document/classify";
 import { collectRepositorySnapshots } from "../../src/document/git-data";
+import { GitHubApi } from "../../src/github/api";
+import { FakeGithubService } from "../../src/github/fake";
+import { GhGithubService } from "../../src/github/gh-service";
+import type { GithubService } from "../../src/github/service";
+import { FakeGitHub } from "../fixtures/github-fake";
 import {
   buildFetchFallback,
   buildRoutes,
@@ -324,6 +329,14 @@ async function handleE2EReset(request: Request): Promise<Response> {
     releaseRepositories?: boolean;
     nativeWatch?: boolean;
     failDiscovery?: boolean;
+    // Serve /api/github/* from a fresh in-memory fake (src/github/fake.ts),
+    // `true` or a scenario name. `"transport"` instead runs the real service
+    // (src/github/gh-service.ts) over the transport-level fake
+    // (tests/fixtures/github-fake.ts, fixture acme/widgets) with `origin` at
+    // github.com/acme/widgets; it needs `git: true`. Absent: every GitHub
+    // route answers 404, as before, so suites that don't ask see no pull
+    // request surfaces.
+    github?: boolean | string;
   } = {};
   try {
     const text = await request.text();
@@ -381,6 +394,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
     typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
   activeFollow = typeof body.follow === "boolean" ? body.follow : true;
   personalState = { version: 1 };
+  e2eGithub = body.github && body.github !== "transport" ? new FakeGithubService({ scenario: typeof body.github === "string" ? body.github : undefined }) : null;
 
   const previousWorkspaceRoot = activeWorkspaceRoot;
   activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
@@ -414,6 +428,15 @@ async function handleE2EReset(request: Request): Promise<Response> {
   if (discoveryGate || failDiscovery) await fs.writeFile(path.join(activeWorkspaceRoot, "indexing-gate.unknown"), "Waiting for discovery\n");
   if (body.git) {
     await initE2EGitRepository();
+  }
+  if (body.github === "transport") {
+    await safeGit(activeWorkspaceRoot, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    e2eGithub = new GhGithubService({
+      api: new GitHubApi(new FakeGitHub()),
+      mode: "full",
+      repositoryRoot: id => watchSession.getRepositories()?.find(repository => repository.id === id)?.rootPath ?? null,
+      log: () => undefined,
+    });
   }
   if (body.dirty) {
     for (const [relativePath, contents] of Object.entries(body.dirty)) {
@@ -753,6 +776,8 @@ async function handleE2EChat(request: Request): Promise<Response> {
   return Response.json({ error: "invalid chat control" }, { status: 400 });
 }
 
+// The PR review fake for the current test, when its reset asked for one.
+let e2eGithub: GithubService | null = null;
 let server: ReturnType<typeof Bun.serve>;
 let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
 let workspaceRoutes!: ReturnType<typeof buildRoutes>;
@@ -816,6 +841,9 @@ const inner = Bun.serve({
       handleE2EReset,
       handleE2EPersonalState,
       handleE2EChat,
+      // Read per request: a reset may switch the fake on or off. Never the
+      // real `gh` transport (github-guard.test.ts checks this file).
+      get github() { return e2eGithub; },
     })),
   },
   fetch: async (request, srv) => {

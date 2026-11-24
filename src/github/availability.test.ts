@@ -22,6 +22,10 @@ describe("sendBlockedReason", () => {
     expect(sendBlockedReason({ status: "ready" }, { number: 7, state: "CLOSED" }, NOW)).toBe("#7 is closed; new comments are closed here.");
   });
 
+  test("pauses sending when the session reads GitHub only", () => {
+    expect(sendBlockedReason({ status: "ready", readOnly: true }, { number: 7, state: "OPEN" }, NOW)).toContain("reads GitHub only");
+  });
+
   test("says nothing before the session has answered", () => {
     expect(githubWritesPausedReason(null, NOW)).toBeNull();
   });

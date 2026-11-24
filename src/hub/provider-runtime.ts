@@ -17,6 +17,9 @@ export type ProviderCliSupport = {
   version: string | null;
 };
 
+// The GitHub floor is also the session's pull request backend's floor
+// (src/github/gh.ts checks it once per session): every `gh api` flag it uses
+// (`--hostname`, `--include`, `--input -`, `--method`, `-H`) predates 2.0.
 const MINIMUM_VERSION: Record<Provider, [number, number]> = {
   github: [2, 0],
   gitlab: [1, 22],

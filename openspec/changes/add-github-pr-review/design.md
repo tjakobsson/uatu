@@ -2,7 +2,7 @@
 
 See `proposal.md` for motivation and scope. The behavior contract is in this change's `specs/`. This section records only the current state that shapes the approach.
 
-- **No GitHub integration exists.** Nothing in `src/` calls the GitHub API, uses octokit, runs `gh pr`, fetches `refs/pull/*`, or parses owner/repo from a remote.
+- **No GitHub integration existed** when this change was proposed: nothing in `src/` called the GitHub API, used octokit, ran `gh pr`, fetched `refs/pull/*`, or parsed owner/repo from a remote. (The `gh api` backend now lives in `src/github/`; see the "As built" notes below.)
 - **`gh` is already projected into sessions.** When a workspace is assigned a token with the `github-cli` capability, `src/hub/credential-context.ts` exposes `gh` on the session's tool path and `src/hub/provider-runtime.ts` writes a private `GH_CONFIG_DIR` and sets `GH_HOST` plus `GH_TOKEN` (or `GH_ENTERPRISE_TOKEN`). Ambient `GH_*`/`GITHUB_TOKEN` are stripped. Without an assignment, `GH_CONFIG_DIR` points at an empty directory. The environment is a session-start snapshot; disabling the token stops the session (`openspec/specs/hub-credentials/spec.md`). Outside a Hub (source runs), the user's own `gh` login applies.
 - **Base selection has no override.** `resolveCompareBase()` in `src/document/git-base-ref.ts` tries `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`. `git-data.ts` (repository snapshots) and `diff.ts` (per-file diff, cached per repo and validated by HEAD) both call it. `CompareTarget` is `base | last-commit`.
 - **Repository snapshots ride the `document` live topic.** `RepositorySnapshot` (closed schema in `api/openapi.yaml`) is republished by `src/server/repository-refresh.ts` when Git results change. Child routes under `/api/*` are internal and excluded from the public contract; the Hub proxy already enforces session authentication and the same-origin check on every proxied request (`src/hub/server.ts`).
@@ -71,6 +71,16 @@ Invocation rules:
 
 The transport is an interface, `GitHubTransport.request({ host, method, path | graphql, variables, body }) → { status, headers, json }`, implemented by `gh.ts`. Tests substitute it (D15).
 
+*As built (task 1.2):*
+
+- `gh api` exits 1 for HTTP ≥ 400 and for any GraphQL `errors`, also a partial answer on HTTP 200, with the body on stdout. So stdout is parsed whatever the exit code, and only an empty stdout counts as a transport failure. That failure is classified from the exit code (4 means no login) and from stderr, which is never forwarded.
+- `--include` is on every call, not only where needed.
+- GraphQL runs with `--method POST`, so the method doesn't depend on `gh`'s defaults.
+- REST sends `X-GitHub-Api-Version: 2026-03-10` on github.com and `*.ghe.com`. GitHub Enterprise Server keeps `gh`'s default (2022-11-28), because older servers refuse versions they don't know. The constant is `REST_API_VERSION` in `gh.ts`.
+- Output is capped at 8 MB, and at most four `gh` processes run at once (`GH_PROCESS_CONCURRENCY`).
+- The floor reuses `providerCliVersionSupported`, so it stays at 2.0. All the flags used (`--hostname`, `--include`, `--input -`, `--method`, `-H`) predate 2.0. That `gh api graphql --input -` works on 2.0 itself is unverified against a 2.0 binary.
+- The transport returns GitHub's answer. Classification lives in `classify.ts` and `api.ts`, scoped per section and per action rather than one repository-wide status. A FORBIDDEN under the checks costs the checks (`omitted.unavailable`), and a refused write answers its own HTTP status. An unknown GraphQL field (`undefinedField`, for example on an older Enterprise Server) reads as `unavailable` with "open it on GitHub".
+
 Error classification maps to the spec's statuses:
 
 | Signal | Status |
@@ -95,6 +105,8 @@ The client receives only the status, plus GitHub's JSON `message` when there is 
 
 That remote's name is kept: the fetch action (D7) and PR worktrees (D12) use it. `github.com` always counts as GitHub. Any other host counts only when `gh auth status --hostname <host>` succeeds, which covers GitHub Enterprise without a configured host list. With no GitHub remote, no `gh` process is started at all.
 
+*As built (task 1.3):* `ghe.com` and `*.ghe.com` (GitHub Enterprise Cloud with data residency) count like github.com. So does the Hub's projected `GH_HOST`, without asking `gh`. `gh auth status` runs once per host per session. `ssh.github.com` (SSH over 443) reads as github.com. Owners and names are limited to `[A-Za-z0-9_.-]`, and anything else (local paths, deeper URL paths) is not GitHub.
+
 ### D4. Detecting the checked-out branch's PR
 
 Inputs come from the repository snapshot the child already collects (branch, HEAD, detached flag) plus `git config branch.<name>.merge` and `branch.<name>.remote`:
@@ -104,6 +116,8 @@ Inputs come from the repository snapshot the child already collects (branch, HEA
 3. Otherwise head name = upstream branch name, or the local name when there is no upstream. Head owner = the owner of the upstream remote's repository, or the base owner when there is no upstream. Query `repository.pullRequests(headRefName:, states: [OPEN, MERGED, CLOSED], orderBy: UPDATED_AT DESC, first: 10)` and keep those whose `headRepositoryOwner` matches. Prefer an OPEN one, else the most recently updated.
 
 Detection reruns only when branch, HEAD, or upstream configuration changes in the collected snapshot. Results are cached per repository root.
+
+*As built (task 2.1):* the branch facts come from three local Git calls per summary request (`config --get-regexp` for remotes, `gh-resolved` and the branch's upstream; `symbolic-ref`; `rev-parse HEAD`), not from the repository snapshot. Detection is one query keyed on `headRefName`, followed by the summary query by number. An upstream of `refs/pull/<n>/head` skips the search.
 
 ### D5. Data contract: a summary on the snapshot, detail on demand
 
@@ -142,6 +156,27 @@ The client re-reads detail when the summary's `updatedAt`, `headRefOid` or revie
 
 *Alternative:* a new `github` live topic. Rejected for this change: it means a Hub revision, broker wiring and replay semantics for data that changes about once a minute, while the summary fits the existing repository update.
 
+*As built so far:* the summary is still read on demand from the internal `GET /api/github/summary`, not carried on `RepositorySnapshot.github`. That keeps the public workspace contract unchanged for now; task 2.3 remains open.
+
+Detail is two GraphQL reads plus REST `pulls/{n}/files`:
+
+- Conversation, with the summary fields and merge readiness.
+- Threads, with the viewer's pending review.
+- Changed files from REST: patches only, at most 3,000 files and 4 MB of patches, cached per head commit.
+
+`PullRequestFile` now carries GitHub's `patch` (with file headers) or, from the fake, both sides. Files changed renders whichever it gets, and a file with neither says GitHub sends no diff for it.
+
+The contract gained only optional fields, so the fake and the client are unchanged:
+
+- `ReviewThread.subjectType: "FILE"`
+- an optional merge `method`
+- `PullRequestFile.previousPath`
+- `PullRequestDetail.omitted`: timeline entries left out or skipped, truncated threads or files, and sections GitHub refused
+- `PullRequestList.totalCount`
+- `GithubSummary.readOnly`
+
+`BUNDLED_WEB_REVISION` is unchanged: nothing existing was reshaped.
+
 ### D6. Refresh policy
 
 Refresh is event-driven; there is no timer (owner decision). A timer spends the user's shared GitHub budget (5,000 points an hour across every token and agent of that user) on workspaces nobody is looking at, and the events below cover what a reviewer sees.
@@ -152,6 +187,18 @@ Refresh is event-driven; there is no timer (owner decision). A timer spends the 
 - **Retry feedback:** Retry says `Retrying…` (also to assistive technology) while it runs, then either the fresh data with its new time or the same refusal with the time of this retry, so a repeated failure reads as a new answer.
 - **Publishing:** a summary change republishes the last Git results with the new `github` field through repository-refresh's publish path, without re-running Git. If the PR association or base changed, it requests a Git re-collection instead, because changed files depend on the base (D7).
 - **Cost:** GraphQL has no conditional requests. The summary query costs about 1 point, so cost follows user activity (opening views, switching back to the window), not wall-clock time. What is lost: checks turning green while the window stays unfocused show only when the user comes back or refreshes.
+
+*As built (task 2.2, server side):* the browser already raises the triggers (`pull-request-store.ts`). The service starts nothing on its own:
+
+- One in-flight summary per repository is shared by every request.
+- A summary younger than 5 s for the same branch facts is answered from memory, which covers several tabs and focus bursts.
+- `unavailable` backs off from 15 s, doubling up to 10 min.
+- A rate limit stops every request to that host until its reset time, held per host.
+- A manual refresh asks GitHub anyway, and the reads in the 15 s after it go through, so Retry also refreshes the open view.
+- While rate-limited or unavailable, the last detail and list are answered as they were.
+- The open-PR list is cached 30 s.
+
+**Kill switch.** One setting, `UATU_GITHUB = off | read | full`, read once at session start. Unset means `full`; an unknown value means `off`. `off` serves no routes (404). `read` refuses every write with 403 and marks summaries `readOnly`. `UATU_GITHUB_FAKE=1` selects the fake unless the setting is `off`.
 
 ### D7. PR base override for `base` comparisons
 
@@ -270,7 +317,7 @@ Naming: `pr/<n>` is unambiguous, cannot collide with a fork's `main` or `patch-1
 
 ### D13. Rendering GitHub content
 
-The child renders each Markdown body (`body`, never GitHub's `bodyHTML`) with `renderMarkdownToHtml` from `src/render/markdown.ts`, which applies the GitHub-modeled sanitize schema. It does so without local-document link rewriting: relative URLs resolve against the PR's GitHub URL, and links open in a new tab through the existing preview link handling. Plain strings (titles, logins, branch names, check names, GitHub error messages) are escaped with `escapeHtml` on render. Avatars are not loaded. Images in bodies load from their GitHub URLs, as remote images in documents do. Images that are private-repository attachments may not load (see Risks).
+The child renders each Markdown body (`body`, never GitHub's `bodyHTML`) with `renderMarkdownToHtml` from `src/render/markdown.ts`, which applies the GitHub-modeled sanitize schema. It does so without local-document link rewriting: relative URLs resolve against the PR's GitHub URL (built as a `baseUrl` option on `renderMarkdownToHtml`, applied after sanitizing; `src/github/markdown.ts`), and links open in a new tab through the existing preview link handling. Plain strings (titles, logins, branch names, check names, GitHub error messages) are escaped with `escapeHtml` on render. Avatars are not loaded. Images in bodies load from their GitHub URLs, as remote images in documents do. Images that are private-repository attachments may not load (see Risks).
 
 ### D14. Security
 
@@ -284,6 +331,7 @@ The child renders each Markdown body (`body`, never GitHub's `bodyHTML`) with `r
 
 - **Unit:** `gh.ts` runs against a fake `gh` executable written into a temporary directory on `PATH`. The fake records argv and stdin and replays scripted status, headers and JSON. It covers the version floor, missing binary, `--hostname`, stdin-only variables (including a body starting with `@`), and each error class. `remote.ts`, `normalize.ts`, `anchoring.ts`, the D11 gating table and the scheduler (fake clock) are pure tests.
 - **Service:** `service.ts` runs against an in-memory `FakeGitHub` transport (`tests/fixtures/github-fake.ts`) holding repositories, PRs, timeline, threads, pending reviews and merge state, and implementing the GraphQL operations and REST paths used here, keyed by operation name. Real temporary Git repositories cover detection, base override and anchoring.
+- *As built (task 1.4, 2.4):* `tests/fixtures/github-fake.ts` is a transport-level fake over one hand-written fixture, `tests/fixtures/github/acme-widgets.json`, which follows GitHub's documented schemas and is marked as not recorded. The unit tests run the real service over it with real temporary repositories. For now, the e2e server serves the existing service-level fake (`src/github/fake.ts`), switched on per test by its reset (`github: true` or a scenario name) instead of a separate control route; scenario changes go through the fake's existing `/api/github/dev/scenario`. Serving the transport fake in e2e is still to do.
 - **E2E:** `tests/e2e/server.ts` injects the service with `FakeGitHub` and a test-only `/__e2e/github` control route (scenario reset, push a new head, set mergeability, simulate rate limit or no credential), listed in `api/exclusions.yaml` as `scope: test`. `testdata/` gains a fixture repository with an `origin` remote URL on `github.com` and a local bare remote for fetches. Feature files: `tests/e2e/pull-request-read.e2e.ts` (including merge readiness), `pull-request-base.e2e.ts`, `pull-request-worktree.e2e.ts` (Hub fixtures, real Git, `refs/pull/<n>/head` created in the bare remote with `git update-ref`), `pull-request-review.e2e.ts`. A guard test asserts the e2e server never constructs the real `gh` transport.
 - **Manual acceptance** against a sandbox GitHub repository happens once, before merge, by the project owner. It covers the D7/D8 claim that exact-base hunks match GitHub's, the pending-review mutations, and readiness against github.com's merge box.
 

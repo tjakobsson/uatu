@@ -1,0 +1,240 @@
+{
+  "_comment": "HAND-WRITTEN, not recorded. Shaped after GitHub's GraphQL reference (PullRequest, PullRequestReviewThread, StatusCheckRollup, timeline items) and the REST 'List pull requests files' schema, as of 2026-11. Node ids are fictional. Recording real fixtures against a sandbox repository is task 8.2. Read by tests/fixtures/github-fake.ts.",
+  "host": "github.com",
+  "owner": "acme",
+  "name": "widgets",
+  "viewer": "octo-reviewer",
+  "repository": {
+    "mergeCommitAllowed": true,
+    "squashMergeAllowed": true,
+    "rebaseMergeAllowed": false,
+    "deleteBranchOnMerge": true,
+    "viewerPermission": "WRITE"
+  },
+  "pullRequests": [
+    {
+      "id": "PR_kwDOAcme42",
+      "number": 42,
+      "title": "Add login form <script>alert(1)</script>",
+      "url": "https://github.com/acme/widgets/pull/42",
+      "state": "OPEN",
+      "isDraft": false,
+      "createdAt": "2026-11-20T09:00:00Z",
+      "updatedAt": "2026-11-23T15:30:00Z",
+      "author": { "login": "octo-author" },
+      "baseRefName": "main",
+      "headRefName": "feature/login",
+      "baseRefOid": "1111111111111111111111111111111111111111",
+      "headRefOid": "4242424242424242424242424242424242424242",
+      "isCrossRepository": false,
+      "headRepositoryOwner": { "login": "acme" },
+      "reviewDecision": "REVIEW_REQUIRED",
+      "commits": { "totalCount": 3 },
+      "changedFiles": 5,
+      "additions": 40,
+      "deletions": 6,
+      "mergeable": "MERGEABLE",
+      "mergeStateStatus": "BLOCKED",
+      "reviewRequests": {
+        "nodes": [
+          { "requestedReviewer": { "__typename": "User", "login": "octo-reviewer" } },
+          { "requestedReviewer": { "__typename": "Team", "slug": "web", "organization": { "login": "acme" } } },
+          { "requestedReviewer": { "__typename": "FutureReviewer", "id": "X_1" } }
+        ]
+      },
+      "latestReviews": {
+        "nodes": [
+          { "author": { "login": "octo-colleague" }, "state": "COMMENTED" }
+        ]
+      },
+      "viewerPending": { "nodes": [] },
+      "lastCommit": {
+        "nodes": [
+          {
+            "commit": {
+              "statusCheckRollup": {
+                "state": "FAILURE",
+                "contexts": {
+                  "totalCount": 6,
+                  "nodes": [
+                    { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "isRequired": true },
+                    { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": true },
+                    { "__typename": "CheckRun", "name": "e2e", "status": "IN_PROGRESS", "conclusion": null, "isRequired": true },
+                    { "__typename": "CheckRun", "name": "flaky-optional", "status": "COMPLETED", "conclusion": "TIMED_OUT", "isRequired": false },
+                    { "__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS", "description": "Legacy CI passed", "isRequired": false },
+                    { "__typename": "FutureCheck", "name": "unknown kind" }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "body": "Adds the login form.\n\nSee [the design](docs/login.md) and ![diagram](images/flow.png).\n\n<img src=x onerror=alert(1)> [bad](javascript:alert(1))\n\n<script>alert(2)</script>",
+      "timelineItems": {
+        "totalCount": 6,
+        "nodes": [
+          { "__typename": "IssueComment", "id": "IC_1", "author": { "login": "octo-colleague" }, "body": "Looks good, one question inline.", "createdAt": "2026-11-21T10:00:00Z" },
+          { "__typename": "PullRequestReview", "id": "PRR_1", "author": { "login": "octo-colleague" }, "state": "COMMENTED", "body": "", "submittedAt": "2026-11-21T10:05:00Z", "createdAt": "2026-11-21T10:01:00Z" },
+          { "__typename": "PullRequestReview", "id": "PRR_2", "author": { "login": "octo-bot" }, "state": "DISMISSED", "body": "Automated nit.", "submittedAt": "2026-11-21T11:00:00Z", "createdAt": "2026-11-21T11:00:00Z" },
+          { "__typename": "FutureTimelineEvent", "id": "FTE_1" },
+          { "__typename": "IssueComment", "id": "IC_2", "author": null, "body": "Comment from a deleted account.", "createdAt": "2026-11-22T08:00:00Z" }
+        ]
+      },
+      "reviewThreads": {
+        "totalCount": 4,
+        "nodes": [
+          {
+            "id": "PRRT_line",
+            "path": "src/login.ts",
+            "line": 12,
+            "startLine": null,
+            "originalLine": 12,
+            "diffSide": "RIGHT",
+            "isResolved": false,
+            "isOutdated": false,
+            "subjectType": "LINE",
+            "comments": {
+              "totalCount": 1,
+              "nodes": [
+                { "id": "PRRC_1", "author": { "login": "octo-colleague" }, "body": "Why not reuse `validate()`?", "createdAt": "2026-11-21T10:01:00Z", "diffHunk": "@@ -10,3 +10,4 @@ export function login() {\n   const user = read();\n+  if (!user.name) return;", "state": "SUBMITTED", "pullRequestReview": { "id": "PRR_1" } }
+              ]
+            }
+          },
+          {
+            "id": "PRRT_outdated",
+            "path": "src/login.ts",
+            "line": null,
+            "startLine": null,
+            "originalLine": 4,
+            "diffSide": "RIGHT",
+            "isResolved": false,
+            "isOutdated": true,
+            "subjectType": "LINE",
+            "comments": {
+              "totalCount": 1,
+              "nodes": [
+                { "id": "PRRC_2", "author": { "login": "octo-colleague" }, "body": "Typo here.", "createdAt": "2026-11-20T12:00:00Z", "diffHunk": "@@ -1,3 +1,4 @@\n+import { read } from './store';", "state": "SUBMITTED", "pullRequestReview": { "id": "PRR_0" } }
+              ]
+            }
+          },
+          {
+            "id": "PRRT_file",
+            "path": "docs/login.md",
+            "line": null,
+            "startLine": null,
+            "originalLine": null,
+            "diffSide": "RIGHT",
+            "isResolved": false,
+            "isOutdated": false,
+            "subjectType": "FILE",
+            "comments": {
+              "totalCount": 1,
+              "nodes": [
+                { "id": "PRRC_3", "author": { "login": "octo-colleague" }, "body": "Should this doc live in the wiki?", "createdAt": "2026-11-21T10:02:00Z", "diffHunk": "", "state": "SUBMITTED", "pullRequestReview": { "id": "PRR_1" } }
+              ]
+            }
+          },
+          {
+            "id": "PRRT_left",
+            "path": "src/session.ts",
+            "line": 3,
+            "startLine": null,
+            "originalLine": 3,
+            "diffSide": "LEFT",
+            "isResolved": true,
+            "isOutdated": false,
+            "subjectType": "LINE",
+            "comments": {
+              "totalCount": 1,
+              "nodes": [
+                { "id": "PRRC_4", "author": { "login": "octo-colleague" }, "body": "Glad this is gone.", "createdAt": "2026-11-21T10:03:00Z", "diffHunk": "@@ -1,4 +1,3 @@\n const a = 1;\n const b = 2;\n-const legacy = true;", "state": "SUBMITTED", "pullRequestReview": { "id": "PRR_1" } }
+              ]
+            }
+          }
+        ]
+      },
+      "files": [
+        { "sha": "aaa1", "filename": "src/login.ts", "status": "modified", "additions": 20, "deletions": 2, "changes": 22, "patch": "@@ -10,3 +10,4 @@ export function login() {\n   const user = read();\n+  if (!user.name) return;\n   return user;\n }" },
+        { "sha": "aaa2", "filename": "docs/login.md", "status": "added", "additions": 10, "deletions": 0, "changes": 10, "patch": "@@ -0,0 +1,2 @@\n+# Login\n+How to sign in." },
+        { "sha": "aaa3", "filename": "src/session.ts", "status": "modified", "additions": 0, "deletions": 1, "changes": 1, "patch": "@@ -1,4 +1,3 @@\n const a = 1;\n const b = 2;\n-const legacy = true;\n export { a, b };" },
+        { "sha": "aaa4", "filename": "src/auth/form.ts", "previous_filename": "src/form.ts", "status": "renamed", "additions": 10, "deletions": 3, "changes": 13, "patch": "@@ -1,3 +1,3 @@\n-export const form = 1;\n+export const form = 2;\n export {};" },
+        { "sha": "aaa5", "filename": "images/flow.png", "status": "added", "additions": 0, "deletions": 0, "changes": 0 }
+      ]
+    },
+    {
+      "id": "PR_kwDOAcme41",
+      "number": 41,
+      "title": "Earlier login attempt",
+      "url": "https://github.com/acme/widgets/pull/41",
+      "state": "CLOSED",
+      "isDraft": false,
+      "createdAt": "2026-11-10T09:00:00Z",
+      "updatedAt": "2026-11-12T09:00:00Z",
+      "author": { "login": "octo-author" },
+      "baseRefName": "main",
+      "headRefName": "feature/login",
+      "baseRefOid": "1111111111111111111111111111111111111111",
+      "headRefOid": "4141414141414141414141414141414141414141",
+      "isCrossRepository": false,
+      "headRepositoryOwner": { "login": "acme" },
+      "reviewDecision": null,
+      "commits": { "totalCount": 1 },
+      "changedFiles": 1,
+      "additions": 1,
+      "deletions": 0,
+      "mergeable": "UNKNOWN",
+      "mergeStateStatus": "UNKNOWN",
+      "reviewRequests": { "nodes": [] },
+      "latestReviews": { "nodes": [] },
+      "viewerPending": { "nodes": [] },
+      "lastCommit": { "nodes": [{ "commit": { "statusCheckRollup": null } }] },
+      "body": "",
+      "timelineItems": { "totalCount": 0, "nodes": [] },
+      "reviewThreads": { "totalCount": 0, "nodes": [] },
+      "files": [
+        { "sha": "bbb1", "filename": "README.md", "status": "modified", "additions": 1, "deletions": 0, "changes": 1, "patch": "@@ -1 +1,2 @@\n # Widgets\n+Login soon." }
+      ]
+    },
+    {
+      "id": "PR_kwDOAcme57",
+      "number": 57,
+      "title": "Fix typo from a fork",
+      "url": "https://github.com/acme/widgets/pull/57",
+      "state": "MERGED",
+      "isDraft": false,
+      "createdAt": "2026-11-01T09:00:00Z",
+      "updatedAt": "2026-11-02T09:00:00Z",
+      "author": { "login": "octo-contributor" },
+      "baseRefName": "main",
+      "headRefName": "patch-1",
+      "baseRefOid": "1111111111111111111111111111111111111111",
+      "headRefOid": "5757575757575757575757575757575757575757",
+      "isCrossRepository": true,
+      "headRepositoryOwner": { "login": "octo-contributor" },
+      "reviewDecision": "APPROVED",
+      "commits": { "totalCount": 1 },
+      "changedFiles": 1,
+      "additions": 1,
+      "deletions": 1,
+      "mergeable": "UNKNOWN",
+      "mergeStateStatus": "UNKNOWN",
+      "reviewRequests": { "nodes": [] },
+      "latestReviews": { "nodes": [{ "author": { "login": "octo-reviewer" }, "state": "APPROVED" }] },
+      "viewerPending": { "nodes": [] },
+      "lastCommit": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "SUCCESS", "contexts": { "totalCount": 1, "nodes": [{ "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "isRequired": true }] } } } }] },
+      "body": "Typo.",
+      "timelineItems": {
+        "totalCount": 2,
+        "nodes": [
+          { "__typename": "MergedEvent", "actor": { "login": "octo-reviewer" }, "createdAt": "2026-11-02T09:00:00Z" },
+          { "__typename": "HeadRefDeletedEvent", "createdAt": "2026-11-02T09:00:05Z" }
+        ]
+      },
+      "reviewThreads": { "totalCount": 0, "nodes": [] },
+      "files": [
+        { "sha": "ccc1", "filename": "README.md", "status": "modified", "additions": 1, "deletions": 1, "changes": 2, "patch": "@@ -1 +1 @@\n-# Widgts\n+# Widgets" }
+      ]
+    }
+  ]
+}

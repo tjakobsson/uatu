@@ -51,12 +51,15 @@ const HOUR_MS = 3_600_000;
 // How long the fake pretends the rate limit lasts.
 const RATE_LIMIT_RESET_MS = 14 * 60_000;
 
+// The fake always has both sides of a file.
+type FakeFile = PullRequestFile & { oldContents: string; newContents: string };
+
 type PullRequestRecord = {
   seed: SeedPullRequest;
   state: PullRequestState;
   updatedAt: number;
   createdAt: number;
-  files: PullRequestFile[];
+  files: FakeFile[];
   checks: SeedCheck[];
   reviewerStates: Map<string, ReviewerState>;
   timeline: TimelineItem[];
@@ -318,7 +321,7 @@ export class FakeGithubService implements GithubService {
 
   private recordFrom(seed: SeedPullRequest): PullRequestRecord {
     const createdAt = this.seededAt - seed.createdHoursAgo * HOUR_MS;
-    const files: PullRequestFile[] = seed.files.map(file => {
+    const files: FakeFile[] = seed.files.map(file => {
       const counts = countLineChanges(file.old, file.new);
       return {
         path: file.path,

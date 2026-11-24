@@ -153,6 +153,19 @@ src/
 │                   login attempts, loopback-redirect delivery, and the
 │                   notice that tells running workspaces; the pane is
 │                   `agent-accounts-pane.ts`), pages, server, main
+├── github/         GitHub pull request review — service (the GithubService
+│                   seam and the UATU_GITHUB off|read|full choice) + gh-service
+│                   (the real one: detection, event-driven refresh, writes
+│                   with re-checks) over gh (the `gh api` transport: argv,
+│                   stdin bodies, --include) + api + classify (statuses from
+│                   status/headers/GraphQL errors) + remote (base repository,
+│                   branch facts) + ops/ (one pinned query and soft parser per
+│                   call, readiness) + markdown; fake + fake-data (the
+│                   in-memory demo backend, UATU_GITHUB_FAKE=1); http (the
+│                   /api/github/* handlers); the browser half: client,
+│                   pull-request-store, availability, readiness, present,
+│                   connect. tests/fixtures/github-fake.ts is the
+│                   transport-level fake over hand-written fixtures
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA assets, shared browser notification enrollment UI,

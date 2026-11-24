@@ -159,6 +159,15 @@ describe("PullRequestStore pending reviews elsewhere", () => {
     store.applySummary(summary("ready", { number: 642, viewerPendingComments: 0 }));
     expect(store.pendingElsewhere([])).toEqual([]);
   });
+
+  test("a repository that isn't on GitHub turns the pull request surfaces off", () => {
+    const store = new PullRequestStore();
+    const base = { mock: false, repository: null, viewer: null, checkedAt: 0, stale: false } as const;
+    store.applySummary({ ...base, status: "not-github" });
+    expect(store.state.enabled).toBe(false);
+    store.applySummary({ ...base, status: "no-pull-request" });
+    expect(store.state.enabled).toBe(true);
+  });
 });
 
 describe("PullRequestStore retry", () => {

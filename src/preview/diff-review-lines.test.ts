@@ -41,6 +41,15 @@ describe("naming a commented line away from the diff", () => {
     expect(lineExcerpt(files, { path: "links.ts", line: 40, side: "RIGHT" })).toBe("");
     expect(lineExcerpt(files, { path: "gone.ts", line: 1, side: "RIGHT" })).toBe("");
   });
+  test("from GitHub's patch when the file's sides aren't sent", () => {
+    const patch = "diff --git a/p.ts b/p.ts\n--- a/p.ts\n+++ b/p.ts\n@@ -10,3 +10,4 @@ fn\n keep\n-gone\n+added one\n+added two\n same\n";
+    const patched = [{ path: "p.ts", patch }];
+    expect(lineExcerpt(patched, { path: "p.ts", line: 11, side: "LEFT" })).toBe("gone");
+    expect(lineExcerpt(patched, { path: "p.ts", line: 12, side: "RIGHT" })).toBe("added two");
+    expect(lineExcerpt(patched, { path: "p.ts", line: 13, side: "RIGHT" })).toBe("same");
+    expect(lineExcerpt(patched, { path: "p.ts", line: 12, side: "LEFT" })).toBe("same");
+    expect(lineExcerpt(patched, { path: "p.ts", line: 2, side: "RIGHT" })).toBe("");
+  });
 });
 
 describe("inline composers on either side of a line", () => {

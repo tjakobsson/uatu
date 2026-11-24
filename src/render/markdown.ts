@@ -12,7 +12,7 @@ import {
   parseSimpleToml,
   parseSimpleYaml,
 } from "../document/metadata";
-import { markExternalAnchors } from "./external-links";
+import { markExternalAnchors, resolveRelativeUrls } from "./external-links";
 
 const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?)<\/code><\/pre>/g;
 
@@ -65,7 +65,10 @@ export type RenderedMarkdown = {
   metadata: DocumentMetadata | undefined;
 };
 
-export function renderMarkdownToHtml(source: string): RenderedMarkdown {
+// `baseUrl` resolves relative link and image URLs against an absolute URL
+// (GitHub bodies resolve against their pull request's URL, design D13);
+// without it, relative URLs stay for the preview's own link handling.
+export function renderMarkdownToHtml(source: string, options: { baseUrl?: string } = {}): RenderedMarkdown {
   const metadata = extractMarkdownMetadata(source);
 
   // micromark-extension-frontmatter consumes the leading frontmatter block from
@@ -82,6 +85,7 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
 
   const tree = fromHtml(rawHtml, { fragment: true });
   const safe = sanitize(tree, markdownSanitizeSchema);
+  if (options.baseUrl) resolveRelativeUrls(safe, options.baseUrl);
   markExternalAnchors(safe);
   return { html: highlightCodeBlocks(toHtml(safe)), metadata };
 }

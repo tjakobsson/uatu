@@ -107,9 +107,10 @@ type BaseDeps = {
   // (dashboard, login, sibling sessions) as in-app, so an installed webapp
   // never shows iOS's out-of-scope browser chrome navigating between them.
   manifestScope?: "base-path" | "origin";
-  // GitHub pull request service behind /api/github/*. Absent (the default)
-  // means every such route answers 404. Today only the opt-in in-memory fake
-  // implements it (src/github/service.ts).
+  // GitHub pull request service behind /api/github/*. Absent means every
+  // such route answers 404. cli.ts passes the real `gh api` service (or the
+  // fake with UATU_GITHUB_FAKE=1); the e2e server passes the in-memory fake
+  // only when a test's reset asks for it (src/github/service.ts).
   github?: GithubService | null;
   // Optional metrics registry, shared with the watch session so document and
   // Chat stream lifecycles land in one snapshot.

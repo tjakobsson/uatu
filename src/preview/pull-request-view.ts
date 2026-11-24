@@ -871,7 +871,7 @@ function timelineItemHtml(item: TimelineItem, detail: PullRequestDetail): string
   }
   if (item.kind === "merged") {
     return `<div class="pr-event pr-event-line"><span class="gh-state gh-state-merged">Merged</span>
-      <span><strong>${escapeHtml(item.actor)}</strong> merged this pull request (${escapeHtml(item.method.toLowerCase())}) · ${escapeHtml(age(item.at))}${item.deletedBranch ? ` · <code>${escapeHtml(detail.summary.headRefName)}</code> deleted on GitHub` : ""}</span></div>`;
+      <span><strong>${escapeHtml(item.actor)}</strong> merged this pull request${item.method ? ` (${escapeHtml(item.method.toLowerCase())})` : ""} · ${escapeHtml(age(item.at))}${item.deletedBranch ? ` · <code>${escapeHtml(detail.summary.headRefName)}</code> deleted on GitHub` : ""}</span></div>`;
   }
   const badge = item.state === "APPROVED" ? `<span class="gh-pill gh-pill-success">✓ Approved</span>`
     : item.state === "CHANGES_REQUESTED" ? `<span class="gh-pill gh-pill-danger">Changes requested</span>`
@@ -889,7 +889,7 @@ function threadSummaryHtml(thread: ReviewThread): string {
   return `<div class="pr-thread-summary">
       <div class="pr-thread-summary-head">
         <code class="gh-ref">${escapeHtml(thread.path)}</code>
-        <span class="pr-muted">${placed ? `line ${thread.line}` : "outdated"}</span>
+        <span class="pr-muted">${placed ? `line ${thread.line}` : thread.subjectType === "FILE" ? "file" : "outdated"}</span>
         <span class="pr-thread-summary-aside">
           ${thread.isResolved ? `<span class="gh-pill">Resolved</span>` : `<span class="gh-pill gh-pill-attention">Unresolved</span>`}
           ${replies > 0 ? `<span class="pr-muted">${replies} ${replies === 1 ? "reply" : "replies"}</span>` : ""}

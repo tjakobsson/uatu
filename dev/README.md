@@ -38,8 +38,23 @@ pane's "Mock scenario" control switches between
 for its head to be fetched before its files show; Fetch succeeds at once),
 `no-pull-request`, `no-credential`, `rate-limited` and
 `unavailable`, and resets the data after asking. `UATU_GITHUB_FAKE_SCENARIO=<name>` picks
-the starting scenario. Without the flag, every `/api/github/*` route answers
-404.
+the starting scenario.
+
+Without the flag, sessions use the real GitHub backend: the session's own
+`gh` (`gh api` only), with the credential the Hub assigned to the workspace
+(Settings → Credentials, a token with GitHub CLI access). The dev hub assigns
+none, so a GitHub repository shows the "GitHub isn't connected" guidance and
+no request leaves the machine. One setting controls the backend, inherited by
+the sessions like the flag above:
+
+| Variable | Values | Effect |
+|---|---|---|
+| `UATU_GITHUB` | `full` (default), `read`, `off` | `full` reads pull requests and sends comments and reviews; `read` reads only (every write is refused and sending says why); `off` turns pull requests off (every `/api/github/*` route answers 404). Any other value means `off`. `off` also wins over `UATU_GITHUB_FAKE`. |
+| `UATU_GITHUB_FAKE` | `1` | The in-memory fake instead of GitHub. |
+| `UATU_GITHUB_FAKE_SCENARIO` | a scenario name | The fake's starting scenario. |
+
+For example, `UATU_GITHUB=read bun run dev` starts a dev hub whose sessions
+read GitHub but never post.
 
 Ctrl+C stops the hub, and the hub stops its session children. Add more
 folders from the dashboard. To start over, stop the hub and delete

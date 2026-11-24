@@ -334,26 +334,37 @@ const REVIEW_CSS = `
   border-radius: 3px;
 }`;
 
-// One pull request file, both sides supplied by the caller. Always Pierre
-// (the review UI needs annotations), highlighted unless it is large.
+// One pull request file: both sides (expandable context), or GitHub's
+// patch alone (the hunks GitHub shows). Always Pierre (the review UI needs
+// annotations), highlighted unless it is large. With neither, GitHub sent no
+// diff (a binary or very large file) and a note says so.
 export async function renderReviewDiff<T>(
   host: HTMLElement,
-  file: { path: string; oldContents: string; newContents: string; languageHint: string | null },
+  file: { path: string; oldContents?: string; newContents?: string; patch?: string; languageHint: string | null },
   options: { diffStyle: DiffStyle; wrap: boolean; review: DiffReviewOptions<T> },
 ): Promise<DiffReviewHandle<T> | null> {
   clearHost(host);
   const encoder = new TextEncoder();
-  const bytes = encoder.encode(file.oldContents).length + encoder.encode(file.newContents).length;
+  const both = file.oldContents !== undefined && file.newContents !== undefined;
+  if (!both && !file.patch) {
+    const note = document.createElement("p");
+    note.className = "uatu-diff-note pr-muted";
+    note.textContent = "GitHub sends no diff for this file (binary or too large); see it on GitHub.";
+    host.appendChild(note);
+    return null;
+  }
+  const bytes = both
+    ? encoder.encode(file.oldContents!).length + encoder.encode(file.newContents!).length
+    : encoder.encode(file.patch!).length;
   const plainText = bytes >= DIFF_MAX_HIGHLIGHT_BYTES;
   const payload: Extract<DocumentDiffPayload, { kind: "text" }> = {
     kind: "text",
     baseRef: "",
-    patch: `--- a/${file.path}\n+++ b/${file.path}\n`,
+    patch: both ? `--- a/${file.path}\n+++ b/${file.path}\n` : file.patch!,
     bytes,
     addedLines: 0,
     deletedLines: 0,
-    oldContents: file.oldContents,
-    newContents: file.newContents,
+    ...(both ? { oldContents: file.oldContents!, newContents: file.newContents! } : {}),
   };
   const body = document.createElement("div");
   body.className = "uatu-diff-body";
