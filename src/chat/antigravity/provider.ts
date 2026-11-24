@@ -116,6 +116,8 @@ export class AntigravityProvider implements ChatProvider {
   private readonly interactions = new PendingInteractions<PermissionDetail>((conversationId, event) => this.publish({ ...event, conversationId }));
   private readonly conversations = new Map<string, Conversation>();
   private readonly sessions = new Map<string, ProviderSession>();
+  // Sessions created here that agy has not listed yet.
+  private readonly created = new Set<string>();
   private readonly released = new WeakSet<AcpProcess>();
   private readonly processes = new Set<AcpProcess>();
   private catalog: AcpCatalog | undefined;
@@ -188,8 +190,11 @@ export class AntigravityProvider implements ChatProvider {
       this.sessions.set(session.id, known ? { ...session, createdAt: Math.min(known.createdAt, session.createdAt) } : session);
     }
     const ids = new Set(listed.map(session => session.id));
-    // Sessions this provider created that agy does not list yet.
-    return [...[...this.sessions.values()].filter(session => !ids.has(session.id) && this.conversations.has(session.id)), ...listed];
+    for (const id of ids) this.created.delete(id);
+    // A fresh listing is the inventory: what it no longer holds is gone,
+    // except sessions created here that agy does not list yet.
+    for (const id of [...this.sessions.keys()]) if (!ids.has(id) && !this.created.has(id)) this.sessions.delete(id);
+    return [...[...this.created].flatMap(id => this.sessions.get(id) ?? []), ...listed];
   }
 
   async getSession(id: string): Promise<ProviderSession | null> {
@@ -211,6 +216,7 @@ export class AntigravityProvider implements ChatProvider {
     const created = this.now();
     const session: ProviderSession = { id: answer.sessionId, title: DEFAULT_TITLE, directory: this.workspacePath, createdAt: created, updatedAt: created };
     this.sessions.set(session.id, session);
+    this.created.add(session.id);
     const conversation = this.conversation(session.id);
     conversation.seeded = true;
     conversation.process = process;
@@ -574,7 +580,9 @@ export class AntigravityProvider implements ChatProvider {
     conversation.starting ??= (async () => {
       // agy answers a load of an unknown id and fails the next prompt, so the
       // id must be one agy lists (design D10).
-      if (!this.sessions.has(conversation.sessionId) && !(await this.listSessions()).some(session => session.id === conversation.sessionId)) {
+      // Checked against a fresh listing, not the cache: a cached id agy has
+      // since dropped would load "successfully" and break the next prompt.
+      if (!(await this.listSessions()).some(session => session.id === conversation.sessionId)) {
         throw new ConversationNotFoundError();
       }
       const process = await this.startProcess();

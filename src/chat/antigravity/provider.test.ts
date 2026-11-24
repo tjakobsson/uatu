@@ -67,8 +67,11 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       // The next prompt resumes it in a new process that loads the session.
       await run(session.id, "Again");
       const methods = (await fake.log()).map(entry => entry.method);
-      expect(methods.filter(method => method === "initialize")).toHaveLength(2);
-      expect(methods.indexOf("session/load")).toBeGreaterThan(methods.indexOf("session/new"));
+      // One process for the new conversation, then a listing that vouches
+      // for the id, then the conversation's new process.
+      expect(methods.filter(method => method === "initialize")).toHaveLength(3);
+      expect(methods.indexOf("session/list")).toBeGreaterThan(methods.indexOf("session/new"));
+      expect(methods.indexOf("session/load")).toBeGreaterThan(methods.indexOf("session/list"));
     });
 
     test("idle release waits for a prompt that is still being prepared", async () => {
@@ -153,6 +156,21 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await prompts()).toEqual([]);
       // The listing that decided it leaves nothing running.
       expect(await fake.running()).toBe(0);
+    });
+
+    test("an id agy no longer lists is refused, not loaded from a stale cache, and leaves the listing", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      await run(session.id, "Say hello");
+      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reader.dispose());
+      expect((await reader.listSessions()).map(listed => listed.id)).toEqual([session.id]);
+      // agy drops the session (deleted elsewhere).
+      await writeFile(path.join(fake.stateDirectory, "sessions.json"), "[]");
+      await expect(reader.listMessages(session.id, { limit: 50 })).rejects.toBeInstanceOf(ConversationNotFoundError);
+      expect((await fake.log()).filter(entry => entry.method === "session/load")).toEqual([]);
+      expect(await reader.listSessions()).toEqual([]);
+      expect(await reader.getSession(session.id)).toBeNull();
     });
 
     test("a load that fails after part of its replay leaves no partial history behind", async () => {
