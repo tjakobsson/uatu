@@ -238,11 +238,13 @@ agent in commit 2, before the Antigravity provider exists):
 - The provider publishes the accepted steer as a `user_message` at the point
   it was accepted. Replayed history deduplicates it by turn and message
   position, so it appears once (D4).
-- The earlier prompt's end is published with the seam's "repeat status, not a
-  turn boundary" fact, so the adapter keeps the conversation running, sends no
-  completion notification and does not drain the held queue. The provider
-  keeps a single turn token across the steer, so liveness for image capture
-  follows the whole turn.
+- The provider publishes no status, and no completion signal, for the earlier
+  prompt's end, so the adapter keeps the conversation running, sends no
+  completion notification and does not drain the held queue. The seam's
+  repeat fact is not used here: a completed status that carries it still
+  drives settlement and held-message delivery. The provider keeps a single
+  turn token across the steer, so liveness for image capture follows the
+  whole turn.
 - Send now keeps the existing rule for agents without `steering`: it is
   offered only while the held queue is dormant or the conversation is idle.
   Switching a held message to a steer mid-turn is left for later.

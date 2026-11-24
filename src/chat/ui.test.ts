@@ -3886,6 +3886,45 @@ describe("chat reversible-history composer", () => {
       Reflect.set(globalThis, "ResizeObserver", previousObserver);
     }
   });
+  for (const status of ["running", "idle"] as const) test(`immediate steering steers busy text with no Steer entry and keeps the no-steering Send now rule (${status})`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const deliveries: unknown[] = [];
+    const current = { ...conversation("one"), status };
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["immediate-steering", "send-now"] } } }],
+      conversations: async () => [current], commands: async () => [], models: async () => [], modes: async () => [],
+      snapshot: async () => ({ ...snapshot("one"), conversation: current, queued: [{ id: "held", text: "Held message", queuedAt: 1, delivery: "queue" }] }),
+      prompt: async (...args: unknown[]) => { deliveries.push(args[7]); return { messageId: "steered", pending: false, delivery: "steer", configuration: {} }; },
+      stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?immediate-steering=${status}-${Date.now()}`);
+    initChat(api);
+    try {
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      await waitUntil(() => select.querySelector('option[value="one"]') !== null);
+      select.value = "one";
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+      await waitUntil(() => document.querySelector('[data-chat-queued-id="held"]') !== null);
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      type(input, "Steer into the turn");
+      const send = document.querySelector<HTMLButtonElement>("#chat-send")!;
+      expect(send.getAttribute("aria-label")).toBe(status === "running" ? "Send as steer; hold 2.5 seconds to queue" : "Send message");
+      expect(document.querySelector(".chat-send-group")!.hasAttribute("data-steering")).toBe(true);
+      // The dock never offers a switch to steer; Send now only while idle.
+      expect(document.querySelector('[data-queue-steer="held"]')).toBeNull();
+      expect(!!document.querySelector('[data-queue-send-now="held"]')).toBe(status === "idle");
+      if (status === "running") {
+        document.querySelector<HTMLFormElement>("#chat-composer")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+        await waitUntil(() => !!document.querySelector('[data-chat-item-id="message:steered"]'));
+        expect(deliveries).toEqual(["steer"]);
+        expect([...document.querySelectorAll("[data-chat-queued-id]")].map(node => node.getAttribute("data-chat-queued-id"))).toEqual(["held"]);
+      }
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
   for (const status of ["running", "idle"] as const) test(`held command paths retain ${status} steering controls while actual commands do not`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

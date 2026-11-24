@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Composer, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
+import { Composer, steersWhileBusy, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
 import { ChatTransportError } from "./client";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay } from "./replay";
@@ -41,7 +41,7 @@ function fixture(overrides: Partial<ComposerTransport> = {}) {
   };
   const context: ComposerConversation = {
     selected: () => selected, read: () => projection, write: value => { projection = value; }, epoch: () => epoch,
-    cancelling: () => cancelling, declares: capability => capability !== "steering" || (steering.get(selected) ?? true), commands: () => [], commandsAvailable: () => true,
+    cancelling: () => cancelling, declares: capability => capability !== "immediate-steering" && (capability !== "steering" || (steering.get(selected) ?? true)), commands: () => [], commandsAvailable: () => true,
     reloadCommands: async () => true, agentId: () => "agent", refreshCommands: () => {},
     configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
     imageSupport: () => ({ supported: true }), refresh: (id, pending) => refresh(id, pending),
@@ -688,4 +688,52 @@ test("dispose invalidates uploading intake without manufacturing previews or sen
   const attaching = f.composer.attach([image()]); f.composer.edit("Original"); const sent = f.composer.submit();
   f.composer.dispose(); upload.resolve({ id: "late", mimeType: "image/png", sizeBytes: 5 }); await Promise.all([attaching, sent]);
   expect(f.created).toEqual([]); expect(f.prompts).toEqual([]);
+});
+
+// add-antigravity-chat D9: an agent declaring `immediate-steering` (and not
+// `steering`) gets the same busy deliveries; only the outcome handling of a
+// lost response differs, because an immediate steer is one only while the
+// turn runs.
+function immediateFixture(overrides: Partial<ComposerTransport> = {}) {
+  const f = fixture(overrides);
+  f.context.declares = capability => capability !== "steering";
+  return f;
+}
+
+test("immediate steering: busy ordinary text steers, Alt+Enter and attachments queue", async () => {
+  const f = immediateFixture();
+  expect(steersWhileBusy(f.context.declares)).toBe(true);
+  f.composer.edit("Steer this"); await f.composer.submit();
+  f.composer.edit("Hold this"); await f.composer.submit({ delivery: "queue" });
+  f.composer.edit("With an image"); await f.composer.attach([image()]); await f.composer.submit();
+  expect(f.prompts.map(args => [args[2], args[7]])).toEqual([["Steer this", "steer"], ["Hold this", "queue"], ["With an image", "queue"]]);
+});
+
+test("immediate steering: an accepted steer settles its draft into one timeline row, not a dock entry", async () => {
+  const f = immediateFixture({ prompt: async (...args) => acceptance({ messageId: "steered", delivery: "steer", pending: false }) });
+  let consumed = 0; f.context.consumeConfiguration = () => { consumed++; };
+  f.composer.edit("Steer once"); await f.composer.submit();
+  expect(f.projection().queued).toEqual([]);
+  expect(f.projection().items).toEqual([expect.objectContaining({ id: "message:steered", type: "user_message", text: "Steer once" })]);
+  expect(consumed).toBe(0);
+});
+
+test("immediate steering: a refused steer restores its text", async () => {
+  const f = immediateFixture({ prompt: async () => { throw new ChatTransportError("agy refused it", 409); } });
+  f.composer.edit("Refused steer"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("Refused steer");
+  expect(f.projection().items).toEqual([]);
+  expect(f.projection().acceptedDrafts).toEqual([]);
+});
+
+test("immediate steering: a lost response is unconfirmed while running and restored while idle", async () => {
+  const running = immediateFixture({ prompt: async () => { throw new ChatTransportError("Unknown", 502); } });
+  running.composer.edit("Maybe delivered"); await running.composer.submit();
+  expect(running.texts.get("one")).toBe("");
+  expect(running.projection().acceptedDrafts[0]).toEqual(expect.objectContaining({ text: "Maybe delivered", unconfirmed: true }));
+  const idle = immediateFixture({ prompt: async () => { throw new ChatTransportError("Unavailable", 502); } });
+  idle.setProjection({ status: "idle" });
+  idle.composer.edit("Not a steer"); await idle.composer.submit();
+  expect(idle.texts.get("one")).toBe("Not a steer");
+  expect(idle.projection().acceptedDrafts).toEqual([]);
 });

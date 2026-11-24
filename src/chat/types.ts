@@ -75,6 +75,12 @@ export type ChatCapability =
   // their switch actions, and an undo replacement goes out as a steer.
   // Declared by OpenCode 2.x only (opencode-v2-steering, design D2).
   | "steering"
+  // The agent takes a message into its running turn as soon as it is sent,
+  // and cannot withdraw it afterwards: the composer steers busy ordinary text
+  // and queues on Alt/Option+Enter or the Send hold, as with `steering`, but
+  // the steer goes to the agent at once, so the dock never shows a Steer
+  // entry. Never declared together with `steering` (add-antigravity-chat D9).
+  | "immediate-steering"
   // The agent can deliver a held message ahead of the rest of the queue:
   // the dock offers Send now. On a `steering` agent that is the switch to
   // steer; without it, only while the queue is dormant or the conversation

@@ -16455,3 +16455,120 @@ describe("steering (opencode-v2-steering)", () => {
     await plain.adapter.dispose();
   });
 });
+
+describe("immediate steering (add-antigravity-chat D9)", () => {
+  // A fake shaped like Antigravity: it takes a second prompt into the running
+  // turn at once, keeps no inbox, and reports the turn's end once, after the
+  // steered part. It declares `immediate-steering` and `send-now`, never
+  // `steering`.
+  function immediate(options: { steerAdmissionTimeoutMs?: number } = {}) {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now"] };
+    provider.sessions = [fixtureSession("session")];
+    let n = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++n}`, coalesceWindowMs: 1, steerAdmissionTimeoutMs: options.steerAdmissionTimeoutMs });
+    const steer = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "steer");
+    const queue = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "queue");
+    const status = (value: "running" | "completed" | "interrupted") => provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "status", status: value }], outcome: "handled", eventType: `status.${value}` } });
+    // The live timeline: history() rereads the fake's (empty) stored pages.
+    const userRows = async () => adapter.projectionForTests("session").items().filter(item => item.type === "user_message");
+    return { provider, adapter, steer, queue, status, userRows };
+  }
+
+  test("a busy steer goes to the provider at once, with no dock entry and no configuration", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const steered = await steer("r-s", "and also this");
+      expect(steered).toEqual(expect.objectContaining({ pending: false, delivery: "steer", messageId: "id-1" }));
+      expect(provider.prompts).toEqual([expect.objectContaining({ id: "id-1", text: "and also this", delivery: "steer" })]);
+      expect(provider.prompts[0]!.model).toBeUndefined();
+      expect(provider.prompts[0]!.mode).toBeUndefined();
+      const history = await adapter.history("session");
+      expect(history.queued ?? []).toEqual([]);
+      expect(history.conversation.status).toBe("running");
+      expect((await userRows()).map(item => item.id)).toEqual(["message:id-1"]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("the provider's own row for an accepted steer does not duplicate it", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const steered = await steer("r-s", "steer once");
+      provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "upsert", item: { id: `message:${steered.messageId}`, type: "user_message", createdAt: 5, text: "steer once" } }], outcome: "handled", eventType: "user_message_chunk" } });
+      await liveEventsApplied(adapter, provider);
+      expect((await userRows()).map(item => [item.id, item.type === "user_message" && item.text])).toEqual([[`message:${steered.messageId}`, "steer once"]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("held messages wait for the carried turn's end, not for the steer", async () => {
+    const { adapter, provider, steer, queue, status } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-q", "after the turn");
+      expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      await steer("r-s", "into the turn");
+      expect(provider.prompts.map(prompt => [prompt.text, prompt.delivery])).toEqual([["into the turn", "steer"]]);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.delivery])).toEqual([["after the turn", "queue"]]);
+      status("completed");
+      await waitUntil(() => provider.prompts.length === 2);
+      expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "after the turn", delivery: "queue" }));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a refused steer publishes nothing and leaves the turn running", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      provider.prompt = async () => { throw new Error("agy refused the prompt"); };
+      await expect(steer("r-s", "refused")).rejects.toThrow("agy refused the prompt");
+      expect(await userRows()).toEqual([]);
+      expect((await adapter.history("session")).conversation.status).toBe("running");
+      expect((await adapter.history("session")).queued ?? []).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("an unknown admission is retained by its receipt and never resent", async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let calls = 0;
+      provider.prompt = () => { calls++; return new Promise(() => undefined); };
+      await expect(steer("r-s", "maybe delivered")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      await expect(steer("r-s", "maybe delivered")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      expect(calls).toBe(1);
+      expect(await userRows()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("commands queue, an idle backlog holds, and an idle conversation dispatches whatever the delivery", async () => {
+    const { adapter, provider, steer } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      expect(await steer("r-c", "/review focus")).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(provider.prompts).toEqual([]);
+      await adapter.abort("session", "stop");
+      // Dormant after Stop: a steer joins the back of the held queue rather
+      // than overtaking it, because there is no running turn to join.
+      expect(await steer("r-d", "after stop")).toEqual(expect.objectContaining({ delivery: "queue" }));
+      expect(provider.prompts.every(prompt => prompt.delivery === "queue")).toBe(true);
+      const idle = immediate();
+      try {
+        expect(await idle.steer("r-i", "go")).toEqual(expect.objectContaining({ pending: false, delivery: "queue" }));
+        expect(idle.provider.prompts).toEqual([expect.objectContaining({ text: "go", delivery: "queue" })]);
+      } finally { await idle.adapter.dispose(); }
+    } finally { await adapter.dispose(); }
+  });
+
+  test("Send now keeps the rule for agents without steering", async () => {
+    const { adapter, queue } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-q", "held");
+      await expect(adapter.sendNow("session", held.messageId, "send-now")).rejects.toBeInstanceOf(SendNowUnavailableError);
+    } finally { await adapter.dispose(); }
+  });
+});

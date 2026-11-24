@@ -426,7 +426,10 @@ export interface ChatProvider {
    * `steer` hands the message to a running turn for its next step boundary
    * (opencode-v2-steering D1): only an agent declaring `steering` is asked,
    * and a steer carries no model or mode to the session — a mid-turn switch
-   * would retarget the turn being steered (D6).
+   * would retarget the turn being steered (D6). An agent declaring
+   * `immediate-steering` is asked too, only while its turn runs: it takes the
+   * steer into that turn at once and resolves on acceptance, and it reports
+   * the turn's end once, after the steered part (add-antigravity-chat D9).
    */
   prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   /** Native identity known before dispatch, for read-only unknown recovery. */

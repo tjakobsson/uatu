@@ -2636,6 +2636,12 @@ export class ChatAdapter {
         const steerable = this.agent().capabilities.includes("steering")
           && (reversible?.staged || delivery === "steer")
           && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
+        // add-antigravity-chat D9: an agent declaring `immediate-steering`
+        // takes a busy steer into its running turn at once. Commands stay the
+        // workspace queue's, as on a steering agent.
+        const immediate = !reversible?.staged && delivery === "steer"
+          && this.agent().capabilities.includes("immediate-steering") && !this.agent().capabilities.includes("steering")
+          && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
         if (reversible?.staged) {
           if (steerable) {
             // A replacement is another pending inbox entry, not an escape
@@ -2668,6 +2674,13 @@ export class ChatAdapter {
           return { ...dispatched, pending: false, delivery: "queue" };
         }
         const busy = this.turnActive(conversationId, projection);
+        if (busy && immediate) {
+          // Never a dock entry and never a configuration change: the steer
+          // joins the turn being run, and held messages keep waiting for that
+          // turn's end, which the provider reports once, after the steer.
+          const steered = await this.dispatchImmediateSteer(conversationId, projection, { messageId: this.id(), text, requestId, attachments: attachmentRefs });
+          return { messageId: steered.messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(conversationId) ?? currentConfiguration };
+        }
         const queue: HeldQueue = this.heldQueues.get(conversationId) ?? [];
         // Order is absolute: while anything is held, a new submission joins the
         // back of the queue even when the conversation is momentarily idle —
@@ -3623,6 +3636,25 @@ export class ChatAdapter {
       if (projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
       throw mapped;
     }
+  }
+
+  /**
+   * Hand a busy message to an `immediate-steering` agent's running turn
+   * (add-antigravity-chat D9). A refusal propagates with nothing published,
+   * so the composer restores the draft; an admission that neither answers in
+   * time nor fails is an unknown outcome the receipt retains, never resent.
+   * The accepted message's row goes in at acceptance under the same id
+   * dispatchPrompt uses, which the provider's own row and replay share.
+   */
+  private async dispatchImmediateSteer(conversationId: string, projection: ConversationProjection, input: { messageId: string; text: string; requestId: string; attachments: MessageAttachment[] }): Promise<{ messageId: string }> {
+    const providerAttachments = await this.locateAttachments(input.attachments);
+    const admission = Promise.resolve().then(() => this.provider.prompt(conversationId, {
+      id: input.messageId, text: input.text, delivery: "steer",
+      ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
+    }));
+    const accepted = await this.boundedSteerAdmission(admission, input.messageId);
+    projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text: input.text, requestId: input.requestId, ...(input.attachments.length ? { attachments: input.attachments } : {}) });
+    return accepted;
   }
 
   // Provider events can update the cache while prompt admission awaits.

@@ -13,6 +13,14 @@ export type PendingAction = "remove" | "edit" | "queue" | "steer" | "send-now" |
 export type HistoryOperation = "undo" | "redo" | "revert" | "restore";
 export type PendingQueueAction = { terminal?: boolean };
 const TOO_LATE = "Too late — already delivered";
+
+/** Whether busy ordinary text steers: held by the agent until a step boundary
+ * (`steering`), or handed to the running turn at once (`immediate-steering`).
+ * Either way the composer offers the same steer and queue deliveries; only
+ * `steering` has pending Steer entries in the dock. */
+export function steersWhileBusy(declares: (capability: ChatCapability) => boolean): boolean {
+  return declares("steering") || declares("immediate-steering");
+}
 const messageOf = (error: unknown) => error instanceof Error ? error.message : "Chat failed";
 
 /** Projection stays with its existing owner. These operations run synchronously;
@@ -286,8 +294,13 @@ export class Composer {
     // Retrying the same logical request can return a cached acceptance. It
     // does not renew the original attempt's permission to insert a message.
     const authority = retried ? retry!.authority : { conversationId: id, epoch, generation: current.generation };
-    const delivery = this.conversation.declares("steering") ? refs.length ? "queue" : options.delivery ?? "steer" : undefined;
-    const nativeSteer = this.conversation.declares("steering") && !parsePromptSlashCommand(text, this.conversation.commands()) && (current.reversibleHistory?.staged === true || delivery === "steer" && (isLiveConversationStatus(current.status) || current.queued.length > 0));
+    const steers = steersWhileBusy(capability => this.conversation.declares(capability));
+    const delivery = steers ? refs.length ? "queue" : options.delivery ?? "steer" : undefined;
+    // An immediate steer is only ever one while the turn runs; idle, the
+    // workspace dispatches or holds it like any other submission.
+    const nativeSteer = steers && !parsePromptSlashCommand(text, this.conversation.commands()) && (this.conversation.declares("steering")
+      ? current.reversibleHistory?.staged === true || delivery === "steer" && (isLiveConversationStatus(current.status) || current.queued.length > 0)
+      : delivery === "steer" && isLiveConversationStatus(current.status));
     this.update(id, p => addAcceptedDraft(p, { requestId, messageId: `pending:${requestId}`, text, ...(refs.length ? { attachments: refs } : {}) }));
     this.putAttachments(id, []); this.putUnavailable(id, []); this.presentation.note("Sending..."); this.changed("submit", id);
     const agentId = this.conversation.agentId();

@@ -14,6 +14,7 @@ import {
   parseAgentChatStatuses,
   parseAgentUsageReport,
   parseBackgroundTaskOutput,
+  parseChatAgent,
   parseChatAgentDescriptor,
   parseChatAvailability,
   parseChatCommand,
@@ -639,4 +640,9 @@ describe("chat domain validation", () => {
       providerPayload: {},
     })).toThrow(/unknown/);
   });
+});
+
+test("an agent declaration accepts immediate-steering and a name this client does not know", () => {
+  const agent = { id: "antigravity", name: "Antigravity", capabilities: ["immediate-steering", "send-now", "a-future-capability"] };
+  expect(parseChatAgent(agent) as unknown).toEqual(agent);
 });

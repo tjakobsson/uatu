@@ -15,20 +15,20 @@ commit that passes `bun run test:ci` on its own.
 
 ## 0. Planning
 
-- [ ] 0.1 Commit this OpenSpec change on its own and verify that `openspec validate add-antigravity-chat --strict` passes.
+- [x] 0.1 Commit this OpenSpec change on its own and verify that `openspec validate add-antigravity-chat --strict` passes.
 
 ## 1. Add the ACP package (commit 1)
 
-- [ ] 1.1 Get explicit approval to install `@agentclientprotocol/sdk` (2.x, pinned exactly) and its `zod` peer, then install them. Verify that `package.json` and `bun.lock` change only for these two packages.
+- [x] 1.1 Get explicit approval to install `@agentclientprotocol/sdk` (2.x, pinned exactly) and its `zod` peer, then install them. Verify that `package.json` and `bun.lock` change only for these two packages.
 - [ ] 1.2 Verify that `bun run check:licenses` and `bun run audit` pass with the new packages.
-- [ ] 1.3 Prove that both packages bundle into the compiled binary with a minimal import of `client`, `ndJsonStream` and `schema/meta.json`. Verify that `bun run build` and `bun run smoke` pass. If they fail, stop and decide the fallback before group 2.
+- [x] 1.3 Prove that both packages bundle into the compiled binary with a minimal import of `client`, `ndJsonStream` and `schema/meta.json`. Verify that `bun run build` and `bun run smoke` pass. If they fail, stop and decide the fallback before group 2.
 
 ## 2. The `immediate-steering` capability (commit 2)
 
-- [ ] 2.1 Add `immediate-steering` to `ChatCapability`. Verify that `parseChatAgent` accepts it and that `bun run api:validate` and `bun run test:api` pass with no workspace revision change. If the compatibility gate disagrees, bump the revision and add a changelog entry in this commit.
-- [ ] 2.2 Composer: give an `immediate-steering` conversation the same busy deliveries, guidance, accessible names and hold-to-queue gesture as a `steering` one, with commands and attachment drafts still queued. Verify with `composer.test.ts` and `hold-to-queue.test.ts` cases for a stub immediate-steering agent, and that the existing steering and no-steering cases pass unchanged.
-- [ ] 2.3 Adapter and dock: deliver a steer to the provider at once with no pending, paused or withdrawable entry; return a refused steer's draft and attachments to the composer; keep an unknown admission as an unconfirmed entry without resending; and keep Send now on the dormant-or-idle rule. Verify with `adapter.test.ts` and `ui.test.ts` stub-agent cases for each.
-- [ ] 2.4 Keep the turn running across a steer: an earlier prompt's end marked "repeat status, not a turn boundary" sends no completion notification, does not drain the held queue, and does not finish workspace activity. Verify with adapter and notification tests, and with a test that a steered accepted message appears in the timeline once.
+- [x] 2.1 Add `immediate-steering` to `ChatCapability`. Verify that `parseChatAgent` accepts it and that `bun run api:validate` and `bun run test:api` pass with no workspace revision change. If the compatibility gate disagrees, bump the revision and add a changelog entry in this commit.
+- [x] 2.2 Composer: give an `immediate-steering` conversation the same busy deliveries, guidance, accessible names and hold-to-queue gesture as a `steering` one, with commands and attachment drafts still queued. Verify with `composer.test.ts` and `hold-to-queue.test.ts` cases for a stub immediate-steering agent, and that the existing steering and no-steering cases pass unchanged.
+- [x] 2.3 Adapter and dock: deliver a steer to the provider at once with no pending, paused or withdrawable entry; return a refused steer's draft and attachments to the composer; keep an unknown admission as an unconfirmed entry without resending; and keep Send now on the dormant-or-idle rule. Verify with `adapter.test.ts` and `ui.test.ts` stub-agent cases for each.
+- [x] 2.4 Keep the turn running across a steer: an earlier prompt's end, which the provider does not publish as a status, sends no completion notification, does not drain the held queue, and does not finish workspace activity. Verify with adapter and notification tests, and with a test that a steered accepted message appears in the timeline once.
 - [ ] 2.5 Add an e2e case with a stub immediate-steering fake: tap Send steers with no Steer entry, Alt/Option+Enter queues, and the message appears once. Verify that it passes in `bun run test:e2e` for that file and that `bun run test:ci` passes.
 - [ ] 2.6 Document `immediate-steering` in `docs/CHAT.md` ("Sending, steering and queued messages") and in the `CLAUDE.md` chat folder-map note on keyboard submission. Verify that the documented shortcuts match the composer tests.
 
@@ -41,7 +41,7 @@ commit that passes `bun run test:ci` on its own.
 - [ ] 3.5 Implement normalization (D5) with the seam's neutral liveness facts and a provisional turn token. Verify with normalization tests for streamed text, thoughts, a command with output and exit code, the waiting-for-permission state, a denial, and each stop reason, plus a visuals test that an image in a reply is captured under `antigravity:message:<id>`.
 - [ ] 3.6 Implement permissions through the shared pending-interactions holder (allow once, deny, abandon on cancel and on process exit). Verify with provider tests, including cancelling while a permission is pending.
 - [ ] 3.7 Implement models with thinking levels (config options and legacy ids), modes, reapplying them after load or resume, slash commands, interrupt, context reports from `usage_update`, and per-turn token usage. Verify with provider tests for each, including that a resumed conversation's prompt runs on its chosen model.
-- [ ] 3.8 Implement immediate steering for agy: serialize prompts, send a steer as a further `session/prompt`, mark the superseded prompt's `end_turn` as a repeat status, keep one turn token across the steer, and give live user messages the ids replay derives. Verify with provider tests against the mid-turn fixture: one turn, one user message after reload, and held messages waiting for the carried turn.
+- [ ] 3.8 Implement immediate steering for agy: serialize prompts, send a steer as a further `session/prompt`, publish no status for the superseded prompt's `end_turn`, keep one turn token across the steer, and give live user messages the ids replay derives. Verify with provider tests against the mid-turn fixture: one turn, one user message after reload, and held messages waiting for the carried turn.
 - [ ] 3.9 Implement image attachments gated on the advertised prompt capabilities. Verify with tests that attachments are declared and sent as image blocks when advertised, and not declared otherwise.
 - [ ] 3.10 Implement the login-missing state from -32000, its recheck on listing, retry and prompt, and "Antigravity login failed" turn failures. Verify with provider and service tests.
 - [ ] 3.11 Register Antigravity last in `src/cli.ts`, declaring the capabilities in the `antigravity-chat` spec. Verify with a service test that chat status lists OpenCode, Claude Code and Antigravity in order with OpenCode as default, that the declaration matches the spec, and that `bun run test:ci` passes.
