@@ -364,6 +364,8 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await fake.setFlag("legacy-only", true);
       const session = await provider.createSession("a");
       expect((await provider.listModels()).find(model => model.selection.modelId === "gemini-4-argon")?.variants).toEqual(["low", "medium", "high"]);
+      // A level-looking id with no sibling, priced as itself, stays itself.
+      expect((await provider.listModels()).map(model => model.selection.modelId)).toContain("gpt-oss-120b-medium");
       await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-argon" }, "low");
       await run(session.id, "Say hello");
       const log = await fake.log();

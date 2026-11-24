@@ -231,7 +231,7 @@ export class AntigravityProvider implements ChatProvider {
     const conversation = this.conversation(session.id);
     conversation.seeded = true;
     conversation.process = process;
-    conversation.applied = catalogFromSession(answer, false).current;
+    conversation.applied = catalogFromSession(answer, false, id => this.knownModel(id)).current;
     conversation.configuration = { ...conversation.applied, ...configuration };
     this.watch(conversation, process);
     this.scheduleIdle(conversation);
@@ -641,7 +641,7 @@ export class AntigravityProvider implements ChatProvider {
         this.setLogin("ok");
         this.learnCatalog(answer);
         // agy starts a loaded session on its own defaults (design D7).
-        conversation.applied = catalogFromSession(answer, false).current;
+        conversation.applied = catalogFromSession(answer, false, id => this.knownModel(id)).current;
         conversation.configuration = { ...conversation.applied, ...conversation.configuration };
       } catch (error) {
         conversation.replay = undefined;
@@ -810,7 +810,7 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   private learnCatalog(answer: unknown): void {
-    const catalog = catalogFromSession(answer, this.imageInput === true);
+    const catalog = catalogFromSession(answer, this.imageInput === true, id => this.knownModel(id));
     if (catalog.models.length === 0 && catalog.modes.length === 0) return;
     const changed = JSON.stringify(catalog.models) !== JSON.stringify(this.catalog?.models) || JSON.stringify(catalog.modes) !== JSON.stringify(this.catalog?.modes);
     this.catalog = catalog;

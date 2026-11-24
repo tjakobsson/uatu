@@ -36,7 +36,7 @@ function options(configOptions: unknown, id: string): Array<{ value: string; nam
  * with a level suffix (`gemini-4-neon-low`) give its thinking levels. With
  * no config options, legacy ids that share a family are folded the same way.
  */
-export function catalogFromSession(answer: unknown, imageInput: boolean): AcpCatalog {
+export function catalogFromSession(answer: unknown, imageInput: boolean, known: (id: string) => boolean = () => false): AcpCatalog {
   const value = record(answer);
   const legacy = (Array.isArray(record(value?.models)?.availableModels) ? record(value?.models)!.availableModels as unknown[] : [])
     .flatMap(entry => {
@@ -50,14 +50,19 @@ export function catalogFromSession(answer: unknown, imageInput: boolean): AcpCat
   const selection: AcpCatalog["selection"] = families.length ? "config" : "legacy";
   if (families.length === 0) {
     const seen = new Map<string, string>();
+    // A level suffix makes a family only for an id that is not a model of its
+    // own (a known or priced id such as `gpt-oss-120b-medium`) and that
+    // shares the family with another level.
+    const prefix = (id: string) => { const match = id.match(/^(.+)-([a-z]+)$/); return match && levelNames.has(match[2]!) ? match[1]! : undefined; };
     for (const model of legacy) {
-      const match = model.id.match(/^(.+)-([a-z]+)$/);
-      const family = match && levelNames.has(match[2]!) ? match[1]! : model.id;
+      const candidate = prefix(model.id);
+      const folds = candidate !== undefined && !known(model.id) && legacy.some(other => other.id !== model.id && prefix(other.id) === candidate && !known(other.id));
+      const family = folds ? candidate : model.id;
       if (!seen.has(family)) seen.set(family, family === model.id ? model.name : model.name.replace(/\s*\([^)]*\)$/, ""));
     }
     families = [...seen].map(([family, name]) => ({ value: family, name }));
     const currentId = typeof record(value?.models)?.currentModelId === "string" ? record(value?.models)!.currentModelId as string : undefined;
-    const family = currentId && families.find(candidate => candidate.value === currentId || levelOf(currentId, candidate.value));
+    const family = currentId && (families.find(candidate => candidate.value === currentId) ?? families.find(candidate => levelOf(currentId, candidate.value)));
     if (family) {
       current.model = { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: family.value };
       const level = levelOf(currentId!, family.value);
