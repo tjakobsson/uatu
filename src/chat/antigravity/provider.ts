@@ -25,6 +25,7 @@ import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nex
 const IDLE_RELEASE_MS = 5 * 60_000;
 const DEFAULT_TITLE = "New conversation";
 const LOGIN_REQUIRED_MESSAGE = "Antigravity is not logged in. Run agy where UatuCode runs and sign in.";
+const NO_TRANSCRIPT_MESSAGE = `${LOGIN_REQUIRED_MESSAGE} agy keeps no transcript of this conversation to read meanwhile.`;
 // How long agy may take to answer `initialize`, a listing, `session/new` or
 // `session/load` before its process is ended, so a hung agy can neither pile
 // up children nor leave a conversation waiting on a stuck start.
@@ -303,7 +304,7 @@ export class AntigravityProvider implements ChatProvider {
       // read: never a replay seeded earlier, and nothing once the file is gone.
       if (!await this.seedFromTranscript(conversation)) {
         this.forgetHistory(conversation);
-        throw new AgentLoginRequiredError(`${LOGIN_REQUIRED_MESSAGE} agy keeps no transcript of this conversation to read meanwhile.`);
+        throw new AgentLoginRequiredError(NO_TRANSCRIPT_MESSAGE);
       }
     } else if (!conversation.seeded) {
       conversation.holds += 1;
@@ -311,7 +312,9 @@ export class AntigravityProvider implements ChatProvider {
       catch (error) {
         // A listed conversation stays readable when agy's login has expired:
         // its transcript is read on its own (spec: login-missing state).
-        if (rpcErrorCode(error) !== AUTH_REQUIRED_CODE || !await this.seedFromTranscript(conversation)) throw error;
+        // Without one, the read says how to sign in, as later reads do.
+        if (rpcErrorCode(error) !== AUTH_REQUIRED_CODE) throw error;
+        if (!await this.seedFromTranscript(conversation)) throw new AgentLoginRequiredError(NO_TRANSCRIPT_MESSAGE);
       } finally { conversation.holds -= 1; this.scheduleIdle(conversation); }
     }
     const items = conversation.items;

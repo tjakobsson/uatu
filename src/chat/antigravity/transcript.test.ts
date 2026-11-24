@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { installFakeAgy, type FakeAgy } from "../../../tests/fixtures/antigravity/fake-agy-path";
 import { conversationTotals } from "../conversation-totals";
-import type { NormalizedProviderEvent } from "../provider";
+import { AgentLoginRequiredError, type NormalizedProviderEvent } from "../provider";
 import type { ConversationItem } from "../types";
 import type { AntigravityPriceTable } from "./pricing";
 import { AntigravityProvider } from "./provider";
@@ -118,6 +118,19 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
       expect(tool(items, "read_file")?.output).toBe("Showing lines 1-1 of 1\n1: # Fixture workspace");
       expect(tool(items, "write_file")).toEqual(expect.objectContaining({ status: "failed", error: 'permission check failed for write_file "hello.txt"' }));
       expect(carriers(items)).toHaveLength(3);
+      expect(provider.loginState()).toBe("missing");
+    } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
+  });
+
+  test("a read that first finds agy's login expired, with no transcript to read, says how to sign in", async () => {
+    await rm(transcriptPath(home, sessionId), { force: true });
+    const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, homeDirectory: home, prices });
+    try {
+      expect((await provider.listSessions()).map(session => session.id)).toContain(sessionId);
+      await fake.setFlag("auth-missing", true);
+      const read = provider.listMessages(sessionId, { limit: 500 });
+      await expect(read).rejects.toBeInstanceOf(AgentLoginRequiredError);
+      await expect(read).rejects.toThrow("Run agy where UatuCode runs and sign in.");
       expect(provider.loginState()).toBe("missing");
     } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
   });
