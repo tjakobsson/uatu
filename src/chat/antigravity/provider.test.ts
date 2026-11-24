@@ -440,6 +440,19 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(statuses(session.id)).toEqual(["interrupted"]);
     });
 
+    test("an earlier prompt that ends just before agy refuses the steer is not taken as acceptance, and its own end is reported", async () => {
+      const { fake, provider, waitFor, upserts, statuses, ended, events } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
+      await fake.setFlag("end-then-refuse-steer", true);
+      await expect(provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" })).rejects.toThrow("Antigravity is busy and did not take the message");
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["failed"]);
+      expect(events.flatMap(event => event.updates).findLast(update => update.kind === "status")).toEqual(expect.objectContaining({ message: "Antigravity stopped: the reply reached its token limit." }));
+      expect(upserts(session.id).filter(item => item.type === "user_message" && item.text === "Steer")).toEqual([]);
+    });
+
     test("a steer whose process ends before agy answers has an unknown outcome", async () => {
       const { fake, provider, waitFor, upserts } = await setup();
       const session = await provider.createSession("a");

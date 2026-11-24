@@ -981,11 +981,12 @@ future requests.
   accepts image prompts.
 - **Steering.** Antigravity takes a message sent during a turn into that
   turn at once (immediate steering, above). `agy` has no acknowledgement
-  for a prompt, so the steer counts as accepted when `agy` ends the part of
-  the turn before it, which it does as soon as it takes a steer; only then
-  does it appear in the timeline. If `agy` answers the steer with an error
-  first, its text returns to the composer with `agy`'s reason. If `agy`'s
-  process ends first, the steer is kept as unconfirmed and never resent.
+  for a prompt, so the steer is confirmed only by `agy`'s answer to it,
+  which comes when the turn carrying it ends; it then appears in the
+  timeline where you sent it. Until then it shows as unconfirmed. If `agy`
+  answers the steer with an error, its text returns to the composer with
+  `agy`'s reason. If the turn is stopped or `agy`'s process ends first, the
+  steer stays unconfirmed and is never resent.
 - **Context and tokens.** The context indicator follows the used and size
   figures `agy` reports, and each turn carries its token usage.
 - **Cost.** `agy` reports tokens but no price, so Chat prices each turn

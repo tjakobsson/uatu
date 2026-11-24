@@ -15,6 +15,8 @@
 //   pids                 the pid of every `agy acp` process started
 //   refuse-steer         present: a prompt sent during a run is refused (-32603)
 //   crash-on-steer       present: the process exits 1 on a prompt sent during a run
+//   end-then-refuse-steer present: a prompt sent during a run ends the earlier
+//                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
 //   slow-config          present: `session/set_config_option` answers after 300 ms
 //   fail-load            present: `session/load` fails after sending its replay
@@ -224,6 +226,11 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   const text = params.prompt.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
   const running = runs.get(params.sessionId);
   if (running && flag("refuse-steer")) throw new RequestError(-32603, "Antigravity is busy and did not take the message");
+  if (running && flag("end-then-refuse-steer")) {
+    // The earlier prompt ends on its own just before agy refuses the steer.
+    running.resolve({ stopReason: "max_tokens" });
+    throw new RequestError(-32603, "Antigravity is busy and did not take the message");
+  }
   if (running && flag("crash-on-steer")) process.exit(1);
   // Replay keeps the prompt's blocks: its text, then each image.
   updateSession(params.sessionId, session => {

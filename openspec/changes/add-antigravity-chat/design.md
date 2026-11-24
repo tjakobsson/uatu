@@ -239,8 +239,20 @@ agent in commit 2, before the Antigravity provider exists):
   attachments return to the composer. If the outcome is unknown, the steer is
   kept as an unconfirmed entry under the existing rules and never resent.
 - The provider publishes the accepted steer as a `user_message` at the point
-  it was accepted. Replayed history deduplicates it by turn and message
+  it was sent. Replayed history deduplicates it by turn and message
   position, so it appears once (D4).
+- For Antigravity, acceptance needs evidence about the steer itself. ACP
+  has no acknowledgement for a prompt, and agy ends the earlier prompt with
+  an ordinary `end_turn`, the same stop reason a natural end has (the trial
+  showed no other), so the earlier prompt ending proves nothing: it can end
+  on its own, be cancelled, hit its token limit or fail on its login just
+  before agy refuses the steer. Only the steer's own answer counts. A result
+  other than `cancelled` means agy took it. An error answer is a definite
+  refusal, and the earlier prompt's end, held meanwhile, is then reported as
+  it came. A `cancelled` result or the connection ending is an unknown
+  outcome: unconfirmed, never resent. A steer is therefore confirmed only
+  when the turn carrying it ends; one that outlasts the adapter's admission
+  bound is unconfirmed until its late acceptance settles it.
 - The provider publishes no status, and no completion signal, for the earlier
   prompt's end, so the adapter keeps the conversation running, sends no
   completion notification and does not drain the held queue. The seam's
