@@ -5,25 +5,27 @@ This change is the bottom pull request of a GitHub stack,
 marks the Workspace API revision bump in task 3.2. Its head is
 `refactor/generalize-chat-agent-seam` in `tjakobsson/uatu`, and its base is
 `main`. The first commit carries this OpenSpec change. Each of groups 1–5
-below is one behaviour-preserving commit that passes `bun run test:ci` on its
-own. The Antigravity pull request (`add-antigravity-chat`, head
+below landed as one behaviour-preserving commit that passes `bun run test:ci`
+on its own; review fixes then followed as separate commits on top, each named
+for what it corrects, and the behaviour differences they settled on are
+listed in the proposal and design D4. The Antigravity pull request (`add-antigravity-chat`, head
 `feat/add-antigravity`) is the top of the stack.
 
 ## 0. Planning
 
-- [ ] 0.1 Commit this OpenSpec change on its own and verify that `openspec validate generalize-chat-agent-seam --strict` passes.
+- [x] 0.1 Commit this OpenSpec change on its own and verify that `openspec validate generalize-chat-agent-seam --strict` passes.
 
 ## 1. Agent-neutral turn liveness (commit 1)
 
 - [x] 1.1 Add characterization tests for today's liveness and text-seal decisions: OpenCode 1.x and 2.x text end, execution evidence, step failure and completion alias, and Claude Code live and history rows with and without a turn token. Verify that they pass against the current code before anything moves.
 - [x] 1.2 Introduce the neutral annotations (text sealed in both forms, execution live yes/no/unknown, turn continues despite terminal status, repeat status) and the neutral sealable turn token with its provisional/authoritative kind in a shared chat module. Move `isVisualTurnLive` there. Verify typecheck.
-- [x] 1.3 Make the OpenCode 1.x and 2.x normalizers and the Claude Code normalizer and transcript reader write the neutral annotations. Make `agents.ts` and `adapter.ts` read only those, with token freezing, sealing, preservation and the recovery comparison in one adapter helper. Verify that the 1.1 tests and the existing visuals regressions in `agents.test.ts`, `adapter.test.ts` and `visual-store.test.ts` pass unchanged.
+- [x] 1.3 Make the OpenCode 1.x and 2.x normalizers and the Claude Code normalizer and transcript reader write the neutral annotations. Make `agents.ts` and `adapter.ts` read only those, with token freezing, sealing, preservation and the recovery comparison in one adapter helper. Verify that the 1.1 tests and the existing visuals regressions in `agents.test.ts`, `adapter.test.ts` and `visual-store.test.ts` pass, edited only mechanically (the agent markers renamed to the neutral annotations, and later the descriptors' `login` field), with no assertion lost.
 - [x] 1.4 Make `nativeVisualMessageIdentity` take an agent id and the capture-identity helper agent-neutral. Verify with a test that pins `claude:message:<id>`, `claude:text:<apiId>:<n>` and `opencode:message:<id>` byte for byte, and that `<agentId>:message:<id>` is produced for any other agent.
 - [x] 1.5 Update the chat sections of `ARCHITECTURE.md` that describe the liveness markers. Verify that no shared module outside `src/chat/claude/` and `src/chat/opencode/` imports a Claude or OpenCode liveness symbol (`rg` check), and that `bun run test:ci` passes.
 
 ## 2. Generic PATH runtime and agent-neutral lazy service (commit 2)
 
-- [x] 2.1 Extract `PathAgentRuntime` from `src/chat/claude/runtime.ts`, configured by binary name, display name, version parser and messages, and keep `ClaudeRuntime` as its Claude Code configuration. Verify that `src/chat/claude/runtime.test.ts` passes unchanged, including the not-installed, timeout and failed-probe messages byte for byte.
+- [x] 2.1 Extract `PathAgentRuntime` from `src/chat/claude/runtime.ts`, configured by binary name, display name, version parser and messages, and keep `ClaudeRuntime` as its Claude Code configuration. Verify that `src/chat/claude/runtime.test.ts` passes with its existing tests changed only by an import, with no assertion lost, plus added tests that pin the not-installed, timeout and failed-probe messages byte for byte.
 - [x] 2.2 Replace the inline `AgentRuntime` literal in `src/cli.ts` with a shared adapter, and keep `src/hub/agent-account-runtime.ts` working. Verify typecheck and the agent-account tests.
 - [x] 2.3 Make `LazyChatService` agent-neutral: it takes the agent's name and runtime, OpenCode's options move to an OpenCode runtime factory, and the restarting and incompatible-version messages name the owning agent. Verify `src/chat/service.test.ts` with OpenCode's wording unchanged, plus a new test that a Claude Code adapter failure names Claude Code.
 - [x] 2.4 Move `ManagedProcess` and the bounded capture into a shared chat process module. The capture takes an optional scrubber, and OpenCode's password scrubbing stays in its stack. Verify that `opencode-service.test.ts` passes unchanged, and add tests for SIGTERM, grace and SIGKILL escalation and for capture bounding.
