@@ -9,7 +9,7 @@ import { AgentLoginRequiredError, type NormalizedProviderEvent } from "../provid
 import type { ConversationItem } from "../types";
 import type { AntigravityPriceTable } from "./pricing";
 import { AntigravityProvider } from "./provider";
-import { readSessionTranscript, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
+import { enrichReplay, readSessionTranscript, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
 
 // One conversation recorded through the fake agy (text, a read, a denied
 // write), reopened by fresh providers with different transcripts on disk.
@@ -212,4 +212,27 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
       expect(items.filter(item => item.type === "user_message").map(item => item.id).at(-1)).toBe(`message:${accepted.messageId}`);
     } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
   });
+});
+
+test("an image-only turn keeps its recorded tokens and cost on reopen, matched to the wordless request at its position", async () => {
+  const steps = [
+    { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nSay hello\n</USER_REQUEST>" },
+    { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", content: "Hello", input_tokens: 10, output_tokens: 1 },
+    { step_index: 2, type: "USER_INPUT", content: "<USER_REQUEST>\n\n</USER_REQUEST>" },
+    { step_index: 3, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", content: "A chart", input_tokens: 500, output_tokens: 20 },
+  ];
+  const replayed: ConversationItem[] = [
+    { id: "message:s.u1", type: "user_message", createdAt: 1, text: "Say hello" },
+    { id: "message:s.a1.1", type: "assistant_message", createdAt: 2, markdown: "Hello" },
+    { id: "message:s.u2", type: "user_message", createdAt: 3, text: "", attachments: [{ id: "image", name: "chart.png", mimeType: "image/png" }] },
+    { id: "message:s.a2.1", type: "assistant_message", createdAt: 4, markdown: "A chart" },
+  ];
+  const file = path.join(home, "image-only.jsonl");
+  await writeFile(file, steps.map(step => JSON.stringify(step)).join("\n"));
+  const read = await readTranscript(file);
+  if (!("steps" in read)) throw new Error("the transcript was not read");
+  const enriched = enrichReplay(replayed, "s", transcriptTurns(read.steps), { family: model => transcriptModelFamily(model, () => false), price: usage => (usage.input ?? 0) / 1000 });
+  const carrier = enriched?.items.find(item => item.id === "usage:s.t2") as Extract<ConversationItem, { type: "assistant_message" }> | undefined;
+  expect(carrier?.usage).toEqual(expect.objectContaining({ input: 500, output: 20, costUsd: 0.5 }));
+  expect(enriched?.accounting.map(entry => entry.messageId)).toEqual(["s.t1", "s.t2"]);
 });

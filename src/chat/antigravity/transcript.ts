@@ -150,9 +150,13 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
   if (users.length !== turns.length) return null;
   // Counts alone prove nothing: a turn is the transcript's only when the
   // user's words match what agy recorded for it. A transcript with no
-  // matching turn is another conversation's.
-  const matched = new Set(users.flatMap((user, index) => user.type === "user_message" && user.text.trim() !== "" && user.text.trim() === turns[index]!.request ? [index + 1] : []));
+  // matching turn is another conversation's. Once words prove it, a turn
+  // without words (images only) is the one recorded without words at the
+  // same position.
+  const words = (user: ConversationItem) => user.type === "user_message" ? user.text.trim() : "";
+  const matched = new Set(users.flatMap((user, index) => words(user) !== "" && words(user) === turns[index]!.request ? [index + 1] : []));
   if (matched.size === 0) return null;
+  users.forEach((user, index) => { if (words(user) === "" && !turns[index]!.request) matched.add(index + 1); });
   const toolsByTurn = new Map<number, number[]>();
   let turn = 0;
   items.forEach((item, index) => {

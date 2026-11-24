@@ -308,7 +308,9 @@ a size bound on the bytes one open handle yields. It validates each line's
 shape and adds permission outcomes, file-read output, and per-turn tokens and
 model to the matching replayed rows. The transcript records no tool call ids,
 so a turn is matched by identity, the user's words agy recorded for it, and
-its tools by their order within it; a turn whose words do not match keeps its
+its tools by their order within it; once words prove the transcript, a turn
+without words (images only) is the one recorded without words at the same
+position; a turn whose words do not match keeps its
 replayed rows, and a transcript with no matching turn is another
 conversation's. A missing file, an unreadable file,
 or a file whose shape is not recognized leaves the replayed history unchanged
