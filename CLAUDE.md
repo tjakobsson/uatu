@@ -48,8 +48,9 @@ src/
 │                   normalizer writes so image capture knows when a reply's
 │                   text is final and its turn has ended; path-agent-runtime
 │                   is the runtime for an agent found on PATH, discovery plus
-│                   one version probe killed after 10 s, which Claude Code
-│                   configures;
+│                   one version probe that answers at its 10 s deadline and
+│                   reaps its process group in the background, which Claude
+│                   Code and Antigravity configure;
 │                   managed-process stops a runtime's child process group
 │                   (SIGTERM, grace, SIGKILL) and keeps a bounded copy of
 │                   its output;
@@ -80,8 +81,9 @@ src/
 │                   normalization; catalog: models and thinking levels;
 │                   transcript: agy's own transcript, read-only, for what
 │                   replay omits; pricing + prices: turn cost from the
-│                   generated models.dev snapshot). registered-agents lists the offered agents in
-│                   picker order, which cli.ts registers. One conversation is
+│                   generated models.dev snapshot). registered-agents lists
+│                   the offered agents in picker order, which cli.ts
+│                   registers. One conversation is
 │                   owned by one agent for life; ids are agent-qualified
 │                   on the wire (`<agentId>:<providerId>`). Each agent's
 │                   `sdk-coverage.ts` holds the hand-kept annotations for
