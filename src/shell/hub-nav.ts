@@ -3,7 +3,8 @@
 // the origin root), this reads the Hub's workspace list and the brokered
 // activity, and gives the switcher what it says about them: the status
 // card's facts and Start, the badge, the Checkouts rows (two lines each,
-// ordered by who needs you; the current workspace is the status card, not
+// ordered by who needs you, grouped under repository headings when there is
+// more than one repository; the current workspace is the status card, not
 // a row), `+ New` for the current repository, and the footer's Hub links.
 // Everywhere else — the desktop wrapper, the e2e harness — the probe fails
 // or the base path is "/", and nothing registers.
@@ -543,6 +544,52 @@ function isRepositoryMain(workspaces: readonly HubWorkspaceSummary[], workspace:
   return !workspace.parentId && (workspace.createWorktree === true || workspaces.some(candidate => candidate.parentId === workspace.id));
 }
 
+// The repository family a workspace belongs to, by its main checkout's id: a
+// child's parent, a main checkout itself. Null outside any repository family.
+// Read from the Hub's explicit links, never from names.
+export function checkoutRepositoryKey(workspaces: readonly HubWorkspaceSummary[], workspace: HubWorkspaceSummary): string | null {
+  if (workspace.parentId) return workspace.parentId;
+  return isRepositoryMain(workspaces, workspace) || workspace.repositoryId !== undefined ? workspace.id : null;
+}
+
+// The heading of the folders outside any repository family.
+export const OTHER_FOLDERS_HEADING = "Other folders";
+
+export type CheckoutGroup = { key: string | null; name: string; workspaces: HubWorkspaceSummary[] };
+
+// The Checkouts list in groups, one per repository (design: "Checkouts by
+// repository"). Headings show only when more than one group is present,
+// counting the current checkout's own repository even when it has no other
+// row: a list that is all another repository's must say so. The current
+// repository's group comes first, then the others by name, then the folders
+// outside any repository; rows keep `orderCheckouts`' order within a group.
+export function groupCheckouts(
+  workspaces: HubWorkspaceSummary[],
+  activity: WorkspaceActivityMap,
+  currentId: string | null,
+): { headings: boolean; groups: CheckoutGroup[] } {
+  const current = workspaces.find(workspace => workspace.id === currentId);
+  const currentKey = current ? checkoutRepositoryKey(workspaces, current) : undefined;
+  const byKey = new Map<string | null, HubWorkspaceSummary[]>();
+  for (const workspace of orderCheckouts(workspaces, activity, currentId)) {
+    const key = checkoutRepositoryKey(workspaces, workspace);
+    const bucket = byKey.get(key);
+    if (bucket) bucket.push(workspace);
+    else byKey.set(key, [workspace]);
+  }
+  const keys = new Set(byKey.keys());
+  if (currentKey !== undefined) keys.add(currentKey);
+  const name = (key: string | null) => {
+    if (key === null) return OTHER_FOLDERS_HEADING;
+    const main = workspaces.find(workspace => workspace.id === key);
+    return main ? main.displayName || main.id : key;
+  };
+  const rank = (key: string | null) => key === currentKey ? 0 : key === null ? 2 : 1;
+  const groups = [...byKey].map(([key, members]) => ({ key, name: name(key), workspaces: members }))
+    .sort((a, b) => rank(a.key) - rank(b.key) || a.name.localeCompare(b.name) || (a.key ?? "").localeCompare(b.key ?? ""));
+  return { headings: keys.size > 1, groups };
+}
+
 export type CheckoutRow = {
   // Line 1: the checkout's pull request, or its name.
   pullRequest: { number: number; title: string } | null;
@@ -554,21 +601,16 @@ export type CheckoutRow = {
   mark: "live" | "hollow" | "busy";
 };
 
-// What one Checkouts row says (design: "What each row shows"). `mainId` is
-// the current repository's main checkout: a worktree of another repository
-// names that repository on line 2.
+// What one Checkouts row says (design: "What each row shows"). Its
+// repository is its group's heading, never a fact on the row.
 export function checkoutRow(
   workspaces: HubWorkspaceSummary[],
   workspace: HubWorkspaceSummary,
   activity: WorkspaceActivityMap,
-  options: { pullRequest: { number: number; title: string } | null; mainId: string | null },
+  options: { pullRequest: { number: number; title: string } | null },
 ): CheckoutRow {
   const name = checkoutName(workspaces, workspace);
   const facts: string[] = [];
-  if (workspace.parentId && workspace.parentId !== options.mainId) {
-    const parent = workspaces.find(candidate => candidate.id === workspace.parentId);
-    if (parent) facts.push(parent.displayName || parent.id);
-  }
   const branch = workspace.parentId || isRepositoryMain(workspaces, workspace) || workspace.branch ? checkoutBranchLabel(workspace) : null;
   if (branch !== null && (options.pullRequest !== null || branch !== name) && (workspace.branch || workspace.detached || workspace.parentId || isRepositoryMain(workspaces, workspace))) facts.push(branch);
   const detail = workspaceMenuDetail(workspaces, workspace);
@@ -652,20 +694,21 @@ export function initHubNav(): void {
   // press on it survives a background refresh.
   const renderCheckouts = (container: HTMLElement, query: string, pullRequestFor: (branch: string) => { number: number; title: string } | null) => {
     const mainId = mainCheckout()?.id ?? null;
-    const next: Element[] = [];
-    for (const workspace of orderCheckouts(latest, activity, currentId)) {
+    // One row, or null when the search leaves it out. A search matches the
+    // row's repository too, so typing a repository's name lists its rows.
+    const buildRow = (workspace: HubWorkspaceSummary, repository: string | null): HTMLAnchorElement | null => {
       // A pull request names a checkout of this repository only: another
       // repository's branches are not in this session's list.
       const inRepository = mainId !== null && (workspace.id === mainId || workspace.parentId === mainId);
       const pullRequest = inRepository && workspace.branch && !workspace.detached ? pullRequestFor(workspace.branch) : null;
-      const row = checkoutRow(latest, workspace, activity, { pullRequest, mainId });
+      const row = checkoutRow(latest, workspace, activity, { pullRequest });
       const pending = rowStart.get(workspace.id);
       if (workspace.running && !workspace.availability) rowStart.delete(workspace.id);
       const state = !workspace.running && !workspace.availability && pending
         ? { text: rowStartWords[pending], tone: "stopped" as const }
         : row.state;
       const line1 = row.pullRequest ? `#${row.pullRequest.number} ${row.pullRequest.title}` : row.name;
-      if (!matchesSearch([line1, row.name, workspace.branch, workspace.displayName, workspace.id, ...row.facts, state?.text], query)) continue;
+      if (!matchesSearch([line1, row.name, workspace.branch, workspace.displayName, workspace.id, ...row.facts, state?.text, repository], query)) return null;
 
       const item = document.createElement("a");
       item.className = "hub-menu-item switcher-row";
@@ -745,10 +788,47 @@ export function initHubNav(): void {
       }
       // Listeners read the workspace they were built for, so an entry is only
       // kept while that is unchanged too.
-      next.push(item);
       menuEntrySignatures.set(item, menuEntrySignature(item, workspace));
+      return item;
+    };
+    const { headings, groups } = groupCheckouts(latest, activity, currentId);
+    container.classList.toggle("is-grouped", headings);
+    if (!headings) {
+      // One repository: one flat list, no heading.
+      const next = groups.flatMap(group => group.workspaces.map(workspace => buildRow(workspace, group.key === null ? null : group.name)))
+        .filter((row): row is HTMLAnchorElement => row !== null);
+      reconcileMenuEntries(container, next, menuEntrySignatures);
+      return;
     }
-    reconcileMenuEntries(container, next, menuEntrySignatures);
+    // Several: a group per repository, its heading sticky while its rows
+    // scroll. A group is kept as the same node (keyed by its repository) and
+    // its rows reconciled inside it, so a press on a row survives a refresh.
+    const nextGroups: Element[] = [];
+    for (const group of groups) {
+      const rows = group.workspaces.map(workspace => buildRow(workspace, group.key === null ? null : group.name)).filter((row): row is HTMLAnchorElement => row !== null);
+      if (rows.length === 0) continue;
+      const key = group.key ?? "";
+      let element = [...container.children].find(child => child.getAttribute("data-repository") === key && child.classList.contains("switcher-repo-group")) as HTMLElement | undefined;
+      if (!element) {
+        element = document.createElement("div");
+        element.className = "switcher-repo-group";
+        element.setAttribute("role", "group");
+        element.dataset.repository = key;
+        const heading = document.createElement("div");
+        heading.className = "switcher-repo-heading";
+        heading.setAttribute("aria-hidden", "true");
+        const rowsElement = document.createElement("div");
+        rowsElement.className = "switcher-repo-rows";
+        element.append(heading, rowsElement);
+        menuEntrySignatures.set(element, `repository:${key}`);
+      }
+      const heading = element.querySelector<HTMLElement>(".switcher-repo-heading")!;
+      if (heading.textContent !== group.name) heading.textContent = group.name;
+      if (element.getAttribute("aria-label") !== group.name) element.setAttribute("aria-label", group.name);
+      reconcileMenuEntries(element.querySelector(".switcher-repo-rows")!, rows, menuEntrySignatures);
+      nextGroups.push(element);
+    }
+    reconcileMenuEntries(container, nextGroups, menuEntrySignatures);
   };
 
   // `+ New` in the Checkouts heading: the worktree menu of the current

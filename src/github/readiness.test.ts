@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { mergeMethodsText, mergeReadinessView, pendingCommentsNote, reviewerStatesText } from "./readiness";
+import { detailsDisclosureText, mergeMethodsText, mergeReadinessView, pendingCommentsNote, readinessVerdict, reviewerStatesText } from "./readiness";
 
 const open = { state: "OPEN" as const, isCrossRepository: false, headOwner: "octo-org", viewerPendingComments: 0 };
 const readiness = { mergeable: true, blockers: [], allowedMethods: ["SQUASH" as const, "REBASE" as const], deleteBranchOnMerge: true };
@@ -72,5 +72,20 @@ describe("reviewerStatesText", () => {
 
   test("is empty without reviewers", () => {
     expect(reviewerStatesText([])).toBe("");
+  });
+});
+
+describe("the pane's Details row and Merge readiness heading", () => {
+  test("the row says what is behind it, the verdict first when there is one", () => {
+    expect(detailsDisclosureText("blocked", 5, 2)).toBe("Blockers, 5 checks, 2 reviewers");
+    expect(detailsDisclosureText("ready", 1, 1)).toBe("Ready to merge, 1 check, 1 reviewer");
+    expect(detailsDisclosureText("merged", 0, 0)).toBe("Readiness, 0 checks, 0 reviewers");
+  });
+
+  test("the heading's verdict counts the blockers", () => {
+    expect(readinessVerdict({ tone: "blocked", reasons: ["a", "b"] })).toBe("2 blockers");
+    expect(readinessVerdict({ tone: "blocked", reasons: ["a"] })).toBe("1 blocker");
+    expect(readinessVerdict({ tone: "ready", reasons: [] })).toBe("Ready");
+    expect(readinessVerdict({ tone: "unknown", reasons: [] })).toBe("Unknown");
   });
 });

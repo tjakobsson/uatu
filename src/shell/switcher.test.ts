@@ -156,11 +156,11 @@ describe("the switcher's Pull requests", () => {
     const page = await mount();
     openSwitcher();
     await page.settle();
-    page.click(page.menu.querySelector("[data-switcher-filter-toggle]")!);
+    page.click(page.menu.querySelector('[data-switcher-menu-toggle="filter"]')!);
     expect(page.menu.querySelector<HTMLElement>(".switcher-filter-menu")!.hidden).toBe(false);
     page.click(page.menu.querySelector('[data-switcher-filter="drafts"]')!);
     expect([...page.menu.querySelectorAll<HTMLElement>("#switcher-pull-requests [role=option]")].map(row => row.dataset.prRow)).toEqual(["631"]);
-    expect(page.menu.querySelector("[data-switcher-filter-toggle]")!.textContent).toContain("Drafts");
+    expect(page.menu.querySelector('[data-switcher-menu-toggle="filter"]')!.textContent).toContain("Drafts");
   });
 
   test("a search folds the status card and filters the rows; Enter on the active row acts on it", async () => {
@@ -176,6 +176,53 @@ describe("the switcher's Pull requests", () => {
     expect(search.getAttribute("aria-activedescendant")).toBe("switcher-pr-631");
     page.key(search, "Enter");
     expect(page.events.at(-1)).toEqual({ type: OPEN_PULL_REQUEST_EVENT, detail: { repositoryId: "repo", number: 631 } });
+  });
+
+  test("the heading names the repository the pull requests are from", async () => {
+    const page = await mount();
+    openSwitcher();
+    await page.settle();
+    const heading = page.menu.querySelector("#switcher-pull-requests-heading")!;
+    expect(heading.textContent).toBe("Pull requests·octo-org/uatu");
+    // One repository: plain text, no selector.
+    expect(heading.querySelector("button")).toBeNull();
+  });
+
+  test("a workspace with two Git repositories gets a repository selector; the status card names the other repository beside what is viewed", async () => {
+    const page = await mount();
+    const snapshot = (id: string, label: string, branch: string) => ({ id, label, metadata: { status: "git", branch, commitShort: "abc1234" } }) as unknown as import("../shared/types").RepositorySnapshot;
+    const docs = { host: "github.com", owner: "octo-org", name: "docs" };
+    githubApi.summary = async repositoryId => ({ status: "no-pull-request", mock: true, repository: repositoryId === "docs" ? docs : { host: "github.com", owner: "octo-org", name: "uatu" }, viewer: "octo-reviewer", checkedAt: 0, stale: false });
+    const uatuList = await githubApi.pullRequests("repo");
+    githubApi.pullRequests = async repositoryId => repositoryId === "docs"
+      ? { ...uatuList, repository: docs, pullRequests: [item(12, { title: "docs: search" })] }
+      : uatuList;
+    try {
+      pullRequestStore.syncRepositories([snapshot("repo", "uatu", "feat/view-pr"), snapshot("docs", "docs-site", "main")]);
+      await page.settle();
+      openSwitcher();
+      await page.settle();
+      const toggle = () => page.menu.querySelector<HTMLElement>('[data-switcher-menu-toggle="repository"]')!;
+      expect(toggle().textContent).toContain("octo-org/uatu");
+      expect(toggle().getAttribute("aria-haspopup")).toBe("menu");
+      page.click(toggle());
+      const options = [...page.menu.querySelectorAll<HTMLElement>('[data-switcher-menu="repository"] [role=menuitemradio]')];
+      // A repository not read yet is named by its local label.
+      expect(options.map(option => [option.textContent, option.getAttribute("aria-checked")])).toEqual([["octo-org/uatu" + "uatu", "true"], ["docs-site", "false"]]);
+      page.click(options[1]!);
+      await page.settle();
+      expect(pullRequestStore.state.repositoryId).toBe("docs");
+      expect(page.menu.querySelector<HTMLElement>('[data-switcher-menu="repository"]')!.hidden).toBe(true);
+      expect(toggle().textContent).toContain("octo-org/docs");
+      expect([...page.menu.querySelectorAll<HTMLElement>("#switcher-pull-requests [role=option]")].map(row => row.dataset.prRow)).toEqual(["12"]);
+
+      // Viewing #12 of the other repository: the status card says which.
+      pullRequestStore.select(12);
+      refreshSwitcher();
+      expect(page.menu.querySelector(".switcher-status-viewing")!.textContent).toContain("octo-org/docs #12");
+    } finally {
+      pullRequestStore.syncRepositories([]);
+    }
   });
 
   test("no credential: one line of guidance, no rows", async () => {

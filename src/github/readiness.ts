@@ -85,3 +85,22 @@ export function mergeReadinessView(
     stale,
   };
 }
+
+// The verdict in a word or two, for the details' Merge readiness heading. A
+// stale one is qualified in its rows ("Last known: blocked · as of 09:41").
+export function readinessVerdict(readiness: Pick<ReadinessView, "tone" | "reasons">): string {
+  switch (readiness.tone) {
+    case "blocked": return `${readiness.reasons.length} ${readiness.reasons.length === 1 ? "blocker" : "blockers"}`;
+    case "ready": return "Ready";
+    case "merged": return "Merged";
+    case "closed": return "Closed";
+    default: return "Unknown";
+  }
+}
+
+// What the pane's Details row says is behind it: `Blockers, 5 checks, 2
+// reviewers`, its first word the verdict when there is one.
+export function detailsDisclosureText(tone: ReadinessView["tone"], checks: number, reviewers: number): string {
+  const readiness = tone === "blocked" ? "Blockers" : tone === "ready" ? "Ready to merge" : "Readiness";
+  return [readiness, `${checks} ${checks === 1 ? "check" : "checks"}`, `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`].join(", ");
+}

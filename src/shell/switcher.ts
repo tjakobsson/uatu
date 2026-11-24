@@ -10,10 +10,12 @@
 // Both open one dialog (`#hub-menu`, a full-height sheet on touch, a panel
 // under the chip on desktop): a status card (Working in, and Viewing with
 // Back), one search over both lists, Checkouts (rendered by the Hub's part,
-// shell/hub-nav.ts, which owns the Hub's list and live activity), Pull
-// requests (the repository's open pull requests, a filter menu, the first
-// three and "Show all n"), and a footer with the Hub's dashboard and
-// Settings. Sign out is not here: it lives on the Hub's own pages.
+// shell/hub-nav.ts, which owns the Hub's list and live activity, grouped
+// under repository headings when there is more than one), Pull requests (the
+// repository's open pull requests, named in the heading, a selector when the
+// workspace has more than one Git repository; a filter menu, the first three
+// and "Show all n"), and a footer with the Hub's dashboard and Settings.
+// Sign out is not here: it lives on the Hub's own pages.
 //
 // Choosing a pull request that is not checked out asks first: View here
 // (show it in Files and Preview, nothing fetched or checked out) or Check
@@ -146,13 +148,20 @@ const state = {
   active: null as string | null,
   expanded: false,
   filter: "open" as PullRequestFilter,
-  filterMenuOpen: false,
+  // The heading's open menu: the filter, or the repository selector.
+  menu: null as "filter" | "repository" | null,
   list: null as PullRequestList | null,
+  // The repository the list (or its error) is for: a list of another than
+  // the store's current one is not shown.
+  listRepositoryId: null as string | null,
   listError: null as string | null,
   listNoCredential: false,
-  loading: false,
+  loadingFor: null as string | null,
   lookups: new Map<number, Lookup>(),
   step: null as Step | null,
+  // Opened at Pull requests: kept in view until its list has arrived, since
+  // the rows that arrive later are what lets the lists scroll that far.
+  revealPullRequests: false,
 };
 
 const $ = <T extends HTMLElement>(selector: string) => document.querySelector<T>(selector);
@@ -162,7 +171,7 @@ export function initSwitcher(): void {
   // A new document (tests mount one each): nothing carries over.
   root = document;
   hub = null;
-  Object.assign(state, { open: false, opener: null, query: "", settledQuery: "", active: null, expanded: false, filter: "open", filterMenuOpen: false, list: null, listError: null, listNoCredential: false, loading: false, step: null });
+  Object.assign(state, { open: false, opener: null, query: "", settledQuery: "", active: null, expanded: false, filter: "open", menu: null, list: null, listRepositoryId: null, listError: null, listNoCredential: false, loadingFor: null, step: null });
   state.lookups.clear();
   disposeStore?.();
   disposeStore = pullRequestStore.subscribe(() => {
@@ -364,7 +373,7 @@ export function openSwitcher(options: { opener?: HTMLElement; section?: "pull-re
   state.active = null;
   state.expanded = false;
   state.step = null;
-  state.filterMenuOpen = false;
+  state.menu = null;
   state.lookups.clear();
   const search = panel.querySelector<HTMLInputElement>("#switcher-search");
   if (search) search.value = "";
@@ -381,9 +390,8 @@ export function openSwitcher(options: { opener?: HTMLElement; section?: "pull-re
   // or stopped elsewhere, and the pull requests GitHub has now.
   hub?.refresh();
   void loadList(false);
-  if (options.section === "pull-requests") {
-    panel.querySelector<HTMLElement>("#switcher-pull-requests-section")?.scrollIntoView?.({ block: "start" });
-  }
+  state.revealPullRequests = options.section === "pull-requests";
+  revealPullRequests(panel);
   // On touch the search is not focused: the keyboard would cover the
   // lists. The dialog itself takes focus there.
   if (touchMode() || !search) panel.focus({ preventScroll: true });
@@ -394,8 +402,9 @@ export function closeSwitcher(options: { restoreFocus?: boolean } = {}): void {
   const panel = $<HTMLElement>("#hub-menu");
   if (!panel || !state.open) return;
   state.open = false;
+  state.revealPullRequests = false;
   state.step = null;
-  state.filterMenuOpen = false;
+  state.menu = null;
   if (state.settleTimer) clearTimeout(state.settleTimer);
   state.settleTimer = null;
   panel.hidden = true;
@@ -444,9 +453,9 @@ function onDocumentKeydown(event: KeyboardEvent): void {
     // A modal dialog above (the worktree dialog) owns its own Escape.
     // So does the worktree menu opened from + New.
     if ((document.activeElement as Element | null)?.closest?.('dialog[open], [role="menu"][aria-label="Create worktree"]')) return;
-    if (state.filterMenuOpen) {
+    if (state.menu) {
       event.preventDefault();
-      closeFilterMenu(true);
+      closeMenu(true);
       return;
     }
     event.preventDefault();
@@ -498,18 +507,24 @@ function wirePanel(panel: HTMLElement): void {
       void loadList(true);
       return;
     }
-    const filterToggle = target.closest<HTMLElement>("[data-switcher-filter-toggle]");
-    if (filterToggle) {
-      if (state.filterMenuOpen) closeFilterMenu(false);
-      else openFilterMenu();
+    const menuToggle = target.closest<HTMLElement>("[data-switcher-menu-toggle]");
+    if (menuToggle) {
+      const which = menuToggle.dataset.switcherMenuToggle as "filter" | "repository";
+      if (state.menu === which) closeMenu(false);
+      else openMenu(which);
       return;
     }
     const filterItem = target.closest<HTMLElement>("[data-switcher-filter]");
     if (filterItem) {
       state.filter = filterItem.dataset.switcherFilter as PullRequestFilter;
       state.expanded = false;
-      closeFilterMenu(true);
+      closeMenu(true);
       renderPanel();
+      return;
+    }
+    const repositoryItem = target.closest<HTMLElement>("[data-switcher-repository]");
+    if (repositoryItem) {
+      chooseRepository(repositoryItem.dataset.switcherRepository!);
       return;
     }
     const row = target.closest<HTMLElement>("[data-pr-row]");
@@ -529,7 +544,8 @@ function wirePanel(panel: HTMLElement): void {
     }, LOOKUP_DELAY_MS);
     // A number or URL naming an open pull request makes its row active.
     const named = pullRequestQueryTarget(state.query);
-    if (named && state.list && !otherRepositoryName(named, state.list.repository) && state.list.pullRequests.some(item => item.number === named.number)) {
+    const list = currentList();
+    if (named && list && !otherRepositoryName(named, list.repository) && list.pullRequests.some(item => item.number === named.number)) {
       state.active = `switcher-pr-${named.number}`;
     }
     renderPanel();
@@ -556,8 +572,8 @@ function wirePanel(panel: HTMLElement): void {
     options.find(option => option.id === state.active)?.scrollIntoView?.({ block: "nearest" });
   });
   panel.addEventListener("keydown", event => {
-    if (!state.filterMenuOpen) return;
-    const menu = panel.querySelector<HTMLElement>(".switcher-filter-menu");
+    if (!state.menu) return;
+    const menu = panel.querySelector<HTMLElement>(`[data-switcher-menu="${state.menu}"]`);
     if (!menu || !menu.contains(document.activeElement)) return;
     const items = [...menu.querySelectorAll<HTMLElement>("[role=menuitemradio]")];
     const index = items.indexOf(document.activeElement as HTMLElement);
@@ -565,7 +581,7 @@ function wirePanel(panel: HTMLElement): void {
       event.preventDefault();
       items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
     } else if (event.key === "Tab") {
-      closeFilterMenu(false);
+      closeMenu(false);
     }
   });
 }
@@ -609,6 +625,14 @@ function renderPanel(): void {
   renderPullRequests(panel);
   renderFooter(panel);
   paintActive();
+  revealPullRequests(panel);
+}
+
+function revealPullRequests(panel: HTMLElement): void {
+  if (!state.revealPullRequests) return;
+  panel.querySelector<HTMLElement>("#switcher-pull-requests-section")?.scrollIntoView?.({ block: "start" });
+  // Settled once the section says anything but that it is reading.
+  if (!panel.querySelector("#switcher-pr-notes")?.textContent?.includes("Reading pull requests…")) state.revealPullRequests = false;
 }
 
 function renderStatus(panel: HTMLElement): void {
@@ -630,7 +654,7 @@ function renderStatus(panel: HTMLElement): void {
     ${viewing !== null ? `<div class="switcher-status-viewing">
       <div class="switcher-status-row">
         <span class="switcher-status-key">Viewing</span>
-        <span class="switcher-status-value"><strong>#${viewing}</strong></span>
+        <span class="switcher-status-value">${pullRequestStore.otherRepositoryChosen() ? `<span class="switcher-status-repo">${escapeHtml(repositoryLabel(pullRequestStore.state.repositoryId))}</span> ` : ""}<strong>#${viewing}</strong></span>
         <button type="button" class="gh-link-button switcher-status-back" data-switcher-status-back aria-label="${escapeHtmlAttribute(`Back to ${branch}`)}">← Back</button>
       </div>
       <p class="switcher-status-note">Not checked out · terminal stays on ${escapeHtml(branch)}</p>
@@ -641,7 +665,7 @@ function renderStatus(panel: HTMLElement): void {
 }
 
 function pullRequestForBranch(branch: string): { number: number; title: string } | null {
-  const items = state.list?.pullRequests ?? [];
+  const items = currentList()?.pullRequests ?? [];
   const match = items.find(item => pullRequestLocalBranch(item) === branch);
   return match ? { number: match.number, title: match.title } : null;
 }
@@ -682,25 +706,38 @@ function renderFooter(panel: HTMLElement): void {
 
 async function loadList(manual: boolean): Promise<void> {
   const repositoryId = pullRequestStore.state.repositoryId;
-  if (pullRequestStore.state.enabled !== true || !repositoryId || state.loading) return;
+  if (pullRequestStore.state.enabled !== true || !repositoryId || state.loadingFor === repositoryId) return;
   if (pullRequestStore.state.summary?.status === "no-credential") return;
   if (hub && hub.facts().running === false) return;
-  state.loading = true;
+  state.loadingFor = repositoryId;
   if (manual) renderIfOpen();
+  // An answer for a repository that is no longer the current one is dropped.
+  const current = () => pullRequestStore.state.repositoryId === repositoryId;
   try {
     const list = await githubApi.pullRequests(repositoryId);
+    if (!current()) return;
     state.list = list;
+    state.listRepositoryId = repositoryId;
     state.listError = null;
     state.listNoCredential = false;
     // The Pull request pane marks pending reviews from it too.
     pullRequestStore.applyList(list);
   } catch (failure) {
+    if (!current()) return;
+    // A failed re-read keeps the repository's last list on screen.
+    if (state.listRepositoryId !== repositoryId) state.list = null;
+    state.listRepositoryId = repositoryId;
     state.listError = errorMessage(failure);
     state.listNoCredential = failure instanceof GithubRequestError && failure.status === 401;
   } finally {
-    state.loading = false;
+    if (state.loadingFor === repositoryId) state.loadingFor = null;
   }
   renderIfOpen();
+}
+
+// The list, when it is the current repository's.
+function currentList(): PullRequestList | null {
+  return state.listRepositoryId === pullRequestStore.state.repositoryId ? state.list : null;
 }
 
 function renderIfOpen(): void {
@@ -733,17 +770,24 @@ function lineHtml(parts: LinePart[]): string {
     .join(`<span class="switcher-sep" aria-hidden="true">·</span>`);
 }
 
+// The Hub's checkouts are its repository's: with another of the workspace's
+// repositories chosen, none of them is a pull request's checkout, and none
+// can be created from it.
+function hubForPullRequests(): SwitcherHub | null {
+  return hub && !pullRequestStore.otherRepositoryChosen() ? hub : null;
+}
+
 function rowFacts(item: PullRequestListItem) {
   const viewing = viewingNumber() === item.number;
   const own = pullRequestStore.branchNumber() === item.number;
-  const checkout = hub?.findCheckout(pullRequestLocalBranch(item)) ?? null;
+  const checkout = hubForPullRequests()?.findCheckout(pullRequestLocalBranch(item)) ?? null;
   const pending = Math.max(item.viewerPendingComments, pullRequestStore.pendingCount(item.number));
   return { viewing, checkedOut: own || checkout !== null, pending, own, checkout };
 }
 
 function rowAction(facts: ReturnType<typeof rowFacts>): string {
   if (facts.own) return facts.viewing ? "Go back to it" : "Shown when not viewing another";
-  if (facts.pending > 0 || !hub) return "View here";
+  if (facts.pending > 0 || !hubForPullRequests()) return "View here";
   if (facts.checkout && !facts.checkout.current) return "Choose: go to its worktree or view here";
   return "Choose: view here or check out";
 }
@@ -773,6 +817,36 @@ function lookupRowHtml(pr: PullRequestSummary): string {
     </div>`;
 }
 
+// The repository the pull requests are from, as the section heading names it:
+// `owner/name` once GitHub has said it, else the local repository's label.
+function repositoryLabel(repositoryId: string | null): string {
+  const known = pullRequestStore.githubName(repositoryId);
+  if (known) return known;
+  const summary = pullRequestStore.state.summary?.repository;
+  if (summary && repositoryId === pullRequestStore.state.repositoryId) return `${summary.owner}/${summary.name}`;
+  return pullRequestStore.repositories().find(repository => repository.id === repositoryId)?.label ?? "";
+}
+
+// `Pull requests · octo-org/uatu`: plain text with one repository, a compact
+// selector when the workspace has more than one Git repository.
+function renderRepository(slot: HTMLElement | null, menuSlot: HTMLElement | null, set: (element: HTMLElement, html: string) => void): void {
+  if (!slot || !menuSlot) return;
+  const current = pullRequestStore.state.repositoryId;
+  const label = repositoryLabel(current);
+  const repositories = pullRequestStore.repositories();
+  if (repositories.length < 2) {
+    set(slot, label ? `<span class="switcher-sep" aria-hidden="true">·</span><span class="switcher-pr-repo-name" title="${escapeHtmlAttribute(label)}">${escapeHtml(label)}</span>` : "");
+    set(menuSlot, "");
+    return;
+  }
+  const open = state.menu === "repository";
+  set(slot, `<span class="switcher-sep" aria-hidden="true">·</span><button type="button" class="gh-link-button switcher-repo-toggle" data-switcher-menu-toggle="repository" aria-haspopup="menu" aria-expanded="${open}" aria-label="${escapeHtmlAttribute(`Repository: ${label}. Choose another`)}" title="${escapeHtmlAttribute(label)}"><span class="switcher-pr-repo-name">${escapeHtml(label)}</span> <span aria-hidden="true">▾</span></button>`);
+  set(menuSlot, `<span class="switcher-filter-menu switcher-repo-menu" data-switcher-menu="repository" role="menu" aria-label="Pull requests from"${open ? "" : " hidden"}>${repositories.map(repository => {
+    const name = repositoryLabel(repository.id);
+    return `<button type="button" role="menuitemradio" aria-checked="${repository.id === current}" data-switcher-repository="${escapeHtmlAttribute(repository.id)}">${escapeHtml(name)}${name !== repository.label ? `<span class="switcher-repo-local">${escapeHtml(repository.label)}</span>` : ""}</button>`;
+  }).join("")}</span>`);
+}
+
 function renderPullRequests(panel: HTMLElement): void {
   const section = panel.querySelector<HTMLElement>("#switcher-pull-requests-section");
   const notes = panel.querySelector<HTMLElement>("#switcher-pr-notes");
@@ -788,13 +862,19 @@ function renderPullRequests(panel: HTMLElement): void {
     element.dataset.html = html;
     element.innerHTML = html;
   };
+  const repoSlot = panel.querySelector<HTMLElement>("#switcher-pr-repo");
+  const repoMenuSlot = panel.querySelector<HTMLElement>("#switcher-repo-menu-slot");
   if (!enabled) {
     set(notes, ""); set(listbox, ""); set(more, ""); set(filterSlot, "");
+    if (repoSlot) set(repoSlot, "");
+    if (repoMenuSlot) set(repoMenuSlot, "");
     return;
   }
+  renderRepository(repoSlot, repoMenuSlot, set);
   const searching = state.query.trim() !== "";
   const facts = currentFacts();
-  const noCredential = storeState.summary?.status === "no-credential" || state.listNoCredential;
+  const listIsCurrent = state.listRepositoryId === storeState.repositoryId;
+  const noCredential = storeState.summary?.status === "no-credential" || (listIsCurrent && state.listNoCredential);
   if (hub && facts.running === false) {
     set(filterSlot, ""); set(listbox, ""); set(more, "");
     set(notes, `<p class="switcher-note">Start ${escapeHtml(workspaceName())} to list pull requests.</p>`);
@@ -809,8 +889,8 @@ function renderPullRequests(panel: HTMLElement): void {
   }
   const filterLabel = PULL_REQUEST_FILTERS.find(entry => entry.value === state.filter)?.label ?? "Open";
   set(filterSlot, `<span class="switcher-filter">
-      <button type="button" class="gh-link-button switcher-filter-toggle" data-switcher-filter-toggle aria-haspopup="menu" aria-expanded="${state.filterMenuOpen}" aria-label="${escapeHtmlAttribute(`Filter: ${filterLabel}`)}">${escapeHtml(filterLabel)} <span aria-hidden="true">▾</span></button>
-      <span class="switcher-filter-menu" role="menu" aria-label="Filter pull requests"${state.filterMenuOpen ? "" : " hidden"}>${PULL_REQUEST_FILTERS.map(entry =>
+      <button type="button" class="gh-link-button switcher-filter-toggle" data-switcher-menu-toggle="filter" aria-haspopup="menu" aria-expanded="${state.menu === "filter"}" aria-label="${escapeHtmlAttribute(`Filter: ${filterLabel}`)}">${escapeHtml(filterLabel)} <span aria-hidden="true">▾</span></button>
+      <span class="switcher-filter-menu" data-switcher-menu="filter" role="menu" aria-label="Filter pull requests"${state.menu === "filter" ? "" : " hidden"}>${PULL_REQUEST_FILTERS.map(entry =>
         `<button type="button" role="menuitemradio" aria-checked="${entry.value === state.filter}" data-switcher-filter="${entry.value}">${escapeHtml(entry.label)}</button>`).join("")}</span>
     </span>`);
 
@@ -818,9 +898,11 @@ function renderPullRequests(panel: HTMLElement): void {
   const stale = summary && (summary.status === "rate-limited" || summary.status === "unavailable");
   const noteParts: string[] = [];
   if (stale) noteParts.push(`<p class="switcher-note" role="status">${summary.status === "rate-limited" ? "Rate-limited" : "GitHub unreachable"} · as of ${escapeHtml(clockTime(summary.checkedAt))} · <button type="button" class="gh-link-button" data-switcher-retry>Retry</button></p>`);
-  const list = state.list;
+  const list = currentList();
+  // Another repository chosen (or the first opening): read its list.
+  if (state.listRepositoryId !== storeState.repositoryId) void loadList(false);
   if (!list) {
-    noteParts.push(state.listError
+    noteParts.push(listIsCurrent && state.listError
       ? `<p class="switcher-note is-error" role="alert">${escapeHtml(state.listError)} <button type="button" class="gh-link-button" data-switcher-retry>Retry</button></p>`
       : `<p class="switcher-note">Reading pull requests…</p>`);
     set(notes, noteParts.join("")); set(listbox, ""); set(more, "");
@@ -864,22 +946,35 @@ function renderPullRequests(panel: HTMLElement): void {
   section.hidden = searching && shown.length === 0 && lookupRow === "" && noteParts.length === 0;
 }
 
-function openFilterMenu(): void {
-  state.filterMenuOpen = true;
+function openMenu(which: "filter" | "repository"): void {
+  state.menu = which;
   renderPanel();
-  document.querySelector<HTMLElement>(`.switcher-filter-menu [aria-checked="true"]`)?.focus();
+  document.querySelector<HTMLElement>(`[data-switcher-menu="${which}"] [aria-checked="true"]`)?.focus();
 }
 
-function closeFilterMenu(focusToggle: boolean): void {
-  state.filterMenuOpen = false;
+function closeMenu(focusToggle: boolean): void {
+  const which = state.menu;
+  state.menu = null;
   renderPanel();
-  if (focusToggle) document.querySelector<HTMLElement>("[data-switcher-filter-toggle]")?.focus();
+  if (focusToggle && which) document.querySelector<HTMLElement>(`[data-switcher-menu-toggle="${which}"]`)?.focus();
+}
+
+// The repository selector: another of the workspace's Git repositories
+// becomes the pull request repository (page-local). A pull request viewed
+// from the old one is let go first, so Files and Preview show the checkout.
+function chooseRepository(repositoryId: string): void {
+  const changed = repositoryId !== pullRequestStore.state.repositoryId;
+  if (changed && viewingNumber() !== null) showBranch("none");
+  state.expanded = false;
+  state.lookups.clear();
+  if (changed) pullRequestStore.chooseRepository(repositoryId);
+  closeMenu(true);
 }
 
 // --- Choosing a pull request ------------------------------------------------
 
 function chosenPullRequest(number: number): ChosenPullRequest | null {
-  const item = state.list?.pullRequests.find(candidate => candidate.number === number);
+  const item = currentList()?.pullRequests.find(candidate => candidate.number === number);
   if (item) return item;
   for (const lookup of state.lookups.values()) {
     if (lookup.status === "found" && lookup.pr.number === number) return lookup.pr;
@@ -897,16 +992,16 @@ export function choosePullRequest(number: number): void {
     else viewHere(number);
     return;
   }
-  const checkout = hub?.findCheckout(pullRequestLocalBranch(pr)) ?? null;
+  const checkout = hubForPullRequests()?.findCheckout(pullRequestLocalBranch(pr)) ?? null;
   if (checkout?.current) {
     closeSwitcher({ restoreFocus: false });
     showBranch("heading");
     return;
   }
-  const pending = Math.max(state.list?.pullRequests.find(item => item.number === number)?.viewerPendingComments ?? 0, pullRequestStore.pendingCount(number));
+  const pending = Math.max(currentList()?.pullRequests.find(item => item.number === number)?.viewerPendingComments ?? 0, pullRequestStore.pendingCount(number));
   // A pending review can only be finished in the view; outside a Hub there
   // is nothing else to choose.
-  if (!hub || (pending > 0 && checkout === null)) {
+  if (!hubForPullRequests() || (pending > 0 && checkout === null)) {
     viewHere(number);
     return;
   }
@@ -985,14 +1080,14 @@ function renderStep(element: HTMLElement, step: Step): void {
     </div>`;
   const viewLines = [`Opens in Files and Preview, from GitHub`, `Terminal and agent stay on ${escapeHtml(branch)}`];
   if (step.kind === "choice") {
-    const found = hub?.findCheckout(pullRequestLocalBranch(pr)) ?? null;
+    const found = hubForPullRequests()?.findCheckout(pullRequestLocalBranch(pr)) ?? null;
     const view = choiceCard("view", "View here", `View #${pr.number} here`, viewLines, { primary: found === null });
     let cards: string;
     if (found) {
       const state_ = found.state ? ` · <span class="switcher-part${found.tone ? ` is-${found.tone}` : ""}">${escapeHtml(found.state.toLowerCase())}</span>` : "";
       cards = choiceCard("go", "Go to its worktree", `Go to its worktree, ${found.label}`, [`Opens ${escapeHtml(found.label)}${state_}`, "Its own terminal and agent"], { primary: true }) + view;
     } else {
-      cards = view + (hub?.canCreateWorktree()
+      cards = view + (hubForPullRequests()?.canCreateWorktree()
         ? choiceCard("check-out", "Check out as a worktree…", `Check out #${pr.number} as a worktree…`, [`New folder ${escapeHtml(checkout.folderName)}, on branch ${escapeHtml(checkout.branch)}`, "Its own terminal and agent"])
         : "");
     }
@@ -1004,7 +1099,7 @@ function renderStep(element: HTMLElement, step: Step): void {
     element.setAttribute("aria-labelledby", "switcher-step-title");
     return;
   }
-  const mock = Boolean(state.list?.mock ?? true);
+  const mock = Boolean(currentList()?.mock ?? true);
   if (step.kind === "confirm") {
     const source = pr.isCrossRepository ? `<code>pull/${pr.number}/head</code> from the base repository` : `<code>origin/${escapeHtml(pr.headRefName)}</code>`;
     element.innerHTML = `${head(`Check out #${pr.number}`)}

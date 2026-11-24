@@ -44,12 +44,19 @@ export function scopedPullRequestNumber(selected: number | null, branchNumber: n
 
 // Focus and visibility changes come in bursts (switching windows, a tab
 // coming back): they refresh at most this often.
-// The workspace's pull request repository: its first Git repository. The
-// pane, the store and the pull request URL (`?pr=<n>`, which may leave the
-// repository out) all mean this one.
-export function pullRequestRepository<T extends { metadata: { status: string } }>(repositories: readonly T[]): T | null {
-  return repositories.find(candidate => candidate.metadata.status === "git") ?? null;
+// The workspace's pull request repository: its first Git repository, unless
+// the page chose another of its Git repositories (`chosen`: the switcher's
+// repository selector, or a pull request URL naming one). The pull request
+// URL (`?pr=<n>`) leaves the first one out; it names any other.
+export function pullRequestRepository<T extends { id: string; metadata: { status: string } }>(repositories: readonly T[], chosen: string | null = null): T | null {
+  const git = repositories.filter(candidate => candidate.metadata.status === "git");
+  return (chosen === null ? undefined : git.find(candidate => candidate.id === chosen)) ?? git[0] ?? null;
 }
+
+// One of the workspace's Git repositories, as the repository selector names
+// it: the GitHub repository (`owner/name`) once a summary has said it, else
+// its local label.
+export type PullRequestRepositoryOption = { id: string; label: string; github: string | null };
 
 export type PullRequestPreviewParams = {
   repositoryId: string;
@@ -101,6 +108,13 @@ export class PullRequestStore {
   private selected: number | null = null;
   private readonly listeners = new Set<Listener>();
   private repositoryKey = "";
+  // Page-local: the Git repository chosen in the switcher (or by a pull
+  // request URL), and the snapshots it is chosen from.
+  private chosenRepositoryId: string | null = null;
+  private snapshots: readonly RepositorySnapshot[] = [];
+  // The GitHub repository (`owner/name`) each local repository's summary or
+  // list named.
+  private readonly githubNames = new Map<string, string>();
   private generation = 0;
   // Pull requests on screen, by who shows them (the PR view, the pane's
   // picked PR): re-read on focus and Retry.
@@ -157,7 +171,8 @@ export class PullRequestStore {
   // Called with the repository snapshots on every sidebar render. Fetches
   // only when the active repository, its branch or its HEAD changed.
   syncRepositories(repositories: readonly RepositorySnapshot[]): void {
-    const repository = pullRequestRepository(repositories);
+    this.snapshots = repositories;
+    const repository = pullRequestRepository(repositories, this.chosenRepositoryId);
     const key = repository ? `${repository.id}\n${repository.metadata.branch ?? ""}\n${repository.metadata.commitShort ?? ""}` : "";
     if (key === this.repositoryKey) return;
     const previousRepositoryId = this.state.repositoryId;
@@ -173,6 +188,36 @@ export class PullRequestStore {
     }
     this.listenForReturn();
     void this.refresh(false);
+  }
+
+  // The workspace's Git repositories, the first being the default pull
+  // request repository. More than one makes the switcher's Pull requests
+  // heading a repository selector.
+  repositories(): PullRequestRepositoryOption[] {
+    return this.snapshots.filter(repository => repository.metadata.status === "git")
+      .map(repository => ({ id: repository.id, label: repository.label, github: this.githubNames.get(repository.id) ?? null }));
+  }
+
+  // The GitHub repository (`owner/name`) a local repository's data named.
+  githubName(repositoryId: string | null): string | null {
+    return repositoryId === null ? null : this.githubNames.get(repositoryId) ?? null;
+  }
+
+  // Whether the pull request repository is another than the workspace's
+  // first: the status card names it beside a viewed pull request then.
+  otherRepositoryChosen(): boolean {
+    const first = pullRequestRepository(this.snapshots);
+    return first !== null && this.state.repositoryId !== null && this.state.repositoryId !== first.id;
+  }
+
+  // Makes another of the workspace's Git repositories the pull request
+  // repository (page-local). Before the snapshots arrive it waits for them;
+  // an id that names none of them changes nothing.
+  chooseRepository(repositoryId: string): void {
+    if (repositoryId === this.chosenRepositoryId) return;
+    if (this.snapshots.length > 0 && !this.repositories().some(repository => repository.id === repositoryId)) return;
+    this.chosenRepositoryId = repositoryId;
+    if (this.snapshots.length > 0) this.syncRepositories(this.snapshots);
   }
 
   // A surface shows (or, with null, stops showing) a pull request.
@@ -198,6 +243,7 @@ export class PullRequestStore {
   }
 
   applyList(list: PullRequestList): void {
+    if (this.state.repositoryId) this.githubNames.set(this.state.repositoryId, `${list.repository.owner}/${list.repository.name}`);
     this.listedPending.clear();
     for (const item of list.pullRequests) this.listedPending.set(item.number, item.viewerPendingComments);
     this.emit();
@@ -250,6 +296,7 @@ export class PullRequestStore {
   applySummary(summary: GithubSummary): void {
     if (summary.pullRequest && this.selected === summary.pullRequest.number) this.selected = null;
     if (summary.pullRequest) this.knownPending.set(summary.pullRequest.number, summary.pullRequest.viewerPendingComments);
+    if (summary.repository && this.state.repositoryId) this.githubNames.set(this.state.repositoryId, `${summary.repository.owner}/${summary.repository.name}`);
     const retry = retryAfterSummary(this.state.retry, this.state.summary?.status ?? null, summary.status);
     this.state = { ...this.state, enabled: true, summary, loading: false, error: null, retry };
   }

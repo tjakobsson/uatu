@@ -125,6 +125,9 @@ export function activatePullRequestPreview(params: PullRequestPreviewParams, opt
   setFollowEnabled(false);
   setSelectedId(null);
   setPreviewMode({ kind: "pull-request", repositoryId: params.repositoryId, number: params.number });
+  // A pull request of another of the workspace's Git repositories makes that
+  // one the pull request repository first, so the pick is read from it.
+  pullRequestStore.chooseRepository(params.repositoryId);
   pullRequestStore.select(params.number);
   syncFollowToggle();
   if (options.pushHistory) pushPullRequestPreview(params.repositoryId, params.number, params.tab, { file: params.file, thread: params.thread });

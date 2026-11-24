@@ -122,7 +122,7 @@ The workspace switcher SHALL focus on switching and on creating worktrees in the
 #### Scenario: Picker repository identity and grouping are unambiguous
 - **WHEN** the switcher shows workspaces with or without repository-family membership
 - **THEN** the status card SHALL name the current checkout's repository followed by its branch, identically for main and child, and the chip and touch button SHALL name its branch
-- **AND** Checkouts rows SHALL be one flat list on one left edge without indentation or group headers, naming a main checkout by its repository and a worktree by its branch, with the branch and one state on a muted second line; a worktree of another repository names that repository on its second line
+- **AND** Checkouts rows SHALL share one left edge without indentation or tree lines, naming a main checkout by its repository and a worktree by its branch, with the branch and one state on a muted second line; checkouts of more than one repository SHALL be grouped under compact repository headings (the current repository's first), and a row never repeats its repository
 - **AND** workspaces without a repository family SHALL keep only their display name without branch; grouping and identity MUST NOT be inferred from names
 
 #### Scenario: Dashboard hierarchy preserves focused lifecycle and policy access
@@ -177,7 +177,7 @@ The workspace switcher SHALL focus on switching and on creating worktrees in the
 - **WHEN** a user opens the switcher from a child worktree of a repository
 - **THEN** the status card reads that checkout's repository followed by its branch, in the same weight and size as a main checkout's own repository-then-branch reading, and the chip keeps its running/stopped indicator and its activity badge
 - **WHEN** the switcher lists checkouts of two repositories
-- **THEN** **+ New** in the Checkouts heading belongs to the current repository, and every row shares one left edge with no indentation or tree lines
+- **THEN** **+ New** in the Checkouts heading belongs to the current repository, each repository's rows sit under its own small heading, and every row shares one left edge with no indentation or tree lines
 - **AND** the switcher fits a 390 px viewport without horizontal overflow in both colour schemes
 
 #### Scenario: Worktree actions are available without leaving the workspace

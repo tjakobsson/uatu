@@ -35,11 +35,12 @@ Activating the switcher SHALL open one labelled modal dialog titled `Switch`: a 
 - **WHEN** the switcher opens on `uatu · feat/view-pr` while #618 is viewed
 - **THEN** the card reads `Working in uatu · feat/view-pr`, then `Viewing #618` with `← Back` (named `Back to feat/view-pr`) and the muted line `Not checked out · terminal stays on feat/view-pr`
 - **AND** with nothing viewed the Viewing block is absent
+- **AND** when the viewed pull request is from another of the workspace's Git repositories than its first, the Viewing line names that repository, like `Viewing octo-org/docs #12`
 - **AND** while the current session is stopped the card reads `Working in … · Stopped` with Start, which starts the session in place without navigating
 
 #### Scenario: One search over both lists
 - **WHEN** the user types `63` in the search field
-- **THEN** the status card folds away and Checkouts and Pull requests show only rows whose name, branch, number, title or author match
+- **THEN** the status card folds away and Checkouts and Pull requests show only rows whose name, branch, number, title or author match, or whose repository's name does (a checkout's repository)
 - **AND** a number or a pull request URL also finds a merged or closed pull request after a pause, as one result
 - **AND** on touch the field is not focused on open, so the keyboard does not cover the lists; on desktop focus starts in it
 
@@ -58,13 +59,21 @@ Activating the switcher SHALL open one labelled modal dialog titled `Switch`: a 
 - **THEN** the switcher's footer offers Hub dashboard and Settings, and Sign out is on those pages
 
 ### Requirement: Checkout rows show what helps you choose
-**Checkouts** SHALL list every Hub workspace except the current one, which the status card names, ordered by who needs you. Each row SHALL have at most two lines, and tapping it SHALL be its only action. The heading SHALL carry **+ New** when the current repository can host worktrees.
+**Checkouts** SHALL list every Hub workspace except the current one, which the status card names, ordered by who needs you. Each row SHALL have at most two lines, and tapping it SHALL be its only action. The heading SHALL carry **+ New** when the current repository can host worktrees. When the checkouts belong to more than one repository, they SHALL be grouped under compact repository headings; with one repository there SHALL be no heading.
 
 #### Scenario: Two lines and an order
 - **WHEN** the switcher lists other checkouts
 - **THEN** line 1 is the checkout's pull request (`#636 title`, when its branch has one in the listed pull requests) or else its name: the repository for a main checkout, the branch for a worktree, the display name otherwise
 - **AND** line 2, muted, is the branch unless line 1 already is the branch, then one state
 - **AND** rows are ordered awaiting you, working, finished, idle, stopped, then unavailable
+
+#### Scenario: Checkouts of two repositories
+- **WHEN** the switcher opens in `uatu · feat/view-pr` and the Hub also has `uatu`'s worktree `fix/pane-heights` and the repository `docs-site` with its worktrees `feat/search` and `fix/typos`
+- **THEN** Checkouts shows a group headed `uatu` holding `fix/pane-heights`, then a group headed `docs-site` holding `docs-site`, `feat/search` and `fix/typos`, each group a labelled group named by its repository
+- **AND** each heading is the repository's name, small and muted, and sticks to the top of the scrolling lists while its group's rows pass under it
+- **AND** the current repository's group comes first, the others follow by name, and folders outside any repository come last under `Other folders`; within a group the rows keep their two lines and their order by who needs you, and no row repeats its repository on line 2
+- **AND** the current checkout's repository counts even without another row of its own, so a list of only `docs-site`'s checkouts still has its heading
+- **AND** typing `docs-site` in the search lists that repository's three checkouts under their heading
 
 #### Scenario: States on line 2
 - **WHEN** other checkouts await the user, work, finished, are stopped, are missing, or conflict
@@ -86,12 +95,19 @@ Activating the switcher SHALL open one labelled modal dialog titled `Switch`: a 
 - **THEN** their rows show states only, never conversation content or titles
 
 ### Requirement: Pull request rows show who, checks and review
-**Pull requests** SHALL list the current repository's open pull requests as two-line rows with a filter menu in the heading (`Open ▾`: Open, Review requested, Mine, Drafts), showing the first three rows and then `Show all n`, which expands the list in place. Pull requests awaiting the viewer's review or holding the viewer's pending review SHALL sort first.
+**Pull requests** SHALL list the current repository's open pull requests as two-line rows, with the repository named in the heading (`Pull requests · octo-org/uatu`) and a filter menu in the heading (`Open ▾`: Open, Review requested, Mine, Drafts), showing the first three rows and then `Show all n`, which expands the list in place. Pull requests awaiting the viewer's review or holding the viewer's pending review SHALL sort first.
 
 #### Scenario: What a row says
 - **WHEN** the switcher lists pull requests
 - **THEN** line 1 reads `#number title`, and line 2, muted, the author, `Fork` or `Draft`, checks (`✓ checks`, `✗ checks`, `◷ checks running`) and the review state: `approved`, `changes requested`, `review required`, `review requested` (from the viewer), or `✎ n pending` for the viewer's unsent review, which takes the review slot
 - **AND** only the fact to act on is coloured: amber for `review requested` and `✎ n pending`, red for `changes requested`, green for `approved`
+
+#### Scenario: Which repository's pull requests
+- **WHEN** the switcher lists pull requests
+- **THEN** the heading reads `Pull requests · octo-org/uatu`: the GitHub repository once GitHub has named it, else the local repository's name, cut at its end when long
+- **AND** with one Git repository in the workspace the name is plain text
+- **AND** when the workspace has more than one Git repository the name is a compact selector, a menu naming each repository, that lists the chosen repository's pull requests; the choice is page-local, a pull request viewed from the previous repository is let go first, and a pull request URL naming one of the repositories (`?repository=`) chooses it too
+- **AND** with another of its repositories chosen, the Hub's checkouts are not offered as that repository's: its rows view the pull request here
 
 #### Scenario: Rows and marks
 - **WHEN** #618 is viewed and #636 is checked out in another worktree

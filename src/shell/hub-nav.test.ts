@@ -10,6 +10,7 @@ import {
   applyWorkspaceActivity,
   checkoutBranchLabel,
   checkoutRow,
+  groupCheckouts,
   chipBranchLabel,
   chipLabel,
   chipDotClass,
@@ -90,26 +91,58 @@ describe("checkoutRow", () => {
   const awaiting = new Map([["uatu-x", { running: true, working: true, awaiting: true, finished: false }]]);
 
   test("a worktree: its pull request, then the branch and one state", () => {
-    expect(checkoutRow(all, child, awaiting, { pullRequest: { number: 636, title: "fix(sidebar): restore pane heights" }, mainId: "uatu" }))
+    expect(checkoutRow(all, child, awaiting, { pullRequest: { number: 636, title: "fix(sidebar): restore pane heights" } }))
       .toEqual({ pullRequest: { number: 636, title: "fix(sidebar): restore pane heights" }, name: "fix/pane-heights", facts: ["fix/pane-heights"], state: { text: "Awaiting you", tone: "awaiting" }, mark: "live" });
   });
 
   test("a worktree without a pull request is named by its branch, which line 2 doesn't repeat", () => {
-    expect(checkoutRow(all, child, new Map(), { pullRequest: null, mainId: "uatu" })).toMatchObject({ name: "fix/pane-heights", facts: [], state: null });
+    expect(checkoutRow(all, child, new Map(), { pullRequest: null })).toMatchObject({ name: "fix/pane-heights", facts: [], state: null });
   });
 
   test("a main checkout: the repository, then its branch; stopped is hollow", () => {
-    expect(checkoutRow(all, docs, new Map(), { pullRequest: null, mainId: "uatu" }))
+    expect(checkoutRow(all, docs, new Map(), { pullRequest: null }))
       .toEqual({ pullRequest: null, name: "octo-docs", facts: ["main"], state: { text: "Stopped", tone: "stopped" }, mark: "hollow" });
   });
 
-  test("another repository's worktree names that repository; a busy one has a spinner", () => {
+  test("another repository's worktree leaves its repository to the group heading; a busy one has a spinner", () => {
     const busy = new Map([["docs-y", { running: true, working: true, awaiting: false, finished: false }]]);
-    expect(checkoutRow(all, docsChild, busy, { pullRequest: null, mainId: "uatu" })).toMatchObject({ name: "draft", facts: ["octo-docs"], state: { text: "Working", tone: "working" }, mark: "busy" });
+    expect(checkoutRow(all, docsChild, busy, { pullRequest: null })).toMatchObject({ name: "draft", facts: [], state: { text: "Working", tone: "working" }, mark: "busy" });
   });
 
   test("a workspace outside any repository keeps its display name alone", () => {
-    expect(checkoutRow(all, plain, new Map(), { pullRequest: null, mainId: "uatu" })).toMatchObject({ name: "Notes", facts: [], state: null, mark: "live" });
+    expect(checkoutRow(all, plain, new Map(), { pullRequest: null })).toMatchObject({ name: "Notes", facts: [], state: null, mark: "live" });
+  });
+});
+
+describe("groupCheckouts", () => {
+  const main = { ...summary("uatu", true, "uatu"), repositoryId: "r", createWorktree: true, branch: "main" };
+  const child = { ...summary("uatu-x", true, "x"), repositoryId: "r", parentId: "uatu", branch: "fix/pane-heights" };
+  const docs = { ...summary("docs", false, "docs-site"), repositoryId: "d", createWorktree: true, branch: "main" };
+  const docsChild = { ...summary("docs-y", true, "y"), repositoryId: "d", parentId: "docs", branch: "draft" };
+  const docsOther = { ...summary("docs-z", false, "z"), repositoryId: "d", parentId: "docs", branch: "fix/typos" };
+  const atlas = { ...summary("atlas", true, "atlas"), repositoryId: "a", createWorktree: true, branch: "main" };
+  const plain = summary("notes", true, "Notes");
+  const view = (result: ReturnType<typeof groupCheckouts>) => ({ headings: result.headings, groups: result.groups.map(group => [group.name, ...group.workspaces.map(workspace => workspace.id)]) });
+
+  test("one repository: no headings, one group in status order", () => {
+    expect(view(groupCheckouts([main, child], new Map(), "uatu"))).toEqual({ headings: false, groups: [["uatu", "uatu-x"]] });
+  });
+
+  test("several repositories: the current one first, then the others by name, folders outside any repository last", () => {
+    const awaiting = new Map([["docs-y", { running: true, working: false, awaiting: true, finished: false }]]);
+    expect(view(groupCheckouts([plain, docs, docsOther, atlas, docsChild, main, child], awaiting, "uatu-x"))).toEqual({
+      headings: true,
+      groups: [["uatu", "uatu"], ["atlas", "atlas"], ["docs-site", "docs-y", "docs", "docs-z"], ["Other folders", "notes"]],
+    });
+  });
+
+  test("the current repository counts even with no row of its own", () => {
+    expect(view(groupCheckouts([main, docs, docsChild], new Map(), "uatu"))).toEqual({ headings: true, groups: [["docs-site", "docs-y", "docs"]] });
+  });
+
+  test("one repository and plain folders are two groups; plain folders alone are one", () => {
+    expect(groupCheckouts([main, child, plain], new Map(), "uatu").headings).toBe(true);
+    expect(view(groupCheckouts([plain, summary("other", true, "Other")], new Map(), "notes"))).toEqual({ headings: false, groups: [["Other folders", "other"]] });
   });
 });
 
@@ -1616,7 +1649,7 @@ describe("initHubNav renders the status card, the chip and the Checkouts rows", 
     expect(document.querySelector('#hub-menu a[href="/settings#personal-chat-preferences-pane"]')).toBe(settings);
   });
 
-  test("the chip names the branch, the status card the repository, and the rows are one flat list", async () => {
+  test("the chip names the branch, the status card the repository, and the rows are grouped by repository", async () => {
     const { document, window } = await mount("/s/atlas-trst/", [
       { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },
       { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "Trst", ownership: "uatu", sourceRef: "main" },
@@ -1634,14 +1667,20 @@ describe("initHubNav renders the status card, the chip and the Checkouts rows", 
     expect(menu.hidden).toBe(false);
     // The status card names the repository, then the branch.
     expect(menu.querySelector("#switcher-status")!.textContent).toMatch(/Working in\s*atlas\s*·\s*Trst/);
-    // No group headers and no Sign out; one + New, for this repository.
-    expect(menu.querySelector(".hub-menu-group")).toBeNull();
+    // No Sign out; one + New, for this repository.
     expect(menu.textContent).not.toContain("Sign out");
     expect([...menu.querySelectorAll("[data-fork-for]")].map(button => button.getAttribute("aria-label"))).toEqual(["New worktree in atlas"]);
 
+    // A repository and a folder outside any: two groups, each a labelled
+    // group with a small heading, this repository's first.
+    const groups = [...menu.querySelectorAll<HTMLElement>("#switcher-checkouts > .switcher-repo-group")];
+    expect(groups.map(group => [group.getAttribute("role"), group.getAttribute("aria-label"), group.querySelector(".switcher-repo-heading")!.textContent])).toEqual([
+      ["group", "atlas", "atlas"],
+      ["group", "Other folders", "Other folders"],
+    ]);
     const rows = [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")];
-    // Every checkout but the current one, running before stopped.
-    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "notes", "atlas-ext"]);
+    // Every checkout but the current one; running before stopped in a group.
+    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "atlas-ext", "notes"]);
     const row = (id: string) => menu.querySelector<HTMLElement>(`.hub-menu-item[data-workspace-id="${id}"]`)!;
     expect(row("atlas").getAttribute("role")).toBe("option");
     expect(row("atlas").querySelector(".switcher-row-line1")!.textContent).toBe("atlas");
@@ -1652,6 +1691,16 @@ describe("initHubNav renders the status card, the chip and the Checkouts rows", 
     expect(row("notes").querySelector(".switcher-row-line1")!.textContent).toBe("Notes");
     // Provenance stays on the dashboard.
     expect(menu.querySelector(".hub-menu-provenance")).toBeNull();
+
+    // A re-render keeps the groups and their rows as the nodes on screen.
+    const group = groups[0]!;
+    const atlasRow = row("atlas");
+    const toggle = document.querySelector<HTMLElement>("#hub-toggle")!;
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    for (let attempt = 0; attempt < 20; attempt += 1) await Bun.sleep(1);
+    expect(menu.querySelector("#switcher-checkouts > .switcher-repo-group")).toBe(group);
+    expect(row("atlas")).toBe(atlasRow);
   });
 
   test("a missing docs folder is labelled a folder in the picker, a missing worktree a checkout", async () => {
@@ -1677,20 +1726,30 @@ describe("initHubNav renders the status card, the chip and the Checkouts rows", 
       { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },
       { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "fix/pane-heights", ownership: "uatu", sourceRef: "main" },
       { id: "beacon", displayName: "beacon", path: "/src/beacon", running: false, repositoryId: "repo-2", branch: "main", createWorktree: true },
+      { id: "b2", displayName: "Probe", path: "/src/b2", running: false, repositoryId: "repo-2", parentId: "beacon", branch: "probe" },
     ]);
     document.querySelector<HTMLElement>("#hub-toggle")!.dispatchEvent(new window.Event("click", { bubbles: true }));
     const menu = document.querySelector<HTMLElement>("#hub-menu")!;
     const search = menu.querySelector<HTMLInputElement>("#switcher-search")!;
     const ids = () => [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")].map(row => row.dataset.workspaceId);
-    expect(ids()).toEqual(["atlas-trst", "beacon"]);
+    const headings = () => [...menu.querySelectorAll(".switcher-repo-heading")].map(heading => heading.textContent);
+    expect(ids()).toEqual(["atlas-trst", "beacon", "b2"]);
+    expect(headings()).toEqual(["atlas", "beacon"]);
     search.value = "pane";
     search.dispatchEvent(new window.Event("input", { bubbles: true }));
     expect(ids()).toEqual(["atlas-trst"]);
+    // A group with no match folds away; the match keeps its heading.
+    expect(headings()).toEqual(["atlas"]);
+    // A repository's name lists its rows, the ones that don't say it too.
+    search.value = "beacon";
+    search.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(ids()).toEqual(["beacon", "b2"]);
+    expect(headings()).toEqual(["beacon"]);
     // While searching, the status card folds away.
     expect(menu.hasAttribute("data-searching")).toBe(true);
     search.value = "stopped";
     search.dispatchEvent(new window.Event("input", { bubbles: true }));
-    expect(ids()).toEqual(["beacon"]);
+    expect(ids()).toEqual(["beacon", "b2"]);
     // Arrow keys make a row active for the combobox; Escape closes.
     search.dispatchEvent(Object.assign(new window.Event("keydown", { bubbles: true }), { key: "ArrowDown" }));
     expect(search.getAttribute("aria-activedescendant")).toBe("switcher-checkout-beacon");

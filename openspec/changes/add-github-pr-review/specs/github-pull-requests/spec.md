@@ -156,14 +156,14 @@ When a repository has a detected pull request, the workspace SHALL show it witho
 
 #### Scenario: A short pane
 - **WHEN** the pane holding the summary is only a few lines tall
-- **THEN** a top row pinned while the pane scrolls holds the state, the review decision and the `Details` toggle on one line (the number is in the pane header), and below it the title, checks count and the first merge blocker sit above the summary's actions
-- **AND** the review decision is never cut: `Open`, `Changes requested` and `Details` fit one line in a 300px sidebar, and in a narrower one the decision wraps under the state
+- **THEN** a top row pinned while the pane scrolls holds the state and the review decision (the number is in the pane header), and below it the title and one status line (the checks count and the first merge blocker) sit above the summary's actions, followed by the full-width `Details` row
+- **AND** the review decision is never cut: `Open` and `Changes requested` fit one line in a 300px sidebar, and in a narrower one the decision wraps under the state
 - **AND** whenever what the pane says changes (the pull request, the status, the review decision, the pending count, an update on GitHub, or the fake's Reset data), the pane starts at its top, so its title row is in view
 - **AND** the pinned top row covers the pane from its top edge: nothing scrolled shows above it, with Details open or closed
 
 #### Scenario: The pane on touch fills the Files tab
 - **WHEN** the Pull request pane is the expanded pane of touch mode's accordion
-- **THEN** its details start open, so the pane's height holds the pull request's branches, readiness, checks and reviewers instead of empty space, and the Details toggle still folds them
+- **THEN** its details start open, so the pane's height holds the pull request's readiness, checks, reviewers, branches and stats instead of empty space, and the Details row still folds them
 - **AND** with less to show than the room (Details folded, no pull request, no credential) the pane is as tall as its content and the folded panes' headers follow right under it, leaving no blank stretch inside the pane
 - **AND** the title shows at most its clamped lines (two on touch, a viewed pull request's too), a clipped extra line never shows, a one-line title leaves no gap under it, its full text is its tooltip, and its tap box is still at least 44px tall
 
@@ -196,9 +196,20 @@ When a repository has a detected pull request, the workspace SHALL show it witho
 - **WHEN** the pane is at its default height, with Details closed or open
 - **THEN** its bottom edge falls between rows: a row that would be cut is left wholly below it, and the pixels go to another pane
 
+#### Scenario: The Details row
+- **WHEN** the pane shows an open pull request blocked twice, with 5 checks and 2 reviewers
+- **THEN** under the actions a full-width row reads `Details`, then muted `Blockers, 5 checks, 2 reviewers`, then a chevron; it is a button with `aria-expanded` and `aria-controls`, at least 44px tall on touch, and a bordered button on desktop that stays marked while its panel is open
+- **AND** it never cuts its words: in a 300px sidebar its summary wraps rather than ending in an ellipsis
+- **AND** on a touch screen 500px tall or less, which has the width and not the height, it fills the rest of the actions' line instead of a line of its own
+
+#### Scenario: The details are separated and easy to read
+- **WHEN** the details are open, on a 390×844 or 844×390 touch phone or a 1440×900 desktop, in the light or the dark theme
+- **THEN** they are four separate cards, in this order: `Merge readiness` (each reason a row with an attention mark, the verdict like `2 blockers` at the heading's right, the merge notes muted under them), `Checks` (one row per check: glyph, name, its time at the right; the counts at the heading's right), `Reviewers` (avatar, login, state badge at the right; `1 of 2 approved` at the heading's right) and `Branch and stats` (Branches, Changes with the files link, Author and Repository, each a muted label with its value at the right)
+- **AND** headings are sentence case, not uppercase; rows in a card are divided by hairlines; and every text in them keeps a contrast of at least 4.5:1 against its card
+
 #### Scenario: Opening the details
 - **WHEN** the user expands the details on a desktop at 1440×900, the Pull request, Change Overview and Files panes shown
-- **THEN** the details float beside the pane, level with the Details toggle, as one panel holding the branches, stats, merge readiness with every reason, the checks and the reviewers, whole and hit where they show; the pane's summary and actions stay in view, and the panel scrolls on its own only when the window is too short for it
+- **THEN** the details float beside the pane, level with the Details row (moved up as far as it takes to show them whole), as one panel holding the four cards, whole and hit where they show; the pane's summary and actions stay in view, and the panel scrolls on its own only when the window is too short for it
 - **AND** Escape closes it with focus back on Details, and so does a click outside it; a click on one of the pane's controls (Review) both closes it and reaches that control, so the review dialog opens on the first click
 - **AND** it is the same floating panel whatever GitHub's status: over stale data (rate-limited, unreachable) it is opaque and on top of the preview, and only the pane's rows are dimmed
 - **AND** on touch, where the expanded pane takes the Files tab, the details open in the pane itself; the title stays in view, and the pane scrolls only as far as keeps the title below the pinned top row and its bottom edge between rows
@@ -324,7 +335,11 @@ The pull request view SHALL render the description and the conversation in time 
 - **AND** the state badges' white text (`Open`, `Merged`, `Closed`, `Draft`) and the green `+N` addition counts, file headers included, keep at least 4.5:1 contrast in light and dark themes
 
 ### Requirement: The pull request view is addressable by URL
-The pull request view SHALL have a same-origin URL naming the pull request number (`?pr=<n>`), and the repository only when it is not the workspace's pull request repository (its first Git repository). URLs that name the repository SHALL keep working. Direct arrival, refresh, and browser Back/Forward SHALL restore it, and an unresolvable URL SHALL show why the pull request is unavailable rather than an unrelated document.
+The pull request view SHALL have a same-origin URL naming the pull request number (`?pr=<n>`), and the repository only when it is not the workspace's first Git repository. URLs that name the repository SHALL keep working. Direct arrival, refresh, and browser Back/Forward SHALL restore it, and an unresolvable URL SHALL show why the pull request is unavailable rather than an unrelated document.
+
+#### Scenario: A pull request of another of the workspace's repositories
+- **WHEN** the workspace has two Git repositories and a URL names the second with `?repository=<id>&pr=12`
+- **THEN** that repository becomes the page's pull request repository, as the switcher's repository selector makes it, and #12 is read from it
 
 #### Scenario: Direct arrival and refresh
 - **WHEN** a user opens or refreshes a URL naming pull request #42 of a repository the workspace can read

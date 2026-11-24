@@ -1143,9 +1143,68 @@ html:not([data-ui-mode="touch"]) .switcher-lists > .switcher-head {
   display: inline-flex;
 }
 
+/* `Pull requests · octo-org/uatu`: the repository in the heading, muted and
+   cut at its end when long; a selector when there is more than one. */
+.switcher-section-head {
+  position: relative;
+}
+
+.switcher-section-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.switcher-pr-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--text-subtle);
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.switcher-pr-repo:empty {
+  display: none;
+}
+
+.switcher-pr-repo-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switcher-repo-toggle {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.switcher-repo-menu {
+  left: 0;
+  right: auto;
+  top: calc(100% - 4px);
+}
+
+.switcher-repo-menu button {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.switcher-repo-local {
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
 /* + New, the filter toggle and Show all: accent text buttons, 44px tall. */
 .switcher-new,
 .switcher-filter-toggle,
+.switcher-repo-toggle,
 .switcher-show-all {
   display: inline-flex;
   align-items: center;
@@ -1210,6 +1269,43 @@ html:not([data-ui-mode="touch"]) .switcher-lists > .switcher-head {
 
 .switcher-list:empty {
   display: none;
+}
+
+/* Checkouts of more than one repository: a group per repository, its name a
+   small muted heading that sticks to the top of the scrolling lists while
+   its rows pass under it (and leaves with its last row). The list itself is
+   no card then, and must not clip: the cards are the groups' rows. */
+.switcher-list.is-grouped {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+
+.switcher-repo-group + .switcher-repo-group {
+  margin-top: 0.35rem;
+}
+
+.switcher-repo-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0.3rem 0.15rem 0.25rem;
+  background: var(--surface-raised);
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switcher-repo-rows {
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  overflow: hidden;
 }
 
 /* A row: at most two lines, the first what it is (15px), the second muted
@@ -12624,7 +12720,7 @@ textarea.gh-input { resize: vertical; min-height: 4rem; }
    would make a stacking context that traps the floating Details panel under
    the preview (and dims it). The pinned top row keeps its opaque background,
    so only its contents dim. */
-.pr-pane.is-stale > :not(.pr-pane-pin, .pr-pane-details),
+.pr-pane.is-stale > :not(.pr-pane-pin, .pr-pane-details, .pr-pane-disclosure),
 .pr-pane.is-stale > .pr-pane-pin > .pr-pane-top > *,
 .pr-pane.is-stale > .pr-pane-details:not(.is-floating) { opacity: 0.72; }
 .pr-pane-pending-short { display: none; }
@@ -12638,17 +12734,15 @@ textarea.gh-input { resize: vertical; min-height: 4rem; }
 }
 html[data-ui-mode="touch"] .pr-scope-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.3; }
 .pr-pane-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.45rem; min-width: 0; }
-/* Beside Details, spelled out in full: tight spacing keeps the state and
-   the longest decision ("Changes requested") on one line in a 300px
-   sidebar; narrower, the decision wraps under the state, never cut. */
+/* Spelled out in full: tight spacing keeps the state and the longest
+   decision ("Changes requested") on one line in a 300px sidebar; narrower,
+   the decision wraps under the state, never cut. */
 .pr-pane-top > .pr-pane-row { flex: 1 1 auto; flex-wrap: wrap; gap: 0.2rem 0.25rem; }
 .pr-pane-top > .pr-pane-row > * { flex: 0 0 auto; }
 .pr-pane-top > .pr-pane-row > .gh-state { padding-inline: 0.4rem; gap: 0.2rem; }
 .pr-pane-top > .pr-pane-row > .gh-pill { padding-inline: 0.35rem; }
-/* The top row (state, decision, Details), under a picked pull request's
-   note and its Back, stays pinned while the pane scrolls, so the pull request
-   is always named and Details and the way back always in reach. Opaque: rows
-   scroll under it. */
+/* The top row (state and decision) stays pinned while the pane scrolls, so
+   the pull request's state is always in view. Opaque: rows scroll under it. */
 .pr-pane-pin {
   position: sticky;
   top: calc(-1 * var(--pr-pane-pad-top, 0px));
@@ -12668,7 +12762,6 @@ html[data-ui-mode="touch"] .pr-scope-title { white-space: normal; display: -webk
   padding: 0.1rem 0;
   background: var(--surface);
 }
-.pr-pane-repo { margin-left: 0.4rem; color: var(--text-subtle); font-size: 0.78rem; }
 .pr-pane-title {
   position: relative;
   display: block;
@@ -12709,40 +12802,114 @@ html[data-ui-mode="touch"] .pr-scope-title { white-space: normal; display: -webk
 .pr-pane-actions .gh-button { padding-inline: 0.5rem; white-space: nowrap; }
 .pr-pane-actions .gh-external { margin-left: auto; }
 .pr-pane-merge { text-decoration: none; }
-.pr-pane-details-toggle {
-  flex: 0 0 auto;
-  margin-left: auto;
-  white-space: nowrap;
-  padding: 0.2rem 0 0.2rem 0.15rem;
-  border: 0;
-  background: none;
-  color: var(--text-subtle);
+/* Details: one full-width disclosure row under the actions, saying what is
+   behind it (`Details  Blockers, 5 checks, 2 reviewers  ⌄`). A clear button
+   on desktop, a 44px row on touch. */
+.pr-pane-disclosure {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 32px;
+  margin: 0.15rem 0 0.1rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.5rem;
+  background: var(--surface-subtle);
+  color: var(--text-strong);
   font: inherit;
-  font-size: 0.76rem;
+  font-size: 0.8rem;
+  text-align: left;
   cursor: pointer;
 }
-.pr-pane-details[hidden] { display: none; }
-.pr-pane-details { padding-top: 0.3rem; border-top: 1px solid var(--border-soft); }
-.pr-pane-branches { margin-bottom: 0.3rem; }
-.pr-pane-stats { color: var(--text-subtle); margin-bottom: 0.2rem; }
-.pr-pane-stats a { color: inherit; }
-.pr-pane-readiness p { margin: 0 0 0.2rem; font-size: 0.76rem; line-height: 1.35; }
-.pr-pane-reasons { margin: 0 0 0.3rem; padding-left: 1.1rem; font-size: 0.76rem; line-height: 1.35; }
-.pr-pane-checks { margin: 0.1rem 0 0.4rem; padding: 0; list-style: none; }
-.pr-pane-checks li { display: flex; align-items: center; gap: 0.35rem; padding: 0.12rem 0; }
-.pr-pane-check-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pr-pane-heading {
-  margin: 0.5rem 0 0.3rem;
+.pr-pane-disclosure:hover { border-color: var(--text-subtle); }
+.pr-pane-disclosure:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pr-pane-disclosure-label { flex: 0 0 auto; font-weight: 600; }
+.pr-pane-disclosure-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-subtle);
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
-.pr-pane-heading .gh-check { letter-spacing: 0; }
-.pr-pane-reviewers { margin: 0 0 0.6rem; padding: 0; list-style: none; }
-.pr-pane-reviewers li { display: flex; align-items: center; gap: 0.45rem; padding: 0.18rem 0; }
+.pr-pane-disclosure-chevron { flex: 0 0 auto; color: var(--text-subtle); transition: transform 120ms ease; }
+.pr-pane-disclosure[aria-expanded="true"] .pr-pane-disclosure-chevron { transform: rotate(180deg); }
+/* Desktop: the details open as a panel beside the pane, so the chevron
+   points that way, and the row stays marked while the panel is open. */
+html:not([data-ui-mode="touch"]) .pr-pane-disclosure-chevron,
+html:not([data-ui-mode="touch"]) .pr-pane-disclosure[aria-expanded="true"] .pr-pane-disclosure-chevron { transform: rotate(-90deg); }
+html:not([data-ui-mode="touch"]) .pr-pane-disclosure[aria-expanded="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+/* A 300px sidebar: compact, and the summary wraps rather than being cut. */
+html:not([data-ui-mode="touch"]) .pr-pane-disclosure { gap: 0.4rem; padding-inline: 0.5rem; }
+html:not([data-ui-mode="touch"]) .pr-pane-disclosure-summary { font-size: 0.74rem; white-space: normal; overflow: visible; }
+@media (prefers-reduced-motion: reduce) { .pr-pane-disclosure-chevron { transition: none; } }
+
+/* The details: separate groups (Merge readiness, Checks, Reviewers, Branch
+   and stats), each a bordered card with a sentence-case heading and its
+   value at the right, then aligned rows: icon, name, value at the right. */
+.pr-pane-details[hidden] { display: none; }
+.pr-pane-details { display: flex; flex-direction: column; gap: 0.5rem; padding-bottom: 0.3rem; }
+.pr-pane-section {
+  padding: 0.45rem 0.65rem 0.4rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface-subtle);
+}
+.pr-pane-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.15rem;
+  color: var(--text-strong);
+  font-size: 0.82rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.pr-pane-section-head > :first-child { flex: 1 1 auto; min-width: 0; }
+.pr-pane-section-value { flex: 0 0 auto; color: var(--text-subtle); font-size: 0.76rem; font-weight: 500; }
+.pr-pane-readiness.is-blocked .pr-pane-section-value { color: var(--gh-attention-fg); font-weight: 600; }
+.pr-pane-readiness.is-ready .pr-pane-section-value { color: var(--success-strong); font-weight: 600; }
+.pr-pane-readiness.is-stale .pr-pane-section-value { color: var(--text-subtle); font-weight: 500; }
+.pr-pane-list { margin: 0; padding: 0; list-style: none; }
+.pr-pane-list > li,
+.pr-pane-facts > div {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.85rem;
+  box-sizing: border-box;
+  padding: 0.2rem 0;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+.pr-pane-list > li:first-child,
+.pr-pane-facts > div:first-child { border-top: 0; }
+.pr-pane-row-icon { flex: 0 0 1rem; align-self: flex-start; padding-top: 0.05rem; text-align: center; font-weight: 700; }
+.pr-pane-row-icon.is-attention { color: var(--gh-attention-fg); }
+.pr-pane-row-icon.is-success { color: var(--success-strong); }
+.pr-pane-row-icon.is-muted { color: var(--text-subtle); }
+.pr-pane-row-text { flex: 1 1 auto; min-width: 0; }
+.pr-pane-checks .gh-check { flex: 0 0 1rem; text-align: center; }
+/* The running dot on a card: the darker amber, so it holds 4.5:1 there too. */
+.pr-pane-section .gh-check-pending { color: var(--gh-attention-fg); }
+.pr-pane-check-name,
 .pr-pane-reviewer { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-pane-row-value { flex: 0 0 auto; color: var(--text-subtle); font-variant-numeric: tabular-nums; text-align: right; }
+.pr-pane-section-note {
+  margin: 0.15rem 0 0;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-subtle);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+.pr-pane-facts dt { flex: 0 0 auto; color: var(--text-subtle); }
+.pr-pane-facts dd { flex: 1 1 auto; min-width: 0; margin: 0; text-align: right; overflow-wrap: anywhere; }
+.pr-pane-stats a { color: inherit; }
 /* Stale data over a pull request: one line above it, Retry included. */
 .pr-pane-stale {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem;
@@ -12757,13 +12924,17 @@ html[data-ui-mode="touch"] .pr-scope-title { white-space: normal; display: -webk
 .pr-pane-elsewhere { margin: 0.1rem 0 0.35rem; padding: 0; list-style: none; font-size: 0.74rem; color: var(--gh-attention-fg); }
 .pr-pane-elsewhere li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
 .pr-pane-elsewhere a { color: inherit; font-weight: 600; }
-/* Touch panes are short: the repository is in the preview header. */
-html[data-ui-mode="touch"] .pr-pane-repo { display: none; }
 html[data-ui-mode="touch"] .pr-pane-title { margin: 0.15rem 0 0.1rem; }
-/* A slim pinned top row: Details is 36px tall, its tap box 44px. */
+/* A slim pinned top row; the Details row is a 44px target. */
 html[data-ui-mode="touch"] .pull-request-pane-body { --pr-pane-pad-top: 0.1rem; padding: var(--pr-pane-pad-top) 0.75rem 0.4rem; }
-html[data-ui-mode="touch"] .pr-pane-details-toggle { position: relative; min-height: 36px; }
-html[data-ui-mode="touch"] .pr-pane-details-toggle::after { content: ""; position: absolute; inset: -4px 0; }
+html[data-ui-mode="touch"] .pr-pane-disclosure { min-height: 44px; font-size: 0.86rem; }
+/* A short touch screen (a phone in landscape) has the width and not the
+   height: the Details row fills the rest of the actions' line. */
+@media (max-height: 500px) {
+  html[data-ui-mode="touch"] .pr-pane-disclosure { flex: 1 1 16rem; width: auto; margin: 0; }
+}
+html[data-ui-mode="touch"] .pr-pane-section-head { font-size: 0.86rem; }
+html[data-ui-mode="touch"] :is(.pr-pane-list > li, .pr-pane-facts > div) { min-height: 2.1rem; font-size: 0.84rem; }
 .pr-pane-mock {
   display: flex;
   flex-wrap: wrap;
@@ -13709,6 +13880,6 @@ html[data-ui-mode="touch"] .pr-file-action[data-file-comment] .pr-file-action-la
 .pr-pane-details.is-floating:not([hidden]) {
   position: fixed; top: var(--pr-details-top, 6rem); left: var(--pr-details-left, 1rem); z-index: 30;
   width: var(--pr-details-width, 22rem); max-height: var(--pr-details-max-height, 70vh); box-sizing: border-box; overflow: auto;
-  padding: 0.6rem 0.8rem 0.7rem; border: 1px solid var(--border-medium); border-radius: 0.7rem;
+  padding: 0.55rem; border: 1px solid var(--border-medium); border-radius: 0.7rem;
   background: var(--surface); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
 }

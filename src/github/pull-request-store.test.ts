@@ -232,4 +232,68 @@ describe("pull request URLs", () => {
     expect(pullRequestRepository(repositories)?.id).toBe("b");
     expect(pullRequestRepository([])).toBeNull();
   });
+  test("a chosen Git repository wins; a chosen id that names none, or a non-Git one, doesn't", () => {
+    const repositories = [{ id: "a", metadata: { status: "non-git" } }, { id: "b", metadata: { status: "git" } }, { id: "c", metadata: { status: "git" } }];
+    expect(pullRequestRepository(repositories, "c")?.id).toBe("c");
+    expect(pullRequestRepository(repositories, "a")?.id).toBe("b");
+    expect(pullRequestRepository(repositories, "gone")?.id).toBe("b");
+  });
+});
+
+describe("PullRequestStore repository choice", () => {
+  const snapshot = (id: string, label: string, branch: string, status = "git") =>
+    ({ id, label, metadata: { status, branch, commitShort: "abc1234" } }) as unknown as import("../shared/types").RepositorySnapshot;
+  const summary = (owner: string, name: string): GithubSummary => ({ status: "no-pull-request", mock: true, repository: { host: "github.com", owner, name }, viewer: "v", checkedAt: 0, stale: false });
+
+  test("lists the Git repositories, chooses another, and names each by GitHub once known", async () => {
+    const { githubApi } = await import("./client");
+    const original = githubApi.summary;
+    const asked: string[] = [];
+    githubApi.summary = async repositoryId => {
+      asked.push(repositoryId);
+      return repositoryId === "/docs" ? summary("octo-org", "docs") : summary("octo-org", "uatu");
+    };
+    try {
+      const store = new PullRequestStore();
+      store.syncRepositories([snapshot("/uatu", "uatu", "main"), snapshot("/notes", "notes", "", "non-git"), snapshot("/docs", "docs", "feat/search")]);
+      await Bun.sleep(1);
+      expect(store.state.repositoryId).toBe("/uatu");
+      expect(store.repositories()).toEqual([{ id: "/uatu", label: "uatu", github: "octo-org/uatu" }, { id: "/docs", label: "docs", github: null }]);
+      expect(store.otherRepositoryChosen()).toBe(false);
+
+      store.select(7);
+      store.chooseRepository("/docs");
+      await Bun.sleep(1);
+      // Another repository: its branch, its summary, and no pick carried over.
+      expect(store.state).toMatchObject({ repositoryId: "/docs", branch: "feat/search" });
+      expect(store.scopedNumber()).toBeNull();
+      expect(store.otherRepositoryChosen()).toBe(true);
+      expect(store.githubName("/docs")).toBe("octo-org/docs");
+      expect(asked).toEqual(["/uatu", "/docs"]);
+
+      // An id that names none of them changes nothing.
+      store.chooseRepository("/gone");
+      store.chooseRepository("/notes");
+      expect(store.state.repositoryId).toBe("/docs");
+    } finally {
+      githubApi.summary = original;
+    }
+  });
+
+  test("a choice made before the snapshots arrive (a pull request URL at boot) applies when they do", async () => {
+    const { githubApi } = await import("./client");
+    const original = githubApi.summary;
+    githubApi.summary = async () => summary("octo-org", "docs");
+    try {
+      const store = new PullRequestStore();
+      store.chooseRepository("/docs");
+      store.select(12);
+      store.syncRepositories([snapshot("/uatu", "uatu", "main"), snapshot("/docs", "docs", "feat/search")]);
+      await Bun.sleep(1);
+      expect(store.state.repositoryId).toBe("/docs");
+      expect(store.scopedNumber()).toBe(12);
+    } finally {
+      githubApi.summary = original;
+    }
+  });
 });

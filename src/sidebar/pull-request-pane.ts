@@ -1,25 +1,27 @@
 // The Pull request pane: the workspace's current pull request at a glance.
-// A pinned top row (state, review decision, and the Details toggle; the
-// number is in the pane header), then a compact summary a short pane always
-// shows (title, checks count and the first merge blocker, any pending
-// comments), then the actions (the one review button, Review or Finish
-// review (n), which opens the review dialog; Merge on GitHub ↗ while the PR
-// is ready, else View on GitHub ↗), then the details behind the toggle (head
-// → base, stats, author, merge readiness with every reason, the per-check
-// list, reviewers; open by default on touch, where the expanded pane takes
-// the Files tab, up to its content's height). On desktop, where the pane
-// shares the sidebar with others and can't always grow enough, the open
-// details float beside the toggle as one panel (Escape or a click outside
-// closes it) instead of opening into a short scroll region. The title's
-// clamp is on its text. The pane is sized
-// to whole rows, so no row is cut at its bottom. A manual ↻ says "Updated
-// just now" in the header once GitHub has answered. uatu never merges: readiness is read-only and merging links to
-// GitHub (design D11). The title and number open the PR preview. Each GitHub
-// status has its own empty or error state (mockup 6), and stale data stays
-// visible with its age and a Retry that says what it is doing; while
-// GitHub can't take writes, Finish review waits with the reason. The pane
-// scrolls back to its top whenever what it shows changes (another PR,
-// another status), never mid-way into old content.
+// The summary: a pinned top row (state and review decision; the number is in
+// the pane header), the title, one status line (checks and the first merge
+// blocker), any pending note, then the actions (the one review button,
+// Review or Finish review (n), which opens the review dialog; Merge on
+// GitHub ↗ while the PR is ready, else View on GitHub ↗). Under them a
+// full-width Details row says what is behind it ("Blockers, 5 checks, 2
+// reviewers") and opens the details: separate groups for Merge readiness
+// (every reason, then the merge notes), Checks, Reviewers, and Branch and
+// stats, each a card with a sentence-case heading and aligned rows. They start
+// open on touch, where the expanded pane takes the Files tab, up to its
+// content's height. On desktop, where the pane shares the sidebar with
+// others and can't always grow enough, the open details float beside the
+// Details row as one panel (Escape or a click outside closes it) instead of
+// opening into a short scroll region. The title's clamp is on its text. The
+// pane is sized to whole rows, so no row is cut at its bottom. A manual ↻
+// says "Updated just now" in the header once GitHub has answered. uatu never
+// merges: readiness is read-only and merging links to GitHub (design D11).
+// The title and number open the PR preview. Each GitHub status has its own
+// empty or error state (mockup 6), and stale data stays visible with its age
+// and a Retry that says what it is doing; while GitHub can't take writes,
+// Finish review waits with the reason. The pane scrolls back to its top
+// whenever what it shows changes (another PR, another status), never mid-way
+// into old content.
 //
 // The current pull request is the checked-out branch's own, unless another
 // is viewed (View here, in the workspace switcher): then the pane shows the
@@ -49,7 +51,7 @@ import {
   reviewerBadge,
   stateBadge,
 } from "../github/present";
-import { mergeReadinessView } from "../github/readiness";
+import { detailsDisclosureText, mergeReadinessView, readinessVerdict, type ReadinessView } from "../github/readiness";
 import { GITHUB_FAKE_SCENARIOS, type GithubStatus, type PullRequestSummary } from "../shared/github-contract";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
@@ -76,8 +78,8 @@ const updatedNote = document.querySelector<HTMLElement>("#pull-request-updated")
 // The body's children are rows the pane stack sizes the pane to (panes.ts).
 paneBody.toggleAttribute("data-pane-rows", true);
 
-// The details (branches, stats, readiness reasons, checks, reviewers) start
-// folded on desktop: the pane is short, and the summary above the actions
+// The details (readiness reasons, checks, reviewers, branches and stats)
+// start folded on desktop: the pane is short, and the summary above the actions
 // carries what matters at a glance. The toggle's choice holds for the page.
 // On touch the expanded pane fills the Files tab's stack (the accordion
 // folds the others), so the details start open there instead of leaving the
@@ -360,17 +362,15 @@ function closeFloatingDetails(focusToggle: boolean): void {
   const details = paneBody.querySelector<HTMLElement>("#pr-pane-details.is-floating");
   const toggle = paneBody.querySelector<HTMLElement>("[data-pr-details-toggle]");
   if (details) details.hidden = true;
-  if (toggle) {
-    toggle.setAttribute("aria-expanded", "false");
-    toggle.textContent = "▸ Details";
-  }
+  if (toggle) toggle.setAttribute("aria-expanded", "false");
   if (focusToggle) toggle?.focus();
 }
 
-// The floating details sit beside the pane, level with the Details toggle,
-// so the summary and the actions stay in view (under the toggle when the
-// window has no room beside it), as tall as the window allows (then they
-// scroll on their own).
+// The floating details sit beside the pane, level with the Details row, so
+// the summary and the actions stay in view (under the row when the window
+// has no room beside it). Beside the pane they move up as far as it takes to
+// show them whole; only a window too short for them leaves them scrolling on
+// their own.
 function positionDetails(): void {
   const details = paneBody.querySelector<HTMLElement>("#pr-pane-details.is-floating:not([hidden])");
   const toggle = paneBody.querySelector<HTMLElement>("[data-pr-details-toggle]");
@@ -378,11 +378,15 @@ function positionDetails(): void {
   const box = paneBody.getBoundingClientRect();
   const toggleBox = toggle.getBoundingClientRect();
   const beside = window.innerWidth - box.right >= 380;
-  const top = Math.max(8, beside ? toggleBox.top - 8 : toggleBox.bottom + 6);
   const left = Math.max(8, beside ? box.right + 6 : box.left + 8);
-  details.style.setProperty("--pr-details-top", `${Math.round(top)}px`);
   details.style.setProperty("--pr-details-left", `${Math.round(left)}px`);
   details.style.setProperty("--pr-details-width", `${Math.round(Math.min(380, window.innerWidth - left - 12))}px`);
+  // The panel's own height at that width, without a cap.
+  details.style.setProperty("--pr-details-max-height", "none");
+  const natural = details.getBoundingClientRect().height;
+  const level = beside ? toggleBox.top - 8 : toggleBox.bottom + 6;
+  const top = Math.max(8, beside ? Math.min(level, window.innerHeight - 12 - natural) : level);
+  details.style.setProperty("--pr-details-top", `${Math.round(top)}px`);
   details.style.setProperty("--pr-details-max-height", `${Math.round(window.innerHeight - top - 12)}px`);
 }
 
@@ -555,12 +559,19 @@ function summaryHtml(pr: PullRequestSummary): string {
     : finishPaused ? `${paused} Your comments stay pending.`
     : pending > 0 ? "Finish your review: publish your pending comments as a comment, approval or change request"
     : "Approve, comment or request changes, with a summary and any line comments";
-  // Always in view, even in a short pane: the top row (state, decision and
-  // the Details toggle; the number is in the pane header) stays pinned while
-  // the pane scrolls;
-  // then the title, checks and the first blocker, then the actions. The rest
-  // folds under Details. Rows are `data-pane-rows` children: the pane stack
-  // sizes the pane to whole rows (sidebar/panes.ts).
+  // Always in view, even in a short pane: the top row (state and decision;
+  // the number is in the pane header) stays pinned while the pane scrolls;
+  // then the title, one status line (checks and the first blocker), the
+  // actions, and the Details disclosure row (on its own line, except on a
+  // short touch screen, where it fills the rest of the actions' line). The rest is behind it, in
+  // separate groups. Rows are `data-pane-rows` children: the pane stack sizes
+  // the pane to whole rows (sidebar/panes.ts).
+  const open_ = detailsOpen();
+  const float = detailsFloat();
+  const inline = !float ? " data-pane-rows" : "";
+  const checkCount = pr.checks.runs.length || pr.checks.passed + pr.checks.failed + pr.checks.pending;
+  const disclosure = detailsDisclosureText(readiness.tone, checkCount, reviewers.length);
+  const approved = reviewers.filter(reviewer => reviewer.state === "APPROVED").length;
   return `<div class="pr-pane${stale ? " is-stale" : ""}${scoped ? " is-viewed" : ""}" data-pane-rows>
       <div class="pr-pane-pin">
         <div class="pr-pane-top">
@@ -568,37 +579,60 @@ function summaryHtml(pr: PullRequestSummary): string {
             ${stateBadge(pr)}
             ${open ? reviewDecisionBadge(pr.reviewDecision) : ""}
           </span>
-          <button type="button" class="pr-pane-details-toggle" data-pr-details-toggle aria-expanded="${detailsOpen()}" aria-controls="pr-pane-details">${detailsOpen() ? "▾" : "▸"} Details</button>
         </div>
       </div>
       <a href="${escapeHtmlAttribute(previewHref(pr.number))}" data-pr-open="${pr.number}" class="pr-pane-title" title="${escapeHtmlAttribute(pr.title)}"><span class="pr-pane-title-text">${escapeHtml(pr.title)}</span></a>
       <p class="pr-pane-status ${toneClass}" title="${escapeHtmlAttribute([readiness.headline, ...readiness.reasons.slice(1)].join(" "))}"><span class="pr-pane-status-checks">${checksSummaryHtml(pr.checks)}</span> · <span>${escapeHtml(readiness.headline)}</span></p>
       ${open && readiness.pendingNote ? `<p class="pr-pane-pending"><span class="pr-pane-pending-full">${escapeHtml(readiness.pendingNote)}</span><span class="pr-pane-pending-short" aria-hidden="true">Finish your review before merging.</span></p>` : ""}
-      <div class="pr-pane-actions"${detailsOpen() && !detailsFloat() ? "" : " data-pane-essential-end"}>
+      <div class="pr-pane-actions">
         <button type="button" class="gh-button${pending > 0 ? " gh-button-primary" : ""}" data-pr-action="review"${open && !finishPaused ? "" : " disabled"}${finishPaused ? ` aria-describedby="pr-pane-paused"` : ""} title="${escapeHtmlAttribute(reviewTitle)}">${reviewActionLabel(pending)}</button>
         ${open ? mergeLinkHtml(pr.url, readiness.tone === "ready" && !readiness.stale, "pr-pane-merge") : externalLink(pr.url, "View on GitHub")}
+        <button type="button" class="pr-pane-disclosure" data-pr-details-toggle aria-expanded="${open_}" aria-controls="pr-pane-details"${open_ && !float ? "" : " data-pane-essential-end"}>
+          <span class="pr-pane-disclosure-label">Details</span>
+          <span class="pr-pane-disclosure-summary">${escapeHtml(disclosure)}</span>
+          <svg class="pr-pane-disclosure-chevron" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
       ${pendingElsewhereHtml([pr.number, ...(previewed === null ? [] : [previewed])])}
-      <div id="pr-pane-details" class="pr-pane-details${detailsFloat() ? " is-floating" : ""}"${detailsFloat() ? ` role="group" aria-label="Details of #${pr.number}"` : " data-pane-rows"}${detailsOpen() ? (detailsFloat() ? "" : " data-pane-essential-end") : " hidden"}>
-        <div class="pr-pane-branches">${branchesHtml(pr)}<span class="pr-pane-repo">${escapeHtml(repositoryName(summary))}</span></div>
-        <div class="pr-pane-stats">${pr.commits} ${pr.commits === 1 ? "commit" : "commits"} · <a href="${escapeHtmlAttribute(previewHref(pr.number, "files"))}" data-pr-open="${pr.number}" data-pr-tab="files">${pr.changedFiles} ${pr.changedFiles === 1 ? "file" : "files"}</a> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span> · by ${escapeHtml(pr.author)}</div>
-        <h4 class="pr-pane-heading">Merge readiness</h4>
-        <div class="pr-pane-readiness ${toneClass}" data-pane-rows>
-          ${readiness.reasons.length ? `<ul class="pr-pane-reasons" data-pane-rows>${readiness.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}
-          ${readiness.notes.map(note => `<p class="pr-muted">${escapeHtml(note)}</p>`).join("")}
-        </div>
-        <h4 class="pr-pane-heading">Checks · ${checksSummaryHtml(pr.checks)}</h4>
-        <ul class="pr-pane-checks" data-pane-rows>${pr.checks.runs.map(run => `<li>${checkGlyph(run.state)}<span class="pr-pane-check-name">${escapeHtml(run.name)}</span><span class="pr-muted">${escapeHtml(run.detail)}</span></li>`).join("")}</ul>
-        <h4 class="pr-pane-heading">Reviewers</h4>
-        <ul class="pr-pane-reviewers" data-pane-rows>
-          ${reviewers.length === 0 ? `<li class="pr-muted">No reviewers requested.</li>` : reviewers.map(reviewer => `<li>
-            ${avatar(reviewer.login, "sm")}
-            <span class="pr-pane-reviewer">${escapeHtml(reviewer.login)}${reviewer.login === viewer ? ` <span class="pr-muted">(you)</span>` : ""}</span>
-            ${reviewerBadge(reviewer.state, reviewer.login === viewer ? pending : 0)}
-          </li>`).join("")}
-        </ul>
+      <div id="pr-pane-details" class="pr-pane-details${float ? " is-floating" : ""}"${float ? ` role="group" aria-label="Details of #${pr.number}"` : " data-pane-rows"}${open_ ? (float ? "" : " data-pane-essential-end") : " hidden"}>
+        <section class="pr-pane-section pr-pane-readiness ${toneClass}" aria-labelledby="pr-pane-readiness-head"${inline}>
+          <h4 id="pr-pane-readiness-head" class="pr-pane-section-head"><span>Merge readiness</span><span class="pr-pane-section-value">${escapeHtml(readinessVerdict(readiness))}</span></h4>
+          <ul class="pr-pane-list pr-pane-reasons"${inline}>${readinessRows(readiness)}</ul>
+          ${readiness.notes.length ? `<p class="pr-pane-section-note">${readiness.notes.map(escapeHtml).join(" ")}</p>` : ""}
+        </section>
+        <section class="pr-pane-section" aria-labelledby="pr-pane-checks-head"${inline}>
+          <h4 id="pr-pane-checks-head" class="pr-pane-section-head"><span>Checks</span><span class="pr-pane-section-value">${checksSummaryHtml(pr.checks)}</span></h4>
+          <ul class="pr-pane-list pr-pane-checks"${inline}>${pr.checks.runs.length ? pr.checks.runs.map(run => `<li>${checkGlyph(run.state)}<span class="pr-pane-check-name">${escapeHtml(run.name)}</span><span class="pr-pane-row-value">${escapeHtml(run.detail)}</span></li>`).join("") : `<li class="pr-muted">No checks reported.</li>`}</ul>
+        </section>
+        <section class="pr-pane-section" aria-labelledby="pr-pane-reviewers-head"${inline}>
+          <h4 id="pr-pane-reviewers-head" class="pr-pane-section-head"><span>Reviewers</span>${reviewers.length ? `<span class="pr-pane-section-value">${approved} of ${reviewers.length} approved</span>` : ""}</h4>
+          <ul class="pr-pane-list pr-pane-reviewers"${inline}>
+            ${reviewers.length === 0 ? `<li class="pr-muted">No reviewers requested.</li>` : reviewers.map(reviewer => `<li>
+              ${avatar(reviewer.login, "sm")}
+              <span class="pr-pane-reviewer">${escapeHtml(reviewer.login)}${reviewer.login === viewer ? ` <span class="pr-muted">(you)</span>` : ""}</span>
+              ${reviewerBadge(reviewer.state, reviewer.login === viewer ? pending : 0)}
+            </li>`).join("")}
+          </ul>
+        </section>
+        <section class="pr-pane-section" aria-labelledby="pr-pane-branch-head"${inline}>
+          <h4 id="pr-pane-branch-head" class="pr-pane-section-head"><span>Branch and stats</span></h4>
+          <dl class="pr-pane-list pr-pane-facts"${inline}>
+            <div><dt>Branches</dt><dd class="pr-pane-branches">${branchesHtml(pr)}</dd></div>
+            <div><dt>Changes</dt><dd class="pr-pane-stats">${pr.commits} ${pr.commits === 1 ? "commit" : "commits"} · <a href="${escapeHtmlAttribute(previewHref(pr.number, "files"))}" data-pr-open="${pr.number}" data-pr-tab="files">${pr.changedFiles} ${pr.changedFiles === 1 ? "file" : "files"}</a> · <span class="gh-add">+${pr.additions}</span> <span class="gh-del">−${pr.deletions}</span></dd></div>
+            <div><dt>Author</dt><dd>${escapeHtml(pr.author)}</dd></div>
+            ${repositoryName(summary) ? `<div><dt>Repository</dt><dd>${escapeHtml(repositoryName(summary))}</dd></div>` : ""}
+          </dl>
+        </section>
       </div>
     </div>`;
+}
+
+// One row per reason GitHub would refuse a merge, or the one verdict row.
+function readinessRows(readiness: ReadinessView): string {
+  const row = (icon: string, kind: string, text: string) => `<li><span class="pr-pane-row-icon is-${kind}" aria-hidden="true">${icon}</span><span class="pr-pane-row-text">${escapeHtml(text)}</span></li>`;
+  if (readiness.reasons.length) return readiness.reasons.map(reason => row("!", "attention", reason)).join("") + (readiness.stale ? row("◷", "muted", readiness.headline) : "");
+  if (readiness.tone === "ready") return row("✓", "success", readiness.headline);
+  return row(readiness.tone === "merged" ? "✓" : "•", "muted", readiness.headline);
 }
 
 // Dev-only: shown only while the fake answers (`mock: true`).

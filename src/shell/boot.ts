@@ -118,6 +118,7 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
     setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "pull-request", repositoryId: initialPullRequestPreview.repositoryId, number: initialPullRequestPreview.number });
+    pullRequestStore.chooseRepository(initialPullRequestPreview.repositoryId);
     pullRequestStore.select(initialPullRequestPreview.number);
   } else if (!hasExplicitRoute && readSelectionCleared()) {
     clearDocumentSelection();
