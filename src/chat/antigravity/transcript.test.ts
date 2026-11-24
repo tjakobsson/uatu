@@ -159,4 +159,22 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
     const read = await readTranscript(FIXTURE);
     expect("steps" in read && transcriptTurns(read.steps).map(turn => turn.tools.length)).toEqual([0, 1, 1]);
   });
+
+  // Last: it prompts the shared conversation, which changes its history.
+  test("after a transcript-only read, the next successful load replaces that history with agy's replay", async () => {
+    await placeTranscript();
+    const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, homeDirectory: home, prices });
+    try {
+      await provider.listSessions();
+      await fake.setFlag("auth-missing", true);
+      const loggedOut = (await provider.listMessages(sessionId, { limit: 500 })).items;
+      expect(loggedOut.some(item => item.id.includes(".transcript."))).toBe(true);
+      await fake.setFlag("auth-missing", false);
+      const accepted = await provider.prompt(sessionId, { id: "again", text: "Say hello again", delivery: "queue" });
+      const items = (await provider.listMessages(sessionId, { limit: 500 })).items;
+      expect(items.some(item => item.id.includes(".transcript."))).toBe(false);
+      expect(items.some(item => item.id === "tool:call_read_1")).toBe(true);
+      expect(items.filter(item => item.type === "user_message").map(item => item.id).at(-1)).toBe(`message:${accepted.messageId}`);
+    } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
+  });
 });

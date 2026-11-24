@@ -60,6 +60,9 @@ type Conversation = {
   readonly accounting: StoredMessageAccounting[];
   // Replay has filled the store (or the conversation started here).
   seeded: boolean;
+  // The history came from agy's transcript alone (logged out): the next
+  // successful load replaces it with agy's replay.
+  fromTranscript?: true;
   // Names this store for history cursors: a reseeded store is another history.
   version: string;
   process?: AcpProcess;
@@ -635,7 +638,7 @@ export class AntigravityProvider implements ChatProvider {
       }
       const process = await this.startProcess();
       conversation.loading = true;
-      if (!conversation.seeded) conversation.replay = { memory: createAcpMemory(conversation.sessionId, this.workspacePath), items: [] };
+      if (!conversation.seeded || conversation.fromTranscript) conversation.replay = { memory: createAcpMemory(conversation.sessionId, this.workspacePath), items: [] };
       try {
         const answer = await process.agent.request("session/load", { sessionId: conversation.sessionId, cwd: this.workspacePath, mcpServers: [] });
         this.setLogin("ok");
@@ -653,9 +656,12 @@ export class AntigravityProvider implements ChatProvider {
       }
       const replay = conversation.replay;
       conversation.replay = undefined;
-      if (replay && !conversation.seeded) {
+      if (replay) {
+        conversation.fromTranscript = undefined;
+        conversation.version = randomUUID();
         applyUpdates(replay.items, sealOpenBlock(replay.memory, this.now()));
         conversation.items.splice(0, conversation.items.length, ...replay.items);
+        conversation.accounting.splice(0);
         Object.assign(conversation.memory, replay.memory);
         await this.enrichFromTranscript(conversation);
         conversation.seeded = true;
@@ -679,6 +685,7 @@ export class AntigravityProvider implements ChatProvider {
     memory.blockCount = 0;
     await this.enrichFromTranscript(conversation);
     conversation.seeded = true;
+    conversation.fromTranscript = true;
     return true;
   }
 
@@ -803,7 +810,7 @@ export class AntigravityProvider implements ChatProvider {
       // Replay: the store's history when it has none yet, otherwise
       // already known and dropped.
       const replay = conversation.replay;
-      if (conversation.seeded || !replay) return;
+      if (!replay) return;
       const normalized = normalizeAcpUpdate(params, replay.memory, this.now());
       applyUpdates(replay.items, normalized.updates);
       if (normalized.sessionLifecycle) this.retitle(conversation, normalized.sessionLifecycle.title);
