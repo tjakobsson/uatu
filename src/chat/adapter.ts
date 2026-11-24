@@ -3654,7 +3654,7 @@ export class ChatAdapter {
    * outcome is a definite refusal: nothing is published and the client
    * restores the draft with the agent's reason. An admission that neither
    * answers in time nor fails is an unknown outcome the receipt retains and
-   * never resends.
+   * never resends; a later acceptance still records its row.
    * The accepted message's row goes in under the same id dispatchPrompt
    * uses, which the provider's own row and replay share.
    */
@@ -3668,7 +3668,13 @@ export class ChatAdapter {
     try {
       accepted = await this.boundedSteerAdmission(admission, input.messageId);
     } catch (error) {
-      if (error instanceof OperationOutcomeUnknownError) throw error;
+      if (error instanceof OperationOutcomeUnknownError) {
+        // Late evidence, never a resend: an acceptance that arrives after the
+        // bound still ties this request to its message, so the client's
+        // unconfirmed draft settles against the delivered row.
+        void admission.then(late => { if (!this.disposed) this.recordImmediateSteer(this.projection(conversationId), late, input); }, () => undefined);
+        throw error;
+      }
       throw new SteerRefusedError(errorMessage(error));
     }
     this.recordImmediateSteer(projection, accepted, input);

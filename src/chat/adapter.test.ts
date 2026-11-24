@@ -16608,6 +16608,43 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     } finally { await adapter.dispose(); }
   });
 
+  for (const order of ["acceptance before the provider's row", "provider's row before the acceptance"] as const) test(`a late acceptance ties the request to its message without resending (${order})`, async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let calls = 0;
+      let accept!: (value: { messageId: string; createdAt: number }) => void;
+      provider.prompt = () => { calls++; return new Promise(resolve => { accept = resolve; }); };
+      await expect(steer("r-late", "late steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      // The submitting client holds an unconfirmed draft for the request.
+      let browser = addAcceptedDraft(projectionFromSnapshot(await adapter.history("session")), { requestId: "r-late", messageId: "pending:r-late", text: "late steer", unconfirmed: true });
+      const { events } = await adapter.subscribe("session", { cursor: browser.cursor });
+      const row = { id: "message:native-late", type: "user_message" as const, createdAt: 7, text: "late steer" };
+      const publishRow = async () => {
+        provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "upsert", item: row }], outcome: "handled", eventType: "update" } });
+        await liveEventsApplied(adapter, provider);
+      };
+      if (order === "provider's row before the acceptance") await publishRow();
+      accept({ messageId: "native-late", createdAt: 7 });
+      await waitUntil(() => adapter.projectionForTests("session").get("message:native-late")?.type === "user_message"
+        && (adapter.projectionForTests("session").get("message:native-late") as { requestId?: string }).requestId === "r-late");
+      if (order === "acceptance before the provider's row") await publishRow();
+      expect(await userRows()).toEqual([expect.objectContaining({ id: "message:native-late", createdAt: 7, requestId: "r-late" })]);
+      const iterator = events[Symbol.asyncIterator]();
+      const deadline = Date.now() + 2_000;
+      while (browser.acceptedDrafts.length > 0 && Date.now() < deadline) {
+        const next = await Promise.race([iterator.next(), Bun.sleep(100).then(() => null)]);
+        if (!next || next.done) continue;
+        browser = applyChatEvent(browser, next.value).projection;
+      }
+      expect(browser.acceptedDrafts).toEqual([]);
+      expect(browser.items.filter(item => item.type === "user_message")).toEqual([expect.objectContaining({ id: "message:native-late", requestId: "r-late" })]);
+      expect(calls).toBe(1);
+      events.cancel();
+    } finally { await adapter.dispose(); }
+  });
+
   test("commands queue, an idle backlog holds, and an idle conversation dispatches whatever the delivery", async () => {
     const { adapter, provider, steer } = immediate();
     try {
