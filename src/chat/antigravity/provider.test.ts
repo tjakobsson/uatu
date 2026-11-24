@@ -398,6 +398,18 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect((await provider.listModels()).find(model => model.selection.modelId === "gemini-4-neon")?.variants).toEqual(["low", "medium", "high", "xhigh"]);
     });
 
+    test("after switching models through config options, the new model's levels appear and the chosen level is applied", async () => {
+      const { fake, provider, run } = await setup();
+      await fake.setFlag("no-legacy-models", true);
+      const session = await provider.createSession("a");
+      expect((await provider.listModels()).find(model => model.selection.modelId === "gemini-4-argon")?.variants).toBeUndefined();
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-argon" }, "low");
+      await run(session.id, "Say hello");
+      expect((await provider.listModels()).find(model => model.selection.modelId === "gemini-4-argon")?.variants).toEqual(["low", "medium", "high"]);
+      expect((await fake.log()).filter(entry => entry.method === "session/set_config_option").map(entry => [entry.params!.configId, entry.params!.value])).toEqual([["model", "gemini-4-argon"], ["thought_level", "low"]]);
+      expect((await fake.sessions())[0]).toEqual(expect.objectContaining({ model: "gemini-4-argon", thoughtLevel: "low" }));
+    });
+
     test("a variant the model does not offer is refused", async () => {
       const { provider } = await setup();
       const session = await provider.createSession("a");

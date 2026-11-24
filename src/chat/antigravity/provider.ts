@@ -12,7 +12,7 @@ import { PushQueue } from "../push-queue";
 import { provisionalTurn, type ChatTurnToken } from "../turn-liveness";
 import { LOGIN_FAILED_NOTICE_CODE, type ChatAgent, type ChatCapability, type ChatCommand, type ChatLoginState, type ChatMode, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionRequest, type TokenUsage } from "../types";
 import { ConversationNotFoundError } from "../workspace";
-import { catalogFromSession, legacyModelId, variantFor, type AcpCatalog } from "./catalog";
+import { catalogFromSession, legacyModelId, variantFor, withAdvertisedLevels, type AcpCatalog } from "./catalog";
 import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./connection";
 import { ANTIGRAVITY_AGENT } from "./descriptor";
 import { ANTIGRAVITY_PRICES } from "./prices";
@@ -736,6 +736,14 @@ export class AntigravityProvider implements ChatProvider {
     conversation.idle = timer;
   }
 
+  private refreshAdvertisedLevels(configOptions: unknown): void {
+    if (!this.catalog) return;
+    const next = withAdvertisedLevels(this.catalog, configOptions);
+    if (next === this.catalog || JSON.stringify(next.models) === JSON.stringify(this.catalog.models)) return;
+    this.catalog = next;
+    this.publish({ updates: [], outcome: "handled", eventType: "catalog", catalogsChanged: true });
+  }
+
   private forgetHistory(conversation: Conversation): void {
     conversation.seeded = false;
     conversation.items.splice(0);
@@ -747,7 +755,8 @@ export class AntigravityProvider implements ChatProvider {
   private async applyConfiguration(conversation: Conversation, process: AcpProcess, input: { model?: ModelSelection; mode?: string; variant?: string }): Promise<void> {
     const chosen = conversation.configuration;
     const model = input.model ?? chosen.model;
-    const variant = model ? variantFor(this.catalog, model.modelId, input.model ? input.variant : input.variant ?? chosen.variant) : undefined;
+    const wantedVariant = input.model ? input.variant : input.variant ?? chosen.variant;
+    let variant = model ? variantFor(this.catalog, model.modelId, wantedVariant) : undefined;
     const mode = input.mode ?? chosen.mode;
     const sessionId = conversation.sessionId;
     let applied = conversation.applied ?? {};
@@ -764,6 +773,9 @@ export class AntigravityProvider implements ChatProvider {
     } else if (modelChanged) {
       const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "model", value: model.modelId });
       applied = { ...applied, ...configurationFromOptions(answer.configOptions) };
+      // The answer advertises the new model's thinking levels.
+      this.refreshAdvertisedLevels(answer.configOptions);
+      variant = variantFor(this.catalog, model.modelId, wantedVariant);
     }
     if (this.catalog?.selection !== "legacy" && variant && (modelChanged || applied.variant !== variant)) {
       const answer = await process.agent.request("session/set_config_option", { sessionId, configId: "thought_level", value: variant });

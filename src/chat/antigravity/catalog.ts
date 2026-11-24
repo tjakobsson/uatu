@@ -100,10 +100,26 @@ export function catalogFromSession(answer: unknown, imageInput: boolean, known: 
   };
 }
 
-/** The thinking level to apply for a selection: the chosen one when the model offers it. */
+/**
+ * The thinking level to apply for a selection: the chosen one when the
+ * model offers it, or when its levels are not known yet (config options
+ * advertise only the current model's, so another model's arrive when it is
+ * selected).
+ */
 export function variantFor(catalog: AcpCatalog | undefined, modelId: string, variant: string | undefined): string | undefined {
   const model = catalog?.models.find(candidate => candidate.selection.modelId === modelId);
-  return variant && model?.variants?.includes(variant) ? variant : undefined;
+  if (!variant) return undefined;
+  if (!model?.variants && catalog?.legacyIds.length === 0) return variant;
+  return model?.variants?.includes(variant) ? variant : undefined;
+}
+
+/** The catalog with the levels a `set_config_option` answer advertises for its current model, when no legacy ids give levels. */
+export function withAdvertisedLevels(catalog: AcpCatalog, configOptions: unknown): AcpCatalog {
+  if (catalog.legacyIds.length) return catalog;
+  const current = configurationFromOptions(configOptions).model?.modelId;
+  const levels = options(configOptions, "thought_level").map(option => option.value);
+  if (!current || levels.length === 0) return catalog;
+  return { ...catalog, models: catalog.models.map(model => model.selection.modelId === current ? { ...model, variants: levels } : model) };
 }
 
 /** The legacy model id that selects a family at a thinking level, when agy offers one. */
