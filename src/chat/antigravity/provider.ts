@@ -55,8 +55,10 @@ type PromptOutcome = { result?: { stopReason: string; usage?: unknown }; error?:
 // its row needs and the promise its sender waits on for confirmation.
 type PromptState = { request: Promise<unknown>; outcome?: PromptOutcome; steer?: SteerState };
 type SteerState = {
-  position: number;
-  // The row it was sent after, if any: its own row goes there once accepted.
+  // Its user position, taken when agy takes it in (the prompt before it
+  // answers), so a steer agy refuses first never moves the running reply.
+  position?: number;
+  // The row it was taken in after, if any: its own row goes there once accepted.
   after?: string;
   sentAt: number;
   text: string;
@@ -406,18 +408,26 @@ export class AntigravityProvider implements ChatProvider {
     if (!turn || turn.ended || !process?.alive) throw new Error("Antigravity is not answering this conversation, so there is nothing to steer");
     const blocks = await this.promptBlocks(input);
     if (conversation.turn !== turn || turn.ended || !process.alive) throw new Error("Antigravity finished its turn before the steer was sent");
-    const memory = conversation.memory;
-    // The steer's position is reserved when it is sent, so what agy answers
-    // after it is numbered as replay will number it.
-    this.emit(conversation, { updates: sealOpenBlock(memory, this.now()), outcome: "handled", eventType: "session/prompt" });
-    memory.userCount += 1;
-    memory.blockCount = 0;
-    const position = memory.userCount;
+    // Sending moves nothing: the reply agy is streaming continues where it
+    // is until agy takes the steer in (settleTurn).
     const sentAt = this.now();
     let confirm!: (confirmation: SteerConfirmation) => void;
     const confirmation = new Promise<SteerConfirmation>(resolve => { confirm = resolve; });
-    this.send(conversation, process, turn, blocks, { position, after: conversation.items.at(-1)?.id, sentAt, text: input.text, attachments: attachmentRefs(input.attachments), confirm });
-    return { messageId: userMessageId(memory, position), createdAt: sentAt, confirmation };
+    const index = this.send(conversation, process, turn, blocks, { sentAt, text: input.text, attachments: attachmentRefs(input.attachments), confirm });
+    // A provisional id: the confirmation names the row's own.
+    return { messageId: `${turn.id}.s${index}`, createdAt: sentAt, confirmation };
+  }
+
+  // agy takes a steer in when the prompt before it answers; from then on
+  // what it streams answers the steer, numbered after the steer's user
+  // position as replay numbers it.
+  private placeSteer(conversation: Conversation, steer: SteerState): void {
+    const memory = conversation.memory;
+    this.emit(conversation, { updates: sealOpenBlock(memory, this.now()), outcome: "handled", eventType: "session/prompt" });
+    memory.userCount += 1;
+    memory.blockCount = 0;
+    steer.position = memory.userCount;
+    steer.after = conversation.items.at(-1)?.id;
   }
 
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
@@ -464,35 +474,46 @@ export class AntigravityProvider implements ChatProvider {
    * whose own end is then reported as it came.
    */
   private settleTurn(conversation: Conversation, process: AcpProcess, turn: Turn): void {
-    const memory = conversation.memory;
+    // The latest prompt before this one that agy did not refuse.
+    let previous: PromptState | undefined;
     for (const state of turn.prompts.values()) {
       const steer = state.steer;
-      if (!steer || steer.decided || !state.outcome) continue;
-      const { result, error } = state.outcome;
-      if (result && result.stopReason !== "cancelled") {
-        steer.decided = "accepted";
-        const user: ConversationItem = { id: `message:${userMessageId(memory, steer.position)}`, type: "user_message", createdAt: steer.sentAt, text: steer.text, ...(steer.attachments?.length ? { attachments: steer.attachments } : {}) };
-        // After the row it was sent after, and after steers sent before it there.
-        let at = steer.after === undefined ? 0 : conversation.items.findIndex(item => item.id === steer.after) + 1;
-        const earlier = (item: ConversationItem | undefined) => item?.type === "user_message" && Number(item.id.match(/\.u(\d+)$/)?.[1] ?? Infinity) < steer.position;
-        while (at > 0 && at < conversation.items.length && earlier(conversation.items[at])) at += 1;
-        conversation.items.splice(at > 0 ? at : conversation.items.length, 0, user);
-        this.publish({ conversationId: conversation.sessionId, updates: [{ kind: "upsert", item: user }], outcome: "handled", eventType: "session/prompt" });
-        steer.confirm({ outcome: "accepted", messageId: userMessageId(memory, steer.position), createdAt: steer.sentAt });
-      } else if (error !== undefined && rpcErrorCode(error) !== undefined) {
-        steer.decided = "refused";
-        // Nothing was numbered after it: give its position back.
-        if (memory.userCount === steer.position && memory.blockCount === 0) memory.userCount -= 1;
-        steer.confirm({ outcome: "refused", reason: error instanceof Error ? error.message : String(error) });
-      } else {
-        steer.decided = "unknown";
-        steer.confirm({ outcome: "unknown" });
-      }
+      if (steer && !steer.decided) this.decideSteer(conversation, steer, state.outcome, previous);
+      if (steer?.decided !== "refused") previous = state;
     }
     if (turn.ended) return;
     const carrying = [...turn.prompts.entries()].reverse().find(([, state]) => state.steer?.decided !== "refused");
     if (!carrying || !carrying[1].outcome) return;
     this.finishTurn(conversation, process, turn, carrying[1].outcome);
+  }
+
+  private decideSteer(conversation: Conversation, steer: SteerState, outcome: PromptOutcome | undefined, previous: PromptState | undefined): void {
+    const memory = conversation.memory;
+    const taken = previous?.outcome?.result && previous.outcome.result.stopReason !== "cancelled";
+    if (steer.position === undefined && taken) this.placeSteer(conversation, steer);
+    if (!outcome) return;
+    const { result, error } = outcome;
+    if (result && result.stopReason !== "cancelled") {
+      steer.decided = "accepted";
+      if (steer.position === undefined) this.placeSteer(conversation, steer);
+      const position = steer.position!;
+      const user: ConversationItem = { id: `message:${userMessageId(memory, position)}`, type: "user_message", createdAt: steer.sentAt, text: steer.text, ...(steer.attachments?.length ? { attachments: steer.attachments } : {}) };
+      // After the row it was taken in after, and after steers taken in before it there.
+      let at = steer.after === undefined ? 0 : conversation.items.findIndex(item => item.id === steer.after) + 1;
+      const earlier = (item: ConversationItem | undefined) => item?.type === "user_message" && Number(item.id.match(/\.u(\d+)$/)?.[1] ?? Infinity) < position;
+      while (at > 0 && at < conversation.items.length && earlier(conversation.items[at])) at += 1;
+      conversation.items.splice(at > 0 ? at : conversation.items.length, 0, user);
+      this.publish({ conversationId: conversation.sessionId, updates: [{ kind: "upsert", item: user }], outcome: "handled", eventType: "session/prompt" });
+      steer.confirm({ outcome: "accepted", messageId: userMessageId(memory, position), createdAt: steer.sentAt });
+    } else if (error !== undefined && rpcErrorCode(error) !== undefined) {
+      steer.decided = "refused";
+      // Taken in with nothing numbered after it: give its position back.
+      if (steer.position !== undefined && memory.userCount === steer.position && memory.blockCount === 0) memory.userCount -= 1;
+      steer.confirm({ outcome: "refused", reason: error instanceof Error ? error.message : String(error) });
+    } else {
+      steer.decided = "unknown";
+      steer.confirm({ outcome: "unknown" });
+    }
   }
 
   private finishTurn(conversation: Conversation, process: AcpProcess, turn: Turn, outcome: PromptOutcome): void {
@@ -569,7 +590,7 @@ export class AntigravityProvider implements ChatProvider {
     // Every input the turn carried: its opening prompt and each steer agy
     // took, each a turn of its own in the transcript, matched by its words.
     const inputs = [{ position: turn.userIndex, text: turn.request }, ...[...turn.prompts.values()]
-      .flatMap(state => state.steer?.decided === "accepted" ? [{ position: state.steer.position, text: state.steer.text }] : [])];
+      .flatMap(state => state.steer?.decided === "accepted" && state.steer.position !== undefined ? [{ position: state.steer.position, text: state.steer.text }] : [])];
     const recordedTurns = transcriptTurns(read.steps);
     const tokens: TokenUsage = {};
     let recordedModelId: string | undefined;

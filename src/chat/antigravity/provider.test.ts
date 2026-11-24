@@ -517,7 +517,8 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       const session = await provider.createSession("a");
       const first = await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
-      const steer = await provider.prompt(session.id, { id: "s", text: "Also write BANANA", delivery: "steer" });
+      const sent = await provider.prompt(session.id, { id: "s", text: "Also write BANANA", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      const steer = await sent.confirmation as Extract<SteerConfirmation, { outcome: "accepted" }>;
       await ended(session.id);
       // The earlier prompt ended before the steer was accepted, so every
       // status this turn will publish is in by now.
@@ -549,8 +550,8 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       // Sent, not confirmed: no row yet.
       expect(await users()).toEqual(before);
       const confirmation = await sent.confirmation;
-      expect(confirmation).toEqual({ outcome: "accepted", messageId: sent.messageId, createdAt: sent.createdAt });
-      expect(await users()).toEqual([...before, `message:${sent.messageId}`]);
+      expect(confirmation).toEqual({ outcome: "accepted", messageId: expect.stringMatching(/\.u2$/), createdAt: sent.createdAt });
+      expect(await users()).toEqual([...before, `message:${(confirmation as { messageId: string }).messageId}`]);
       await ended(session.id);
     });
 
@@ -561,13 +562,13 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
       const one = await provider.prompt(session.id, { id: "s1", text: "One", delivery: "steer" }) as { messageId: string; confirmation: Promise<SteerConfirmation> };
       const two = await provider.prompt(session.id, { id: "s2", text: "Two", delivery: "steer" }) as { messageId: string; confirmation: Promise<SteerConfirmation> };
-      expect((await one.confirmation).outcome).toBe("accepted");
-      expect((await two.confirmation).outcome).toBe("accepted");
+      const accepted = [await one.confirmation, await two.confirmation] as Array<Extract<SteerConfirmation, { outcome: "accepted" }>>;
+      expect(accepted.map(confirmation => confirmation.outcome)).toEqual(["accepted", "accepted"]);
       await ended(session.id);
       expect(statuses(session.id)).toEqual(["completed"]);
       expect((await prompts()).map(entry => (entry.params!.prompt as Array<{ text: string }>)[0]!.text)).toEqual(["steer: run it", "One", "Two"]);
       const users = (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message").map(item => item.id);
-      expect(users).toEqual([`message:${first.messageId}`, `message:${one.messageId}`, `message:${two.messageId}`]);
+      expect(users).toEqual([`message:${first.messageId}`, ...accepted.map(confirmation => `message:${confirmation.messageId}`)]);
     });
 
     test("a steer agy refuses settles as refused with its reason, publishes no row, and leaves the turn running to its end", async () => {
@@ -583,6 +584,19 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await provider.interrupt(session.id);
       await ended(session.id);
       expect(statuses(session.id)).toEqual(["interrupted"]);
+    });
+
+    test("a steer agy refuses leaves the running reply where it was, so what follows extends it", async () => {
+      const { fake, provider, waitFor, upserts, ended } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "pause: greet", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.type === "assistant_message" && item.markdown === "Hello, "), "the reply's start");
+      await fake.setFlag("refuse-steer", true);
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      expect((await sent.confirmation).outcome).toBe("refused");
+      await ended(session.id);
+      const replies = (await provider.listMessages(session.id, { limit: 100 })).items.flatMap(item => item.type === "assistant_message" && item.markdown ? [[item.id, item.markdown]] : []);
+      expect(replies).toEqual([[expect.stringMatching(/\.a1\.1$/), "Hello, world"]]);
     });
 
     test("an earlier prompt that ends just before agy refuses the steer is not taken as acceptance, and its own end is reported", async () => {

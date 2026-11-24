@@ -107,6 +107,14 @@
       "stopReason": "end_turn"
     },
     "refuse": { "steps": [], "stopReason": "refusal" },
+    "pause": {
+      "steps": [
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello, " } } },
+        { "waitForPrompt": {} },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "world" } } }
+      ],
+      "stopReason": "end_turn"
+    },
     "maxtokens": { "steps": [{ "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Partial" } } }], "stopReason": "max_tokens" },
     "image": {
       "steps": [{ "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Here is a chart: ![chart](chart.svg)" } } }],

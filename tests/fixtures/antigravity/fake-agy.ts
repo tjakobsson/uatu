@@ -46,6 +46,8 @@ type Step =
   | { update: Update }
   | { permission: { toolCallId: string; title: string; kind: string } }
   | { waitForSteer: { usage?: Record<string, number> } }
+  // Resumes once another prompt reaches the run, taken in or refused.
+  | { waitForPrompt: Record<string, never> }
   | { waitForCancel: { update?: Update } };
 type Script = { title?: string; steps: Step[]; onReject?: Step[]; stopReason: string; usage?: Record<string, number> };
 type Fixture = {
@@ -131,6 +133,7 @@ type Run = {
   cancelled: boolean;
   cancelWaiters: Array<() => void>;
   steerWaiters: Array<() => void>;
+  promptWaiters: Array<() => void>;
   pendingSteerUsage?: Record<string, number>;
 };
 const runs = new Map<string, Run>();
@@ -235,6 +238,7 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   if (broken.has(params.sessionId)) throw new RequestError(-32603, `Failed to send user message: not_found: trajectory not found: ${params.sessionId}: not found`);
   const text = params.prompt.flatMap(block => block.type === "text" ? [block.text] : []).join("\n");
   const running = runs.get(params.sessionId);
+  if (running) setTimeout(() => { for (const waiter of running.promptWaiters.splice(0)) waiter(); }, 0);
   if (running && flag("refuse-steer")) throw new RequestError(-32603, "Antigravity is busy and did not take the message");
   if (running && flag("end-then-refuse-steer")) {
     // The earlier prompt ends on its own just before agy refuses the steer.
@@ -261,7 +265,7 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
   const name = text.match(/^(\w+):/)?.[1];
   const script = fixture.scripts[name && fixture.scripts[name] ? name : "text"]!;
   return new Promise<PromptResult>(resolve => {
-    const run: Run = { resolve, cancelled: false, cancelWaiters: [], steerWaiters: [] };
+    const run: Run = { resolve, cancelled: false, cancelWaiters: [], steerWaiters: [], promptWaiters: [] };
     runs.set(params.sessionId, run);
     void perform(params.sessionId, script, run, client).then(result => {
       runs.delete(params.sessionId);
@@ -317,6 +321,8 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       run.pendingSteerUsage = flag("no-usage") ? undefined : step.waitForSteer.usage;
       await new Promise<void>(resolve => { run.steerWaiters.push(resolve); run.cancelWaiters.push(resolve); });
       run.pendingSteerUsage = undefined;
+    } else if ("waitForPrompt" in step) {
+      await new Promise<void>(resolve => { run.promptWaiters.push(resolve); run.cancelWaiters.push(resolve); });
     } else if ("waitForCancel" in step) {
       await new Promise<void>(resolve => run.cancelWaiters.push(resolve));
       if (step.waitForCancel.update) await send(step.waitForCancel.update);

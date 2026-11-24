@@ -454,7 +454,8 @@ export interface ChatProvider {
    * `createdAt`, when given, is the accepted message's timeline position.
    * An immediate steer may instead resolve as soon as it is sent, with a
    * `confirmation` that settles from the agent's answer to it: the adapter
-   * then frees the conversation at once and settles the steer later.
+   * then frees the conversation at once and settles the steer later. Its
+   * `messageId` is then provisional; an acceptance names the row's own.
    */
   prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> }>;
   /** Native identity known before dispatch, for read-only unknown recovery. */

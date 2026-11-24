@@ -239,8 +239,11 @@ agent in commit 2, before the Antigravity provider exists):
   attachments return to the composer. If the outcome is unknown, the steer is
   kept as an unconfirmed entry under the existing rules and never resent.
 - The provider publishes the accepted steer as a `user_message` at the point
-  it was sent. Replayed history deduplicates it by turn and message
-  position, so it appears once (D4).
+  agy took it in: when the prompt before it answered. Sending it moves
+  nothing in the stream, so a steer refused before that leaves the running
+  reply and the ids after it as they were, and only steers agy took in hold
+  user positions, as in replay. Replayed history deduplicates it by turn and
+  message position, so it appears once (D4).
 - For Antigravity, acceptance needs evidence about the steer itself. ACP
   has no acknowledgement for a prompt, and agy ends the earlier prompt with
   an ordinary `end_turn`, the same stop reason a natural end has (the trial
@@ -258,7 +261,7 @@ agent in commit 2, before the Antigravity provider exists):
   and frees the conversation's admission lane at once, so a queued
   follow-up goes into the dock and stays editable, and a second steer can be
   sent. The client keeps the steer as an unconfirmed draft. Acceptance puts
-  its row, carrying the request id, where it was sent, which settles the
+  its row, carrying the request id, where agy took it in, which settles the
   draft; a refusal adds a `steer-refused` notice, which returns the draft to
   the composer with agy's reason; an unknown outcome leaves the draft
   unconfirmed, never resent. An admission that answers after the steer
