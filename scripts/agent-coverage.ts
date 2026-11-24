@@ -14,7 +14,7 @@
  * publishes after every push to main. Output is deterministic: no
  * timestamps, sorted entries, versions only.
  */
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { AGENT_METHODS, CLIENT_METHODS } from "@agentclientprotocol/sdk";
@@ -424,16 +424,36 @@ export function probeAcpToolKind(kind: string): { state: CoverageState; renders?
   return row?.type === "command" ? { state: "dedicated", renders: "command row" } : { state: "generic" };
 }
 
-// Which ACP methods the Antigravity stack calls or answers, read from its
-// own source: a method is used when its name appears there as a literal.
-function antigravitySource(): string {
+/** The ACP methods a stack sends to the agent and the ones it registers a handler for. */
+export type AcpMethodSites = { sent: ReadonlySet<string>; handled: ReadonlySet<string> };
+
+/**
+ * The ACP methods named at call sites in TypeScript sources: sent through
+ * `agent.request(…)` or `agent.notify(…)`, handled through `onRequest(…)` or
+ * `onNotification(…)`. Comments and types go first, so a method named in a
+ * comment, a string or a type is not a use.
+ */
+export function acpMethodSites(sources: readonly string[]): AcpMethodSites {
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const sent = new Set<string>(), handled = new Set<string>();
+  for (const source of sources) {
+    const code = transpiler.transformSync(source);
+    for (const match of code.matchAll(/\.agent\.(?:request|notify)\(\s*"([^"]+)"/g)) sent.add(match[1]!);
+    for (const match of code.matchAll(/\.on(?:Request|Notification)\(\s*"([^"]+)"/g)) handled.add(match[1]!);
+  }
+  return { sent, handled };
+}
+
+// The Antigravity stack's own source, without its tests and annotations.
+function antigravityMethodSites(): AcpMethodSites {
   const directory = path.join(REPO_ROOT, "src/chat/antigravity");
-  return ["provider.ts", "connection.ts"].map(file => readFileSync(path.join(directory, file), "utf8")).join("\n");
+  const files = readdirSync(directory).filter(file => file.endsWith(".ts") && !file.endsWith(".test.ts") && file !== "sdk-coverage.ts");
+  return acpMethodSites(files.map(file => readFileSync(path.join(directory, file), "utf8")));
 }
 
 /** Used methods are dedicated; an unused one is ignored when an annotation explains why, and unhandled otherwise. */
-function methodState(key: string, method: string, source: string, annotations: CoverageAnnotations): CoverageState {
-  if (source.includes(`"${method}"`)) return "dedicated";
+function methodState(key: string, used: boolean, annotations: CoverageAnnotations): CoverageState {
+  if (used) return "dedicated";
   const explained = Object.keys(annotations.reasons).some(candidate => candidate === key || candidate.endsWith("*") && key.startsWith(candidate.slice(0, -1)));
   return explained ? "ignored" : "unhandled";
 }
@@ -564,12 +584,11 @@ export function openCodeReport(vocabulary: OpenCodeVocabulary = extractOpenCode(
   };
 }
 
-export function antigravityReport(vocabulary: AntigravityVocabulary = extractAntigravity(), annotations: CoverageAnnotations = antigravityCoverageAnnotations): AgentReport {
-  const source = antigravitySource();
+export function antigravityReport(vocabulary: AntigravityVocabulary = extractAntigravity(), annotations: CoverageAnnotations = antigravityCoverageAnnotations, sites: AcpMethodSites = antigravityMethodSites()): AgentReport {
   const axes = annotate([
     { id: "updates", title: "Session updates", source: "`@agentclientprotocol/sdk` `schema/v1/schema.json` `SessionUpdate` (its `sessionUpdate` constants)", keyPrefix: "", entries: vocabulary.updates.names.map(name => ({ name, state: probeAcpUpdate(name) })) },
-    { id: "agent-methods", title: "Agent methods (sent to agy)", source: "`@agentclientprotocol/sdk` `AGENT_METHODS`; a method is used when the Antigravity provider or connection names it. Annotation keys are `agent:<method>`", keyPrefix: "agent:", entries: vocabulary.agentMethods.names.map(name => ({ name, state: methodState(`agent:${name}`, name, source, annotations) })) },
-    { id: "client-methods", title: "Client methods (answered for agy)", source: "`@agentclientprotocol/sdk` `CLIENT_METHODS`. Annotation keys are `client:<method>`", keyPrefix: "client:", entries: vocabulary.clientMethods.names.map(name => ({ name, state: methodState(`client:${name}`, name, source, annotations) })) },
+    { id: "agent-methods", title: "Agent methods (sent to agy)", source: "`@agentclientprotocol/sdk` `AGENT_METHODS`; a method is used when the Antigravity stack sends it, at an `agent.request` or `agent.notify` call. Annotation keys are `agent:<method>`", keyPrefix: "agent:", entries: vocabulary.agentMethods.names.map(name => ({ name, state: methodState(`agent:${name}`, sites.sent.has(name), annotations) })) },
+    { id: "client-methods", title: "Client methods (answered for agy)", source: "`@agentclientprotocol/sdk` `CLIENT_METHODS`; a method is used when the Antigravity stack registers a handler for it, at an `onRequest` or `onNotification` call. Annotation keys are `client:<method>`", keyPrefix: "client:", entries: vocabulary.clientMethods.names.map(name => ({ name, state: methodState(`client:${name}`, sites.handled.has(name), annotations) })) },
     { id: "tool-kinds", title: "Tool kinds", source: "`@agentclientprotocol/sdk` `schema/v1/schema.json` `ToolKind`. Annotation keys are `kind:<kind>`", keyPrefix: "kind:", entries: vocabulary.toolKinds.names.map(name => ({ name, ...probeAcpToolKind(name) })), notEnumerated: "ACP does not enumerate agy's tool names: a tool call carries its name only in agy's own field. This lists ACP's tool kinds instead; a diff in any tool's content adds file-change rows." },
   ], annotations, "src/chat/antigravity/sdk-coverage.ts");
   return {

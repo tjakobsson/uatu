@@ -8,8 +8,10 @@ import type { CoverageAnnotations } from "../coverage-annotations";
  * `kind:`. ACP does not enumerate agy's tool names, so the report lists tool
  * kinds and says so.
  *
- * A method counts as used when the provider or connection names it; an
- * unused one needs a reason here, or it reports as unhandled. agy's legacy
+ * An agent method counts as used where the stack sends it (`agent.request`,
+ * `agent.notify`) and a client method where it registers a handler
+ * (`onRequest`, `onNotification`); an unused one needs a reason here, or it
+ * reports as unhandled. agy's legacy
  * `session/set_model`, which the provider uses when agy offers only legacy
  * model ids, is outside the methods the SDK declares.
  */

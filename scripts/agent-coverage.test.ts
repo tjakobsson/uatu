@@ -9,6 +9,7 @@ import { openCodeCoverageAnnotations } from "../src/chat/opencode/sdk-coverage";
 import {
   ANTIGRAVITY_SOURCES,
   CLAUDE_SOURCES,
+  acpMethodSites,
   antigravityReport,
   extractAntigravity,
   DASHBOARD_ISSUE,
@@ -329,6 +330,24 @@ describe("agent coverage: Antigravity through the ACP SDK", () => {
     expect(entry(antigravity, "tool-kinds", "execute")).toEqual(expect.objectContaining({ state: "dedicated", renders: "command row" }));
     expect(entry(antigravity, "tool-kinds", "read").state).toBe("generic");
     expect(antigravity.axes.find(axis => axis.id === "tool-kinds")?.notEnumerated).toContain("ACP does not enumerate agy's tool names");
+  });
+
+  test("a method is used only where the stack sends it or registers its handler, never where it is merely named", () => {
+    const sites = acpMethodSites([[
+      'await process.agent.request<unknown>("session/set_model", { sessionId });',
+      'void connection.agent.notify("session/cancel", {});',
+      'client.onRequest("session/request_permission", handler).onNotification("session/update", parse, handler);',
+      '// process.agent.request("session/delete", {});',
+      'const note = "logout";',
+      'type Unused = "fs/read_text_file";',
+    ].join("\n")]);
+    expect([...sites.sent].sort()).toEqual(["session/cancel", "session/set_model"]);
+    expect([...sites.handled].sort()).toEqual(["session/request_permission", "session/update"]);
+    // A method the stack only names is not counted as used, sent or answered.
+    const named = antigravityReport(extractAntigravity(), antigravityCoverageAnnotations, { sent: new Set(["initialize"]), handled: new Set(["session/prompt"]) });
+    expect(entry(named, "agent-methods", "session/prompt").state).toBe("unhandled");
+    expect(entry(named, "client-methods", "session/update").state).toBe("unhandled");
+    expect(named.axes.find(axis => axis.id === "agent-methods")?.source).toContain("`agent.request` or `agent.notify` call");
   });
 
   test("a stale annotation fails, naming the key", () => {
