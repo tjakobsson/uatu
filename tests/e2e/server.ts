@@ -105,6 +105,8 @@ let nativeWatch = false;
 let failDiscovery = false;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
+// The second watched repository a reset's `secondRepository` asked for.
+let secondRepositoryRoot: string | null = null;
 let personalState: Record<string, unknown> = { version: 1 };
 const fakeChatAgent = new FakeE2EChatService({
   agentName: process.env.UATU_E2E_PRIMARY_AGENT_NAME ?? undefined,
@@ -340,6 +342,10 @@ async function handleE2EReset(request: Request): Promise<Response> {
     // route answers 404, as before, so suites that don't ask see no pull
     // request surfaces.
     github?: boolean | string;
+    // A second watched root beside the workspace: a separate Git repository
+    // named `docs-site` (in the OS temp directory), so the session has two
+    // repositories. Needs `git: true`.
+    secondRepository?: boolean;
   } = {};
   try {
     const text = await request.text();
@@ -403,6 +409,8 @@ async function handleE2EReset(request: Request): Promise<Response> {
   await Promise.all(e2eGithubRemotes.splice(0).map(remote => fs.rm(remote, { recursive: true, force: true })));
   e2eGithub = body.github && body.github !== "transport" ? new FakeGithubService({ scenario: typeof body.github === "string" ? body.github : undefined }) : environmentGithub();
 
+  if (secondRepositoryRoot) await fs.rm(path.dirname(secondRepositoryRoot), { recursive: true, force: true });
+  secondRepositoryRoot = null;
   const previousWorkspaceRoot = activeWorkspaceRoot;
   activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
   await resetE2EWorkspace();
@@ -436,6 +444,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   if (body.git) {
     await initE2EGitRepository();
   }
+  if (body.git && body.secondRepository) secondRepositoryRoot = await initSecondRepository();
   if (body.github === "transport") {
     await safeGit(activeWorkspaceRoot, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
     e2eGithubTransport = new FakeGitHub();
@@ -1132,7 +1141,7 @@ async function createSession(options: { resetWorkspace: boolean }) {
   }
   const entryPaths = activeFilePath
     ? [`${activeWorkspaceRoot}/${activeFilePath}`]
-    : [activeWorkspaceRoot];
+    : [activeWorkspaceRoot, ...(secondRepositoryRoot ? [secondRepositoryRoot] : [])];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
   const heldDiscovery = discoveryGate;
@@ -1157,6 +1166,17 @@ async function createSession(options: { resetWorkspace: boolean }) {
   if (heldDiscovery) void started.catch(error => console.error(error));
   else await started;
   return session;
+}
+
+// `docs-site`: a one-commit repository on `main` with no remote.
+async function initSecondRepository(): Promise<string> {
+  const root = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-e2e-second-")), "docs-site");
+  await fs.mkdir(root, { recursive: true });
+  await fs.writeFile(path.join(root, "GUIDE.md"), "# Docs site\n\nThe second repository.\n", "utf8");
+  await safeGit(root, ["init", "--initial-branch=main"]);
+  await safeGit(root, ["add", "."]);
+  await safeGit(root, ["-c", "commit.gpgsign=false", "-c", "user.name=Uatu Test", "-c", "user.email=uatu@example.test", "commit", "-m", "docs site"]);
+  return root;
 }
 
 async function initE2EGitRepository() {

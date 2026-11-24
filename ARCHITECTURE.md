@@ -1509,6 +1509,21 @@ Check out as a worktree… then Create worktree creates the checkout through the
 
 uatu never merges (design D11): the pane and the end of Conversation show GitHub's merge readiness read-only, and "Merge on GitHub ↗" links to the pull request. Refresh is event-driven with no timer (design D6): a branch or HEAD change, a PR view opening, returning to the page (focus or visibility, at most every 15 s), the user's own writes, manual refresh and Retry.
 
+### End-to-end coverage
+
+The pull request and switcher surfaces are verified end to end, with real clicks, keys and taps at 1440×900, 390×844 and 844×390; unit tests keep the pure rules (parsers, classification, anchoring, the Git reader, the contract, `switcher-model.ts`). The e2e files:
+
+| File | Covers |
+|---|---|
+| `tests/e2e/pull-request-read.e2e.ts` | The pane's summary and Details cards, merge blockers, every non-ready state (no pull request, no credential, rate-limited, unavailable), an unresolvable URL, a hostile comment, a long conversation, direct arrival, Refresh, reload and Back/Forward, two Git repositories, touch and landscape |
+| `tests/e2e/pull-request-review.e2e.ts` | Comments on each line kind, a reply, deleting a pending comment, Escape and discard confirmations with focus return, drafts across reload, Ctrl+Enter, unsent drafts in Finish review, the verdicts and summary rules, Resolve with Undo, Jump to file, one pinned file header, the head-moved refusal |
+| `tests/e2e/pull-request-review-touch.e2e.ts` | Touch review: a row tap opens the composer, the tabs row's Review / Finish, the tab bar stepping aside while composing, Jump to file, one pinned file header, the review dialog on a short screen, 44px targets by `elementFromPoint` |
+| `tests/e2e/pull-request-file.e2e.ts` | The file view: modes kept across ‹ ›, thread marks, Show in Diff, View file, relative links, All files, Base, the consent card, the branch's own pull request, touch targets |
+| `tests/e2e/pull-request-base.e2e.ts` | The pull request as compare base and the document Diff's notes |
+| `tests/e2e/workspace-switcher.e2e.ts`, `pull-request-worktree.e2e.ts`, `hub-switcher.e2e.ts` | The switcher through a real Hub: faces, status card, Viewing and Back, search, Checkouts by repository, Pull requests and its filter, view or check out, the keyboard, touch and landscape; creating a pull request's worktree; live activity |
+
+They run on the in-memory fake (`/__e2e/reset { github: true | "<scenario>" }`) or the real service over the transport fake (`github: "transport"`, with `/__e2e/github` for #42 and its bare remote); `secondRepository: true` adds a second Git repository (`docs-site`, no remote) as another watched root. Shared steps and the layout checks (`centreMiss`, `expectTouchTarget`, `pinnedFileHeadersAt`) are in `tests/e2e/pull-request-helpers.ts`. The three newest files run in CI's e2e leg 1 (`playwright.config.ts`).
+
 ### The GitHub backend: `gh api`
 
 **Choice.** One setting, `UATU_GITHUB = off | read | full` (unset means `full`; an unknown value means `off`), read once when the session starts:

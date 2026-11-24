@@ -13532,10 +13532,13 @@ html[data-ui-mode="touch"] .pr-toast { bottom: calc(var(--tab-bar-total) + 0.75r
    up), the bottom tab bar steps aside, as it does for the chat input, so the
    keyboard leaves the composer room; blur brings it back. What measures the
    bar (tabBarBottomInset) reads 0 then, and the page's scroll padding and
-   the toasts drop its height too. */
-html[data-ui-mode="touch"]:has(.pr-composer-input:focus) .touch-tab-bar { display: none; }
-html[data-ui-mode="touch"]:has(.pr-composer-input:focus) { scroll-padding-bottom: 0.5rem; }
-html[data-ui-mode="touch"]:has(.pr-composer-input:focus) .pr-toast { bottom: calc(0.75rem + var(--pr-toast-offset, 0px)); }
+   the toasts drop its height too. Focus anywhere in the composer counts: a
+   tap on Add to review moves focus from the text to the button, and the bar
+   coming back under the finger between the press and the release would
+   take the click. */
+html[data-ui-mode="touch"]:has(.pr-composer-box:focus-within) .touch-tab-bar { display: none; }
+html[data-ui-mode="touch"]:has(.pr-composer-box:focus-within) { scroll-padding-bottom: 0.5rem; }
+html[data-ui-mode="touch"]:has(.pr-composer-box:focus-within) .pr-toast { bottom: calc(0.75rem + var(--pr-toast-offset, 0px)); }
 /* A short touch screen has no rows to spare over the diff: one compact line
    at the top, over the pinned header, never over the code. */
 @media (max-height: 500px) {

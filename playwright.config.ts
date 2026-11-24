@@ -21,7 +21,9 @@ const PERF = /@perf\b/;
 // (14.1m) versus 873 in leg 2 (cancelled at the 25m job limit). Moving the
 // three large new chat suites gives 636 versus 645. Counts guard against
 // drift (scripts/e2e-partition.test.ts); CI worker time remains the authority
-// for rebalancing, especially for suites that launch WebKit.
+// for rebalancing, especially for suites that launch WebKit. The pull request
+// and switcher suites that replaced the ux-loop probes (pull-request-read,
+// pull-request-review-touch, workspace-switcher) are short and in leg 1.
 // Unset, the project runs the whole suite. No test's project or identity changes.
 const LEG_ONE_FILES = [
   "asciidoc", "chat-agents", "chat-cost-receipt", "chat-hold-to-queue",
@@ -32,9 +34,9 @@ const LEG_ONE_FILES = [
   "media-browsing", "media-layout", "media-navigation", "media-playback", "media-workflow",
   "metadata-card", "mobile", "notification-layout", "notification-presence",
   "notifications", "outline-presentation", "preview-renderers",
-  "project-search", "pwa", "recent-files", "terminal-clipboard", "terminal-font",
+  "project-search", "pull-request-read", "pull-request-review-touch", "pwa", "recent-files", "terminal-clipboard", "terminal-font",
   "terminal-session-manager", "terminal-switcher", "terminal", "theme",
-  "touch-scroll", "view-and-layout",
+  "touch-scroll", "view-and-layout", "workspace-switcher",
 ].map(name => `**/${name}.e2e.ts`);
 
 function legFiles(): { testMatch?: string[]; testIgnore?: string[] } {

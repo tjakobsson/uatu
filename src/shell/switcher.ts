@@ -642,6 +642,19 @@ function paintActive(): void {
 function renderPanel(): void {
   const panel = $<HTMLElement>("#hub-menu");
   if (!panel) return;
+  // A re-render can replace the focused control (a menu toggle whose label
+  // changed while another repository is read): focus stays in the dialog, on
+  // the same toggle when it is still there, else on the search.
+  const active = document.activeElement as HTMLElement | null;
+  const focused = active && panel.contains(active) ? active : null;
+  renderPanelContent(panel);
+  if (!focused || focused.isConnected || panel.hidden || panel.contains(document.activeElement)) return;
+  const toggle = focused.dataset.switcherMenuToggle;
+  const again = toggle ? panel.querySelector<HTMLElement>(`[data-switcher-menu-toggle="${toggle}"]`) : null;
+  (again && !again.closest("[hidden]") ? again : panel.querySelector<HTMLElement>("#switcher-search"))?.focus({ preventScroll: true });
+}
+
+function renderPanelContent(panel: HTMLElement): void {
   const lists = panel.querySelector<HTMLElement>(".switcher-lists");
   const stepElement = panel.querySelector<HTMLElement>("#switcher-step");
   if (state.step) {
@@ -1012,6 +1025,16 @@ function renderPullRequests(panel: HTMLElement): void {
   };
   const repoSlot = panel.querySelector<HTMLElement>("#switcher-pr-repo");
   const repoMenuSlot = panel.querySelector<HTMLElement>("#switcher-repo-menu-slot");
+  // With more than one Git repository the selector stays while the chosen
+  // one is read or turns out not to be on GitHub: it is the way back.
+  const notOnGithub = storeState.summary?.status === "not-github";
+  if (!enabled && storeState.repositoryId !== null && pullRequestStore.repositories().length > 1 && (notOnGithub || storeState.enabled === null)) {
+    section.hidden = state.query.trim() !== "";
+    renderRepository(repoSlot, repoMenuSlot, set);
+    set(filterSlot, ""); set(listbox, ""); set(more, "");
+    set(notes, `<p class="switcher-note">${notOnGithub ? `${escapeHtml(repositoryLabel(storeState.repositoryId))} isn't on GitHub.` : "Reading GitHub…"}</p>`);
+    return;
+  }
   if (!enabled) {
     set(notes, ""); set(listbox, ""); set(more, ""); set(filterSlot, "");
     if (repoSlot) set(repoSlot, "");
@@ -1070,14 +1093,14 @@ function renderPullRequests(panel: HTMLElement): void {
   if (exact && !visible.includes(exact)) visible = [exact, ...visible];
   const lookupNumber = wanted && shouldLookUp({ named: true, otherRepository: Boolean(otherRepository), exactOpen: Boolean(exact), visibleMatches: visible.length, settled: state.settledQuery === state.query }) ? wanted.number : null;
   if (lookupNumber !== null) lookUp(lookupNumber);
-  const repositoryLabel = `${list.repository.owner}/${list.repository.name}`;
-  if (otherRepository) noteParts.push(`<p class="switcher-note" role="status">This link is for <strong>${escapeHtml(otherRepository)}</strong>, not <strong>${escapeHtml(repositoryLabel)}</strong>.</p>`);
+  const listRepository = `${list.repository.owner}/${list.repository.name}`;
+  if (otherRepository) noteParts.push(`<p class="switcher-note" role="status">This link is for <strong>${escapeHtml(otherRepository)}</strong>, not <strong>${escapeHtml(listRepository)}</strong>.</p>`);
   const waiting = wanted && !otherRepository && !exact && visible.length === 0 && lookupNumber === null;
   if (waiting) noteParts.push(`<p class="switcher-note">#${wanted.number} isn't in the open list. Press Enter to look it up on GitHub.</p>`);
   let lookupRow = "";
   if (lookupNumber !== null) {
     const lookup = state.lookups.get(lookupNumber) ?? { status: "loading" as const };
-    noteParts.push(`<p class="switcher-note" role="status">${escapeHtml(lookupText(lookupNumber, lookup, repositoryLabel))}</p>`);
+    noteParts.push(`<p class="switcher-note" role="status">${escapeHtml(lookupText(lookupNumber, lookup, listRepository))}</p>`);
     if (lookup.status === "found") lookupRow = lookupRowHtml(lookup.pr);
   }
   if (!otherRepository && !wanted && visible.length === 0) {

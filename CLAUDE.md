@@ -252,6 +252,10 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
 - E2E tests live in `tests/e2e/` under feature-named files
   (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.) —
   there is no monolithic `uatu.e2e.ts`.
+- **Prefer e2e tests for user-facing behaviour.** Verify a UI change with a
+  Playwright test that drives it with real clicks and keys at desktop and
+  touch sizes. Keep unit tests for pure rules (parsers, classification,
+  contracts, Git readers).
 - **The follow-mode capability** owns the Follow toggle, its four rules
   (Rule A user click, Rule B chip click, Rule C/D file event), and the
   `TreeView.withProgrammaticUpdate(fn)` guard that distinguishes real

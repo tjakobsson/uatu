@@ -10,23 +10,14 @@
 import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 import { workspacePath, workspaceRoot } from "./config";
 import { captureScreenshot } from "./evidence";
 import { expect, standardBeforeEach, test } from "./fixtures";
-import { ownPullRequest, pushPullRequestHead, refreshPullRequest } from "./pull-request-helpers";
+import { expectTouchTarget, LANDSCAPE, ownPullRequest, PORTRAIT, pushPullRequestHead, refreshPullRequest, resetGithub, resetTouchGithub } from "./pull-request-helpers";
 
 const HEAD = "c0ffee1";
-
-async function resetGithub(page: Page, request: APIRequestContext, github: boolean | string = true): Promise<void> {
-  await standardBeforeEach(page, request);
-  await request.post("/__e2e/reset", { data: { git: true, github } });
-  // Writes (a fetch, a comment) carry the workspace credential, as a session
-  // URL printed by the CLI does.
-  const { token } = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
-  await page.goto(`/?t=${encodeURIComponent(token)}`);
-}
 
 // Opens a file view and waits until its bar and content are on screen.
 async function openFile(page: Page, query: string): Promise<void> {
@@ -297,3 +288,137 @@ test.describe("touch", () => {
     expect(misses).toEqual([]);
   });
 });
+
+// The rest of the ux-loop file view probe (fv-checks), with real clicks and
+// keys: the mode kept across ‹ › in Diff, the counter's Jump to file, View
+// file from Files changed, a relative link, Source's Wrap, and no page
+// errors on the way.
+test.describe("desktop, moving between files", () => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetGithub(page, request);
+  });
+
+  test("Diff is kept across › and Back / Forward, and a reload lands on the file view in Diff", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await openFile(page, "pr=639&path=docs/terminal.md");
+    await chooseMode(page, "diff");
+    const next = page.locator('#pr-file-nav [data-pr-file-direction="next"]');
+    await next.click();
+    await expect.poll(() => param(page, "path")).toBe("src/terminal/links.test.ts");
+    await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
+    await expect(page.locator('#preview .pr-file[data-file-path="src/terminal/links.test.ts"]')).toHaveCount(1);
+    await expect(next).toBeFocused();
+    await next.click();
+    await expect.poll(() => param(page, "path")).toBe("src/terminal/links.ts");
+    await page.goBack();
+    await expect.poll(() => param(page, "path")).toBe("src/terminal/links.test.ts");
+    await page.goForward();
+    await expect.poll(() => param(page, "path")).toBe("src/terminal/links.ts");
+    await expect(page.locator("#pr-file-nav [data-pr-file-count]")).toContainText("4 of 4");
+    await page.reload();
+    await expect(page.locator("#pr-tab-file")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
+    await expect(page.locator('#preview .pr-file[data-file-path="src/terminal/links.ts"]')).toHaveCount(1);
+    expect(errors).toEqual([]);
+  });
+
+  test("the counter opens Jump to file: Escape gives focus back to it, and a pick opens that file", async ({ page }) => {
+    await openFile(page, "pr=639&path=src/terminal/links.ts");
+    const counter = page.locator("#pr-file-nav [data-pr-file-count]");
+    await counter.click();
+    const dialog = page.locator(".pr-jump-dialog[open]");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(counter).toBeFocused();
+    await counter.click();
+    await page.locator('.pr-jump-dialog [data-jump-path="docs/terminal.md"]').click();
+    await expect.poll(() => param(page, "path")).toBe("docs/terminal.md");
+    await expect(counter).toContainText("2 of 4");
+  });
+
+  test("View file from a Files changed header opens the document Rendered; leaving the file view takes its bar away", async ({ page }) => {
+    await openFile(page, "pr=639&path=docs/terminal.md");
+    await chooseMode(page, "diff");
+    await page.locator("#pr-tab-files").click();
+    const files = page.locator("#pr-panel-files");
+    await expect(files.locator("[data-file-view]")).toHaveCount(4);
+    await expect(page.locator(".pr-file-bar")).toHaveCount(0);
+    await files.locator('[data-file-path="docs/terminal.md"] [data-file-view]').click();
+    await expect.poll(() => param(page, "path")).toBe("docs/terminal.md");
+    await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
+    await expect(page.locator("#preview h1", { hasText: "Terminal" })).toBeVisible();
+  });
+
+  test("a relative link opens its target's file view, and AsciiDoc renders there", async ({ page }) => {
+    await openFile(page, "pr=639&path=docs/terminal.md");
+    await chooseMode(page, "rendered");
+    await page.locator("#preview a", { hasText: "the link rules" }).click();
+    await expect.poll(() => param(page, "path")).toBe("docs/terminal-links.adoc");
+    await expect(page.locator("#pr-tab-file")).toContainText("terminal-links.adoc");
+    await expect(page.locator("#preview table").first()).toBeVisible();
+  });
+
+  test("Source keeps the threads bar and offers Wrap; Changed brings the scope back after All files", async ({ page }) => {
+    await openFile(page, "pr=639&path=docs/terminal.md");
+    await chooseMode(page, "source");
+    await expect(page.locator(".pr-file-threads")).toContainText("1 thread");
+    await expect(page.locator("#wrap-control")).toBeVisible();
+    await page.locator('[data-pr-scope-mode="all"]').click();
+    await expect(page.locator('[data-pr-scope-mode="all"]')).toHaveAttribute("aria-checked", "true");
+    await expect(page.locator('#pr-scope-tree button[data-item-path="ARCHITECTURE.md"]')).toBeAttached();
+    await page.locator('[data-pr-scope-mode="changed"]').click();
+    await expect(page.locator('#pr-scope-tree button[data-item-path="ARCHITECTURE.md"]')).toHaveCount(0);
+    await expect(page.locator('#pr-scope-tree button[data-item-path="docs/terminal.md"]')).toBeAttached();
+  });
+});
+
+test.describe("head not fetched, scope", () => {
+  test("the consent card leaves the scope switch, and All files still lists the tree", async ({ page, request }) => {
+    await resetGithub(page, request, "head-not-fetched");
+    await page.goto("/?pr=639&path=docs/terminal.md");
+    await expect(page.locator("#preview .pr-fetch-card")).toBeVisible();
+    await expect(page.locator('#pr-scope-switch [data-pr-scope-mode="all"]')).toBeVisible();
+  });
+});
+
+test.describe("the branch's own pull request, opening the checkout", () => {
+  test("Same as your checkout: Open in workspace opens the live document, without the file view's bar", async ({ page, request }) => {
+    await standardBeforeEach(page, request);
+    await ownPullRequest(page, request);
+    await openFile(page, "pr=42&path=feature.md");
+    await expect(facts(page)).toContainText("Same as your checkout");
+    await facts(page).locator("[data-pr-file-open-local]").click();
+    await expect(page.locator("#preview-path")).toHaveText("feature.md");
+    await expect(page.locator(".pr-file-bar")).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).pathname).toBe("/feature.md");
+  });
+});
+
+for (const [orientation, device] of [["portrait", PORTRAIT], ["landscape", LANDSCAPE]] as const) {
+  test.describe(`touch ${orientation}, from the Files tab`, () => {
+    test.use(device);
+
+    test("a row of the pull request's Files scope brings Preview forward on the file; every file view control is 44px and taken", async ({ page, request }) => {
+      await resetTouchGithub(page, request);
+      await page.goto("/?pr=639");
+      await page.locator("#touch-tab-files").click();
+      const toggle = page.locator('[data-pane-toggle="files"]');
+      if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+      const row = page.locator('#pr-scope-tree button[data-item-path="docs/terminal.md"]');
+      await row.scrollIntoViewIfNeeded();
+      await row.tap();
+      await expect.poll(() => param(page, "path")).toBe("docs/terminal.md");
+      await expect(page.locator("#touch-tab-preview")).toHaveAttribute("aria-selected", "true");
+      await expect(facts(page)).toContainText(`at ${HEAD} (PR head)`);
+      const selectors = ["#pr-file-nav button", '#pr-view-control [data-pr-tab="files"]', "#pr-view-review button", "#view-control .view-segment:not([hidden])", "[data-pr-file-rev]", "[data-pr-file-show-threads]"];
+      for (const selector of selectors) {
+        for (const control of await page.locator(selector).all()) {
+          if (!(await control.isVisible())) continue;
+          await expectTouchTarget(control, `${selector} "${(await control.innerText()).trim().slice(0, 16)}"`);
+        }
+      }
+    });
+  });
+}
