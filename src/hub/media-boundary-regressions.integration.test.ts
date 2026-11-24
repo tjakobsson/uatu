@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import { HubSessionStore, hubCookieName } from "./auth";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { PersonalWorkspaceStateStore } from "./personal-state";
@@ -71,10 +72,11 @@ beforeAll(async () => {
   });
   const registry = new WorkspaceRegistry(path.join(directory, "registry.json"));
   await registry.load(); await registry.register(path.join(directory, "project"));
-  sessions = new SessionManager(registry, { local: { start: async (workspace, basePath) => ({
-    workspaceId: workspace.id, basePath, instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-    endpoint: { hostname: "127.0.0.1", port: child.port! }, token: credential,
-    exited: new Promise(() => {}), async stop() {},
+  sessions = new SessionManager(registry, { local: { start: async (workspace, basePath) => testRunningSession({
+    workspaceId: workspace.id,
+    basePath,
+    port: child.port!,
+    token: credential,
   }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   await sessions.start("project");
   const sessionStore = new HubSessionStore(path.join(directory, "sessions.json"));

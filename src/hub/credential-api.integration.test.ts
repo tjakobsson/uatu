@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { assertOpenApiResponse, loadContract } from "../../tests/contracts/contract-harness";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import type { HubConfig } from "./config";
 import {
@@ -87,19 +88,16 @@ async function fixture(root: string) {
           ? [item.token]
           : []);
       backendEvents.runningProviderTokens.set(entry.id, rawTokens);
-      return {
+      return testRunningSession({
         workspaceId: entry.id,
-        instanceId: crypto.randomUUID(), policyTrust: "unavailable" as const,
-        basePath: `/s/${entry.id}/`,
-        endpoint: { hostname: "127.0.0.1", port: 1 },
+        port: 1,
         token: null,
-        exited: new Promise<number | null>(() => undefined),
         stop: async () => {
           backendEvents.stops.push(entry.id);
           if (backendEvents.stopFailures.has(entry.id)) throw new Error(`${entry.id} refused stop`);
           backendEvents.runningProviderTokens.delete(entry.id);
         },
-      };
+      });
     },
   };
   const sessions = new SessionManager(registry, { local: backend }, {

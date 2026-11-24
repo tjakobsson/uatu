@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NOTIFICATION_LIFETIME_MS, NOTIFICATION_PENDING_RETENTION_MS, type AgentNotification, type AgentNotificationEvent } from "./notifications";
 
-export { CHILD_NOTIFICATIONS_PATH } from "../shared/live-protocol";
 export type NotificationFrame =
   | { type: "event"; cursor: string; event: AgentNotificationEvent }
   | { type: "snapshot"; cursor: string; reason: "initial" | "gap"; pending: AgentNotification[] }

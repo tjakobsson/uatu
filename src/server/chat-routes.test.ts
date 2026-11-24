@@ -1,3 +1,4 @@
+import { SESSION_REPLAY_RESYNC_HEADER } from "../session-contract/headers";
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import os from "node:os";
@@ -15,11 +16,11 @@ import { MetricsRegistry } from "../debug/metrics";
 import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
-import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
+import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../session-contract/policy";
 import { LiveBroker } from "../hub/live-broker";
 import { LiveEndpoint } from "../hub/live-endpoint";
 import { SseFrameParser } from "../hub/live-sse";
-import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
+import { parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
 import type { ChatActionContext } from "../chat/types";
 import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
 import { ChatApiClient } from "../chat/client";
@@ -1278,7 +1279,7 @@ describe("workspace chat routes", () => {
       open: async ({ path, signal }) => {
         opens++;
         const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
-        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(opens === 1 ? null : service.replay.latestCursor());
+        expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBe(opens === 1 ? null : service.replay.latestCursor());
         return response;
       },
     }, { catchUpTrailerClock: {
@@ -1347,7 +1348,7 @@ describe("workspace chat routes", () => {
         const attempt = paths.push(path);
         const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
         const recovery = new URL(path, "http://child").searchParams.get("reconnect") === "1";
-        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(recovery ? service.replay.latestCursor() : null);
+        expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBe(recovery ? service.replay.latestCursor() : null);
         if (attempt !== 1) return response;
         const reader = response.body!.getReader();
         let ended = false;
@@ -1449,7 +1450,7 @@ describe("workspace chat routes", () => {
         const released = Promise.withResolvers<void>(); releases.push(released.promise);
         signal.addEventListener("abort", () => released.resolve(), { once: true });
         const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
-        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+        expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBeNull();
         return response;
       },
     }, { lingerMs: 0 });
@@ -1555,7 +1556,7 @@ describe("workspace chat routes", () => {
         const attempt = paths.push(path);
         if (attempt === 1) signal.addEventListener("abort", () => oldChildReleased.resolve(), { once: true });
         const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
-        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(
+        expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBe(
           new URL(path, "http://child").searchParams.get("reconnect") === "1" ? service.replay.latestCursor() : null,
         );
         return response;
@@ -1685,9 +1686,9 @@ describe("workspace chat routes", () => {
       const handler = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
       const denied = await handler.GET(Object.assign(new Request("http://127.0.0.1:4711/api/chat/conversations/opencode:local/events"), { params: { conversationId: "opencode:local" } }));
       expect(denied.status).toBe(401);
-      expect(denied.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+      expect(denied.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBeNull();
       const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
-      expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(service.replay.latestCursor());
+      expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBe(service.replay.latestCursor());
       const reader = response.body!.getReader();
       const opening = new TextDecoder().decode((await reader.read()).value);
       expect(opening).toMatch(CONVERSATION_OPEN_FRAME);
@@ -1710,7 +1711,7 @@ describe("workspace chat routes", () => {
       expect(snapshot.items[0].markdown).toBe(markdown);
       expect(snapshot.items[0].visuals[0].status).toBe("ready");
       const resumed = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": boundaryCursor } }, { conversationId: "opencode:local" }));
-      expect(resumed.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+      expect(resumed.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBeNull();
       const resumedReader = resumed.body!.getReader();
       await resumedReader.read();
       const liveStatus = service.replay.publish({ type: "conversation.status", status: "completed" });
@@ -1744,7 +1745,7 @@ describe("workspace chat routes", () => {
     const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
     const open = async (cursor: string, reconnect: boolean) => {
       const response = await events.GET(request(`/api/chat/conversations/opencode:local/events?reconnect=${reconnect ? "1" : "0"}`, { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
-      expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(reconnect ? cursor : null);
+      expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBe(reconnect ? cursor : null);
       const reader = response.body!.getReader();
       readers.push(reader);
       const opening = new TextDecoder().decode((await reader.read()).value);
@@ -1815,7 +1816,7 @@ describe("workspace chat routes", () => {
     const handler = routes(service, "/", undefined, undefined, undefined, store)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
     store.setReader(async () => { reads++; throw new Error("plain text must not read files"); });
     const response = await handler.GET(request("/api/chat/conversations/opencode:local/events?reconnect=1", { headers: { "last-event-id": service.replay.latestCursor() } }, { conversationId: "opencode:local" }));
-    expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+    expect(response.headers.get(SESSION_REPLAY_RESYNC_HEADER)).toBeNull();
     const reader = response.body!.getReader();
     try {
       expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);

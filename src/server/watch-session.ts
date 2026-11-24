@@ -81,7 +81,6 @@ const followEligible = isFollowEligible;
 export type WatchSession = ReturnType<typeof createWatchSession>;
 export function createWatchSession(entries: WatchEntry[], initialFollow: boolean, options: WatchSessionOptions = {}) {
   const epoch = crypto.randomUUID();
-  const terminalToken = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
   const metrics = options.metrics;
   const streamMetrics = new StreamLifecycleMetrics(metrics);
   const roots = new Map<string, ObservedRoot>();
@@ -667,7 +666,6 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     getRoots(context: WatchContext = DEFAULT_WATCH_CONTEXT) { return snapshot(context).roots; },
     getUnscopedRoots: unscopedRoots,
     getRepositories(context: WatchContext = DEFAULT_WATCH_CONTEXT) { return repositories.results[context.compareTarget]; },
-    getTerminalToken: () => terminalToken,
     isTerminalEnabled: () => options.terminalEnabled ?? false,
     getSseSubscriberCount: () => subscribers.size,
     _internalWatcher: () => roots.values().next().value?.watcher ?? null,

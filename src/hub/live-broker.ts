@@ -47,16 +47,13 @@
 // `ready` (with fresh data where the topic needs it). A session start/stop
 // notification retries or fails at once instead of at the next tick.
 
+import { SESSION_REPLAY_RESYNC_HEADER } from "../session-contract/headers";
+import { SESSION_ACTIVITY_EVENT, SESSION_ACTIVITY_PATH, SESSION_CONVERSATION_OPEN_EVENT, SESSION_DOCUMENT_EVENTS_PATH, SESSION_INVENTORY_EVENTS_PATH, sessionConversationEventsPath } from "../session-contract/paths";
 import { decodeReplayCursor, type ReplayCursor } from "../chat/replay";
 import type { ActivityMarkSink } from "./activity-marks";
 import type { MetricsRegistry } from "../debug/metrics";
 import { UpstreamSubscriptionMetrics, type UpstreamTopic } from "../debug/stream-metrics";
 import {
-  CHILD_ACTIVITY_EVENT,
-  CHILD_ACTIVITY_PATH,
-  CHILD_DOCUMENT_EVENTS_PATH,
-  CHILD_INVENTORY_EVENTS_PATH,
-  childConversationEventsPath,
   sanitizeWorkspaceActivity,
   WORKTREE_INVALIDATION,
   WORKTREE_TOPIC_CURSOR,
@@ -65,8 +62,6 @@ import {
   type LiveSubscription,
   type LiveTopic,
   type WorkspaceActivity,
-  CHILD_CONVERSATION_OPEN_EVENT,
-  CHILD_CONVERSATION_REPLAY_RESYNC_HEADER,
   LIVE_MAX_CURSOR_BYTES,
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
@@ -1017,7 +1012,7 @@ export class LiveBroker implements PresenceSource {
       if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
       void reader?.cancel().catch(() => undefined);
     }, { once: true });
-    const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}${reconnect ? "&reconnect=1" : ""}`;
+    const path = `${sessionConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}${reconnect ? "&reconnect=1" : ""}`;
     const release = () => {
       clearTrailerTimer();
       if (subscriber.catchUp === controller) { subscriber.catchUp = null; subscriber.catchUpTrailer = undefined; }
@@ -1063,7 +1058,7 @@ export class LiveBroker implements PresenceSource {
         await response.body.cancel().catch(() => undefined);
         return;
       }
-      const hintedCursor = response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER);
+      const hintedCursor = response.headers.get(SESSION_REPLAY_RESYNC_HEADER);
       const hint = hintedCursor && Buffer.byteLength(hintedCursor) <= LIVE_MAX_CURSOR_BYTES ? decodeReplayCursor(hintedCursor) : null;
       // A hint is authority only within this requested replay and shared
       // origin. Stale/foreign hints retain the ordinary, nonvisual merge path.
@@ -1102,7 +1097,7 @@ export class LiveBroker implements PresenceSource {
               return;
             }
             if (awaitingTrailer) { finishWithoutMerging(); return; }
-            if (owed && frame.event === CHILD_CONVERSATION_OPEN_EVENT && (data as { cursor?: unknown } | undefined)?.cursor !== hintedCursor) {
+            if (owed && frame.event === SESSION_CONVERSATION_OPEN_EVENT && (data as { cursor?: unknown } | undefined)?.cursor !== hintedCursor) {
               finishWithoutMerging(); return;
             }
             if (frame.event !== "chat" || frame.id === undefined) continue;
@@ -1171,11 +1166,11 @@ export class LiveBroker implements PresenceSource {
   private childPath(upstream: Upstream, reconnect: boolean): string {
     switch (upstream.topic) {
       case "document":
-        return upstream.key ? `${CHILD_DOCUMENT_EVENTS_PATH}?${upstream.key}` : CHILD_DOCUMENT_EVENTS_PATH;
+        return upstream.key ? `${SESSION_DOCUMENT_EVENTS_PATH}?${upstream.key}` : SESSION_DOCUMENT_EVENTS_PATH;
       case "inventory":
-        return CHILD_INVENTORY_EVENTS_PATH;
+        return SESSION_INVENTORY_EVENTS_PATH;
       case "conversation": {
-        const base = childConversationEventsPath(upstream.key ?? "");
+        const base = sessionConversationEventsPath(upstream.key ?? "");
         const from = upstream.head || upstream.originCursor;
         // A cursor alone also describes a fresh post-history attachment.
         // Only recovery of this existing transport may request equal-cursor
@@ -1184,7 +1179,7 @@ export class LiveBroker implements PresenceSource {
         return `${base}?cursor=${encodeURIComponent(from)}${reconnect ? "&reconnect=1" : ""}`;
       }
       case "activity":
-        return CHILD_ACTIVITY_PATH;
+        return SESSION_ACTIVITY_PATH;
       case "worktrees":
         // Unreachable: open() never runs for a hub-local topic.
         throw new Error("the worktrees topic has no child upstream");
@@ -1289,7 +1284,7 @@ export class LiveBroker implements PresenceSource {
         this.fail(upstream, statusCategoryOf(status));
         return;
       }
-      const visualCursor = response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER);
+      const visualCursor = response.headers.get(SESSION_REPLAY_RESYNC_HEADER);
       upstream.visualResyncCursor = upstream.topic === "conversation" && visualCursor
         && Buffer.byteLength(visualCursor) <= LIVE_MAX_CURSOR_BYTES && decodeReplayCursor(visualCursor) ? visualCursor : undefined;
       const parser = new SseFrameParser();
@@ -1375,7 +1370,7 @@ export class LiveBroker implements PresenceSource {
       case "conversation": {
         const data = parseJson(frame.data);
         const observedCursor = frame.event === "chat" ? frame.id
-          : frame.event === CHILD_CONVERSATION_OPEN_EVENT ? (data as { cursor?: unknown } | undefined)?.cursor : undefined;
+          : frame.event === SESSION_CONVERSATION_OPEN_EVENT ? (data as { cursor?: unknown } | undefined)?.cursor : undefined;
         const observed = typeof observedCursor === "string" ? decodeReplayCursor(observedCursor) : null;
         const trailer = upstream.catchUpOwner?.catchUpTrailer;
         if (observed && trailer && observed.generation !== trailer.generation) trailer.recover();
@@ -1393,7 +1388,7 @@ export class LiveBroker implements PresenceSource {
           this.drop(upstream, true);
           return true;
         }
-        if (frame.event === CHILD_CONVERSATION_OPEN_EVENT) {
+        if (frame.event === SESSION_CONVERSATION_OPEN_EVENT) {
           // The existing private hint names this fetch's snapshot, never a
           // different opening boundary (or a later native generation).
           if (upstream.visualResyncCursor !== (data as { cursor?: unknown } | undefined)?.cursor) upstream.visualResyncCursor = undefined;
@@ -1413,7 +1408,7 @@ export class LiveBroker implements PresenceSource {
         return false;
       }
       case "activity": {
-        if (frame.event !== CHILD_ACTIVITY_EVENT) return false;
+        if (frame.event !== SESSION_ACTIVITY_EVENT) return false;
         const record = (typeof parseJson(frame.data) === "object" ? parseJson(frame.data) : {}) as Record<string, unknown>;
         this.recordActivity(upstream, { ...sanitizeWorkspaceActivity({ running: true, ...record }), unresolved: record.unresolved === true });
         return false;

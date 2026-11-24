@@ -199,7 +199,7 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     await installClipboardMock(page);
     const answer = page.locator('[data-chat-item-id="bench:2"]');
     await answer.locator('[data-chat-copy="code"]').click();
-    expect(await readClipboardMock(page)).toBe("const searchable = 42;\n");
+    expect(await readClipboardMock(page)).toBe("const searchable = 42;");
     await answer.evaluate(el => {
       const range = document.createRange();
       range.selectNodeContents(el.querySelector("p")!);

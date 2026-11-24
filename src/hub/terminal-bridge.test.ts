@@ -12,6 +12,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { buildFetchFallback } from "../server/routes";
 import { terminalBackendAvailable } from "../terminal/backend";
 import { createTerminalServer, type TerminalServer } from "../terminal/server";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession } from "./backend";
 import {
   WebSocketBridge,
@@ -30,15 +31,12 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 3_000): Promise<voi
 };
 
 function sessionFor(port: number): RunningSession {
-  return {
+  return testRunningSession({
     workspaceId: "project",
-    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
     basePath: "/s/project/",
-    endpoint: { hostname: "127.0.0.1", port },
+    port,
     token: "child-secret",
-    exited: new Promise(() => undefined),
-    async stop() {},
-  };
+  });
 }
 
 // A child whose behaviour the URL selects: `mode=refuse` answers 409 to the

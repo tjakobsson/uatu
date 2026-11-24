@@ -1,88 +1,62 @@
 // The session-backend seam. The hub never touches process spawning (or, in
 // the future, container runtimes) directly — it asks a backend to start a
-// session for a workspace and gets back a loopback HTTP endpoint plus the
-// child's session token. Everything above this interface (proxy, dashboard,
-// auth) is backend-agnostic by construction: a future container/VM backend
-// (containerd + a runtime shim, uatu serve inside the guest, port published
-// to loopback) implements this same contract and nothing else changes.
+// workspace session and gets back a session link: the Hub's one handle to
+// that session, holding its loopback endpoint and session token. Everything
+// above this interface (proxy, dashboard, auth) is backend-agnostic by
+// construction: a future container/VM backend (containerd + a runtime shim,
+// uatu serve inside the guest, port published to loopback) implements this
+// same seam and nothing else changes.
 //
-// The local-process backend wraps the desktop-wrapper-proven child contract:
-//   spawn `uatu serve <folder> --no-open --exit-on-stdin-close --base-path …`
-//   → first stdout line is the tokened session URL
-//   → the supervisor holds the child's stdin open for its whole life
-//     (EOF is the orphan backstop if the hub dies without handlers)
-//   → SIGTERM is the clean stop.
+// The local-process backend follows the session contract
+// (src/session-contract/): it spawns `uatu serve` with the contract's argv
+// and stdio, sends the policy bootstrap over descriptor 3, reads the ready
+// line, verifies the readiness proof, and holds the session's stdin open for
+// its whole life (EOF is the orphan backstop if the hub dies without
+// handlers). SIGTERM is the clean stop.
 
 import type { Subprocess } from "bun";
 import { promises as fs } from "node:fs";
-import { randomBytes } from "node:crypto";
-import { createChildPolicyAuthority, type ChildPolicyRequest, type VerifiedChatPolicy } from "./child-policy";
-import { sendChildPolicyDescriptor } from "./child-policy-bootstrap";
+import { sendChildPolicyDescriptor, verifyPolicyReadiness } from "../session-contract/bootstrap";
+import { createSessionLink, type SessionLink } from "../session-contract/link";
+import { createChildPolicyAuthority } from "../session-contract/policy";
+import {
+  createReadyLineScanner,
+  resolveUatuArgv,
+  SESSION_STARTUP_INACTIVITY_MS,
+  SESSION_STDIO,
+  sessionServeArgv,
+  type ReadyLine,
+} from "../session-contract/spawn";
 
 import { buildLocalCredentialEnvironment, type ResolvedCredentialContext } from "./credential-context";
 import type { WorkspaceEntry } from "./registry";
 
-export type SessionEndpoint = {
-  hostname: string;
-  port: number;
-};
-
 export type RunningSession = {
-  workspaceId: string;
-  instanceId: string;
-  policyTrust: "ready" | "unavailable";
-  basePath: string;
-  endpoint: SessionEndpoint;
-  // The child's per-session terminal token (null when the child's terminal
-  // feature is unavailable). Held hub-side only — never surfaced to
-  // browsers; the hub brokers it during proxying.
-  token: string | null;
-  // Resolves when the child exits, with its exit code.
+  // The Hub's handle to the session: every request to it is addressed and
+  // trusted through this link.
+  link: SessionLink;
+  // Resolves when the session exits, with its exit code.
   exited: Promise<number | null>;
   stop(): Promise<void>;
 };
-
-const policyAuthorities = new WeakMap<RunningSession, ReturnType<typeof createChildPolicyAuthority>>();
-export function signSessionChatPolicy(session: RunningSession, request: ChildPolicyRequest, policy: VerifiedChatPolicy): string | null {
-  try { return session.policyTrust === "ready" ? policyAuthorities.get(session)?.sign(request, policy) ?? null : null; }
-  catch { return null; }
-}
 
 export interface SessionBackend {
   start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession>;
 }
 
-// INACTIVITY timeout, not a startup deadline: the child emits periodic
-// progress lines while preparing (a large tree's watcher setup alone can
-// take minutes — chokidar attaches at roughly 5ms per file on macOS), so
-// any stdout output re-arms the timer and only a silent child — hung, or an
-// old build that predates the heartbeat AND takes longer than this — is
-// killed. The child's heartbeat is itself capped (its
-// STARTUP_HEARTBEAT_MAX_DURATION_SECONDS), so a child that wedges without
-// exiting stops re-arming this timer and is reaped one inactivity window
-// after that cap.
-const STARTUP_INACTIVITY_TIMEOUT_MS = 30_000;
 const SIGTERM_GRACE_MS = 3_000;
 
 export type LocalBackendOptions = {
   // How to invoke the uatu CLI. In a compiled binary this is
   // [process.execPath]; from source it is ["bun", "run", "src/cli.ts"] —
-  // resolveUatuArgv() picks based on how the current process was started
-  // (the same detection cli.ts uses for the watchdog re-exec).
+  // the contract's resolveUatuArgv() picks based on how the current process
+  // was started (the same detection cli.ts uses for the watchdog re-exec).
   uatuArgv?: string[];
   spawn?: typeof Bun.spawn;
   env?: NodeJS.ProcessEnv;
   terminationGraceMs?: number;
   startupInactivityMs?: number;
 };
-
-export function resolveUatuArgv(): string[] {
-  const scriptPath = typeof Bun.argv[1] === "string" ? Bun.argv[1] : "";
-  if (/\.(ts|js)$/.test(scriptPath)) {
-    return [process.execPath, scriptPath];
-  }
-  return [process.execPath];
-}
 
 export class LocalProcessBackend implements SessionBackend {
   private readonly uatuArgv: string[];
@@ -96,27 +70,11 @@ export class LocalProcessBackend implements SessionBackend {
     this.spawn = options.spawn ?? Bun.spawn;
     this.env = options.env ?? process.env;
     this.terminationGraceMs = options.terminationGraceMs ?? SIGTERM_GRACE_MS;
-    this.startupInactivityMs = options.startupInactivityMs ?? STARTUP_INACTIVITY_TIMEOUT_MS;
+    this.startupInactivityMs = options.startupInactivityMs ?? SESSION_STARTUP_INACTIVITY_MS;
   }
 
   async start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession> {
-    const argv = [
-      ...this.uatuArgv,
-      "serve",
-      workspace.path,
-      "--no-open",
-      "--exit-on-stdin-close",
-      "--hub-policy-bootstrap",
-      "--port",
-      "0",
-      "--base-path",
-      basePath,
-      // The hub owns its origin root, so its sessions declare the whole
-      // origin as PWA scope — an installed webapp treats the dashboard,
-      // login, and sibling sessions as in-app (no iOS browser chrome).
-      "--manifest-scope",
-      "origin",
-    ];
+    const argv = sessionServeArgv(this.uatuArgv, workspace.path, basePath);
 
     const projected = await buildLocalCredentialEnvironment({
       workspace,
@@ -129,8 +87,8 @@ export class LocalProcessBackend implements SessionBackend {
     try {
       child = this.spawn(argv, {
         // stdin stays a pipe we hold open — closing it (including by hub
-        // death) is the child's signal to exit.
-        stdio: ["pipe", "pipe", "pipe", "socket-fd"],
+        // death) is the session's signal to exit.
+        stdio: [...SESSION_STDIO],
         // Explicit rather than implicit: Bun's default inherit snapshots the
         // environment at process start and does not see later mutations. The hub
         // builds this argv itself, so environment is the only channel an operator
@@ -152,11 +110,15 @@ export class LocalProcessBackend implements SessionBackend {
     }
 
     const stderrTail = collectTail(child.stderr);
+    // Observed from here on: a session that exits before or while its
+    // readiness proof is verified must not yield a link that can sign.
+    let exitObserved = false;
+    const exited = child.exited.then(code => code ?? null).catch(() => null);
+    void child.exited.then(() => { exitObserved = true; }, () => { exitObserved = true; });
 
-    let url: URL;
+    let ready: ReadyLine;
     try {
-      const line = await readFirstUrlLine(child.stdout, this.startupInactivityMs, child);
-      url = new URL(line);
+      ready = await readReadyLine(child.stdout, this.startupInactivityMs, child);
     } catch (error) {
       authority.dispose();
       await terminate(child, this.terminationGraceMs);
@@ -168,43 +130,31 @@ export class LocalProcessBackend implements SessionBackend {
       );
     }
 
-    const session: RunningSession = {
+    // Policy trust needs both halves: the session consumed the bootstrap,
+    // and it then proved so on its own listener. A session seen to exit by
+    // then gets no trust at all.
+    const trusted = bootstrapped && await verifyPolicyReadiness(ready.url.origin, basePath, authority) && !exitObserved;
+    if (!trusted) authority.dispose();
+    const link = createSessionLink({
       workspaceId: workspace.id,
       instanceId: authority.instanceId,
-      policyTrust: "unavailable",
       basePath,
-      endpoint: { hostname: url.hostname, port: Number.parseInt(url.port, 10) },
-      token: url.searchParams.get("t"),
-      exited: child.exited.then(code => code ?? null).catch(() => null),
+      endpoint: ready.endpoint,
+      token: ready.token,
+      authority: trusted ? authority : null,
+    });
+    const session: RunningSession = {
+      link,
+      exited,
       stop: async () => {
-        withdraw();
+        link.withdraw();
         await terminate(child, this.terminationGraceMs);
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       },
     };
-    const withdraw = () => {
-      session.policyTrust = "unavailable";
-      policyAuthorities.delete(session);
-      authority.dispose();
-    };
-    if (bootstrapped) {
-      const challenge = randomBytes(32).toString("base64url");
-      try {
-        const response = await fetch(new URL(`${basePath}api/internal/hub-policy-proof`, url), {
-          method: "POST", headers: { "content-type": "application/json", origin: url.origin },
-          body: JSON.stringify({ challenge }), signal: AbortSignal.timeout(2000),
-        });
-        const proof = response.ok ? await response.json() as { proof?: unknown } : null;
-        if (typeof proof?.proof === "string" && authority.verifyProof(challenge, proof.proof)) {
-          policyAuthorities.set(session, authority);
-          session.policyTrust = "ready";
-        }
-      } catch { /* Missing/old/invalid child trust never falls back to token. */ }
-    }
-    if (session.policyTrust !== "ready") authority.dispose();
     void session.exited
       .then(async () => {
-        withdraw();
+        link.withdraw();
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       })
       .catch(() => undefined);
@@ -212,19 +162,18 @@ export class LocalProcessBackend implements SessionBackend {
   }
 }
 
-// Reads the child's stdout until the first line containing an http:// URL —
-// the CLI's supervisor contract — or rejects on inactivity / early exit.
-// The timer re-arms on every stdout chunk: a slow start that keeps talking
-// (the CLI's supervised startup heartbeat) can take as long as it needs,
-// while a silent child is still bounded.
-async function readFirstUrlLine(
+// Reads the session's stdout until the contract's ready line, or rejects on
+// inactivity / early exit. The timer re-arms on every stdout chunk: a slow
+// start that keeps talking (the CLI's supervised startup heartbeat) can take
+// as long as it needs, while a silent session is still bounded.
+async function readReadyLine(
   stream: ReadableStream<Uint8Array>,
   inactivityMs: number,
   child: Subprocess,
-): Promise<string> {
+): Promise<ReadyLine> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
-  let buffered = "";
+  const scanner = createReadyLineScanner();
 
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let rejectInactive!: (error: Error) => void;
@@ -250,19 +199,8 @@ async function readFirstUrlLine(
         throw new Error("child stdout closed before printing a session URL");
       }
       armTimeout();
-      buffered += decoder.decode(next.value, { stream: true });
-      // Parse COMPLETE lines only. The contract is a URL line; matching the
-      // raw buffer would accept a chunk-split fragment ("http://127" parses
-      // as host 0.0.0.127 with a NaN port) and register an unreachable
-      // session. Scanned lines are dropped so the buffer stays bounded.
-      const lastNewline = buffered.lastIndexOf("\n");
-      if (lastNewline >= 0) {
-        const match = buffered.slice(0, lastNewline).match(/http:\/\/\S+/);
-        if (match) {
-          return match[0];
-        }
-        buffered = buffered.slice(lastNewline + 1);
-      }
+      const ready = scanner.push(decoder.decode(next.value, { stream: true }));
+      if (ready) return ready;
     }
   } finally {
     clearTimeout(timeoutHandle);

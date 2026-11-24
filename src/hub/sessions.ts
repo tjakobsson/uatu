@@ -12,13 +12,10 @@
 // second stop, …) — with a chain, each operation simply observes the true
 // settled state left by its predecessor.
 
+import { sessionBasePath } from "../session-contract/paths";
 import type { RunningSession, SessionBackend } from "./backend";
 import type { CredentialContextResolver } from "./credential-context";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
-
-export function sessionBasePath(workspaceId: string): string {
-  return `/s/${workspaceId}/`;
-}
 
 function shuttingDownMessage(workspaceId: string): string {
   return `the hub is shutting down; refusing to start session '${workspaceId}'`;

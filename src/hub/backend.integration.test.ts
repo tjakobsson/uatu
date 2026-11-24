@@ -8,7 +8,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { LocalProcessBackend, signSessionChatPolicy, type RunningSession } from "./backend";
+import { LocalProcessBackend, type RunningSession } from "./backend";
 import { EMPTY_RESOLVED_CREDENTIAL_CONTEXT } from "./credential-context";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
@@ -37,7 +37,7 @@ describe("LocalProcessBackend", () => {
   test("concurrent null-token children establish independent trust; missing proof stays unavailable", async () => {
     const workspace = await makeWorkspace();
     const fixturePath = path.join(workspace, "private-child.ts");
-    const bootstrapModule = new URL("./child-policy-bootstrap.ts", import.meta.url).pathname;
+    const bootstrapModule = new URL("../session-contract/bootstrap.ts", import.meta.url).pathname;
     await writeFile(fixturePath, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
       const policy = await consumeChildPolicyDescriptor();
       const server = Bun.serve({hostname:'127.0.0.1', port:0, async fetch(request) {
@@ -54,23 +54,75 @@ describe("LocalProcessBackend", () => {
     const children = started.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
     try {
       expect(children).toHaveLength(2);
-      expect(children.map(child => child.token)).toEqual([null, null]);
-      expect(children.map(child => child.policyTrust)).toEqual(["ready", "ready"]);
-      expect(children[0]!.instanceId).not.toBe(children[1]!.instanceId);
+      expect(children.map(child => child.link.url("/").searchParams.get("t"))).toEqual([null, null]);
+      expect(children.map(child => child.link.policyTrust)).toEqual(["ready", "ready"]);
+      expect(children[0]!.link.instanceId).not.toBe(children[1]!.link.instanceId);
     } finally { await Promise.all(children.map(child => child.stop())); }
     await writeFile(fixturePath, `const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return Response.json({proof:'invalid'})}});
       console.log('http://127.0.0.1:'+server.port+'/'); process.stdin.resume();process.on('SIGTERM',()=>process.exit(0));`);
     running = await backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
-    expect(running.policyTrust).toBe("unavailable");
-    expect(signSessionChatPolicy(running, { method: "POST", pathname: "/s/null-token/api/chat/conversations/x/prompts", body: "{}" }, { principal: "alice", revision: 0, autoBackgroundOnSteer: true })).toBeNull();
+    expect(running.link.policyTrust).toBe("unavailable");
+    expect(running.link.sign({ method: "POST", pathname: "/s/null-token/api/chat/conversations/x/prompts", body: "{}" }, { principal: "alice", revision: 0, autoBackgroundOnSteer: true })).toBeNull();
     await running.stop();
     await writeFile(fixturePath, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
       await consumeChildPolicyDescriptor();
       const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return new Promise(()=>{})}});
       console.log('http://127.0.0.1:'+server.port+'/'); process.stdin.resume();process.on('SIGTERM',()=>process.exit(0));`);
     running = await backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
-    expect(running.policyTrust).toBe("unavailable");
+    expect(running.link.policyTrust).toBe("unavailable");
   }, 60_000);
+  test("a session that exits while its readiness proof is verified never yields a trusted link", async () => {
+    // The session answers a valid proof, but the backend observes its exit
+    // before the answer arrives. The exit is the test's to signal: the
+    // child's proof handler asks the test first, and the test resolves the
+    // exit the backend watches before letting the child answer.
+    const exit = Promise.withResolvers<number>();
+    const notify = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+      exit.resolve(0);
+      return new Response(null, { status: 204 });
+    } });
+    let actual: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+    try {
+      const workspace = await makeWorkspace();
+      const fixturePath = path.join(workspace, "exiting-child.ts");
+      const bootstrapModule = new URL("../session-contract/bootstrap.ts", import.meta.url).pathname;
+      await writeFile(fixturePath, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
+        const policy = await consumeChildPolicyDescriptor();
+        const server = Bun.serve({hostname:'127.0.0.1', port:0, async fetch(request) {
+          const {challenge} = await request.json();
+          await fetch(${JSON.stringify(`http://127.0.0.1:${notify.port}/`)});
+          return Response.json({proof: policy?.proof(challenge)});
+        }});
+        console.log('http://127.0.0.1:'+server.port+'/');
+        process.stdin.resume(); process.on('SIGTERM',()=>process.exit(0));`);
+      const backend = new LocalProcessBackend({
+        uatuArgv: [process.execPath, fixturePath],
+        terminationGraceMs: 10,
+        spawn: ((argv: string[], options: Parameters<typeof Bun.spawn>[1]) => {
+          actual = Bun.spawn(argv, options) as Bun.Subprocess<"pipe", "pipe", "pipe">;
+          return new Proxy(actual, {
+            get(target, property) {
+              if (property === "exited") return exit.promise;
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        }) as unknown as typeof Bun.spawn,
+      });
+      const entry = { id: "exits-during-proof", path: workspace, backend: "local" as const, displayName: "exits-during-proof" };
+      const session = await backend.start(entry, "/s/exits-during-proof/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+      expect(session.link.policyTrust).not.toBe("ready");
+      expect(session.link.sign(
+        { method: "POST", pathname: "/s/exits-during-proof/api/chat/conversations/x/prompts", body: "{}" },
+        { principal: "alice", revision: 0, autoBackgroundOnSteer: true },
+      )).toBeNull();
+      expect(await session.exited).toBe(0);
+    } finally {
+      actual?.kill("SIGKILL");
+      await actual?.exited;
+      await notify.stop(true);
+    }
+  }, 30_000);
   for (const [flavor, argv] of [
     ["source", [process.execPath, "run", CLI_PATH]],
     ...(process.env.UATU_TEST_COMPILED_BINARY ? [["compiled", [process.env.UATU_TEST_COMPILED_BINARY]]] : []),
@@ -79,19 +131,19 @@ describe("LocalProcessBackend", () => {
     const backend = new LocalProcessBackend({ uatuArgv: argv });
     const entry = { id: "private-policy", path: workspace, backend: "local" as const, displayName: "private-policy" };
     running = await backend.start(entry, "/s/private-policy/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
-    expect(running.policyTrust).toBe("ready");
-    expect(running.instanceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(running.link.policyTrust).toBe("ready");
+    expect(running.link.instanceId).toMatch(/^[0-9a-f-]{36}$/);
     const request = { method: "POST", pathname: "/s/private-policy/api/chat/conversations/x/prompts", body: "{}" };
     const policy = { principal: "alice", revision: 0, autoBackgroundOnSteer: true };
-    expect(signSessionChatPolicy(running, request, policy)).not.toBeNull();
+    expect(running.link.sign(request, policy)).not.toBeNull();
     const old = running;
     await old.stop();
-    expect(old.policyTrust).toBe("unavailable");
-    expect(signSessionChatPolicy(old, request, policy)).toBeNull();
+    expect(old.link.policyTrust).toBe("unavailable");
+    expect(old.link.sign(request, policy)).toBeNull();
     const restartedBackend = new LocalProcessBackend({ uatuArgv: argv });
     running = await restartedBackend.start(entry, "/s/private-policy/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
-    expect(running.policyTrust).toBe("ready");
-    expect(running.instanceId).not.toBe(old.instanceId);
+    expect(running.link.policyTrust).toBe("ready");
+    expect(running.link.instanceId).not.toBe(old.link.instanceId);
   }, 60_000);
   test(
     "starts a real child, serves under the base path, and stops on SIGTERM",
@@ -101,10 +153,10 @@ describe("LocalProcessBackend", () => {
 
       running = await backend.start({ id: "backend-test", path: workspace, backend: "local", displayName: "backend-test" }, "/s/backend-test/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
 
-      expect(running.endpoint.hostname).toBe("127.0.0.1");
-      expect(running.endpoint.port).toBeGreaterThan(0);
+      expect(running.link.endpoint.hostname).toBe("127.0.0.1");
+      expect(running.link.endpoint.port).toBeGreaterThan(0);
 
-      const base = `http://${running.endpoint.hostname}:${running.endpoint.port}`;
+      const base = `http://${running.link.endpoint.hostname}:${running.link.endpoint.port}`;
       const state = await fetch(`${base}/s/backend-test/api/state`);
       expect(state.status).toBe(200);
       const payload = (await state.json()) as { roots: unknown[] };
@@ -183,7 +235,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       "/s/slow-start/",
       EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
     );
-    expect(session.endpoint.port).toBe(43213);
+    expect(session.link.endpoint.port).toBe(43213);
     await session.stop();
   });
 
@@ -274,9 +326,9 @@ describe("LocalProcessBackend stdout parsing", () => {
       const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
 
       running = await backend.start({ id: "split", path: "/tmp", backend: "local", displayName: "split" }, "/s/split/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
-      expect(running.endpoint.hostname).toBe("127.0.0.1");
-      expect(running.endpoint.port).toBe(43210);
-      expect(running.token).toBe("abc");
+      expect(running.link.endpoint.hostname).toBe("127.0.0.1");
+      expect(running.link.endpoint.port).toBe(43210);
+      expect(running.link.url("/").searchParams.get("t")).toBe("abc");
 
       const session = running;
       running = null;
@@ -299,7 +351,7 @@ describe("LocalProcessBackend stdout parsing", () => {
         const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
 
         running = await backend.start({ id: "envcheck", path: "/tmp", backend: "local", displayName: "envcheck" }, "/s/envcheck/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
-        expect(running.token).toBe("45123");
+        expect(running.link.url("/").searchParams.get("t")).toBe("45123");
 
         const session = running;
         running = null;
