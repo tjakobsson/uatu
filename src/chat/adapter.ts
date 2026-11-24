@@ -840,6 +840,10 @@ export class ChatAdapter {
   private presenceClock = 0;
   private presenceEvictedFloor = 0;
   private readonly presenceSequences = new Map<string, number>();
+  // Shares `presenceClock` to record confinement misses/forgets so an older
+  // in-flight move-in confirmation cannot overwrite a newer lookup miss.
+  private absenceEvictedFloor = 0;
+  private readonly absenceSequences = new Map<string, number>();
   private readonly activeSessionProbes = new Map<string, number>();
   // Request-scoped execution fences, not inbox/activity revisions. A native
   // parent wake can overtake an interrupt response (even across projection
@@ -2573,6 +2577,24 @@ export class ChatAdapter {
     this.presenceSequences.set(conversationId, tick);
   }
 
+  private absenceSequence(conversationId: string): number {
+    return this.absenceSequences.get(conversationId) ?? this.absenceEvictedFloor;
+  }
+
+  private bumpAbsenceSequence(conversationId: string, tick = ++this.presenceClock): void {
+    if (tick <= this.absenceSequence(conversationId)) return;
+    if (this.absenceSequences.has(conversationId)) {
+      this.absenceSequences.delete(conversationId);
+    } else if (this.absenceSequences.size >= INVENTORY_SESSION_LIMIT) {
+      const oldest = this.absenceSequences.entries().next().value;
+      if (oldest) {
+        this.absenceEvictedFloor = Math.max(this.absenceEvictedFloor, oldest[1]);
+        this.absenceSequences.delete(oldest[0]);
+      }
+    }
+    this.absenceSequences.set(conversationId, tick);
+  }
+
   private trackedActivityIds(): string[] {
     return [...new Set([
       ...this.liveTurns.keys(),
@@ -2594,6 +2616,7 @@ export class ChatAdapter {
   }
 
   private forgetMissingSession(id: string): void {
+    this.bumpAbsenceSequence(id);
     this.forgetActivity(id);
     const wasListed = this.listedSessions.delete(id);
     const cached = this.inventorySessions.get(id);
@@ -2644,6 +2667,7 @@ export class ChatAdapter {
         const inWorkspace = Boolean(session && await this.isInWorkspace(session, false));
         if (this.disposed || signal?.aborted) return;
         if (inWorkspace && session) {
+          if (this.absenceSequence(childId) > started) continue;
           this.bumpPresenceSequence(childId, started);
           boundedSet(this.sessionParents, childId, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
           const stop = this.stoppingTurns.get(childId);
@@ -2727,6 +2751,7 @@ export class ChatAdapter {
     if (known) {
       this.bumpStatusSequence(conversationId);
       this.bumpPresenceSequence(conversationId);
+      this.bumpAbsenceSequence(conversationId);
     }
     this.eventCoalescer?.discard(conversationId);
     const projection = this.projections.get(conversationId);
@@ -7262,6 +7287,9 @@ export class ChatAdapter {
       if (confirmed === null || (confirmed !== undefined && !await this.isInWorkspace(confirmed, false))) {
         if (this.presenceSequence(lifecycle.id) <= moveInStarted) this.forgetActivity(lifecycle.id);
         return finishMovedOut();
+      }
+      if (this.absenceSequence(lifecycle.id) > moveInStarted) {
+        return false;
       }
       const parentId = confirmed !== undefined
         ? (confirmed.parentId ?? null)

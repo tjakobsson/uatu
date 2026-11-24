@@ -14485,6 +14485,67 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("a newer confinement miss fences an older pending move-in confirmation read from seeding active execution", async () => {
+    const activeProbes: string[] = [];
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        if (name.startsWith("active.probe:")) activeProbes.push(name);
+        try { return await work(); }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const child = { ...fixtureSession("moved-child-miss"), parentId: "some-parent" };
+    let resolveMoveInLookup!: (session: ProviderSession | null) => void;
+    let firstLookup = true;
+    provider.listActiveSessions = async () => ["moved-child-miss"];
+    provider.getSession = async id => {
+      if (id !== "moved-child-miss") return null;
+      if (firstLookup) {
+        firstLookup = false;
+        return new Promise<ProviderSession | null>(resolve => { resolveMoveInLookup = resolve; });
+      }
+      // Newer lookup sees the child is already gone from this directory.
+      return null;
+    };
+    const pump = adapter.startEventPump();
+
+    const moveDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "moved-child-miss",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "moved-child-miss", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await waitUntil(() => resolveMoveInLookup !== undefined);
+
+    // While move-in confirmation is still pending, a newer getConversation() returns null (missed move-out).
+    await adapter.getConversation("moved-child-miss").catch(() => undefined);
+
+    // Older move-in confirmation returns the stale local session; it must be fenced and never seed working.
+    resolveMoveInLookup(child);
+    await moveDone;
+    expect(activeProbes).toEqual([]);
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("moved-child-miss").status).toBe("idle");
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
