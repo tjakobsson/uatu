@@ -47,7 +47,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([38, 15, 4]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([39, 15, 5]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -65,6 +65,43 @@ describe("API contract structure", () => {
     expect(previous(entry)).toBe(false);
     const { admissionUncertaintyId: _value, ...legacy } = entry;
     expect(previous(legacy)).toBe(true);
+  });
+  test("the agent descriptor's declared login is required and closed in the contract and the client validator", async () => {
+    const { parseChatAgentDescriptor } = await import("../src/chat/validation");
+    const { OPENCODE_AGENT } = await import("../src/chat/opencode/descriptor");
+    const { CLAUDE_CODE_AGENT } = await import("../src/chat/claude/descriptor");
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const schemas = spec.components.schemas;
+    const validate = createAjv().compile(schemaForAjv(schemas.ChatAgentDescriptor, schemas));
+    const unmanaged = { id: "stub", name: "Stub Agent", login: { command: "stub login", hubManaged: false } };
+    // `maxLength` counts code points: 512 supplementary characters fit, 513 do not, in both.
+    const longest = { ...unmanaged, login: { command: "\u{1D7D8}".repeat(512), hubManaged: false } };
+    for (const descriptor of [OPENCODE_AGENT, CLAUDE_CODE_AGENT, unmanaged, longest]) {
+      expect(validate(descriptor), JSON.stringify(validate.errors)).toBe(true);
+      expect(parseChatAgentDescriptor(descriptor)).toEqual(descriptor);
+    }
+    const { login: _login, ...legacy } = unmanaged;
+    for (const invalid of [legacy, { ...unmanaged, login: { command: "", hubManaged: false } }, { ...unmanaged, login: { command: "stub login" } }, { ...unmanaged, login: { command: "stub login", hubManaged: "no" } }, { ...unmanaged, login: { command: "stub login", hubManaged: false, extra: 1 } }, { ...unmanaged, login: { command: "stub login", hubManaged: false, "": 0 } }, { ...unmanaged, login: { command: "\u{1D7D8}".repeat(513), hubManaged: false } }]) {
+      expect(validate(invalid)).toBe(false);
+      expect(() => parseChatAgentDescriptor(invalid)).toThrow();
+    }
+    // Revision 38's closed descriptor rejects the new field, hence the bump.
+    const schema = schemas.ChatAgentDescriptor as { required: string[]; properties: Record<string, object> };
+    const { login: _property, ...previousProperties } = schema.properties;
+    const previous = createAjv().compile(schemaForAjv({ ...schema, required: schema.required.filter(name => name !== "login"), properties: previousProperties }, schemas));
+    expect(previous(legacy)).toBe(true);
+    expect(previous(unmanaged)).toBe(false);
+  });
+  test("a steer-refused notice fits the closed notice schema and names its request through its id", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const { steerRefusedNotice, steerRefusedRequestId } = await import("../src/chat/types");
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(spec.components.schemas.ConversationItem, spec.components.schemas));
+    const notice = steerRefusedNotice("request-7", "agy did not take it", 1);
+    expect(validate(notice), JSON.stringify(validate.errors)).toBe(true);
+    expect(parseConversationItem(notice)).toEqual(notice);
+    expect(steerRefusedRequestId(notice)).toBe("request-7");
+    expect(steerRefusedRequestId({ ...notice, code: "login-failed" })).toBeUndefined();
   });
   test("withheld outcomes agree across closed worker schemas and deny dismissal", async () => {
     const { parseConversationItem, parseChatEvent } = await import("../src/chat/validation");

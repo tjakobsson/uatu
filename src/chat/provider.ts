@@ -308,6 +308,18 @@ export class BackgroundTaskUnavailableError extends Error {
   }
 }
 
+/**
+ * The agent refused the operation because it has no usable login (Antigravity:
+ * agy's -32000). Its message says how to log in; the route answers it as a
+ * conflict the client recognizes, and the agent's login state reads missing.
+ */
+export class AgentLoginRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentLoginRequiredError";
+  }
+}
+
 /** A dispatched mutation may have applied. Retain this outcome in receipts;
  * rejecting it through the ordinary receipt helper would permit a replay.
  */
@@ -361,6 +373,12 @@ export class ReversibleHistoryTargetError extends Error {
 }
 
 export type ProviderPermissionReply = "once" | "always" | "reject";
+
+/** How an immediate steer sent before its confirmation settled (add-antigravity-chat D9). */
+export type SteerConfirmation =
+  | { outcome: "accepted"; messageId: string; createdAt?: number }
+  | { outcome: "refused"; reason: string }
+  | { outcome: "unknown" };
 
 // Provider-neutral by contract: identity, display name, mime, and where the
 // stored bytes live on disk. How an attachment reaches the agent (file: URL,
@@ -433,9 +451,20 @@ export interface ChatProvider {
    * `steer` hands the message to a running turn for its next step boundary
    * (opencode-v2-steering D1): only an agent declaring `steering` is asked,
    * and a steer carries no model or mode to the session — a mid-turn switch
-   * would retarget the turn being steered (D6).
+   * would retarget the turn being steered (D6). An agent declaring
+   * `immediate-steering` is asked too, only while its turn runs: it takes the
+   * steer into that turn at once, resolves only on the agent's evidence that
+   * it took it, and reports the turn's end once, after the steered part
+   * (add-antigravity-chat D9). Its steer rejects with
+   * OperationOutcomeUnknownError when the steer may have reached the agent;
+   * any other rejection is a definite refusal.
+   * `createdAt`, when given, is the accepted message's timeline position.
+   * An immediate steer may instead resolve as soon as it is sent, with a
+   * `confirmation` that settles from the agent's answer to it: the adapter
+   * then frees the conversation at once and settles the steer later. Its
+   * `messageId` is then provisional; an acceptance names the row's own.
    */
-  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> }>;
   /** Native identity known before dispatch, for read-only unknown recovery. */
   promptIdentity?(identity: string): string;
   /**

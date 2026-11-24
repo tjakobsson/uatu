@@ -21,8 +21,9 @@ import { MultiAgentChatService } from "../../agents";
 import { VisualReadError, VisualStore } from "../../visual-store";
 import type { WorkspaceChatService } from "../../service";
 import type { AssistantMessageItem, ChatEvent, ConversationSnapshot } from "../../types";
-import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "../normalization-types";
+import { CHAT_TEXT_SEAL, executionLive, type ChatTextSeal } from "../../turn-liveness";
 import { eventPump } from "../../../../tests/e2e/opencode-v2-provider-harness";
+import { OPENCODE_AGENT } from "../descriptor";
 
 // The stored records of a real 2.0.13 session: user, assistant (read tool),
 // assistant (text), idle, user — see normalization.test.ts for provenance.
@@ -121,7 +122,7 @@ test("V2 execution membership spans native and local history pages, but not a st
       ? { data: records.slice(4), cursor: {} } : { data: records.slice(0, 4), cursor: { next: "native-older-boundary" } },
   });
   const provider = server.provider();
-  const live = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  const live = (item: object) => executionLive(item);
   try {
     const newest = await provider.listMessages("ses_visual", { limit: 1 });
     expect(newest.items.filter(item => item.type === "assistant_message").every(item => live(item) === true)).toBe(true);
@@ -203,7 +204,7 @@ test.each([
       if (!available) throw new VisualReadError(true);
       return png;
     });
-    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.service }] });
     routers.push(value);
     return value;
   };
@@ -256,7 +257,7 @@ test.each([
     expect(answer(complete).visuals?.[0]?.status).toBe(created ? "ready" : "unavailable");
     if (created) expect((await second.resolveVisual(answer(complete).visuals![0]!.id!))?.bytes).toEqual(png);
     expect(answer(complete, "old-tool").visuals?.[0]?.status).toBe("unavailable");
-    expect((answer(initial) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    expect(executionLive(answer(initial))).toBe(true);
     const reloaded = router();
     const reload = await reloaded.history("opencode:ses_visual");
     expect(answer(reload).visuals).toEqual(answer(complete).visuals);
@@ -291,7 +292,7 @@ test.each([
       if (!available) throw new VisualReadError(true);
       return bytes;
     });
-    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.service }] });
     routers.push(value); return value;
   };
   const answer = (snapshot: ConversationSnapshot) => snapshot.items.find(item => item.id === "part:current-tool:text:0") as AssistantMessageItem;
@@ -302,8 +303,8 @@ test.each([
     })();
     expect(initial.conversation.status).toBe("running");
     expect(answer(initial)).toMatchObject({ markdown, completedAt: 9 });
-    expect((answer(initial) as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
-    expect((answer(initial) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    expect((answer(initial) as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
+    expect(executionLive(answer(initial))).toBe(true);
     expect(answer(initial).visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
     expect(reads).toBe(1); // A completed EOF definition must attempt capture now.
     if (!missing) expect((await first.resolveVisual(answer(initial).visuals![0]!.id!))?.bytes).toEqual(original);
@@ -359,11 +360,11 @@ test.each([
 
 test("V2 stored-only execution end refreshes equal-JSON projection rows without a synthetic frame", async () => {
   const h = await visualExecutionFixture();
-  const membership = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  const membership = (item: object) => executionLive(item);
   try {
     const original = (await h.adapter.history("ses_visual")).items.find(item => item.id === "part:current-tool:text:0")!;
     expect(membership(original)).toBe(true);
-    expect((original as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((original as typeof original & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     // Simulate an end missed by this process, followed by another execution.
     h.state.records.push({ id: "missed-end", type: "idle", time: { created: 20 }, outcome: "succeeded" },
       { id: "new-prompt", type: "user", time: { created: 21 }, text: "New execution" });
@@ -376,7 +377,7 @@ test("V2 stored-only execution end refreshes equal-JSON projection rows without 
     expect(JSON.stringify(current)).toBe(JSON.stringify(original));
     expect(membership(current)).toBe(false);
     expect(membership(projection.get(original.id)!)).toBe(false);
-    expect((projection.get(original.id) as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((projection.get(original.id) as typeof original & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     expect(membership(original)).toBe(true);
     // Only the genuinely new user row gets a public frame.
     const iterator = observer.events[Symbol.asyncIterator]();
@@ -391,7 +392,7 @@ test("V2 stored-only execution end refreshes equal-JSON projection rows without 
     expect(before).not.toBe(projection.replay.latestCursor());
     const attach = await h.adapter.subscribe("ses_visual"); attach.events.cancel();
     expect(membership(attach.snapshot.items.find(item => item.id === original.id)!)).toBe(false);
-    expect((attach.snapshot.items.find(item => item.id === original.id) as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((attach.snapshot.items.find(item => item.id === original.id) as typeof original & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
   } finally { await h.adapter.dispose(); }
 });
 

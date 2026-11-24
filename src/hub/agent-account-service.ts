@@ -20,6 +20,8 @@
 
 import { randomUUID } from "node:crypto";
 
+import { CLAUDE_CODE_AGENT } from "../chat/claude/descriptor";
+import { OPENCODE_AGENT } from "../chat/opencode/descriptor";
 import type { ChatAccountChange } from "../chat/types";
 
 import { AccountOperationError, AttemptExpiredError, agentErrorMessage, type AccountAdapter, type StartedLogin } from "./agent-account-adapter";
@@ -33,10 +35,13 @@ import type {
   AgentAccountsSnapshot,
 } from "./agent-account-types";
 
-export const ACCOUNT_AGENTS: ReadonlyArray<{ agent: AccountAgentId; name: string; loginCommand: string }> = [
-  { agent: "opencode", name: "OpenCode", loginCommand: "opencode auth login" },
-  { agent: "claude", name: "Claude Code", loginCommand: "claude auth login" },
-];
+// The Hub's account set: the chat agents whose login the Hub manages, in
+// the order Agent accounts lists them. Identity and login command come from
+// each agent's descriptor, so chat and the Hub cannot disagree on either.
+const HUB_MANAGED_AGENTS = [OPENCODE_AGENT, CLAUDE_CODE_AGENT] as const satisfies ReadonlyArray<{ id: AccountAgentId; login: { hubManaged: true } }>;
+
+export const ACCOUNT_AGENTS: ReadonlyArray<{ agent: AccountAgentId; name: string; loginCommand: string }> =
+  HUB_MANAGED_AGENTS.map(descriptor => ({ agent: descriptor.id, name: descriptor.name, loginCommand: descriptor.login.command }));
 
 const IDLE_MS = 5 * 60_000;
 const ATTEMPT_TTL_MS = 10 * 60_000;

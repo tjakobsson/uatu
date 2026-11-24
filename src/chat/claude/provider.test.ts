@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { notificationPipeline } from "../../../tests/notification-pipeline";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { promises as fsPromises } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
 import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.json";
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, type ClaudeTextIdentity } from "./normalization-types";
-import { CHAT_VISUAL_MESSAGE } from "../visual-identity";
-import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { CHAT_TEXT_SEAL, CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
+import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE } from "../visual-identity";
+import { SIGTERM_GRACE_MS } from "../../session-contract/spawn";
+import { ClaudeProvider, SDK_CLOSE_BUDGET_MS, SHUTDOWN_FLUSH_MARGIN_MS, SHUTDOWN_GRACE_MS, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
@@ -49,6 +52,35 @@ class FakeQuery implements ClaudeQueryHandle {
   usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>;
 
   constructor(readonly input: ClaudeQueryInput) {}
+
+  /** What the query took from its input, each marked with whether the query was still open. */
+  readonly taken: Array<{ envelope: ClaudeUserEnvelope; open: boolean }> = [];
+
+  /** Set before the query starts reading: an SDK that never takes its input. */
+  inputUnread = false;
+
+  /** The SDK's own flag, set once its cleanup has closed the transport. */
+  cleanupPerformed = false;
+
+  /** Reads the input as the SDK does: everything offered, for as long as the query is open. */
+  consumeInput(): this {
+    void (async () => {
+      await Promise.resolve();
+      if (this.inputUnread) return;
+      const reader = this.input.prompt[Symbol.asyncIterator]();
+      while (!this.returned) {
+        const next = await reader.next();
+        if (next.done) return;
+        this.taken.push({ envelope: next.value, open: !this.returned });
+      }
+    })();
+    return this;
+  }
+
+  /** The text of each envelope taken while the query was open. */
+  takenTexts(): string[][] {
+    return this.taken.filter(entry => entry.open).map(entry => entry.envelope.message.content.map(block => String(block.text ?? block.type)));
+  }
 
   push(message: unknown): void {
     const waiter = this.waiters.shift();
@@ -168,14 +200,113 @@ test("native turn metadata survives provider history pagination and cached reads
     const sameTurn = await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor });
     expect(sameTurn.items.map(item => item.id)).toEqual(["message:row-3"]);
     const current = sameTurn.items[0]!;
-    expect((current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect((current as typeof current & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
     const oldPage = await provider.listMessages("turn-pages", { limit: 10, cursor: sameTurn.nextCursor });
     const old = oldPage.items.find(item => item.id === "message:row-0")!;
-    expect((old as typeof old & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((old as typeof old & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     expect((await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor })).items).toEqual(sameTurn.items);
     expect(queries).toHaveLength(0);
   } finally { await provider.dispose(); }
 });
+
+// Both starts of a conversation gated at their transcript check and released
+// in a set order: the prompt's start installs first, a cold usage read's
+// installs over it, so the prompt's query is the one a racing start
+// displaces, as Claude Code's startup has always allowed.
+async function raceStarts(provider: ClaudeProvider, queries: FakeQuery[], conversationId: string, whileFirstIsLive?: () => Promise<void>): Promise<void> {
+  const access = fsPromises.access;
+  const gates: Array<() => void> = [];
+  const before = queries.length;
+  fsPromises.access = (async (...args: Parameters<typeof access>) => {
+    if (String(args[0]).endsWith(`${conversationId}.jsonl`)) await new Promise<void>(resolve => gates.push(resolve));
+    return access(...args);
+  }) as typeof access;
+  try {
+    const prompted = provider.prompt(conversationId, { id: "r-race", text: "now", delivery: "queue" });
+    await waitFor(() => gates.length === 1);
+    const read = provider.readUsage("start");
+    await waitFor(() => gates.length === 2);
+    gates[0]!();
+    await waitFor(() => queries.length === before + 1);
+    // The prompt's query is the live one until the read's start installs.
+    await whileFirstIsLive?.();
+    gates[1]!();
+    await prompted;
+    await read;
+  } finally {
+    fsPromises.access = access;
+  }
+}
+
+// A conversation with two stored turns, on a provider that can rewind and
+// fork, so a staged revert can be committed by a replacement prompt.
+function revertingProvider(prepare?: (query: FakeQuery) => void, options: Partial<ClaudeProviderOptions> = {}) {
+  const { queries, configDir, workspace } = fixture();
+  const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+  const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+  const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+    type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+    message: { role: "user", content: text },
+  });
+  writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+    turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+    turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
+  ].join("\n"));
+  writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+    turn("u1", "2026-08-30T10:00:00.000Z", "keep this"));
+  const forking = new ClaudeProvider({
+    workspacePath: workspace,
+    stateFile: path.join(workspace, ".uatu-test-state.json"),
+    executable: "/bin/claude",
+    catalogProbe: false,
+    configDir,
+    queryFactory: input => {
+      // Each reads its input as the SDK does: a staged replacement is
+      // acknowledged only once taken.
+      const query = new FakeQuery(input).consumeInput();
+      query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+      query.getContextUsage = async () => ({ categories: [], totalTokens: 1, maxTokens: 200_000 });
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ subscription_type: null, rate_limits_available: false });
+      prepare?.(query);
+      queries.push(query);
+      return query;
+    },
+    forkSession: async () => ({ sessionId: forkId }),
+    // Short, so a test whose work is stuck at shutdown does not wait long;
+    // a test that needs work to finish inside the grace sets its own.
+    shutdownGraceMs: 50,
+    ...options,
+  });
+  return { forking, queries, storedId, forkId, workspace };
+}
+
+// The lifecycle edge a race test waits on: the provider's reader for a fake
+// query has finished, its stream-end or failure handling included.
+function readerExit(provider: ClaudeProvider, query: FakeQuery): Promise<void> {
+  const state = provider as unknown as { live: Map<string, { query: unknown; reader: Promise<void> }>; startedSessions: Set<{ query: unknown; reader: Promise<void> }>; closingSessions: Map<{ query: unknown; reader: Promise<void> }, unknown> };
+  const session = [...state.live.values(), ...state.startedSessions, ...state.closingSessions.keys()].find(candidate => candidate.query === query);
+  if (!session) throw new Error("no session holds this query");
+  return session.reader.catch(() => undefined);
+}
+
+// Waits until the provider's durable writes queued so far, and any they
+// queue in turn, have finished: the edge a test needs before it changes
+// what a write will meet on disk.
+async function settledWrites(provider: ClaudeProvider): Promise<void> {
+  const state = provider as unknown as { persistChain: Promise<void> };
+  let chain: Promise<void>;
+  do {
+    chain = state.persistChain;
+    await chain;
+  } while (chain !== state.persistChain);
+}
+
+const requestedIds = (events: NormalizedProviderEvent[]) => events
+  .filter(event => event.eventType === "interaction.requested")
+  .map(event => (event.updates[0] as { item: { requestId: string } }).item.requestId);
+const abandonedIds = (events: NormalizedProviderEvent[]) => events
+  .filter(event => event.eventType === "interaction.abandoned")
+  .map(event => (event.updates[0] as { item: { requestId: string } }).item.requestId);
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -585,16 +716,16 @@ describe("streaming and session signals (D10, D11)", () => {
     const opened = normalizeClaudeMessage(stream("s2", 0, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }), memory, "live");
     const openedUpdate = opened.updates[0];
     if (openedUpdate?.kind !== "upsert") throw new Error("expected opened text block");
-    const turn = (openedUpdate.item as typeof openedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
-    expect(turn).toEqual({ completed: false });
-    const textIdentity = { [CLAUDE_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1", [CLAUDE_TURN]: turn };
+    const turn = (openedUpdate.item as typeof openedUpdate.item & ChatTurnIdentity)[CHAT_TURN]!;
+    expect(turn).toEqual({ completed: false, authority: "provisional" });
+    const textIdentity = { [CHAT_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1", [CHAT_TEXT_SEAL]: "completion", [CHAT_TURN]: turn };
     expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const first = normalizeClaudeMessage(stream("s3", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Autumn brings" } }), memory, "live");
     const second = normalizeClaudeMessage(stream("s4", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " a crisp chill." } }), memory, "live");
     expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const firstUpdate = first.updates[0];
     if (firstUpdate?.kind !== "text" || !firstUpdate.item) throw new Error("expected text delta identity");
-    expect((firstUpdate.item as typeof firstUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
+    expect((firstUpdate.item as typeof firstUpdate.item & ChatTurnIdentity)[CHAT_TURN]).toBe(turn);
     expect(second.updates[0]).toEqual(expect.objectContaining({ kind: "text", itemId: "message:stream:msg_1:0", text: " a crisp chill." }));
     // Thinking deltas and a subagent's stream stay out.
     expect(normalizeClaudeMessage(stream("s5", 1, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }), memory, "live").outcome).toBe("ignored");
@@ -605,7 +736,7 @@ describe("streaming and session signals (D10, D11)", () => {
     expect(completed.updates[1]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "message:a1", type: "assistant_message", markdown: "Autumn brings a crisp chill." }) });
     const completedUpdate = completed.updates[1];
     if (completedUpdate?.kind !== "upsert") throw new Error("expected completed text block");
-    expect((completedUpdate.item as typeof completedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
+    expect((completedUpdate.item as typeof completedUpdate.item & ChatTurnIdentity)[CHAT_TURN]).toBe(turn);
     expect(turn.completed).toBe(false); // A text-block stop is not a turn end.
     // A second text block of the same API message consumes the next streamed index.
     normalizeClaudeMessage(stream("s7", 3, { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } }), memory, "live");
@@ -2559,6 +2690,401 @@ describe("ClaudeProvider sessions", () => {
 
   });
 
+  test("an in-flight deferred rename stays recorded until written, and shutdown drains it", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-inflight-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    let renaming: (() => void) | undefined;
+    const renameStarted = new Promise<void>(resolve => { renaming = resolve; });
+    let finishRename: (() => void) | undefined;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // Far longer than the test: shutdown waits for the rename itself.
+      shutdownGraceMs: 60_000,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async () => { renaming!(); await new Promise<void>(resolve => { finishRename = resolve; }); },
+    });
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await renameStarted;
+    // Another write while the native one is out still names the rename.
+    (provider as unknown as { persistDurableState: () => void }).persistDurableState();
+    await settledWrites(provider);
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    // Shutdown waits for the rename, and its record is cleared on disk
+    // before dispose returns.
+    let disposed = false;
+    const disposing = provider.dispose().then(() => { disposed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(disposed).toBe(false);
+    finishRename!();
+    await disposing;
+    expect(recorded()).toEqual({});
+  });
+
+  test("a deferred rename is written once at a time, and a newer rename lands after it", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-once-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const queries: FakeQuery[] = [];
+    // Each native write as it starts and as it lands; the deferred one is held.
+    const started: string[] = [];
+    const landed: string[] = [];
+    let finishDeferred: (() => void) | undefined;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") await new Promise<void>(resolve => { finishDeferred = resolve; });
+        landed.push(title);
+      },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const transcript = path.join(projectDir, `${session.id}.jsonl`);
+    writeFileSync(transcript, `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    const completed = () => events.filter(event => event.conversationId === session.id && event.updates.some(update => update.kind === "status" && update.status === "completed")).length;
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => started.length === 1);
+    // A second turn ends while the first write is out.
+    await provider.prompt(session.id, { id: "r2", text: "more", delivery: "queue" });
+    queries.at(-1)!.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:04.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => completed() === 2);
+    // The user renames while it is still out. Its transcript check marks the
+    // point where the rename would write.
+    const stat = fsPromises.stat;
+    let checked = false;
+    fsPromises.stat = (async (...args: Parameters<typeof stat>) => {
+      const result = await stat(...args);
+      if (String(args[0]) === transcript) checked = true;
+      return result;
+    }) as typeof stat;
+    try {
+      const renaming = provider.renameSession(session.id, "Newer");
+      await waitFor(() => checked);
+      finishDeferred!();
+      await renaming;
+    } finally {
+      fsPromises.stat = stat;
+    }
+    await settledWrites(provider);
+    // One write of the deferred title, and the newer one stands.
+    expect(started).toEqual(["Planned work", "Newer"]);
+    expect(landed).toEqual(["Planned work", "Newer"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a rename queued behind a deferred write is drained by shutdown, and one asked after shutdown began is refused", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-drain-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const queries: FakeQuery[] = [];
+    // Every native write is held until the test releases it by title.
+    const order: string[] = [];
+    const started: string[] = [];
+    const finish = new Map<string, () => void>();
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // Far longer than the test: shutdown waits for the writes themselves.
+      shutdownGraceMs: 60_000,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        await new Promise<void>(resolve => { finish.set(title, resolve); });
+        order.push(`landed ${title}`);
+      },
+    });
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => started.length === 1);
+    // The user renames behind the deferred write, then shutdown starts.
+    const renaming = provider.renameSession(session.id, "Newer");
+    const disposing = provider.dispose().then(() => { order.push("disposed"); });
+    finish.get("Planned work")!();
+    await waitFor(() => started.includes("Newer"));
+    // The rename is admitted work: shutdown is waiting for it.
+    expect((provider as unknown as { mutations: Set<unknown> }).mutations.size).toBe(1);
+    expect(order).toEqual(["landed Planned work"]);
+    finish.get("Newer")!();
+    await renaming;
+    await disposing;
+    expect(order).toEqual(["landed Planned work", "landed Newer", "disposed"]);
+    // A rename asked once shutdown has begun is refused, writing nothing.
+    await expect(provider.renameSession(session.id, "Late")).rejects.toThrow("Claude provider is disposed");
+    expect(started).toEqual(["Planned work", "Newer"]);
+  });
+
+  test("a manual rename drops a failed deferred rename's record from disk too", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-stale-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    const started: string[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      // The deferred write fails; the manual one succeeds.
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") throw new Error("disk full");
+      },
+    });
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => started.length === 1);
+    await settledWrites(provider);
+    // The failed write left its record on disk, for the next start.
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    await provider.renameSession(session.id, "Newer");
+    // Dropped with the rename: a restart must not apply the stale title.
+    expect(recorded()).toEqual({});
+    expect(started).toEqual(["Planned work", "Newer"]);
+    await provider.dispose();
+  });
+
+  test("a manual rename holds back the deferred title's write while its own is out, and leaves the title for the next turn if its write fails", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-takeover-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    // Each native write as it starts; the manual ones are held, and the
+    // test says whether each succeeds.
+    const started: string[] = [];
+    const finish = new Map<string, (fail: boolean) => void>();
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // No title retries: each turn's refresh runs once.
+      titleRefreshDelaysMs: [],
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") return;
+        if (await new Promise<boolean>(resolve => { finish.set(title, resolve); })) throw new Error("disk full");
+      },
+    });
+    // Counts each turn-end title refresh once it has finished.
+    const state = provider as unknown as { refreshGeneratedTitle: (sessionId: string, attempt?: number) => Promise<void> };
+    const refresh = state.refreshGeneratedTitle.bind(provider);
+    let refreshed = 0;
+    state.refreshGeneratedTitle = async (sessionId, attempt) => { await refresh(sessionId, attempt); refreshed += 1; };
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    // The transcript exists and no deferred write is out: the manual rename
+    // starts its append, then the turn's result arrives.
+    const renaming = provider.renameSession(session.id, "Newer").catch(error => error as Error);
+    await waitFor(() => started.includes("Newer"));
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => refreshed === 1);
+    // The refresh starts no write of the superseded title.
+    expect(started).toEqual(["Newer"]);
+    // The write fails: the deferred title, which stayed recorded, is
+    // written by the next turn's refresh.
+    finish.get("Newer")!(true);
+    expect(await renaming).toEqual(expect.objectContaining({ message: "disk full" }));
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    await provider.prompt(session.id, { id: "r2", text: "more", delivery: "queue" });
+    queries.at(-1)!.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:04.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => refreshed === 2);
+    expect(started).toEqual(["Newer", "Planned work"]);
+    await settledWrites(provider);
+    expect(recorded()).toEqual({});
+    await provider.dispose();
+  });
+
+  // A conversation renamed before its first turn, whose transcript now
+  // exists; every manual native write is held until the test settles it.
+  async function renamedBeforeFirstTurn(prefix: string) {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), prefix)));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const queries: FakeQuery[] = [];
+    const started: string[] = [];
+    const finish = new Map<string, (fail: boolean) => void>();
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile, executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // No title retries: each turn's refresh runs once.
+      titleRefreshDelaysMs: [],
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => {
+        started.push(title);
+        if (title === "Planned work") return;
+        mostInFlight = Math.max(mostInFlight, ++inFlight);
+        try {
+          if (await new Promise<boolean>(resolve => { finish.set(title, resolve); })) throw new Error("disk full");
+        } finally {
+          inFlight -= 1;
+        }
+      },
+    });
+    // Counts each turn-end title refresh once it has finished.
+    const state = provider as unknown as { refreshGeneratedTitle: (sessionId: string, attempt?: number) => Promise<void> };
+    const refresh = state.refreshGeneratedTitle.bind(provider);
+    let refreshed = 0;
+    state.refreshGeneratedTitle = async (sessionId, attempt) => { await refresh(sessionId, attempt); refreshed += 1; };
+    const recorded = () => (JSON.parse(readFileSync(stateFile, "utf8")) as { deferredRenames?: Record<string, string> }).deferredRenames ?? {};
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    // Ends a turn and waits until its title refresh has finished.
+    const endTurn = async (uuid: string) => {
+      const before = refreshed;
+      queries.at(-1)!.push({ type: "result", subtype: "success", uuid, timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+      await waitFor(() => refreshed === before + 1);
+    };
+    return { provider, session, started, finish, recorded, endTurn, mostInFlight: () => mostInFlight };
+  }
+
+  test("a deferred title stays in every snapshot while a manual rename's write is out", async () => {
+    const { provider, session, started, finish, recorded } = await renamedBeforeFirstTurn("uatu-claude-rename-snapshot-");
+    const renaming = provider.renameSession(session.id, "Newer");
+    await waitFor(() => started.includes("Newer"));
+    // Another state write meanwhile still records the deferred title.
+    (provider as unknown as { persistDurableState: () => void }).persistDurableState();
+    await settledWrites(provider);
+    expect(recorded()).toEqual({ [session.id]: "Planned work" });
+    finish.get("Newer")!(false);
+    await renaming;
+    expect(recorded()).toEqual({});
+    await provider.dispose();
+  });
+
+  test("manual renames write one after another, and a failed older one never brings the stale title back", async () => {
+    const { provider, session, started, finish, recorded, endTurn, mostInFlight } = await renamedBeforeFirstTurn("uatu-claude-rename-order-");
+    const holder = () => (provider as unknown as { renameSuppressions?: Map<string, number> }).renameSuppressions?.get(session.id) ?? 0;
+    const first = provider.renameSession(session.id, "First").catch(error => error as Error);
+    await waitFor(() => started.includes("First"));
+    const firstHolder = holder();
+    const second = provider.renameSession(session.id, "Second");
+    // The newer rename has claimed its turn: queued behind the older one
+    // (it now holds the deferred title back), or, unordered, writing.
+    await waitFor(() => started.includes("Second") || holder() > firstHolder);
+    // The older rename fails; the newer one, behind it, succeeds.
+    finish.get("First")!(true);
+    expect(await first).toEqual(expect.objectContaining({ message: "disk full" }));
+    await waitFor(() => started.includes("Second"));
+    finish.get("Second")!(false);
+    await second;
+    expect(mostInFlight()).toBe(1);
+    expect(recorded()).toEqual({});
+    // The next turn writes no stale title.
+    await endTurn("res1");
+    expect(started).toEqual(["First", "Second"]);
+    await provider.dispose();
+  });
+
+  test("a turn ending during the shutdown grace leaves its deferred rename for the next start, writing nothing after shutdown", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-rename-shutdown-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    const queries: FakeQuery[] = [];
+    const renames: string[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      // Each query reads its input as the SDK does, so o2 is delivered.
+      queryFactory: input => { const query = new FakeQuery(input).consumeInput(); queries.push(query); return query; },
+      renameNativeSession: async (_sessionId, title) => { renames.push(title); },
+      // Far longer than the test: the grace ends when o2 does, never by expiry.
+      shutdownGraceMs: 60_000,
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.renameSession(session.id, "Planned work");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    writeFileSync(path.join(projectDir, `${session.id}.jsonl`), `${JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "go" } })}\n`);
+    // Another conversation's prompt, reading its attachment, keeps the grace open.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    const writeFile = fsPromises.writeFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    let disposeReturned = false;
+    const writesAfterDispose: string[] = [];
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (disposeReturned) writesAfterDispose.push(String(args[0]));
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose().then(() => { disposeReturned = true; });
+      // The renamed conversation's turn ends during the grace.
+      queries[0]!.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+      // Handled: its completed status is out, and the title refresh it
+      // starts in the same step has run.
+      await waitFor(() => events.some(event => event.conversationId === session.id && event.updates.some(update => update.kind === "status" && update.status === "completed")));
+      release!();
+      await prompting;
+      await disposing;
+      await settledWrites(provider);
+    } finally {
+      fsPromises.readFile = readFile;
+      fsPromises.writeFile = writeFile;
+    }
+    stop();
+    expect(renames).toEqual([]);
+    expect(writesAfterDispose).toEqual([]);
+    // The rename is still recorded, for the next start to write.
+    expect(JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")).deferredRenames).toEqual({ [session.id]: "Planned work" });
+  });
+
   test("a session-scoped refusal fallback becomes the conversation's model; a local one does not", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);
@@ -2790,6 +3316,444 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  // Characterization of the pending-interaction rules the shared holder
+  // (`../pending-interactions.ts`) now owns. Each reads the ordered event
+  // stream, so a later request's announcement proves nothing earlier is
+  // still on its way.
+
+  test("an answered request settles once and emits nothing: a second reply and a late abort find nothing", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const abort = new AbortController();
+    const decision = query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: abort.signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await provider.replyPermission(session.id, "t1", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    await expect(provider.replyPermission(session.id, "t1", "reject")).rejects.toThrow("no pending permission t1 for this conversation");
+    abort.abort();
+    // The next request's announcement follows anything the first could
+    // still have emitted.
+    const next = query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    expect(abandonedIds(events)).toEqual([]);
+    expect(requestedIds(events)).toEqual(["t1", "t2"]);
+    await provider.replyPermission(session.id, "t2", "once");
+    await next;
+    stop();
+    await provider.dispose();
+  });
+
+  test("replies made in the same tick resolve in the order they were made, each in the turn it is made", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const signal = new AbortController().signal;
+    const decisions = [
+      query.input.options.canUseTool!("Bash", { command: "ls" }, { signal, toolUseID: "t1" }),
+      query.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal, toolUseID: "q1" }),
+      query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal, toolUseID: "t2" }),
+      query.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Other", header: "O", options: [] }] }, { signal, toolUseID: "q2" }),
+    ];
+    const order: string[] = [];
+    const replies = [
+      provider.replyPermission(session.id, "t1", "once").then(() => order.push("permission t1")),
+      provider.replyQuestion(session.id, "q1", [["A"]]).then(() => order.push("question q1")),
+      provider.rejectQuestion(session.id, "q2").then(() => order.push("reject q2")),
+      provider.replyPermission(session.id, "t2", "reject").then(() => order.push("reject t2")),
+    ];
+    // Queued after every handler is attached: a reply that settled in the
+    // turn it was made runs its handler before this marker; one extra await
+    // anywhere on its path would put it after.
+    queueMicrotask(() => order.push("marker"));
+    await Promise.all(replies);
+    expect(order).toEqual(["permission t1", "question q1", "reject q2", "reject t2", "marker"]);
+    await Promise.all(decisions);
+    await provider.dispose();
+  });
+
+  test("a tool request with an empty id is announced and answerable, as before", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "" });
+    await waitFor(() => requestedIds(events).includes(""));
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual([""]);
+    await provider.replyPermission(session.id, "", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a plan reply the holder refuses after the mapping succeeded throws, leaves the card pending, and switches no mode", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    const query = queries[0]!;
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    const modeCalls: string[] = [];
+    query.setPermissionMode = async mode => { modeCalls.push(mode); };
+    const decision = query.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    // An inherited `then` makes the holder refuse the result the mapping built.
+    Object.defineProperty(Object.prototype, "then", { value: () => undefined, configurable: true, writable: true });
+    let reply: Promise<void>;
+    try {
+      reply = provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    } finally {
+      delete (Object.prototype as { then?: unknown }).then;
+    }
+    await expect(reply).rejects.toThrow("must not inherit a `then`");
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["p1"]);
+    expect(modeCalls).toEqual([]);
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("plan");
+    await provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "steps" } });
+    expect(modeCalls).toEqual(["acceptEdits"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a callback from a session already swept is answered at once and announces nothing; a new session for the conversation registers as usual", async () => {
+    const neverAborts = new AbortController().signal;
+    const gone = "The session ended before the request could be shown.";
+    // After the session's stream ends.
+    {
+      const { provider, queries } = fixture();
+      const { events, stop } = collect(provider);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await queries[0]!.return();
+      await waitFor(() => provider.liveSessionCount() === 0);
+      expect(await queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: neverAborts, toolUseID: "t1" })).toEqual({ behavior: "deny", message: gone });
+      expect(await queries[0]!.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal: neverAborts, requestId: "el-1" })).toEqual({ action: "cancel" });
+      expect(await queries[0]!.input.options.onUserDialog!({ dialogKind: "refusal_fallback_prompt", payload: {} }, { signal: neverAborts, requestId: "dl-1" })).toEqual({ behavior: "cancelled" });
+      expect(await provider.listPermissions()).toEqual([]);
+      expect(await provider.listQuestions()).toEqual([]);
+      await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+      const fresh = queries[1]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: neverAborts, toolUseID: "t2" });
+      await waitFor(() => requestedIds(events).includes("t2"));
+      expect(requestedIds(events)).toEqual(["t2"]);
+      await provider.replyPermission(session.id, "t2", "once");
+      expect(await fresh).toEqual({ behavior: "allow", updatedInput: { command: "pwd" } });
+      stop();
+      await provider.dispose();
+    }
+    // After the session is retired at its turn's end.
+    {
+      const { provider, queries } = fixture();
+      const { events, stop } = collect(provider);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      queries[0]!.push({ type: "result", uuid: "res-1", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+      await waitFor(() => queries[0]!.returned);
+      expect(await queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: neverAborts, toolUseID: "t1" })).toEqual({ behavior: "deny", message: gone });
+      await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+      const fresh = queries[1]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: neverAborts, toolUseID: "t2" });
+      await waitFor(() => requestedIds(events).includes("t2"));
+      expect(requestedIds(events)).toEqual(["t2"]);
+      await provider.replyPermission(session.id, "t2", "once");
+      await fresh;
+      stop();
+      await provider.dispose();
+    }
+    // After the workspace shuts down.
+    {
+      const { provider, queries } = fixture();
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      const emitted: string[] = [];
+      const original = (provider as unknown as { emit: (id: string, event: { eventType: string }) => void }).emit.bind(provider);
+      (provider as unknown as { emit: (id: string, event: { eventType: string }) => void }).emit = (id, event) => { emitted.push(event.eventType); original(id, event); };
+      await provider.dispose();
+      expect(await queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: neverAborts, toolUseID: "t1" })).toEqual({ behavior: "deny", message: gone });
+      expect(emitted.filter(type => type.startsWith("interaction."))).toEqual([]);
+      expect(await provider.listPermissions()).toEqual([]);
+    }
+  });
+
+  test("a callback during disposal, after the sweep and before the queue closes, is answered at once and announces nothing", async () => {
+    const outcomes: Array<Promise<unknown>> = [];
+    const { provider, queries } = fixture(query => {
+      query.interrupt = async () => {
+        query.interrupts += 1;
+        outcomes.push(query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "late" }));
+        return {};
+      };
+    });
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const emitted: string[] = [];
+    const target = provider as unknown as { emit: (id: string, event: { eventType: string }) => void };
+    const original = target.emit.bind(provider);
+    target.emit = (id, event) => { emitted.push(event.eventType); original(id, event); };
+    await provider.dispose();
+    expect(queries[0]!.interrupts).toBe(1);
+    expect(await Promise.all(outcomes)).toEqual([{ behavior: "deny", message: "The session ended before the request could be shown." }]);
+    expect(emitted.filter(type => type.startsWith("interaction."))).toEqual([]);
+  });
+
+  test("a session's teardown abandons its requests in the order they were first asked, a redelivery keeping its place", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const signal = new AbortController().signal;
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal, toolUseID: "A" });
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal, toolUseID: "B" });
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls -a" }, { signal, toolUseID: "A" });
+    await waitFor(() => requestedIds(events).length === 3);
+    await queries[0]!.return();
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("an abort listener added after the request runs after the request has ended: its reply is refused", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const abort = new AbortController();
+    const decision = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: abort.signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    let reply: Promise<void> | undefined;
+    abort.signal.addEventListener("abort", () => {
+      reply = provider.replyPermission(session.id, "t1", "once");
+    });
+    abort.abort();
+    await expect(reply!).rejects.toThrow("no pending permission t1 for this conversation");
+    expect(await decision).toEqual({ behavior: "deny", message: "The turn was interrupted before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    stop();
+    await provider.dispose();
+  });
+
+  test("a callback the query factory fires at once is owned by its session: stream end and disposal settle it", async () => {
+    const outcomes: Array<Promise<unknown>> = [];
+    const early = (query: FakeQuery) => { outcomes.push(query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: `early-${outcomes.length}` })); };
+    {
+      const { provider, queries } = fixture(early);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await queries[0]!.return();
+      expect(await outcomes[0]).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+      await provider.dispose();
+    }
+    {
+      const { provider } = fixture(early);
+      const session = await provider.createSession("y");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await provider.dispose();
+      expect(await outcomes[1]).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    }
+  });
+
+  test("a query factory that registers a request and then throws leaves nothing pending", async () => {
+    const outcomes: Array<Promise<unknown>> = [];
+    const { provider } = fixture(query => {
+      outcomes.push(query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "early" }));
+      throw new Error("spawn failed");
+    });
+    const session = await provider.createSession("x");
+    await expect(provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" })).rejects.toThrow("spawn failed");
+    expect(await outcomes[0]).toEqual({ behavior: "deny", message: "The session failed before the user answered." });
+    expect(await provider.listPermissions()).toEqual([]);
+    await provider.dispose();
+    expect(await provider.listPermissions()).toEqual([]);
+  });
+
+  test("an already-aborted request is abandoned without ever being announced", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const aborted = new AbortController();
+    aborted.abort();
+    expect(await query.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal: aborted.signal, requestId: "el-0" })).toEqual({ action: "cancel" });
+    const next = query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    expect(abandonedIds(events)).toEqual(["el-0"]);
+    expect(requestedIds(events)).toEqual(["t2"]);
+    const abandoned = events.find(event => event.eventType === "interaction.abandoned")!;
+    expect(abandoned.conversationId).toBe(session.id);
+    expect(abandoned.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "question:el-0", status: "resolved", outcome: { kind: "rejected" } }) }]);
+    await provider.replyPermission(session.id, "t2", "once");
+    await next;
+    stop();
+    await provider.dispose();
+  });
+
+  test("a reply naming another conversation, another kind, or an unknown request is refused and leaves the request pending", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    const other = await provider.createSession("y");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await expect(provider.replyPermission(other.id, "t1", "once")).rejects.toThrow("no pending permission t1 for this conversation");
+    await expect(provider.replyQuestion(session.id, "t1", [["x"]])).rejects.toThrow("no pending question t1 for this conversation");
+    await expect(provider.rejectQuestion(session.id, "t1")).rejects.toThrow("no pending question t1 for this conversation");
+    await expect(provider.replyPermission(session.id, "t9", "once")).rejects.toThrow("no pending permission t9 for this conversation");
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission(session.id, "t1", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    await provider.dispose();
+  });
+
+  test("the pending lists span conversations and carry what a recovered card needs", async () => {
+    const { provider, queries } = fixture();
+    const first = await provider.createSession("a");
+    const second = await provider.createSession("b");
+    await provider.prompt(first.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    await provider.prompt(first.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    await provider.prompt(second.id, { id: "r2", text: "ask", delivery: "queue" });
+    const signal = new AbortController().signal;
+    const plan = queries[0]!.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal, toolUseID: "p1" });
+    const dialog = queries[1]!.input.options.onUserDialog!({ dialogKind: "refusal_fallback_prompt", payload: { fallbackModel: "claude-sonnet-5" } }, { signal, requestId: "dl-1" });
+    const question = queries[1]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal, toolUseID: "q1" });
+    expect(await provider.listPermissions()).toEqual([{
+      requestId: "p1",
+      conversationId: first.id,
+      action: "Review the plan",
+      resources: [],
+      plan: "steps",
+      choices: [
+        { id: "implement", label: "Approve and implement" },
+        { id: "implement-and-restore", label: "Approve, then return to acceptEdits", description: "Implement the plan, then go back to the mode this conversation used before planning." },
+      ],
+    }]);
+    expect(await provider.listQuestions()).toEqual([
+      expect.objectContaining({ requestId: "dl-1", conversationId: second.id, source: "dialog", schema: { dialogKind: "refusal_fallback_prompt", payload: { fallbackModel: "claude-sonnet-5" } } }),
+      { requestId: "q1", conversationId: second.id, questions: [expect.objectContaining({ prompt: "Pick" })] },
+    ]);
+    await provider.dispose();
+    await Promise.all([plan, dialog, question]);
+  });
+
+  test("dispose abandons every conversation's requests with the shutdown reason, each visibly", async () => {
+    const { provider, queries } = fixture();
+    const { events } = collect(provider);
+    const first = await provider.createSession("a");
+    const second = await provider.createSession("b");
+    await provider.prompt(first.id, { id: "r1", text: "one", delivery: "queue" });
+    await provider.prompt(second.id, { id: "r2", text: "two", delivery: "queue" });
+    const signal = new AbortController().signal;
+    const permission = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal, toolUseID: "t1" });
+    const elicitation = queries[1]!.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal, requestId: "el-1" });
+    await waitFor(() => requestedIds(events).length === 2);
+    await provider.dispose();
+    expect(await permission).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(await elicitation).toEqual({ action: "cancel" });
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(events.filter(event => event.eventType === "interaction.abandoned").map(event => [event.conversationId, (event.updates[0] as { item: { requestId: string } }).item.requestId]))
+      .toEqual([[first.id, "t1"], [second.id, "el-1"]]);
+    expect(await provider.listPermissions()).toEqual([]);
+    expect(await provider.listQuestions()).toEqual([]);
+  });
+
+  test("a session whose stream ends abandons its requests with the session-ended reason", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await queries[0]!.return();
+    expect(await decision).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    expect(await provider.listPermissions()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a retired session abandons its requests with the turn-ended reason", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    const decision = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    queries[0]!.push({ type: "result", uuid: "res-1", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+    expect(await decision).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    expect(await provider.listPermissions()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("an elicitation schema holding Infinity is announced and listed with Infinity in process, as before, and stays answerable", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const schema = { type: "object", properties: { count: { type: "integer", maximum: Number.POSITIVE_INFINITY } }, required: ["count"] };
+    const answer = queries[0]!.input.options.onElicitation!({ serverName: "svc", message: "How many?", mode: "form", requestedSchema: schema }, { signal: new AbortController().signal, requestId: "el-inf" });
+    await waitFor(() => requestedIds(events).includes("el-inf"));
+    const card = (events.find(event => event.eventType === "interaction.requested")!.updates[0] as { item: QuestionRequest }).item;
+    expect(card.schema).toEqual(schema);
+    expect((card.schema as typeof schema).properties.count.maximum).toBe(Number.POSITIVE_INFINITY);
+    expect((await provider.listQuestions())[0]!.schema).toEqual(card.schema);
+    await provider.replyQuestion(session.id, "el-inf", [["3"]]);
+    expect(await answer).toEqual({ action: "accept", content: { count: 3 } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a card the holder refuses ends its callback at once with its own abandoned result, announcing nothing", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const schema = { type: "object", properties: { name: { type: "string" } }, "x-revision": 1n };
+    expect(await query.input.options.onElicitation!({ serverName: "svc", message: "Name?", mode: "form", requestedSchema: schema }, { signal: new AbortController().signal, requestId: "el-big" }))
+      .toEqual({ action: "cancel" });
+    const next = query.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    expect(requestedIds(events)).toEqual(["t2"]);
+    expect(abandonedIds(events)).toEqual([]);
+    expect(await provider.listQuestions()).toEqual([]);
+    await provider.replyPermission(session.id, "t2", "once");
+    await next;
+    stop();
+    await provider.dispose();
+  });
+
+  test("plan approval settles the request before it switches the mode, and a refused switch still approves", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    const query = queries[0]!;
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    let settled = false;
+    const decision = query.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" })
+      .then(value => { settled = true; return value; });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    const seen: Array<{ mode: string; settled: boolean; pending: number }> = [];
+    query.setPermissionMode = async mode => {
+      // Let the decision's continuation run first if it is already due.
+      await Promise.resolve();
+      seen.push({ mode, settled, pending: (await provider.listPermissions()).length });
+      throw new Error("the CLI refused the switch");
+    };
+    await provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    expect(seen).toEqual([{ mode: "acceptEdits", settled: true, pending: 0 }]);
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "steps" } });
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("acceptEdits");
+    await waitFor(() => events.some(event => event.eventType === "plan.approved"));
+    expect(abandonedIds(events)).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
   test("the live catalog replaces the manifest with real windows and effort levels", async () => {
     const { provider, queries } = fixture();
     // Cold: the static fallback answers (Opus 5 and Sonnet 5 run the enlarged window on their plain ids).
@@ -2937,7 +3901,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         queries.push(query);
         return query;
@@ -3850,7 +4815,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         queries.push(query);
         return query;
@@ -3912,7 +4878,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         queries.push(query);
         return query;
@@ -3934,6 +4901,716 @@ describe("ClaudeProvider sessions", () => {
     expect((await forking.listSessions()).map(session => session.id)).not.toContain(forkId);
     expect((await forking.getReversibleHistoryState!(storedId)).staged).toBe(false);
     await forking.dispose();
+  });
+
+  test("committing a revert interrupts the live session, whose abort ends its pending approval as before, and sweeps any survivor before the replacement starts", async () => {
+    const { forking, queries, storedId, forkId } = revertingProvider();
+    const { events, stop } = collect(forking);
+    // A turn keeps the session live through the undo and the commit.
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    expect(queries).toHaveLength(1);
+    // The SDK's interrupt aborts the turn's request signals; a request whose
+    // signal it does not reach survives the interrupt.
+    const turn1 = new AbortController();
+    queries[0]!.interrupt = async () => { queries[0]!.interrupts += 1; turn1.abort(); return {}; };
+    const approval = queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: turn1.signal, toolUseID: "t1" });
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(await approval).toEqual({ behavior: "deny", message: "The turn was interrupted before the user answered." });
+    expect(await asked).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("q1"));
+    expect(abandonedIds(events)).toEqual(["t1", "q1"]);
+    expect(await forking.listQuestions()).toEqual([]);
+    // The replacement resumes the fork and asks as usual.
+    expect(queries.at(-1)!.input.options.resume).toBe(forkId);
+    const fresh = queries.at(-1)!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    await forking.replyPermission(storedId, "t2", "once");
+    await fresh;
+    stop();
+    await forking.dispose();
+  });
+
+  test("a revert's survivors keep the retire reason even when the stream ends during the interrupt", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    // The reader is captured while the session is live. The CLI's stream
+    // ends while it handles the interrupt, and the interrupt answers only
+    // once the provider has handled that end.
+    const exited = readerExit(forking, queries[0]!);
+    let exitedDuringInterrupt = false;
+    queries[0]!.interrupt = async () => {
+      queries[0]!.interrupts += 1;
+      await queries[0]!.return();
+      await exited;
+      exitedDuringInterrupt = true;
+      return {};
+    };
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(exitedDuringInterrupt).toBe(true);
+    expect(await asked).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    stop();
+    await forking.dispose();
+  });
+
+  test("disposal waits for a revert's close already under way, then leaves the query closed and its requests settled", async () => {
+    // The grace ends when the test says, so the order of grace and close
+    // can be seen.
+    const grace = Promise.withResolvers<void>();
+    const { forking, queries, storedId } = revertingProvider(undefined, { shutdownGrace: () => grace.promise });
+    const { events } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    let release: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    queries[0]!.interrupt = async () => {
+      queries[0]!.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return {};
+    };
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const order: string[] = [];
+    const close = queries[0]!.return.bind(queries[0]!);
+    queries[0]!.return = async () => { order.push("return"); return close(); };
+    let disposed = false;
+    const disposing = forking.dispose().then(() => { disposed = true; });
+    // Shutdown has swept the closing session; while the grace lasts, nothing
+    // closes its query.
+    expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(order).toEqual([]);
+    order.push("grace ended");
+    grace.resolve();
+    // Only then does shutdown close it, and it still waits for the
+    // revert's blocked teardown.
+    await waitFor(() => order.includes("return"));
+    expect(order[0]).toBe("grace ended");
+    expect(disposed).toBe(false);
+    release!();
+    await disposing;
+    expect(queries[0]!.returned).toBe(true);
+    expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(await forking.listQuestions()).toEqual([]);
+    expect(await committing).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
+  });
+
+  // Holds disposal on a persistence write already in flight; returns the
+  // release. The write gate is always removed, even if the test fails.
+  async function holdDisposalOnWrite(provider: ClaudeProvider): Promise<{ release: () => void; restore: () => void }> {
+    const writeFile = fsPromises.writeFile;
+    let release: (() => void) | undefined;
+    let writing: (() => void) | undefined;
+    const writeStarted = new Promise<void>(resolve => { writing = resolve; });
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      writing!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return writeFile(...args);
+    }) as typeof writeFile;
+    (provider as unknown as { persistDurableState: () => void }).persistDurableState();
+    await writeStarted;
+    return { release: () => release!(), restore: () => { fsPromises.writeFile = writeFile; } };
+  }
+
+  test("a revert closing during shutdown leaves its survivors to shutdown's sweep, which ends them before the revert's interrupt returns", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    let releaseInterrupt: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    let closed: (() => void) | undefined;
+    const revertClosed = new Promise<void>(resolve => { closed = resolve; });
+    queries[0]!.interrupt = async () => {
+      queries[0]!.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { releaseInterrupt = resolve; });
+      return {};
+    };
+    const returnQuery = queries[0]!.return.bind(queries[0]!);
+    queries[0]!.return = async () => { const result = await returnQuery(); closed!(); return result; };
+    const asked = queries[0]!.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      // Shutdown has ended the survivor already; the interrupt then returns
+      // while disposal still waits on the write, and the revert closes its
+      // query without a sweep of its own.
+      expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+      releaseInterrupt!();
+      await revertClosed;
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    expect(await asked).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    await committing;
+  });
+
+  test("shutdown ends a displaced query's request and a closing revert's in the order they were asked", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    await forking.undo!(storedId);
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    void live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    let releaseInterrupt: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    live.interrupt = async () => {
+      live.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { releaseInterrupt = resolve; });
+      return {};
+    };
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      releaseInterrupt!();
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+    await committing;
+  });
+
+  test("shutdown ends a conversation's displaced and live requests together, in the holder's order, with the shutdown reason", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    const first = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    const second = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    await forking.dispose();
+    expect(live.returned).toBe(true);
+    const shutdown = { behavior: "deny" as const, message: "The workspace shut down before the user answered." };
+    expect([await first, await second]).toEqual([shutdown, shutdown]);
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+  });
+
+  test("the whole shutdown budget fits inside the Hub's kill deadline", () => {
+    // The Hub sends SIGKILL SIGTERM_GRACE_MS after SIGTERM: the grace, the
+    // SDK's close (spent once, since queries close in parallel) and the
+    // drain and flush must all fit, or a rollback could be killed unwritten.
+    expect(SHUTDOWN_GRACE_MS + SDK_CLOSE_BUDGET_MS + SHUTDOWN_FLUSH_MARGIN_MS).toBeLessThanOrEqual(SIGTERM_GRACE_MS);
+  });
+
+  test("shutdown closes every query at once, a usage probe's included", async () => {
+    const closing: FakeQuery[] = [];
+    let releaseCloses: (() => void) | undefined;
+    const closesHeld = new Promise<void>(resolve => { releaseCloses = resolve; });
+    // Each close takes as long as the SDK's may, until released.
+    const { provider, queries } = fixture(query => {
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(() => undefined);
+      query.getContextUsage = () => new Promise(() => undefined);
+      const close = query.return.bind(query);
+      query.return = async () => { closing.push(query); await closesHeld; return close(); };
+    });
+    void provider.readUsage("start").catch(() => undefined);
+    await waitFor(() => queries.length === 1);
+    const probe = queries[0]!;
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const live = queries[1]!;
+    const disposing = provider.dispose();
+    await waitFor(() => closing.includes(probe) && closing.includes(live));
+    releaseCloses!();
+    await disposing;
+  });
+
+  test("a rewind still unanswered when the shutdown grace ends is cut off by the close and rolls its boundary back", async () => {
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    let failRewind: ((error: Error) => void) | undefined;
+    // The control request stays out until the transport closes.
+    const { forking, queries, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = (uuid, options) => {
+        if (options?.dryRun) return rewind(uuid, options);
+        rewinding!();
+        return new Promise((_resolve, reject) => { failRewind = reject; });
+      };
+      const close = query.return.bind(query);
+      query.return = async () => { failRewind?.(new Error("transport closed")); return close(); };
+    }, { shutdownGraceMs: 20 });
+    const undoing = forking.undo!(storedId).catch(error => error as Error);
+    await rewindStarted;
+    const query = queries[0]!;
+    await forking.dispose();
+    expect(query.returned).toBe(true);
+    expect(await undoing).toEqual(expect.objectContaining({ message: "transport closed" }));
+    expect(stateOnDisk(workspace).staged).toEqual({});
+  });
+
+  test("a rewind answered within the shutdown grace completes, and Redo survives", async () => {
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    let answer: (() => void) | undefined;
+    // Like the SDK's: closing the transport fails a rewind still out.
+    const { forking, queries, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      let fail: ((error: Error) => void) | undefined;
+      query.rewindFiles = (uuid, options) => {
+        if (options?.dryRun) return rewind(uuid, options);
+        rewinding!();
+        return new Promise((resolve, reject) => { answer = () => resolve(rewind(uuid, options)); fail = reject; });
+      };
+      const close = query.return.bind(query);
+      query.return = async () => { fail?.(new Error("transport closed")); return close(); };
+    }, { shutdownGraceMs: 60_000 });
+    const undoing = forking.undo!(storedId);
+    await rewindStarted;
+    const disposing = forking.dispose();
+    // The reply arrives after shutdown has started, inside the grace.
+    answer!();
+    expect((await undoing).outcome).toBe("changed");
+    await disposing;
+    expect(queries[0]!.returned).toBe(true);
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+  });
+
+  test("an interrupt that never answers until its query closes does not hold up shutdown, live or mid-revert", async () => {
+    // The SDK's interrupt has no deadline: only closing the transport ends it.
+    const hanging = (query: FakeQuery) => {
+      let fail: ((error: Error) => void) | undefined;
+      query.interrupt = () => { query.interrupts += 1; return new Promise((_resolve, reject) => { fail = reject; }); };
+      const close = query.return.bind(query);
+      query.return = async () => { fail?.(new Error("transport closed")); return close(); };
+    };
+    {
+      // Short: only the grace's expiry ends the wait for the interrupt.
+      const { provider, queries } = fixture(hanging, { shutdownGraceMs: 20 });
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+      await provider.dispose();
+      expect([queries[0]!.interrupts, queries[0]!.returned]).toEqual([1, true]);
+    }
+    {
+      const { forking, queries, storedId } = revertingProvider();
+      await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+      await forking.undo!(storedId);
+      hanging(queries[0]!);
+      const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+      await waitFor(() => queries[0]!.interrupts === 1);
+      await forking.dispose();
+      expect(queries[0]!.returned).toBe(true);
+      await committing;
+    }
+  });
+
+  // A rewind that, like the SDK's, is refused without being sent once its
+  // query is closed, and otherwise stays out until the transport closes.
+  function closeAwareRewind(rewinding: () => void) {
+    return (query: FakeQuery) => {
+      const rewind = query.rewindFiles!.bind(query);
+      let fail: ((error: Error) => void) | undefined;
+      query.rewindFiles = (uuid, options) => {
+        if (query.returned) return Promise.reject(new Error("query closed"));
+        if (options?.dryRun) return rewind(uuid, options);
+        rewinding();
+        return new Promise((_resolve, reject) => { fail = reject; });
+      };
+      const close = query.return.bind(query);
+      query.return = async () => { fail?.(new Error("transport closed")); return close(); };
+    };
+  }
+
+  test("an undo retiring its session during shutdown cannot deadlock on a callback the sweep settles", async () => {
+    let releaseRewind: (() => void) | undefined;
+    let rewinding: (() => void) | undefined;
+    const rewindStarted = new Promise<void>(resolve => { rewinding = resolve; });
+    const { forking, queries, storedId } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => {
+        if (!options?.dryRun) {
+          rewinding!();
+          await new Promise<void>(resolve => { releaseRewind = resolve; });
+        }
+        return rewind(uuid, options);
+      };
+    });
+    const undoing = forking.undo!(storedId);
+    await rewindStarted;
+    const query = queries[0]!;
+    // A permission is pending, and the query's close waits for it to be
+    // answered, as the SDK's does for an open control request.
+    const permission = query.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const close = query.return.bind(query);
+    query.return = async () => { await permission; return close(); };
+    const disposing = forking.dispose();
+    releaseRewind!();
+    await disposing;
+    expect(await permission).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect((await undoing).outcome).toBe("changed");
+  });
+
+  test("shutdown ends a displaced request and a reverting session's in the holder's order before the revert's interrupt aborts the second", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    await forking.undo!(storedId);
+    const turn = new AbortController();
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    const second = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: turn.signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    let releaseInterrupt: (() => void) | undefined;
+    let interrupting: (() => void) | undefined;
+    const interruptStarted = new Promise<void>(resolve => { interrupting = resolve; });
+    // The SDK's interrupt aborts the turn's request signals when it returns.
+    live.interrupt = async () => {
+      live.interrupts += 1;
+      interrupting!();
+      await new Promise<void>(resolve => { releaseInterrupt = resolve; });
+      turn.abort();
+      return {};
+    };
+    const committing = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    await interruptStarted;
+    const hold = await holdDisposalOnWrite(forking);
+    try {
+      const disposing = forking.dispose();
+      releaseInterrupt!();
+      hold.release();
+      await disposing;
+    } finally {
+      hold.restore();
+    }
+    expect(await second).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+    await committing;
+  });
+
+  // Gates the next durable write: resolves `started` when it begins and
+  // holds it until released. The gate is always removed.
+  function gateNextWrite() {
+    const writeFile = fsPromises.writeFile;
+    let release: (() => void) | undefined;
+    let begin: (() => void) | undefined;
+    const started = new Promise<void>(resolve => { begin = resolve; });
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      begin!();
+      await new Promise<void>(resolve => { release = resolve; });
+      return writeFile(...args);
+    }) as typeof writeFile;
+    return { started, release: () => release!(), restore: () => { fsPromises.writeFile = writeFile; } };
+  }
+
+  const stateOnDisk = (workspace: string) => JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")) as { staged: Record<string, unknown>; activeNative?: Record<string, unknown> };
+
+  test("a redo restoring files when disposal starts is drained: its cleared boundary is on disk when dispose returns", async () => {
+    const { forking, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => ({ ...(await rewind(uuid, options)), filesChanged: ["notes.txt"] });
+    });
+    writeFileSync(path.join(workspace, "notes.txt"), "tip");
+    await forking.undo!(storedId);
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+    const writeFile = fsPromises.writeFile;
+    let restoring: (() => void) | undefined;
+    const restoreStarted = new Promise<void>(resolve => { restoring = resolve; });
+    let release: (() => void) | undefined;
+    // Held while redo restores the captured file, before its record is queued.
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (String(args[0]).endsWith("notes.txt")) {
+        restoring!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const redoing = forking.redo!(storedId);
+      await restoreStarted;
+      const disposing = forking.dispose();
+      release!();
+      await disposing;
+      // When dispose returns, the redo's record is on disk.
+      expect(stateOnDisk(workspace).staged).toEqual({});
+      expect((await redoing).outcome).toBe("changed");
+    } finally {
+      fsPromises.writeFile = writeFile;
+    }
+  });
+
+  test("an undo in flight when disposal starts records its recovery state before its rewind, and disposal waits for it", async () => {
+    let rewoundBeforeWrite = false;
+    let stateFile = "";
+    // Close-aware, like the SDK: a rewind sent after the query closed is
+    // refused without being applied.
+    const { forking, queries, storedId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => {
+        if (query.returned) throw new Error("query closed");
+        if (!options?.dryRun && !existsSync(stateFile)) rewoundBeforeWrite = true;
+        return rewind(uuid, options);
+      };
+    // A grace far longer than the test: shutdown closes the query only once
+    // the undo has ended, which is the event this test waits on.
+    }, { shutdownGraceMs: 60_000 });
+    stateFile = path.join(workspace, ".uatu-test-state.json");
+    const gate = gateNextWrite();
+    try {
+      const undoing = forking.undo!(storedId);
+      await gate.started;
+      const disposing = forking.dispose();
+      gate.release();
+      expect((await undoing).outcome).toBe("changed");
+      await disposing;
+    } finally {
+      gate.restore();
+    }
+    expect(queries.at(-1)!.returned).toBe(true);
+    expect(rewoundBeforeWrite).toBe(false);
+    expect(Object.keys(stateOnDisk(workspace).staged)).toEqual([storedId]);
+  });
+
+  test("a replacement prompt paused at its transcript check when the grace ends is drained after the close: its rollback lands before dispose returns, nothing after", async () => {
+    // The grace ends when the test says, while the check is still blocked.
+    const grace = Promise.withResolvers<void>();
+    // The undo captures a file, so the staged record carries a recovery
+    // snapshot as well as its boundary.
+    const { forking, queries, storedId, forkId, workspace } = revertingProvider(query => {
+      const rewind = query.rewindFiles!.bind(query);
+      query.rewindFiles = async (uuid, options) => ({ ...(await rewind(uuid, options)), filesChanged: ["notes.txt"] });
+    }, { shutdownGrace: () => grace.promise });
+    writeFileSync(path.join(workspace, "notes.txt"), "tip");
+    await forking.undo!(storedId);
+    // Another conversation's live query, which only shutdown's close ends.
+    const other = await forking.createSession("y");
+    await forking.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    const otherQuery = queries.at(-1)!;
+    const stagedBefore = stateOnDisk(workspace).staged[storedId] as { boundaryIndex: number; tipSnapshot: Record<string, unknown> };
+    expect(Object.keys(stagedBefore.tipSnapshot)).toEqual([path.join(workspace, "notes.txt")]);
+    const access = fsPromises.access;
+    const writeFile = fsPromises.writeFile;
+    let reached: (() => void) | undefined;
+    const paused = new Promise<void>(resolve => { reached = resolve; });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let disposeReturned = false;
+    const writesAfterDispose: string[] = [];
+    fsPromises.access = (async (...args: Parameters<typeof access>) => {
+      if (String(args[0]).endsWith(`${forkId}.jsonl`)) {
+        reached!();
+        await gate;
+      }
+      return access(...args);
+    }) as typeof access;
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (disposeReturned) writesAfterDispose.push(String(args[0]));
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+      await paused;
+      const disposing = forking.dispose().then(() => { disposeReturned = true; });
+      // The grace ends with the check still blocked, and shutdown closes.
+      grace.resolve();
+      await waitFor(() => otherQuery.returned);
+      expect(disposeReturned).toBe(false);
+      // Released after the close: only the drain waits for the rollback.
+      release!();
+      expect(await prompting).toEqual(expect.objectContaining({ message: "Claude provider is disposed" }));
+      await disposing;
+      await settledWrites(forking);
+    } finally {
+      fsPromises.access = access;
+      fsPromises.writeFile = writeFile;
+    }
+    expect(writesAfterDispose).toEqual([]);
+    // The rollback was recorded: the original boundary and recovery
+    // snapshot are on disk as they were before the commit, with only the
+    // commit marker gone.
+    expect(stateOnDisk(workspace).staged[storedId]).toEqual(stagedBefore);
+  });
+
+  test("a prompt whose query's stream ends during the shutdown grace is refused, never accepted into a query nothing reads", async () => {
+    // The grace never expires here: the stream's end, not the close, refuses r2.
+    const { provider, queries, workspace } = fixture(undefined, { shutdownGraceMs: 60_000 });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] }).catch(error => error as Error);
+      await readStarted;
+      const disposing = provider.dispose();
+      // The CLI's stream ends during the grace.
+      const exited = readerExit(provider, queries[0]!);
+      await queries[0]!.return();
+      await exited;
+      release!();
+      expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session ended before the prompt was accepted" }));
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2"))).toBe(false);
+    stop();
+  });
+
+  test("a staged replacement is acknowledged only once its input has reached a still-open query", async () => {
+    const { forking, queries, storedId, workspace } = revertingProvider();
+    const { events } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    const writeFile = fsPromises.writeFile;
+    let finalizing: (() => void) | undefined;
+    const finalizeStarted = new Promise<void>(resolve => { finalizing = resolve; });
+    let release: (() => void) | undefined;
+    // Hold the write that drops the staged record (the revert's
+    // finalization) until shutdown has closed every query.
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      const [file, data] = args;
+      if (String(file).includes(".uatu-test-state.json") && !String(data).includes(`"${storedId}":{"boundaryIndex"`)) {
+        fsPromises.writeFile = writeFile;
+        finalizing!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return writeFile(...args);
+    }) as typeof writeFile;
+    try {
+      const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+      await finalizeStarted;
+      const replacement = queries.at(-1)!;
+      const disposing = forking.dispose();
+      await waitFor(() => replacement.returned);
+      release!();
+      await disposing;
+      const outcome = await prompting;
+      // Accepted means delivered: the SDK took the replacement's input
+      // while its query was open.
+      expect(outcome).toEqual({ messageId: "r-new" });
+      expect(replacement.taken.map(entry => entry.open)).toEqual([true]);
+      expect(replacement.takenTexts()).toEqual([["a different direction"]]);
+      await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new")));
+    } finally {
+      fsPromises.writeFile = writeFile;
+    }
+  });
+
+  test("a staged replacement nothing takes before the close is refused, and its boundary and Redo stay", async () => {
+    let unread = false;
+    const { forking, queries, storedId, workspace } = revertingProvider(query => { query.inputUnread = unread; });
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    unread = true;
+    const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    // The replacement's input is offered to its query, which never takes it.
+    const offered = (query: FakeQuery) => (query.input.prompt as unknown as { values: unknown[] }).values.length > 0;
+    await waitFor(() => queries.length === 2 && offered(queries[1]!));
+    await forking.dispose();
+    expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+    expect(queries[1]!.taken).toEqual([]);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new"))).toBe(false);
+    // The revert rolled back: its staged boundary, and with it Redo, stay.
+    expect(stateOnDisk(workspace).staged).toEqual({ [storedId]: { boundaryIndex: 1, tipSnapshot: {} } });
+    expect(stateOnDisk(workspace).activeNative).toEqual({});
+    stop();
+  });
+
+  test("the installed SDK still sets and checks the cleanupPerformed flag the provider reads", () => {
+    // ClaudeQueryHandle.cleanupPerformed is an SDK internal: a bump that
+    // renames it would make every closed transport read as open, silently.
+    const source = readFileSync(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk")), "utf8");
+    // Set as the query's cleanup starts, before the transport closes...
+    expect(source).toMatch(/cleanup\(\w*\)\{[^}]{0,200}this\.cleanupPerformed\s*=\s*(?:!0|true)/);
+    // ...and checked by its input loop, the one that takes the prompts.
+    expect(source).toMatch(/async streamInput\([\s\S]{0,600}this\.cleanupPerformed/);
+  });
+
+  test("a staged replacement taken after the SDK closed its transport is refused, keeping Redo", async () => {
+    let closedFirst = false;
+    const { forking, queries, storedId } = revertingProvider(query => { query.cleanupPerformed = closedFirst; });
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    // The replacement's query has closed its transport (the CLI exited)
+    // before the provider's reader has seen its stream end; its input
+    // iterator still takes what is offered, and never writes it.
+    closedFirst = true;
+    const outcome = await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    expect(outcome).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+    expect(queries.at(-1)!.takenTexts()).toEqual([["a different direction"]]);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r-new"))).toBe(false);
+    expect(await forking.getReversibleHistoryState!(storedId)).toEqual(expect.objectContaining({ staged: true, canRedo: true }));
+    stop();
+    await forking.dispose();
+  });
+
+  test("a staged replacement whose stream ends before it takes the input is refused, keeping Redo, and ends no turn", async () => {
+    let unread = false;
+    const { forking, queries, storedId } = revertingProvider(query => { query.inputUnread = unread; });
+    const { events, stop } = collect(forking);
+    await forking.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    await forking.undo!(storedId);
+    unread = true;
+    const prompting = forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" }).catch(error => error as Error);
+    const offered = (query: FakeQuery) => (query.input.prompt as unknown as { values: unknown[] }).values.length > 0;
+    await waitFor(() => queries.length === 2 && offered(queries[1]!));
+    // The replacement's process exits without reading its input.
+    await queries[1]!.return();
+    expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+    expect(await forking.getReversibleHistoryState!(storedId)).toEqual(expect.objectContaining({ staged: true, canRedo: true }));
+    await settledWrites(forking);
+    // The untaken prompt was never a turn: the replacement's exit ends none,
+    // and the refusal is all the caller hears.
+    const endedTurn = (event: NormalizedProviderEvent) => event.updates.some(update => update.kind === "status" && (update as { message?: string }).message === "Claude Code session ended before finishing the turn");
+    expect(events.filter(endedTurn)).toEqual([]);
+    stop();
+    await forking.dispose();
+  });
+
+  test("a history mutation started after disposal is refused before any side effect", async () => {
+    const { forking, queries, storedId, workspace } = revertingProvider();
+    await forking.dispose();
+    await expect(forking.undo!(storedId)).rejects.toThrow("Claude provider is disposed");
+    await expect(forking.redo!(storedId)).rejects.toThrow("Claude provider is disposed");
+    expect(queries).toHaveLength(0);
+    expect(existsSync(path.join(workspace, ".uatu-test-state.json"))).toBe(false);
   });
 
   test("a fork-committed conversation's subagents resolve under the fork's directory", async () => {
@@ -3964,7 +5641,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         return query;
       },
@@ -4009,7 +5687,8 @@ describe("ClaudeProvider sessions", () => {
       catalogProbe: false,
       configDir,
       queryFactory: input => {
-        const query = new FakeQuery(input);
+        // It reads its input as the SDK does.
+        const query = new FakeQuery(input).consumeInput();
         query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
         return query;
       },
@@ -4303,6 +5982,363 @@ describe("plan usage on demand", () => {
     await provider.dispose();
   });
 
+  function racingFixture() {
+    const made = fixture(query => {
+      query.getContextUsage = async () => context;
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => plan;
+    });
+    writeFileSync(path.join(claudeProjectDir(made.workspace, made.configDir), "idle-session.jsonl"), userRow("u1", "earlier", made.workspace));
+    return made;
+  }
+
+  test("a prompt and a cold start read that race as they always have: the displaced query's requests register and are answerable", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    // The read's query, installed last, was retired after its read and so
+    // swept; the prompt's query was only displaced, never swept.
+    expect(queries).toHaveLength(2);
+    expect([queries[0]!.returned, queries[1]!.returned]).toEqual([false, true]);
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission("idle-session", "t1", "once");
+    expect(await displaced).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    expect(await queries[1]!.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" }))
+      .toEqual({ behavior: "deny", message: "The session ended before the request could be shown." });
+    stop();
+    await provider.dispose();
+    // Disposal reaches the displaced query too: no process is left behind.
+    expect(queries[0]!.returned).toBe(true);
+  });
+
+  test("disposal sweeps and closes a displaced query, abandoning its unanswered request", async () => {
+    const { provider, queries } = racingFixture();
+    const { events } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    const pending = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await provider.dispose();
+    expect(await pending).toEqual({ behavior: "deny", message: "The workspace shut down before the user answered." });
+    expect(queries[0]!.returned).toBe(true);
+    expect(queries[0]!.interrupts).toBeGreaterThan(0);
+    await waitFor(() => abandonedIds(events).includes("t1"));
+  });
+
+  test("a displaced query whose stream ends abandons its own unanswered request", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    const pending = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).includes("t1"));
+    await queries[0]!.return();
+    expect(await pending).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    await waitFor(() => abandonedIds(events).includes("t1"));
+    expect(await provider.listPermissions()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a displaced query's exit leaves the live query's replacement under the same id pending", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const live = queries.at(-1)!;
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).filter(id => id === "t1").length === 1);
+    // The live query asks under the same id: the newest registration wins.
+    const replacement = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => requestedIds(events).filter(id => id === "t1").length === 2);
+    // The replacement is pending before the old reader reaches its cleanup,
+    // and still pending once it has.
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    const exited = readerExit(provider, queries[0]!);
+    await queries[0]!.return();
+    await exited;
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission("idle-session", "t1", "once");
+    expect(await replacement).toEqual({ behavior: "allow", updatedInput: { command: "pwd" } });
+    void displaced;
+    stop();
+    await provider.dispose();
+  });
+
+  test("the newer query's end leaves the displaced query's approval pending", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const live = queries.at(-1)!;
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const newer = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    await live.return();
+    expect(await newer).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await provider.replyPermission("idle-session", "t1", "once");
+    expect(await displaced).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a revert sweeps only the old session's survivors, not a displaced query's", async () => {
+    const { forking, queries, storedId } = revertingProvider();
+    const { events, stop } = collect(forking);
+    await raceStarts(forking, queries, storedId);
+    // A live session with a turn, then a staged revert on it.
+    await forking.prompt(storedId, { id: "r2", text: "work", delivery: "queue" });
+    const live = queries.at(-1)!;
+    await forking.undo!(storedId);
+    const displaced = queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const survivor = live.input.options.canUseTool!("AskUserQuestion", { questions: [{ question: "Pick", header: "P", options: [] }] }, { signal: new AbortController().signal, toolUseID: "q1" });
+    await waitFor(() => requestedIds(events).includes("q1"));
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(await survivor).toEqual({ behavior: "deny", message: "The turn ended before the user answered." });
+    expect((await forking.listPermissions()).map(pending => pending.requestId)).toEqual(["t1"]);
+    await forking.replyPermission(storedId, "t1", "once");
+    expect(await displaced).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    stop();
+    await forking.dispose();
+  });
+
+  test("shutdown ends a conversation's requests in the order they were asked, across a displaced and a live query", async () => {
+    const { provider, queries } = racingFixture();
+    const { events } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const live = queries.at(-1)!;
+    void queries[0]!.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "A" });
+    void live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "B" });
+    await waitFor(() => requestedIds(events).includes("B"));
+    await provider.dispose();
+    await waitFor(() => abandonedIds(events).length === 2);
+    expect(abandonedIds(events)).toEqual(["A", "B"]);
+  });
+
+  test("a plan approval from a displaced query switches only that query: the conversation's saved and published mode stay the live query's", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const switched: Record<string, string[]> = { displaced: [], live: [] };
+    displaced.setPermissionMode = async mode => { switched.displaced!.push(mode); };
+    live.setPermissionMode = async mode => { switched.live!.push(mode); };
+    const modeBefore = (await provider.getConversationConfiguration("idle-session")).mode;
+    const decision = displaced.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    await provider.replyPermission("idle-session", "p1", "once");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "steps" } });
+    expect(switched).toEqual({ displaced: ["auto"], live: [] });
+    // The conversation's saved and published mode stay the live query's.
+    expect((await provider.getConversationConfiguration("idle-session")).mode).toBe(modeBefore);
+    // A later announcement proves everything before it has arrived.
+    void live.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "later" });
+    await waitFor(() => requestedIds(events).includes("later"));
+    expect(events.some(event => event.eventType === "plan.approved")).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a displaced plan card restores the mode it offered, even after the live query's approval cleared the conversation's", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "edit", delivery: "queue", mode: "acceptEdits" });
+    await provider.prompt("idle-session", { id: "r3", text: "plan", delivery: "queue", mode: "plan" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const switched: string[] = [];
+    displaced.setPermissionMode = async mode => { switched.push(`displaced ${mode}`); };
+    live.setPermissionMode = async mode => { switched.push(`live ${mode}`); };
+    const displacedPlan = displaced.input.options.canUseTool!("ExitPlanMode", { plan: "theirs" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    const livePlan = live.input.options.canUseTool!("ExitPlanMode", { plan: "ours" }, { signal: new AbortController().signal, toolUseID: "p2" });
+    await waitFor(() => requestedIds(events).includes("p2"));
+    const offered = (events.find(event => event.eventType === "interaction.requested" && (event.updates[0] as { item: { requestId: string } }).item.requestId === "p1")!.updates[0] as { item: { choices?: Array<{ id: string; label: string }> } }).item.choices;
+    expect(offered?.at(-1)?.label).toContain("acceptEdits");
+    // The live approval returns the conversation to acceptEdits and clears
+    // its restore intent, exactly as before.
+    await provider.replyPermission("idle-session", "p2", "once", "implement-and-restore");
+    await livePlan;
+    expect((await provider.getConversationConfiguration("idle-session")).mode).toBe("acceptEdits");
+    await provider.replyPermission("idle-session", "p1", "once", "implement-and-restore");
+    await displacedPlan;
+    expect(switched).toEqual(["live acceptEdits", "displaced acceptEdits"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a plan approval whose asking query has ended switches no query", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const switched: string[] = [];
+    displaced.setPermissionMode = async mode => { switched.push(`displaced ${mode}`); };
+    live.setPermissionMode = async mode => { switched.push(`live ${mode}`); };
+    const decision = displaced.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => requestedIds(events).includes("p1"));
+    // The asking query ends; its approval is abandoned with it, so there is
+    // nothing left to approve and no query switches.
+    const exited = readerExit(provider, displaced);
+    await displaced.return();
+    await exited;
+    expect(await decision).toEqual({ behavior: "deny", message: "The session ended before the user answered." });
+    await expect(provider.replyPermission("idle-session", "p1", "once")).rejects.toThrow("no pending permission p1 for this conversation");
+    expect(switched).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a displaced query whose stream fails abandons its own request and leaves the live query's pending", async () => {
+    const { provider, queries } = racingFixture();
+    const { events, stop } = collect(provider);
+    await raceStarts(provider, queries, "idle-session");
+    await provider.prompt("idle-session", { id: "r2", text: "again", delivery: "queue" });
+    const displaced = queries[0]!;
+    const live = queries.at(-1)!;
+    const own = displaced.input.options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    const other = live.input.options.canUseTool!("Bash", { command: "pwd" }, { signal: new AbortController().signal, toolUseID: "t2" });
+    await waitFor(() => requestedIds(events).includes("t2"));
+    const exited = readerExit(provider, displaced);
+    displaced.fail(new Error("child died"));
+    await exited;
+    expect(await own).toEqual({ behavior: "deny", message: "The session failed before the user answered." });
+    expect((await provider.listPermissions()).map(pending => pending.requestId)).toEqual(["t2"]);
+    await provider.replyPermission("idle-session", "t2", "once");
+    expect(await other).toEqual({ behavior: "allow", updatedInput: { command: "pwd" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a prompt reading its attachment when shutdown begins is accepted and delivered within the grace", async () => {
+    // The grace outlasts the test: the prompt finishes once its input is taken.
+    const { provider, queries, workspace } = fixture(query => query.consumeInput(), { shutdownGraceMs: 60_000 });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      release!();
+      expect(await prompting).toEqual({ messageId: "r2" });
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    expect(queries[0]!.returned).toBe(true);
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2")));
+    // Accepted means delivered: the SDK took the prompt while the query was open.
+    expect(queries[0]!.takenTexts()).toEqual([
+      ["first"],
+      ["image", "with a picture"],
+    ]);
+    stop();
+  });
+
+  test("a prompt in the grace that the SDK never takes before the close is refused, not reported accepted", async () => {
+    // The grace ends when the test says: once the prompt is waiting in the queue.
+    const grace = Promise.withResolvers<void>();
+    const { provider, queries, workspace } = fixture(undefined, { shutdownGrace: () => grace.promise });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    // r1, pushed and never read, is already there; r2 is offered after it.
+    const waiting = () => (queries[0]!.input.prompt as unknown as { values: unknown[] }).values.length;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] }).catch(error => error as Error);
+      await readStarted;
+      const disposing = provider.dispose();
+      expect(waiting()).toBe(1);
+      release!();
+      await waitFor(() => waiting() === 2);
+      // The query is still open with r2 offered; only now does the grace end.
+      expect(queries[0]!.returned).toBe(false);
+      expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2"))).toBe(false);
+      grace.resolve();
+      expect(await prompting).toEqual(expect.objectContaining({ message: "Claude Code session closed before it took the prompt" }));
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    expect(queries[0]!.returned).toBe(true);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:r2"))).toBe(false);
+    stop();
+  });
+
+  test("a start still at its transcript check when shutdown begins starts no query and leaves no request or later write behind", async () => {
+    const { provider, queries, configDir, workspace } = fixture();
+    const writeFile = fsPromises.writeFile;
+    let disposedAt: number | undefined;
+    const writesAfterDispose: string[] = [];
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      if (disposedAt !== undefined) writesAfterDispose.push(String(args[0]));
+      return writeFile(...args);
+    }) as typeof writeFile;
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "idle-session.jsonl"), userRow("u1", "earlier", workspace));
+    const access = fsPromises.access;
+    let reached: (() => void) | undefined;
+    const waiting = new Promise<void>(resolve => { reached = resolve; });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    fsPromises.access = (async (...args: Parameters<typeof access>) => {
+      if (String(args[0]).endsWith("idle-session.jsonl")) {
+        reached!();
+        await gate;
+      }
+      return access(...args);
+    }) as typeof access;
+    try {
+      const started = provider.prompt("idle-session", { id: "r1", text: "now", delivery: "queue", mode: "plan" });
+      await waiting;
+      // Shutdown waits for the prompt; its start resumes after shutdown began.
+      const disposing = provider.dispose();
+      release!();
+      await disposing;
+      disposedAt = Date.now();
+      await expect(started).rejects.toThrow("Claude provider is disposed");
+    } finally {
+      fsPromises.access = access;
+      fsPromises.writeFile = writeFile;
+    }
+    expect(writesAfterDispose).toEqual([]);
+    expect(queries.every(query => query.returned)).toBe(true);
+    expect(queries).toHaveLength(0);
+    expect(provider.liveSessionCount()).toBe(0);
+    expect(await provider.listPermissions()).toEqual([]);
+  });
+
   test("a turn that ends under an explicit read defers retirement until the read answers", async () => {
     let release: ((value: unknown) => void) | undefined;
     const { provider, queries } = fixture(query => {
@@ -4424,6 +6460,17 @@ describe("plan usage on demand", () => {
   });
 });
 
+test("a usage read whose probe would start after shutdown began starts no query and writes nothing", async () => {
+  const { provider, queries, workspace } = fixture();
+  const stateFile = path.join(workspace, ".uatu-test-state.json");
+  // The read is still finding its target when shutdown starts.
+  const reading = provider.readUsage("start");
+  await provider.dispose();
+  expect(await reading).toEqual({ report: null, reason: "unavailable" });
+  expect(queries).toHaveLength(0);
+  expect(existsSync(stateFile)).toBe(false);
+});
+
 test("disposing the provider mid-probe ends the probe query instead of leaving it to its timeout", async () => {
   const { provider, queries } = fixture(query => {
     query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(() => undefined);
@@ -4452,8 +6499,10 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
 
   // The spike's sequence for the turn that schedules: tool call, Stop (with
   // the crons), then the result.
-  async function scheduled(crons: unknown[], options: { background?: boolean } = {}) {
-    const context = fixture();
+  async function scheduled(crons: unknown[], options: { background?: boolean; prepare?: (query: FakeQuery) => void } = {}) {
+    // A grace that cannot expire: the shutdown tests here finish their work
+    // inside it, and none of them covers its expiry.
+    const context = fixture(options.prepare, { shutdownGraceMs: 60_000 });
     const { events, stop } = collect(context.provider);
     const session = await context.provider.createSession("x");
     await context.provider.prompt(session.id, { id: "r1", text: "wake me in a minute", delivery: "queue" });
@@ -4659,6 +6708,9 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
 
   test("a cancel or release whose write fails leaves nothing cancelled: the wakeup stays listed and unblocked", async () => {
     const { provider, events, stop, session, query, workspace } = await scheduled([oneShot, recurring]);
+    // Writes the setup queued finish first: one still in flight would race
+    // the directory below (EEXIST) instead of failing.
+    await settledWrites(provider);
     // The state file's temporary path is a directory: every write fails.
     mkdirSync(path.join(workspace, ".uatu-test-state.json.tmp"));
     await expect(provider.cancelWakeup(session.id, "c1")).rejects.toThrow();
@@ -4828,6 +6880,606 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     shutdown.stop();
   });
 
+  test("shutdown settles the wakeups of a displaced query too", async () => {
+    const { provider, queries, configDir, workspace } = fixture(query => {
+      query.getContextUsage = async () => ({ categories: [], totalTokens: 1, maxTokens: 200_000 });
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ subscription_type: null, rate_limits_available: false });
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "idle-session.jsonl"), JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, cwd: workspace, timestamp: "2026-09-01T12:00:00Z", message: { role: "user", content: "earlier" } }) + "\n");
+    const { events, stop } = collect(provider);
+    // The prompt's query schedules a recurring wakeup while it is live; the
+    // read's start then displaces it.
+    await raceStarts(provider, queries, "idle-session", async () => {
+      const first = queries[0]!;
+      first.push({ type: "assistant", uuid: "cc", session_id: "idle-session", message: { role: "assistant", content: [
+        { type: "tool_use", id: "toolu_cc", name: "CronCreate", input: { cron: recurring.schedule, prompt: recurring.prompt, recurring: true } },
+      ] } });
+      first.push({ type: "user", uuid: "cc-result", session_id: "idle-session", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_cc", content: "Scheduled recurring job c1." }] }, tool_use_result: { id: "c1", recurring: true, durable: false } });
+      await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "tool:toolu_cc" && update.item.type === "tool" && update.item.status === "completed")));
+      await stopHook(first, { session_crons: [recurring] });
+      await waitFor(() => rows(events).some(row => row.id === "wakeup:c1"));
+    });
+    expect(queries[0]!.returned).toBe(false);
+    await provider.dispose();
+    await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+    expect(events.find(event => event.eventType === "wakeups.lost")!.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused", message: WAKEUP_PAUSED_MESSAGE }) },
+      { kind: "status", status: "idle" },
+    ]);
+    stop();
+  });
+
+  // Holds the next durable write until released; `fail` makes it reject.
+  function holdNextWrite() {
+    const writeFile = fsPromises.writeFile;
+    let writing: (() => void) | undefined;
+    const started = new Promise<void>(resolve => { writing = resolve; });
+    let finish: ((fail: boolean) => void) | undefined;
+    fsPromises.writeFile = (async (...args: Parameters<typeof writeFile>) => {
+      fsPromises.writeFile = writeFile;
+      writing!();
+      const fail = await new Promise<boolean>(resolve => { finish = resolve; });
+      if (fail) throw new Error("disk full");
+      return writeFile(...args);
+    }) as typeof writeFile;
+    return { started, finish: (fail: boolean) => finish!(fail), restore: () => { fsPromises.writeFile = writeFile; } };
+  }
+
+  const shutdownReport = (events: NormalizedProviderEvent[]) => events
+    .filter(event => event.eventType === "session.released" || event.eventType === "wakeups.lost")
+    .map(event => [event.eventType, event.updates.filter(update => update.kind === "upsert").map(update => {
+      const item = (update as { item: { id: string; status: string } }).item;
+      return `${item.id} ${item.status}`;
+    })]);
+
+  test("a wakeup cancel whose write is in flight at shutdown is reported cancelled, never paused, and shutdown reports only the rest", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    const report = () => events
+      .filter(event => event.eventType === "wakeup.cancelled" || event.eventType === "wakeups.lost")
+      .map(event => [event.eventType, event.updates.filter(update => update.kind === "upsert").map(update => {
+        const item = (update as { item: { id: string; status: string } }).item;
+        return `${item.id} ${item.status}`;
+      })]);
+    await waitFor(() => report().length === 2);
+    expect(report()).toEqual([
+      ["wakeup.cancelled", ["wakeup:c1 cancelled"]],
+      ["wakeups.lost", ["wakeup:w1 lost"]],
+    ]);
+    stop();
+  });
+
+  test("a Stop during the shutdown grace never republishes settled wakeups as pending; one first seen then is reported as shutdown would", async () => {
+    const { provider, events, stop, session, query, workspace } = await scheduled([oneShot, recurring]);
+    // It reads its input as the SDK does, so the prompt below is delivered.
+    query.consumeInput();
+    // An accepted prompt reading its attachment keeps the grace open.
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    const later = { id: "c2", schedule: "*/7 * * * *", recurring: true, prompt: "CRON check again" };
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      // The CLI's Stop during the grace still lists the settled cron and a new one.
+      await stopHook(query, { session_crons: [recurring, later] });
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    const settled = events.findIndex(event => event.eventType === "wakeups.lost");
+    const after = events.slice(settled).filter(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "scheduled_wakeup"));
+    expect(after.map(event => [event.eventType, event.updates.filter(update => update.kind === "upsert").map(update => {
+      const item = (update as { item: { id: string; status: string } }).item;
+      return `${item.id} ${item.status}`;
+    })])).toEqual([
+      ["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]],
+      ["wakeups.lost", ["wakeup:c2 paused"]],
+    ]);
+    stop();
+  });
+
+  test("a context report finishing in the grace leaves the query open for a prompt still reading its attachment", async () => {
+    // The turn-end context report is still out when shutdown begins.
+    const report = Promise.withResolvers<unknown>();
+    const { provider, events, stop, query, session, workspace } = await scheduled([oneShot], { prepare: query => { query.getContextUsage = () => report.promise; } });
+    query.consumeInput();
+    // Counts the report's idle-retirement check once it has run.
+    const state = provider as unknown as { retireIfIdle: (session: unknown) => Promise<void> };
+    const retireIfIdle = state.retireIfIdle.bind(provider);
+    let retireChecks = 0;
+    state.retireIfIdle = async live => { await retireIfIdle(live); retireChecks += 1; };
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(session.id, { id: "r2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      // The sweep reports the wakeup lost, leaving the session idle.
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      report.resolve({ categories: [], totalTokens: 1, maxTokens: 200_000 });
+      await waitFor(() => retireChecks === 1);
+      // Closing is shutdown's: the query stays open for the prompt.
+      expect(query.returned).toBe(false);
+      release!();
+      expect(await prompting).toEqual({ messageId: "r2" });
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    expect(query.takenTexts()).toContainEqual(["image", "with a picture"]);
+    stop();
+  });
+
+  test("a wakeup shutdown has reported does not fire in a query the grace keeps open", async () => {
+    const { provider, events, stop, query, queries, workspace } = await scheduled([oneShot]);
+    // Another conversation's prompt, reading its attachment, keeps the grace open.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    // Its query reads its input as the SDK does, so o2 is delivered.
+    queries.at(-1)!.consumeInput();
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      // The settled one-shot reaches its hook during the grace: it is blocked.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ decision: "block", reason: "The workspace is shutting down: this scheduled wakeup no longer fires here." });
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    stop();
+  });
+
+  test("a settled wakeup the SDK names as a wakeup is blocked in the grace even while a typed prompt is pending", async () => {
+    const { provider, events, stop, query, queries, session, workspace } = await scheduled([oneShot]);
+    // A typed prompt for the same conversation, delivered and not yet ended.
+    await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
+    // Another conversation's prompt, reading its attachment, keeps the grace open.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    // Its query reads its input as the SDK does, so o2 is delivered.
+    queries.at(-1)!.consumeInput();
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      const disposing = provider.dispose();
+      await waitFor(() => events.some(event => event.eventType === "wakeups.lost"));
+      // Without a source, the same words may be the person's: they pass.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "typed-2" })).toEqual({ continue: true });
+      // With the SDK's wakeup source, it is the settled wakeup: blocked.
+      for (const source of ["schedule_wakeup", "loop_wakeup"]) {
+        expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: `fired-${source}`, source })).toEqual({ decision: "block", reason: "The workspace is shutting down: this scheduled wakeup no longer fires here." });
+      }
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      fsPromises.readFile = readFile;
+    }
+    stop();
+  });
+
+  test("outside shutdown, a cancelled wakeup's guard is main's: any source while nothing is outstanding, none while a prompt is", async () => {
+    const { provider, stop, query, session } = await scheduled([oneShot, recurring]);
+    await provider.cancelWakeup(session.id, "c1");
+    // Nothing outstanding: blocked, whatever the hook's source says.
+    expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "other-source", source: "user" })).toEqual({ decision: "block", reason: "Cancelled in uatu: this scheduled wakeup no longer fires." });
+    // A typed prompt outstanding: not blocked, even with a wakeup source.
+    await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
+    expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "sourced", source: "schedule_wakeup" })).toEqual({ continue: true });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a cancelled wakeup the SDK names as a wakeup is blocked in the grace even while a typed prompt is pending", async () => {
+    const { provider, stop, query, session } = await scheduled([oneShot, recurring]);
+    // A typed prompt, delivered and not yet ended.
+    await provider.prompt(session.id, { id: "r2", text: "and one more thing", delivery: "queue" });
+    await settledWrites(provider);
+    // The cancel's write is in flight, so its session stays out of the
+    // sweep and the grace waits for it.
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      // Without a source, the same words may be the person's: they pass.
+      expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "typed-3" })).toEqual({ continue: true });
+      // With the SDK's wakeup source, it is the cancelled wakeup: blocked.
+      for (const source of ["schedule_wakeup", "loop_wakeup"]) {
+        expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: `fired-${source}`, source })).toEqual({ decision: "block", reason: "Cancelled in uatu: this scheduled wakeup no longer fires." });
+      }
+      hold.finish(false);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    stop();
+  });
+
+  test("a wakeup that fires in the grace on a session left for a cancel in flight keeps its fired row, never reported lost", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    // The cancel's write is in flight, so shutdown leaves the session's
+    // wakeups to the end, and the grace waits for the cancel.
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      // The other wakeup fires in the grace: its turn runs, and the CLI's
+      // Stop no longer lists it.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ continue: true });
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(false);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    const statuses = (wakeupId: string) => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === `wakeup:${wakeupId}`)
+      .map(update => (update as { item: { status: string } }).item.status);
+    await waitFor(() => statuses("c1").includes("cancelled"));
+    expect(statuses("w1").at(-1)).toBe("fired");
+    expect(statuses("w1")).not.toContain("lost");
+    stop();
+  });
+
+  test("a session left for a cancel is reconciled for the whole grace, even after the cancel has finished", async () => {
+    const { provider, events, stop, query, queries, session, workspace } = await scheduled([oneShot, recurring]);
+    // Another conversation's prompt, reading its attachment, keeps the grace
+    // open after the cancel is done.
+    const other = await provider.createSession("y");
+    await provider.prompt(other.id, { id: "o1", text: "first", delivery: "queue" });
+    queries.at(-1)!.consumeInput();
+    const image = path.join(workspace, "shot.png");
+    writeFileSync(image, "png-bytes");
+    const readFile = fsPromises.readFile;
+    let reading: (() => void) | undefined;
+    const readStarted = new Promise<void>(resolve => { reading = resolve; });
+    let release: (() => void) | undefined;
+    fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+      if (String(args[0]) === image) {
+        reading!();
+        await new Promise<void>(resolve => { release = resolve; });
+      }
+      return readFile(...args);
+    }) as typeof readFile;
+    await settledWrites(provider);
+    const hold = holdNextWrite();
+    try {
+      const prompting = provider.prompt(other.id, { id: "o2", text: "with a picture", delivery: "queue", attachments: [{ id: "a1", name: "shot.png", mimeType: "image/png", absolutePath: image }] });
+      await readStarted;
+      // The cancel's write is in flight at shutdown, so its session is left
+      // for the end; then the cancel finishes inside the grace.
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await cancelling;
+      // The other wakeup fires in the grace and the CLI's Stop drops it.
+      expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ continue: true });
+      await stopHook(query, { session_crons: [recurring] });
+      release!();
+      await prompting;
+      await disposing;
+    } finally {
+      hold.restore();
+      fsPromises.readFile = readFile;
+    }
+    const statuses = (wakeupId: string) => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === `wakeup:${wakeupId}`)
+      .map(update => (update as { item: { status: string } }).item.status);
+    expect(statuses("c1")).toContain("cancelled");
+    expect(statuses("w1").at(-1)).toBe("fired");
+    expect(statuses("w1")).not.toContain("lost");
+    stop();
+  });
+
+  test("a Stop while a wakeup's cancel is being written leaves it to the cancel, which reports it cancelled once", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1");
+      await hold.started;
+      // The CLI's Stop still lists the cron the cancel has not yet recorded.
+      await stopHook(query, { session_crons: [oneShot, recurring] });
+      hold.finish(false);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    const c1Rows = events.flatMap(event => event.updates.filter(update => update.kind === "upsert" && update.item.id === "wakeup:c1").map(update => [event.eventType, (update as { item: { status: string } }).item.status]));
+    expect(c1Rows.filter(([, status]) => status === "cancelled")).toEqual([["wakeup.cancelled", "cancelled"]]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a wakeup that fired before its cancel keeps its fired row when the cancel's write fails", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    // The one-shot fires; then the user cancels it before the CLI's Stop.
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    let cancelError: unknown;
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1").catch(error => { cancelError = error; });
+      await hold.started;
+      // The Stop while the cancel's write is out no longer lists it: it fired.
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(true);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    expect(cancelError).toEqual(expect.objectContaining({ message: "disk full" }));
+    const w1Rows = () => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === "wakeup:w1")
+      .map(update => (update as { item: { status: string; firedTurnId?: string } }).item);
+    // The failed cancel applies the Stop's outcome, which the collector
+    // reads asynchronously.
+    await waitFor(() => w1Rows().some(row => row.status === "fired"));
+    expect(w1Rows().at(-1)).toEqual(expect.objectContaining({ status: "fired", firedTurnId: "message:wakeup:fired-1" }));
+    // No longer scheduled: shutdown reports only the cron.
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["c1"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a wakeup that fired keeps its fired row when its cancel then succeeds", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1");
+      await hold.started;
+      // The Stop while the cancel's write is out reports the fire.
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(false);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    const w1Rows = () => events.flatMap(event => event.updates.filter(update => update.kind === "upsert" && update.item.id === "wakeup:w1").map(update => ({ eventType: event.eventType, ...(update as { item: { status: string; firedTurnId?: string } }).item })));
+    await waitFor(() => w1Rows().some(row => row.status !== "pending"));
+    // As before: the fire is what happened, and it is not relabelled.
+    expect(w1Rows().filter(row => row.status !== "pending")).toEqual([expect.objectContaining({ status: "fired", firedTurnId: "message:wakeup:fired-1" })]);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["c1"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a failed cancel that leaves no wakeup idles the conversation and retires its session", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot]);
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1").catch(() => undefined);
+      await hold.started;
+      // The Stop drops the only wakeup: it fired.
+      await stopHook(query, { session_crons: [] });
+      hold.finish(true);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    // Its fired outcome applies; with nothing left, the conversation is
+    // idle again and its session retires.
+    await waitFor(() => query.returned);
+    expect(statuses(events).at(-1)).toBe("idle");
+    expect(provider.liveSessionCount()).toBe(0);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a fire recorded while a wakeup's cancel is out survives a later Stop that still omits it", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    const hold = holdNextWrite();
+    let cancelError: unknown;
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "w1").catch(error => { cancelError = error; });
+      await hold.started;
+      // The first Stop records the fire; the next one only finds w1 still gone.
+      await stopHook(query, { session_crons: [recurring] });
+      await stopHook(query, { session_crons: [recurring] });
+      hold.finish(true);
+      await cancelling;
+    } finally {
+      hold.restore();
+    }
+    expect(cancelError).toEqual(expect.objectContaining({ message: "disk full" }));
+    const w1Rows = () => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === "wakeup:w1")
+      .map(update => (update as { item: { status: string; firedTurnId?: string } }).item);
+    await waitFor(() => w1Rows().some(row => row.status !== "pending"));
+    expect(w1Rows().at(-1)).toEqual(expect.objectContaining({ status: "fired", firedTurnId: "message:wakeup:fired-1" }));
+    stop();
+    await provider.dispose();
+  });
+
+  test("a wakeup whose cancel write fails during the grace is reported by shutdown as it would be, never cancelled", async () => {
+    const { provider, events, stop, query, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    let cancelError: unknown;
+    try {
+      const cancelling = provider.cancelWakeup(session.id, "c1").catch(error => { cancelError = error; });
+      await hold.started;
+      const disposing = provider.dispose();
+      // A Stop in the grace, while the cancel's write is still out.
+      await stopHook(query, { session_crons: [oneShot, recurring] });
+      hold.finish(true);
+      await Promise.all([cancelling, disposing]);
+    } finally {
+      hold.restore();
+    }
+    expect(cancelError).toEqual(expect.objectContaining({ message: "disk full" }));
+    const c1Statuses = events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === "wakeup:c1")
+      .map(update => (update as { item: { status: string } }).item.status);
+    expect(c1Statuses).not.toContain("cancelled");
+    expect(c1Statuses.at(-1)).toBe("paused");
+    stop();
+  });
+
+  test("a release that arrives after shutdown is refused, not reported done", async () => {
+    const { provider, stop, session } = await scheduled([oneShot]);
+    await provider.dispose();
+    await expect(provider.release(session.id)).rejects.toThrow("Claude provider is disposed");
+    stop();
+  });
+
+  test("a release recorded while shutdown runs reports its wakeups released before dispose returns", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    try {
+      const releasing = provider.release(session.id);
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await Promise.all([releasing, disposing]);
+    } finally {
+      hold.restore();
+    }
+    await waitFor(() => shutdownReport(events).length > 0);
+    expect(shutdownReport(events)).toEqual([["session.released", ["wakeup:w1 cancelled", "wakeup:c1 cancelled"]]]);
+    stop();
+  });
+
+  test("a release refused because a turn started while its write ran leaves shutdown to report its wakeups lost or paused", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    let releaseError: unknown;
+    try {
+      const releasing = provider.release(session.id).catch(error => { releaseError = error; });
+      await hold.started;
+      // The CLI starts a turn of its own while the cancellations are written.
+      query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+      await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+      const disposing = provider.dispose();
+      hold.finish(false);
+      await Promise.all([releasing, disposing]);
+    } finally {
+      hold.restore();
+    }
+    expect(releaseError).toBeInstanceOf(ReleaseUnavailableError);
+    await waitFor(() => shutdownReport(events).length > 0);
+    expect(shutdownReport(events)).toEqual([["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]]]);
+    stop();
+  });
+
+  test("a release whose write fails while shutdown runs reports its wakeups as shutdown would, lost or paused", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    const hold = holdNextWrite();
+    let releaseError: unknown;
+    try {
+      const releasing = provider.release(session.id).catch(error => { releaseError = error; });
+      await hold.started;
+      const disposing = provider.dispose();
+      hold.finish(true);
+      await Promise.all([releasing, disposing]);
+    } finally {
+      hold.restore();
+    }
+    expect(releaseError).toEqual(expect.objectContaining({ message: "disk full" }));
+    await waitFor(() => shutdownReport(events).length > 0);
+    expect(shutdownReport(events)).toEqual([["wakeups.lost", ["wakeup:w1 lost", "wakeup:c1 paused"]]]);
+    stop();
+  });
+
+  test("shutdown ends conversations one at a time: each live session's requests, then its lost wakeups", async () => {
+    const context = fixture();
+    const { events, stop } = collect(context.provider);
+    const a = await context.provider.createSession("a");
+    const b = await context.provider.createSession("b");
+    await context.provider.prompt(a.id, { id: "ra", text: "wake me", delivery: "queue" });
+    await context.provider.prompt(b.id, { id: "rb", text: "work", delivery: "queue" });
+    const [queryA, queryB] = [context.queries[0]!, context.queries[1]!];
+    // A schedules a recurring wakeup.
+    queryA.push({ type: "assistant", uuid: "cc", session_id: a.id, message: { role: "assistant", content: [
+      { type: "tool_use", id: "toolu_cc", name: "CronCreate", input: { cron: recurring.schedule, prompt: recurring.prompt, recurring: true } },
+    ] } });
+    queryA.push({ type: "user", uuid: "cc-result", session_id: a.id, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_cc", content: "Scheduled recurring job c1." }] }, tool_use_result: { id: "c1", recurring: true, durable: false } });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "tool:toolu_cc" && update.item.type === "tool" && update.item.status === "completed")));
+    await stopHook(queryA, { session_crons: [recurring] });
+    await waitFor(() => rows(events).some(row => row.id === "wakeup:c1"));
+    // Requests arrive A1, B1, A2.
+    const ask = (query: FakeQuery, id: string) => void query.input.options.canUseTool!("Bash", { command: id }, { signal, toolUseID: id });
+    ask(queryA, "A1");
+    ask(queryB, "B1");
+    ask(queryA, "A2");
+    await waitFor(() => requestedIds(events).includes("A2"));
+    await context.provider.dispose();
+    await waitFor(() => abandonedIds(events).length === 3 && events.some(event => event.eventType === "wakeups.lost"));
+    const shutdownOrder = events
+      .filter(event => event.eventType === "interaction.abandoned" || event.eventType === "wakeups.lost")
+      .map(event => event.eventType === "wakeups.lost" ? `wakeups ${event.conversationId === a.id ? "A" : "B"}` : (event.updates[0] as { item: { requestId: string } }).item.requestId);
+    expect(shutdownOrder).toEqual(["A1", "A2", "wakeups A", "B1"]);
+    stop();
+  });
+
   test("a released cron the resumed session rebuilds is blocked: no model turn, no status, no notification", async () => {
     const { provider, queries, events, stop, session } = await scheduled([recurring]);
     await provider.release(session.id);
@@ -4977,6 +7629,46 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
       await expect(provider.cancelWakeup("resumable", paused[0]!.wakeupId)).rejects.toBeInstanceOf(ScheduledWakeupUnavailableError);
       stop();
       await provider.dispose();
+    });
+
+    test("a paused wakeup cancel still looking it up when shutdown starts is admitted: it finishes and is recorded before dispose returns", async () => {
+      const { provider } = transcriptProvider("delete", () => 0);
+      const { events, stop } = collect(provider);
+      const [paused] = await provider.listPausedWakeups("resumable");
+      const readFile = fsPromises.readFile;
+      let looking: (() => void) | undefined;
+      const lookupStarted = new Promise<void>(resolve => { looking = resolve; });
+      let release: (() => void) | undefined;
+      // The cancel's transcript lookup is held until shutdown has started.
+      fsPromises.readFile = (async (...args: Parameters<typeof readFile>) => {
+        if (String(args[0]).endsWith("resumable.jsonl")) {
+          fsPromises.readFile = readFile;
+          looking!();
+          await new Promise<void>(resolve => { release = resolve; });
+        }
+        return readFile(...args);
+      }) as typeof readFile;
+      const stateFile = path.join((provider as unknown as { workspacePath: string }).workspacePath, ".uatu-test-state.json");
+      let cancelling: Promise<void>;
+      let recordedByDispose = "";
+      try {
+        cancelling = provider.cancelWakeup("resumable", paused!.wakeupId);
+        await lookupStarted;
+        const disposing = provider.dispose();
+        release!();
+        await disposing;
+        // Recorded before dispose returned.
+        recordedByDispose = existsSync(stateFile) ? readFileSync(stateFile, "utf8") : "";
+      } finally {
+        fsPromises.readFile = readFile;
+      }
+      await cancelling;
+      expect(recordedByDispose).toContain(paused!.wakeupId);
+      // Reported as cancelled, on the stream shutdown closed after it.
+      await waitFor(() => events.some(event => event.eventType === "wakeup.cancelled"));
+      // A new paused cancel once shutdown has started is refused.
+      await expect(provider.cancelWakeup("resumable", paused!.wakeupId)).rejects.toThrow("Claude provider is disposed");
+      stop();
     });
 
     test("a resumed session attributes a rebuilt cron's fire before any Stop, and the first Stop settles the rest", async () => {

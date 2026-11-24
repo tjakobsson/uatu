@@ -75,6 +75,12 @@ export type ChatCapability =
   // their switch actions, and an undo replacement goes out as a steer.
   // Declared by OpenCode 2.x only (opencode-v2-steering, design D2).
   | "steering"
+  // The agent takes a message into its running turn as soon as it is sent,
+  // and cannot withdraw it afterwards: the composer steers busy ordinary text
+  // and queues on Alt/Option+Enter or the Send hold, as with `steering`, but
+  // the steer goes to the agent at once, so the dock never shows a Steer
+  // entry. Never declared together with `steering` (add-antigravity-chat D9).
+  | "immediate-steering"
   // The agent can deliver a held message ahead of the rest of the queue:
   // the dock offers Send now. On a `steering` agent that is the switch to
   // steer; without it, only while the queue is dormant or the conversation
@@ -116,10 +122,16 @@ export type ChatAgent = {
   permissionScopeNote?: string;
 };
 
+// How an agent is logged in: its own login command, and whether the Hub's
+// Settings (Agent accounts) manages that login. Declared at registration, so
+// it is known in every availability state.
+export type ChatAgentLogin = { command: string; hubManaged: boolean };
+
 // The agent identity a conversation or status entry names on the wire.
-// Deliberately just identity: capabilities ride the agent's availability
-// (`ChatAvailability.agent`), which only exists once its runtime has spoken.
-export type ChatAgentDescriptor = { id: string; name: string };
+// Deliberately just identity and its declared login: capabilities ride the
+// agent's availability (`ChatAvailability.agent`), which only exists once its
+// runtime has spoken.
+export type ChatAgentDescriptor = { id: string; name: string; login: ChatAgentLogin };
 
 // One offered agent with its independently reported availability. The
 // workspace's chat status is a list of these, in presentation order; the
@@ -591,6 +603,21 @@ export const RATE_LIMIT_ITEM_ID = "notice:rate-limit";
  * retired when it finishes.
  */
 export const LOGIN_FAILED_NOTICE_CODE = "login-failed";
+/**
+ * An immediate steer the agent refused after it was sent. The published
+ * notice has no field for the submission, so the item id names it:
+ * `notice:steer-refused:<requestId>` (add-antigravity-chat D9).
+ */
+export const STEER_REFUSED_NOTICE_CODE = "steer-refused";
+const STEER_REFUSED_NOTICE_PREFIX = `notice:${STEER_REFUSED_NOTICE_CODE}:`;
+export function steerRefusedNotice(requestId: string, reason: string, createdAt: number): NoticeItem {
+  return { id: `${STEER_REFUSED_NOTICE_PREFIX}${requestId}`, type: "notice", createdAt, level: "warning", code: STEER_REFUSED_NOTICE_CODE, message: reason };
+}
+/** The submission a steer-refused notice answers, or undefined for any other item. */
+export function steerRefusedRequestId(item: ConversationItem): string | undefined {
+  if (item.type !== "notice" || item.code !== STEER_REFUSED_NOTICE_CODE || !item.id.startsWith(STEER_REFUSED_NOTICE_PREFIX)) return undefined;
+  return item.id.slice(STEER_REFUSED_NOTICE_PREFIX.length) || undefined;
+}
 export const REAUTHENTICATING_NOTICE_CODE = "reauthenticating";
 
 /**

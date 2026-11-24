@@ -1,6 +1,7 @@
 import type { NormalizedProviderUpdate } from "./provider";
 import type { ConversationItem } from "./types";
 import { chatTimeout, clearChatTimeout, type ChatTaskScheduler } from "./task-scheduler";
+import { withReplyFactsOf, withRetainedReplyFacts } from "./turn-liveness";
 
 export type CoalescerOptions = {
   windowMs?: number;
@@ -140,7 +141,19 @@ function mergeUpdate(buffer: NormalizedProviderUpdate[], update: NormalizedProvi
         // "lo" collapses to "Helo" under its suffix heuristic).
         existing.text += update.text;
       }
-      existing.item = update.item ?? existing.item;
+      // The later item replaces the buffered one, as at base, but reply facts
+      // follow the projection's rules. Without an intervening upsert for the
+      // row, a later reply item keeps the facts it omits from the buffered one
+      // (the projection's sparse merge). With one, the upsert is a barrier:
+      // the later item's reply facts never move back across it (separate
+      // windows would ignore them on the existing row), so the entry keeps the
+      // buffered item's facts, or none, while its other fields follow base.
+      const later = update.item;
+      if (later?.type === "assistant_message") {
+        const barrier = buffer.slice(buffer.indexOf(existing) + 1).some(candidate => candidate.kind === "upsert" && candidate.item.id === update.itemId);
+        existing.item = barrier ? withReplyFactsOf(existing.item, later)
+          : existing.item?.type === "assistant_message" ? withRetainedReplyFacts(existing.item, later) : later;
+      } else existing.item = later ?? existing.item;
       return false;
     }
     buffer.push({ ...update });

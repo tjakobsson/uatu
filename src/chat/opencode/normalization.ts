@@ -2,8 +2,9 @@ import { boundedSet } from "../../shared/bounded-map";
 import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-store";
 import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
+import { CHAT_TEXT_SEAL, CHAT_TURN_CONTINUES, type ChatStatusLiveness } from "../turn-liveness";
 import { nativeVisualMessageIdentity } from "../visual-identity";
-import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, OPENCODE_TEXT_START_FALLBACK, type OpenCodeStepStatus } from "./normalization-types";
+import { OPENCODE_TEXT_START_FALLBACK } from "./normalization-types";
 
 /**
  * The normalization core both OpenCode generations share.
@@ -314,7 +315,7 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
       // an actual native step failure it is a terminal session failure.
       if (eventType === "session.error") matched = { ...matched, updates: matched.updates.map(update => {
         if (update.kind !== "status") return update;
-        const { [OPENCODE_STEP_LIVE]: _step, ...terminal } = update as typeof update & OpenCodeStepStatus;
+        const { [CHAT_TURN_CONTINUES]: _step, ...terminal } = update as typeof update & ChatStatusLiveness;
         return terminal;
       }) };
       matched = preserveClassicTextStarts(matched, eventType, data, context, memory);
@@ -548,7 +549,8 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
       const message = errorMessage(data.error) || text(data.message) || "The turn failed";
       return { conversationId, updates: [
         { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message, ...(isLoginError(data.error) ? { code: LOGIN_FAILED_NOTICE_CODE } : {}) } },
-        { kind: "status", status: "failed", message, ...{ [OPENCODE_STEP_LIVE]: true as const } },
+        // A failed native step is not an execution end. Immutable on each frame.
+        { kind: "status", status: "failed", message, ...{ [CHAT_TURN_CONTINUES]: true as const } },
       ] };
     }
     case "session.retry.scheduled":
@@ -737,13 +739,16 @@ export function normalizeAssistant(message: RecordValue, messageId: string, crea
 // what the usage carrier reads.
 export const IGNORED_PARTS: ReadonlySet<string> = new Set(["step-start", "step-finish", "snapshot"]);
 
+/** Native text completion seals Markdown syntax, not the parent message/turn. */
+export const TEXT_ENDED = { [CHAT_TEXT_SEAL]: "ended" as const };
+
 // `skipped` collects the type of a part no case reads, so a caller on the
 // live path can report it the way an unrecognized event is reported.
 export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[], messageId?: string): NormalizedProviderUpdate[] {
   const id = string(part.id, "part id");
   if (part.type === "text") {
     const ended = completionTime(record(part.time).end).completedAt !== undefined;
-    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId ?? optionalString(part.messageID)), ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
+    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId ?? optionalString(part.messageID)), ...(ended ? TEXT_ENDED : {}) };
     // Classic part completion is a genuine syntax boundary, even when its
     // cumulative text is unchanged. It is not parent-message completion:
     // keep missing-file captures live until the ordered turn/message end.
@@ -879,7 +884,7 @@ export function textUpdate(data: RecordValue, fallbackId: string, createdAt: num
     else remember(starts, key, start);
   }
   const item = { id: itemId, type: "assistant_message" as const, createdAt: start.createdAt, markdown: ended ? value : "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)),
-    [OPENCODE_TEXT_START_FALLBACK]: !start.authoritative, ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
+    [OPENCODE_TEXT_START_FALLBACK]: !start.authoritative, ...(ended ? TEXT_ENDED : {}) };
   return {
     conversationId: optionalString(data.sessionID),
     // A real ended frame must reach projection even when its cumulative text

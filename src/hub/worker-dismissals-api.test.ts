@@ -15,6 +15,7 @@ import { observeWorkerProjection } from "./worker-dismissals-observation";
 import { parseConversationItem } from "../chat/validation";
 import { BackgroundWorkers, nativeProof, prepareTool, workerExecutionIds as nativeExecutionIds } from "../chat/opencode/v2/background";
 import { compactWorkerEvidence } from "../chat/worker-dismissal-evidence";
+import { OPENCODE_AGENT } from "../chat/opencode/descriptor";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -361,7 +362,7 @@ test("header batch DOM skips an accepted oversized identity, posts supported wor
     } else { reads++; if (mode === "read-failure") return new Response(null, { status: 503 }); }
     return Response.json({ version: 1, conversationId, entries });
   }) as typeof fetch);
-  const conversation = { id: conversationId, title: "Fixture", createdAt: 1, updatedAt: 1, status: "idle" as const, agent: { id: "opencode", name: "OpenCode" } };
+  const conversation = { id: conversationId, title: "Fixture", createdAt: 1, updatedAt: 1, status: "idle" as const, agent: OPENCODE_AGENT };
   const api = { status: async () => [{ agent: conversation.agent, availability: { state: "ready", version: "test", agent: { ...conversation.agent, capabilities: ["subagents", "background-tasks"] } } }],
     conversations: async () => [conversation], commands: async () => [], models: async () => [], modes: async () => [],
     snapshot: async () => ({ conversation, configuration: {}, generation: "fixture", cursor: "fixture", items }),

@@ -41,18 +41,49 @@ src/
 │                   the agent's own command outside a Hub; keyboard submission
 │                   steers by default, with Alt/Option+Enter queuing while a
 │                   steering conversation is busy — the dock is one list, steers in
-│                   OpenCode's inbox first, then the Uatu-held queue);
-│                   agent-specific stacks below the seam in
+│                   OpenCode's inbox first, then the Uatu-held queue; an
+│                   immediate-steering agent gets the same keys, but its steer
+│                   goes to the running turn at once and never enters the dock;
+│                   turn-liveness holds the agent-neutral facts each
+│                   normalizer writes so image capture knows when a reply's
+│                   text is final and its turn has ended; path-agent-runtime
+│                   is the runtime for an agent found on PATH, discovery plus
+│                   one version probe that answers at its 10 s deadline and
+│                   reaps its process group in the background, which Claude
+│                   Code and Antigravity configure;
+│                   managed-process stops a runtime's child process group
+│                   (SIGTERM, grace, SIGKILL) and keeps a bounded copy of
+│                   its output;
+│                   pending-interactions holds the permission and question
+│                   requests an agent waits on through callbacks (settle
+│                   once, cancellation, abandonment, reconnect lists);
+│                   push-queue is the async queue behind a provider's
+│                   events());
+│                   agent-specific stacks below the seam, each with a
+│                   descriptor.ts (the agent's id, name and declared login,
+│                   which cli.ts registers and the Hub's Agent accounts read), in
 │                   chat/opencode/ (the loopback server runtime, which
 │                   decides the spawned server's generation from its
-│                   readiness answer, + one stack per OpenCode generation:
+│                   readiness answer; agent-runtime, which wraps it for the
+│                   chat service and holds the per-generation provider
+│                   factories; + one stack per OpenCode generation:
 │                   v1/ is the 1.x provider on `@opencode-ai/sdk` and its
 │                   normalization, v2/ the 2.x provider on
 │                   `@opencode/client`; the shared normalization core sits
-│                   at the root) and chat/claude/ (probe runtime,
+│                   at the root), chat/claude/ (probe runtime,
 │                   per-conversation SDK sessions, transcript reader,
 │                   model catalog, normalization, account: what
-│                   `accountInfo()` says about the login). One conversation is
+│                   `accountInfo()` says about the login) and
+│                   chat/antigravity/ (runtime: the `agy` PATH runtime;
+│                   connection: one `agy acp` process over the official
+│                   ACP SDK, owned from spawn to group cleanup; provider:
+│                   a process per live conversation and replay history;
+│                   normalization; catalog: models and thinking levels;
+│                   transcript: agy's own transcript, read-only, for what
+│                   replay omits; pricing + prices: turn cost from the
+│                   generated models.dev snapshot). registered-agents lists
+│                   the offered agents in picker order, which cli.ts
+│                   registers. One conversation is
 │                   owned by one agent for life; ids are agent-qualified
 │                   on the wire (`<agentId>:<providerId>`). Each agent's
 │                   `sdk-coverage.ts` holds the hand-kept annotations for

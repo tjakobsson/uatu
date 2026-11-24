@@ -5,6 +5,11 @@ import type { ChatApiClient } from "./client";
 import type { RevealOptions } from "./coordinated-scroll";
 import { resetUsagePaneForTests } from "./usage-pane";
 import type { ChatCommand, ChatModel, ConversationSnapshot, QueuedMessage, ReversibleHistoryResult } from "./types";
+import { CLAUDE_CODE_AGENT } from "./claude/descriptor";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
+
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 const savedGlobals = new Map<string, unknown>();
@@ -2576,7 +2581,7 @@ describe("chat reversible-history composer", () => {
       fonts: { hackMono: asset, hackLicense: asset, nerdFontsLicense: asset, notices: asset } }, getSession: () => { throw new Error("Unexpected document read"); },
       chatService: { history: async (id: string, options: { cursor?: string; limit?: number }) => {
         const page = await adapter.history(id, options);
-        return { ...page, conversation: { ...page.conversation, agent: { id: "test", name: "Test" } } };
+        return { ...page, conversation: { ...page.conversation, agent: { id: "test", name: "Test", login: TEST_LOGIN } } };
       } } as never, getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
     const route = routes["/api/chat/conversations/:conversationId"] as unknown as { GET(request: never): Response | Promise<Response> };
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, routes: { ...routes, "/api/chat/conversations/:conversationId": { GET: async request => {
@@ -3129,7 +3134,7 @@ describe("chat reversible-history composer", () => {
     const reads: Array<{ id: string; result: ReturnType<typeof deferred<ConversationSnapshot>> }> = [];
     let prompts = 0;
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: {
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: {
         state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] },
       } }],
       conversations: async () => [conversation("one"), conversation("two")],
@@ -3441,7 +3446,7 @@ describe("chat reversible-history composer", () => {
     let handlers: { resync(): void } | undefined;
     const running = { ...snapshot("one"), conversation: { ...conversation("one"), status: "running" as const } };
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: {
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: {
         state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["side-generation", "steering"] },
       } }],
       conversations: async () => [running.conversation], commands: async () => [], models: async () => [], modes: async () => [],
@@ -3702,7 +3707,7 @@ describe("chat reversible-history composer", () => {
       { id: "queued", text: "Queued input", delivery: "queue", paused: true, queuedAt: 2 },
     ];
     const api = taskApi(document, { items: () => action === "shell Stop" ? [shell] : [] });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-tasks", "background-blocking-work", "steering", "send-now"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-tasks", "background-blocking-work", "steering", "send-now"] } } }];
     api.snapshot = async id => ({ ...snapshot(id), items: action === "shell Stop" ? [shell] : [], queued: action === "paused-batch Send" ? queued : [] });
     const calls: string[] = [];
     api.stopTask = async (id, taskId) => { calls.push(`${id}/${taskId}`); };
@@ -3881,6 +3886,47 @@ describe("chat reversible-history composer", () => {
       Reflect.set(globalThis, "ResizeObserver", previousObserver);
     }
   });
+  for (const status of ["running", "idle"] as const) test(`immediate steering steers busy text with no Steer entry and keeps the no-steering Send now rule (${status})`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const deliveries: unknown[] = [];
+    const current = { ...conversation("one"), status };
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["immediate-steering", "send-now"] } } }],
+      conversations: async () => [current], commands: async () => [], models: async () => [], modes: async () => [],
+      snapshot: async () => ({ ...snapshot("one"), conversation: current, queued: [{ id: "held", text: "Held message", queuedAt: 1, delivery: "queue" }] }),
+      prompt: async (...args: unknown[]) => { deliveries.push(args[7]); return { messageId: "steered", pending: false, delivery: "steer", configuration: {} }; },
+      stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?immediate-steering=${status}-${Date.now()}`);
+    initChat(api);
+    try {
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      await waitUntil(() => select.querySelector('option[value="one"]') !== null);
+      select.value = "one";
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+      await waitUntil(() => document.querySelector('[data-chat-queued-id="held"]') !== null);
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      type(input, "Steer into the turn");
+      const send = document.querySelector<HTMLButtonElement>("#chat-send")!;
+      expect(send.getAttribute("aria-label")).toBe(status === "running" ? "Send as steer; hold 2.5 seconds to queue" : "Send message");
+      expect(document.querySelector(".chat-send-group")!.hasAttribute("data-steering")).toBe(true);
+      // The hold-to-queue gesture is offered as for a steering agent.
+      expect(document.querySelector("#chat-send-help")!.textContent).toContain("Hold Send or Space: after 0.5 seconds, a 2-second queue countdown starts.");
+      // The dock never offers a switch to steer; Send now only while idle.
+      expect(document.querySelector('[data-queue-steer="held"]')).toBeNull();
+      expect(!!document.querySelector('[data-queue-send-now="held"]')).toBe(status === "idle");
+      if (status === "running") {
+        document.querySelector<HTMLFormElement>("#chat-composer")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+        await waitUntil(() => !!document.querySelector('[data-chat-item-id="message:steered"]'));
+        expect(deliveries).toEqual(["steer"]);
+        expect([...document.querySelectorAll("[data-chat-queued-id]")].map(node => node.getAttribute("data-chat-queued-id"))).toEqual(["held"]);
+      }
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
   for (const status of ["running", "idle"] as const) test(`held command paths retain ${status} steering controls while actual commands do not`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -3889,7 +3935,7 @@ describe("chat reversible-history composer", () => {
     stubConversationSelect(document);
     const entries = ["/build", "/build notes", "/build/notes.md", "/unknown", "/Build", "/provider:build notes"];
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["commands", "steering", "send-now"] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["commands", "steering", "send-now"] } } }],
       conversations: async () => [conversation("one")],
       commands: async () => ["build", "provider:build"].map(name => ({ name, description: name, argumentHint: "", kind: "command" })),
       models: async () => [], modes: async () => [],
@@ -3934,7 +3980,7 @@ describe("chat reversible-history composer", () => {
     });
     const running = { ...conversation("one"), status: "running" as const };
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["commands", "steering", "background-blocking-work"] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["commands", "steering", "background-blocking-work"] } } }],
       conversations: async () => [running], commands: async () => [{ name: "build", description: "Build", argumentHint: "", kind: "command" }], models: async () => [], modes: async () => [],
       snapshot: async () => { reads++; return { ...snapshot("one"), conversation: running }; },
       prompt: transport.prompt.bind(transport), stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
@@ -4015,7 +4061,7 @@ describe("chat reversible-history composer", () => {
     const first = deferred<Awaited<ReturnType<ChatApiClient["prompt"]>>>();
     let parent: Parameters<ChatApiClient["stream"]>[2] | undefined;
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["models", "steering"] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["models", "steering"] } } }],
       conversations: async () => [{ ...conversation("one"), status: "running" }], commands: async () => [], models: async () => [a, b, c], modes: async () => [],
       snapshot: async () => ({ ...snapshot("one"), configuration: { model: a.selection }, conversation: { ...conversation("one"), status: "running" } }),
       prompt: async (_id: string, _request: string, _text: string, selection: unknown, _mode: unknown, _variant: unknown, _attachments: unknown, delivery: unknown) => {
@@ -4095,7 +4141,7 @@ describe("chat reversible-history composer", () => {
     const status = scenario === "idle" ? "idle" : "running";
     let parent: Parameters<ChatApiClient["stream"]>[2] | undefined;
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["models", "modes", "variants", ...(scenario === "unsupported" ? [] : ["steering"])] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["models", "modes", "variants", ...(scenario === "unsupported" ? [] : ["steering"])] } } }],
       conversations: async () => [{ ...conversation("one"), status }], commands: async () => [], models: async () => [model],
       modes: async () => [{ name: "build", description: "Build" }, { name: "plan", description: "Plan" }],
       snapshot: async () => ({ ...snapshot("one"), configuration, conversation: { ...conversation("one"), status } }),
@@ -4161,7 +4207,7 @@ describe("chat reversible-history composer", () => {
       });
       let events: Parameters<ChatApiClient["stream"]>[2];
       const api = {
-        status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }],
+        status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }],
         conversations: async () => [conversation("one"), conversation("two")], commands: async () => [], models: async () => [], modes: async () => [],
         snapshot: async (id: string) => {
           reads++;
@@ -4277,7 +4323,7 @@ describe("chat reversible-history composer", () => {
       return mutations === 1 ? response.promise : retryResponse.promise;
     });
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }],
       conversations: async () => [conversation("one"), conversation("two")], commands: async () => [], models: async () => [], modes: async () => [],
       snapshot: async (id: string) => { reads++; return { ...snapshot(id), queued: mutations === 1 && id === "one" ? [] : [{ id: "pending", text: id === "one" ? "Original pending input" : "Other conversation input", queuedAt: 1, delivery: "steer" }] }; },
       removeQueued: transport.removeQueued.bind(transport), changeDelivery: transport.changeDelivery.bind(transport),
@@ -4398,7 +4444,7 @@ describe("chat reversible-history composer", () => {
       const transport = new ChatApiClient(async () => { mutations++; return response.promise; });
       const models: ChatModel[] = ["A", "B"].map(name => ({ selection: { providerId: "test", modelId: name }, provider: "Test", name, imageInput: true }));
       const api = {
-        status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "models", "attachments"] } } }],
+        status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "models", "attachments"] } } }],
         conversations: async () => [{ ...conversation("one"), status: "running" }], commands: async () => [], models: async () => models, modes: async () => [],
         snapshot: async () => { reads++; return mutations ? recovery.promise : { ...snapshot("one"), conversation: { ...conversation("one"), status: "running" }, queued: [original] }; },
         removeQueued: outcome === "programmer-error" ? async () => { throw new Error("Local programmer failure"); } : transport.removeQueued.bind(transport),
@@ -4479,7 +4525,7 @@ describe("chat reversible-history composer", () => {
     let prompts = 0, removes = 0;
     let parent: { event(event: unknown, cursor: string): void } | undefined;
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "background-blocking-work"] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "background-blocking-work"] } } }],
       conversations: async () => [{ ...conversation("one"), status: "running" }], commands: async () => [], models: async () => [], modes: async () => [],
       snapshot: async () => ({ ...snapshot("one"), conversation: { ...conversation("one"), status: "running" }, queued: [{ id: "unrelated", requestId: "held", text: "Unrelated held work", queuedAt: 1, delivery: "queue" }] }),
       prompt: async () => ({ messageId: `accepted-${++prompts}`, pending: true, delivery: "steer", configuration: {}, automaticBackground: prompts === 1 ? "unknown" : "accepted" }),
@@ -4528,7 +4574,7 @@ describe("chat reversible-history composer", () => {
     let calls = 0, pendingRequest: string | undefined, readsAfterUnknown = 0;
     const { ChatTransportError } = await import("./client");
     const api = {
-      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "background-blocking-work"] } } }],
+      status: async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "background-blocking-work"] } } }],
       conversations: async () => [conversation("one"), conversation("two")], commands: async () => [], models: async () => [], modes: async () => [],
       snapshot: async (id: string) => {
         if (pendingRequest) readsAfterUnknown++;
@@ -4595,7 +4641,7 @@ describe("chat reversible-history composer", () => {
     ];
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: {
           state: "ready",
           version: "test",
@@ -4904,7 +4950,7 @@ describe("chat permission confirmation", () => {
     };
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: {
           state: "ready",
           version: "test",
@@ -4984,11 +5030,11 @@ describe("agent logins", () => {
       status: async () => {
         statusReads += 1;
         return [{
-          agent: { id: "opencode", name: "OpenCode" },
+          agent: OPENCODE_AGENT,
           availability: { state: "ready", version: "1.18.34", agent: { id: "opencode", name: "OpenCode", capabilities: ["models"] }, login, ...(revision ? { accountsRevision: revision } : {}) },
         }];
       },
-      conversations: async () => [{ ...conversation("one"), agent: { id: "opencode", name: "OpenCode" } }],
+      conversations: async () => [{ ...conversation("one"), agent: OPENCODE_AGENT }],
       commands: async () => [],
       models: async () => { modelReads += 1; return catalog; },
       snapshot: async (id: string) => snapshot(id),
@@ -5032,6 +5078,202 @@ describe("agent logins", () => {
   });
 });
 
+describe("login guidance and agent-named copy", () => {
+  // The descriptors as the workspace registers them. A Hub-served page carries
+  // the Hub proxy's `uatu-hub` marker under a session base path (`/s/<id>/`).
+  const OPENCODE = { id: "opencode", name: "OpenCode", login: { command: "opencode auth login", hubManaged: true } };
+  const CLAUDE = { id: "claude", name: "Claude Code", login: { command: "claude auth login", hubManaged: true } };
+  const UNMANAGED = { id: "stub", name: "Stub Agent", login: { command: "stub-agent login --device", hubManaged: false } };
+
+  async function boot(descriptor: { id: string; name: string }, options: { hubServed: boolean; basePath?: string; runtimeName?: string; undescribed?: boolean; login: "ok" | "missing"; models?: ChatModel[]; capabilities?: string[]; readUsage?: () => Promise<unknown> }) {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    const meta = (name: string, content: string) => {
+      const tag = document.createElement("meta");
+      tag.setAttribute("name", name);
+      tag.setAttribute("content", content);
+      document.head.append(tag);
+    };
+    const basePath = options.basePath ?? (options.hubServed ? "/s/my-workspace/" : undefined);
+    if (basePath) meta("uatu-base-path", basePath);
+    if (options.hubServed) meta("uatu-hub", "true");
+    installDomGlobals(document, window);
+    const { resetAppBasePathForTests } = await import("../shared/app-url");
+    resetAppBasePathForTests();
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const conversationId = `${descriptor.id}:one`;
+    const summary = { ...conversation(conversationId), agent: descriptor };
+    let models = 0;
+    let login = options.login;
+    let statusReads = 0;
+    let inventory: { invalidation(event: unknown): void } | undefined;
+    const created: Array<typeof summary> = [];
+    const api = {
+      status: async () => {
+        statusReads += 1;
+        return [{
+          agent: descriptor,
+          availability: { state: "ready", version: "test", ...(options.undescribed ? {} : { agent: { id: descriptor.id, name: options.runtimeName ?? descriptor.name, capabilities: options.capabilities ?? ["models"] } }), login },
+        }];
+      },
+      conversations: async () => [summary, ...created],
+      commands: async () => [],
+      modes: async () => [],
+      models: async () => { models += 1; return options.models ?? []; },
+      usage: async () => ({ plan: { subscription: "pro", fiveHour: { utilization: 9 } }, readAt: Date.now() }),
+      readUsage: options.readUsage ?? (async () => ({ report: null, reason: "no-live-session" })),
+      createConversation: async () => {
+        const conversation = { ...summary, id: `${descriptor.id}:two` };
+        created.push(conversation);
+        return { ...snapshot(conversation.id), conversation, items: [] };
+      },
+      snapshot: async (id: string) => ({
+        ...snapshot(id),
+        conversation: { ...summary, id },
+        items: [{ id: "notice:login:1", type: "notice", createdAt: 1, level: "error", code: "login-failed", message: "Not logged in · Please run /login" }],
+      }),
+      stream: () => ({ close() {} }),
+      inventoryStream: (handlers: { invalidation(event: unknown): void }) => { inventory = handlers; return { close() {} }; },
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?login-guidance=${Math.random()}`);
+    initChat(api);
+    const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    select.value = conversationId;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    const finish = async () => {
+      // A missing login keeps the page polling status. Log in, and wait until
+      // the page has read that, so the poll has stopped before the next case.
+      if (login === "missing") {
+        login = "ok";
+        const before = statusReads;
+        inventory?.invalidation({ type: "conversation.inventory" });
+        const notice = document.querySelector<HTMLElement>("#chat-login-notice")!;
+        await waitUntil(() => statusReads > before && notice.hidden === true, () => `status reads ${statusReads}, notice hidden ${notice.hidden}`);
+      }
+      window.dispatchEvent(new Event("pagehide"));
+      for (const tag of document.head.querySelectorAll('meta[name="uatu-base-path"], meta[name="uatu-hub"]')) tag.remove();
+      resetAppBasePathForTests();
+      resetUsagePaneForTests();
+    };
+    return { document, window, finish, modelReads: () => models, statusReads: () => statusReads };
+  }
+
+  for (const descriptor of [OPENCODE, CLAUDE]) for (const hubServed of [false, true]) {
+    test(`${descriptor.name} ${hubServed ? "on a Hub-served page links to its Agent accounts card" : "outside a Hub names its own login command"} in the composer notice, the empty model list, and a login failure`, async () => {
+      const { document, finish, modelReads } = await boot(descriptor, { hubServed, login: "missing" });
+      try {
+        const notice = document.querySelector<HTMLElement>("#chat-login-notice")!;
+        const empty = document.querySelector<HTMLElement>("#chat-configuration-empty")!;
+        const failure = () => document.querySelector<HTMLElement>('[data-chat-item-id="notice:login:1"]');
+        await waitUntil(() => !notice.hidden && modelReads() > 0 && !empty.hidden && failure() !== null,
+          () => `notice ${notice.hidden} ${notice.textContent}; empty ${empty.hidden} ${empty.textContent}; failure ${failure()?.textContent}`);
+        const href = `/settings#agent-accounts/${descriptor.id}`;
+        const command = `Run ${descriptor.login.command} where UatuCode runs.`;
+        expect(notice.textContent).toBe(`${descriptor.name} is not logged in. ${hubServed ? `Log in to ${descriptor.name}` : command}`);
+        expect(empty.textContent).toBe(`No provider is logged in. ${hubServed ? `Log in to ${descriptor.name}` : command}`);
+        expect(failure()!.querySelector(".chat-login-failed-title")?.textContent).toBe(`${descriptor.name} login failed`);
+        expect(failure()!.querySelector(".chat-login-failed-action")?.textContent).toBe(hubServed ? `Log in to ${descriptor.name}` : command);
+        for (const surface of [notice, empty, failure()!]) {
+          expect(surface.querySelector("a.chat-login-link")?.getAttribute("href") ?? null).toBe(hubServed ? href : null);
+          expect(surface.querySelector(".chat-login-command code")?.textContent ?? null).toBe(hubServed ? null : descriptor.login.command);
+        }
+      } finally { await finish(); }
+    });
+  }
+
+  test("a standalone page under a Hub-shaped base path names the command, not Settings", async () => {
+    const { document, finish, modelReads } = await boot(CLAUDE, { hubServed: false, basePath: "/s/demo/", login: "missing" });
+    try {
+      const notice = document.querySelector<HTMLElement>("#chat-login-notice")!;
+      const failure = () => document.querySelector<HTMLElement>('[data-chat-item-id="notice:login:1"]');
+      await waitUntil(() => !notice.hidden && modelReads() > 0 && failure() !== null);
+      expect(notice.textContent).toBe("Claude Code is not logged in. Run claude auth login where UatuCode runs.");
+      expect(failure()!.querySelector(".chat-login-failed-action")?.textContent).toBe("Run claude auth login where UatuCode runs.");
+      expect(document.querySelector("#chat-login-notice a, .chat-login-failed a")).toBeNull();
+    } finally { await finish(); }
+  });
+
+  test("an agent whose login the Hub does not manage names its own command on a Hub-served page", async () => {
+    const { document, finish, modelReads } = await boot(UNMANAGED, { hubServed: true, login: "missing" });
+    try {
+      const notice = document.querySelector<HTMLElement>("#chat-login-notice")!;
+      const empty = document.querySelector<HTMLElement>("#chat-configuration-empty")!;
+      const failure = () => document.querySelector<HTMLElement>('[data-chat-item-id="notice:login:1"]');
+      await waitUntil(() => !notice.hidden && modelReads() > 0 && !empty.hidden && failure() !== null);
+      const command = "Run stub-agent login --device where UatuCode runs.";
+      expect(notice.textContent).toBe(`Stub Agent is not logged in. ${command}`);
+      expect(empty.textContent).toBe(`No provider is logged in. ${command}`);
+      expect(failure()!.querySelector(".chat-login-failed-action")?.textContent).toBe(command);
+      for (const surface of [notice, empty, failure()!]) {
+        expect(surface.querySelector("a")).toBeNull();
+        expect(surface.querySelector(".chat-login-command code")?.textContent).toBe("stub-agent login --device");
+      }
+    } finally { await finish(); }
+  });
+
+  // Once the runtime has described itself, the chooser names the agent as the
+  // runtime declares it; the stub's runtime reports a name of its own.
+  for (const [descriptor, runtimeName] of [[OPENCODE, undefined], [CLAUDE, undefined], [UNMANAGED, "Stub CLI"]] as const) {
+    const name = runtimeName ?? descriptor.name;
+    test(`a model list without a default reads "Let ${name} choose"`, async () => {
+      const models: ChatModel[] = [{ selection: { providerId: "groq", modelId: "llama" }, provider: "Groq", name: "Llama" }];
+      const { document, finish, modelReads } = await boot(descriptor, { hubServed: false, login: "ok", models, ...(runtimeName ? { runtimeName } : {}) });
+      try {
+        const summary = document.querySelector<HTMLElement>("#chat-configuration-summary")!;
+        await waitUntil(() => modelReads() > 0 && summary.textContent === `Let ${name} choose`, () => `summary ${summary.textContent}`);
+        // The picker, the inline chip and the accessible label name it the same way.
+        const picker = document.querySelector<HTMLElement>("#chat-configuration-models")!;
+        await waitUntil(() => (picker.textContent ?? "").includes(`Let ${name} choose`), () => `picker ${picker.textContent}`);
+        if (runtimeName) expect(picker.textContent).not.toContain(descriptor.name);
+        expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe(`Chat configuration. Model: chosen by ${name}`);
+        const inline = document.querySelector<HTMLElement>("#chat-inline-configuration")!;
+        expect(inline.textContent).toBe(`${name} · Let ${name} choose`);
+        expect(inline.title).toBe(`${name} · ${name} · Let ${name} choose`);
+        // So does the announcement of a new conversation.
+        const state = document.querySelector<HTMLElement>("#chat-state")!;
+        document.querySelector<HTMLButtonElement>("#chat-new-conversation")!.click();
+        await waitUntil(() => (state.textContent ?? "").startsWith("Started new conversation"), () => `state ${state.textContent}`);
+        expect(state.textContent).toBe(`Started new conversation with ${name}. Model: chosen by ${name}.`);
+      } finally { await finish(); }
+    });
+  }
+
+  // Before its runtime describes itself, only the model summary fallback
+  // (shown in the summary and the inline/touch chip) names the conversation's
+  // registered agent rather than a fixed one. The picker row and the trigger's
+  // accessible label keep the generic "the agent" wording.
+  test(`a runtime that has not described itself yet reads "Let Claude Code choose"`, async () => {
+    const models: ChatModel[] = [{ selection: { providerId: "groq", modelId: "llama" }, provider: "Groq", name: "Llama" }];
+    const { document, finish, modelReads } = await boot(CLAUDE, { hubServed: false, login: "ok", undescribed: true, models });
+    try {
+      const summary = document.querySelector<HTMLElement>("#chat-configuration-summary")!;
+      await waitUntil(() => modelReads() > 0 && summary.textContent === "Let Claude Code choose", () => `summary ${summary.textContent}`);
+      const picker = document.querySelector<HTMLElement>("#chat-configuration-models")!;
+      await waitUntil(() => (picker.textContent ?? "").includes("Let the agent choose"), () => `picker ${picker.textContent}`);
+      expect(picker.textContent).not.toContain("Claude Code");
+      expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-label")).toBe("Chat configuration. Model: chosen by the agent");
+      // The inline/touch chip shows the same summary fallback.
+      expect(document.querySelector<HTMLElement>("#chat-inline-configuration")!.textContent).toBe("Let Claude Code choose");
+    } finally { await finish(); }
+  });
+
+  for (const descriptor of [CLAUDE, UNMANAGED]) {
+    test(`a usage read the agent could not answer says "${descriptor.name} could not answer"`, async () => {
+      const { document, window, finish } = await boot(descriptor, { hubServed: false, login: "ok", ...(descriptor === UNMANAGED ? { runtimeName: "Stub CLI" } : {}), capabilities: ["context", "usage"], readUsage: async () => ({ report: null, reason: "unavailable" }) });
+      try {
+        const action = () => document.querySelector<HTMLButtonElement>('[data-pane-id="usage"] .pane-action[data-usage-read]');
+        await waitUntil(() => action()?.hidden === false, () => `usage action ${action()?.hidden}`);
+        action()!.dispatchEvent(new window.Event("click", { bubbles: true }));
+        const status = () => document.querySelector("#usage-pane .usage-pane-status")?.textContent;
+        await waitUntil(() => status() === `Couldn't read usage · ${descriptor.name} could not answer`, () => `usage status ${status()}`);
+      } finally { await finish(); }
+    });
+  }
+});
+
 describe("catalog revisions", () => {
   const model = (limit: number): ChatModel => ({ selection: { providerId: "anthropic", modelId: "opus" }, provider: "Anthropic", name: "Opus", contextLimit: limit, contextWindow: { source: "catalog", freshness: "current" } });
 
@@ -5055,10 +5297,11 @@ describe("catalog revisions", () => {
     let statusReads = 0;
     const agent = { id: "claude", name: "Claude Code", capabilities: ["models", "context"] };
     const other = { id: "other", name: "Other", capabilities: ["context"] };
-    const summary = { ...conversation("claude:one"), agent: { id: agent.id, name: agent.name } };
-    const summaries = [summary, ...(withOther ? [{ ...conversation("other:one"), agent: { id: other.id, name: other.name } }] : [])];
+    const descriptor = (described: { id: string; name: string }) => ({ id: described.id, name: described.name, login: TEST_LOGIN });
+    const summary = { ...conversation("claude:one"), agent: descriptor(agent) };
+    const summaries = [summary, ...(withOther ? [{ ...conversation("other:one"), agent: descriptor(other) }] : [])];
     const api = {
-      status: async () => { statusReads += 1; return [agent, ...(withOther ? [other] : [])].map(agent => ({ agent, availability: { state: "ready", version: "test", agent } })); },
+      status: async () => { statusReads += 1; return [agent, ...(withOther ? [other] : [])].map(agent => ({ agent: descriptor(agent), availability: { state: "ready", version: "test", agent } })); },
       conversations: async () => summaries,
       models: (agentId: string) => { readAgents.push(agentId); const read = deferred<ChatModel[]>(); reads.push(read); return read.promise; },
       commands: async () => [],
@@ -5260,7 +5503,7 @@ describe("chat scheduled wakeups", () => {
     let emit: ((event: unknown) => void) | undefined;
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["scheduled-wakeups"] } },
       }]),
       conversations: async () => [{ ...conversation("one"), status: "scheduled" }],
@@ -5336,7 +5579,7 @@ describe("chat paused crons", () => {
     const cancelled = deferred<unknown>();
     let emit: ((event: unknown) => void) | undefined;
     const api = {
-      status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["scheduled-wakeups"] } } }]),
+      status: async () => ([{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["scheduled-wakeups"] } } }]),
       conversations: async () => [conversation("one")],
       commands: async () => [],
       snapshot: async (id: string) => ({ ...snapshot(id), items: [{ id: "message:u", type: "user_message", createdAt: 1, text: "poll every five minutes" }, paused] }),
@@ -5437,7 +5680,7 @@ describe("chat cost receipt", () => {
       let selected = "";
       Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
       const api = {
-        status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["context", "subagents"] } } }]),
+        status: async () => ([{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["context", "subagents"] } } }]),
         conversations: async () => [conversation("one"), conversation("two"), conversation("tallied")],
         commands: async () => [],
         snapshot: async (id: string) => {
@@ -5580,7 +5823,7 @@ describe("plan usage on demand", () => {
       ],
     };
     const api = {
-      status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities } } }]),
+      status: async () => ([{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities } } }]),
       conversations: async () => [conversation("standing"), conversation("older")],
       commands: async () => [],
       usage: async () => { usageAsks += 1; return stored; },
@@ -5672,11 +5915,11 @@ describe("plan usage on demand", () => {
       status: async () => {
         statusCalls += 1;
         return [
-          { agent: claude, availability: statusCalls === 1 ? { state: "idle" } : { state: "ready", version: "test", agent: { ...claude, capabilities: ["context", "usage"] } } },
-          { agent: { id: "opencode", name: "OpenCode" }, availability: { state: "idle" } },
+          { agent: CLAUDE_CODE_AGENT, availability: statusCalls === 1 ? { state: "idle" } : { state: "ready", version: "test", agent: { ...claude, capabilities: ["context", "usage"] } } },
+          { agent: OPENCODE_AGENT, availability: { state: "idle" } },
         ];
       },
-      conversations: async () => [{ id: "claude:c", title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: claude }],
+      conversations: async () => [{ id: "claude:c", title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: CLAUDE_CODE_AGENT }],
       models: async () => [],
       modes: async () => [],
       commands: async () => [],
@@ -5687,7 +5930,7 @@ describe("plan usage on demand", () => {
         return { plan: { subscription: "pro", fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } }, readAt: Date.now() };
       },
       readUsage: async (agentId: string) => { readAgents.push(agentId); return { report: null, reason: "no-live-session" }; },
-      snapshot: async (id: string) => ({ ...snapshot(id), conversation: { id, title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: claude } }),
+      snapshot: async (id: string) => ({ ...snapshot(id), conversation: { id, title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: CLAUDE_CODE_AGENT } }),
       stream: () => ({ close() {} }),
       inventoryStream: () => ({ close() {} }),
       attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
@@ -5756,7 +5999,7 @@ describe("chat question anchoring", () => {
     };
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["questions"] } },
       }]),
       conversations: async () => [conversation("one")],
@@ -7282,7 +7525,7 @@ describe("chat running work reachable without a disclosure", () => {
       input: JSON.stringify({ description: "Foreground analysis", subagent_type: "general", prompt: "Inspect" }) };
     const cancelled: string[] = [], stopped: string[] = [];
     const api = taskApi(document, { items: () => [tool], stop: id => { stopped.push(id); } });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "subagents"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "subagents"] } } }];
     api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool] });
     api.cancel = async id => { cancelled.push(id); return { cancelled: true }; };
     const dialog = document.querySelector<HTMLDialogElement>("#chat-action-confirm")!;
@@ -7331,7 +7574,7 @@ describe("chat running work reachable without a disclosure", () => {
     const items = [launcher, { ...launcher, id: "tool:b" }, canonical];
     let stream: { event(event: unknown, cursor: string): void } | undefined;
     const api = taskApi(document, { items: () => items, onStream: (_id, handlers) => { stream = handlers; } });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "background-tasks", "subagents"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "background-tasks", "subagents"] } } }];
     api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items });
     let sequence = 0;
     const emit = (body: Record<string, unknown>) => { sequence++; stream!.event({ generation: "g", sequence, conversationId: "one", ...body }, `cursor-one-${sequence}`); };
@@ -7381,7 +7624,7 @@ describe("chat running work reachable without a disclosure", () => {
     let stream: { event(event: unknown, cursor: string): void } | undefined;
     const cancelled: string[] = [];
     const api = taskApi(document, { items: () => [tool], conversations: ["one", "two"], onStream: (_id, handlers) => { stream = handlers; } });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "subagents"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "subagents"] } } }];
     api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool] });
     api.cancel = async id => { cancelled.push(id); return { cancelled: true }; };
     const dialog = document.querySelector<HTMLDialogElement>("#chat-action-confirm")!;
@@ -7421,7 +7664,7 @@ describe("chat running work reachable without a disclosure", () => {
     const tool = { id: "tool:foreground", type: "tool" as const, createdAt: 2, name: "task", status: "running" as const, input: '{"description":"Foreground analysis"}' };
     const cancelled: string[] = [];
     const api = taskApi(document, { items: () => [tool] });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: supported ? ["background-blocking-work", "subagents"] : ["subagents"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: supported ? ["background-blocking-work", "subagents"] : ["subagents"] } } }];
     api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool] });
     api.cancel = async id => { cancelled.push(id); return { cancelled: true }; };
     try {
@@ -7446,7 +7689,7 @@ describe("chat running work reachable without a disclosure", () => {
     let stream: { event(event: unknown, cursor: string): void } | undefined;
     const tool = { id: "tool:blocker", type: "tool", createdAt: 2, name: "subagent", status: "pending", input: "{}" };
     const api = taskApi(document, { items: () => [tool], onStream: (_id, handlers) => { stream = handlers; } });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-tasks", "background-blocking-work", "subagents"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-tasks", "background-blocking-work", "subagents"] } } }];
     api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool as import("./types").ToolItem] });
     let sequence = 0;
     const emit = (body: Record<string, unknown>) => { sequence++; stream!.event({ generation: "g", sequence, conversationId: "one", ...body }, `cursor-one-${sequence}`); };
@@ -7489,7 +7732,7 @@ describe("chat running work reachable without a disclosure", () => {
     stubConversationSelect(document);
     let stream: { event(event: unknown, cursor: string): void } | undefined;
     const api = taskApi(document, { items: () => [], onStream: (_id, handlers) => { stream = handlers; } });
-    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }];
+    api.status = async () => [{ agent: { id: "test", name: "Test", login: TEST_LOGIN }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }];
     let sequence = 0;
     const queued = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `pending-${index}`, text: `Pending ${index}`, delivery: "steer", paused: true, queuedAt: 1 }));
     const emit = (count: number) => {
@@ -8395,7 +8638,7 @@ function taskApi(document: Document, options: {
 }): ChatApiClient {
   return {
     status: async () => ([{
-      agent: { id: "test", name: "Test" },
+      agent: { id: "test", name: "Test", login: TEST_LOGIN },
       availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-tasks", "subagents"] } },
     }]),
     conversations: async () => (options.conversations ?? ["one"]).map(id => ({ ...conversation(id), status: "background" })),
@@ -8442,7 +8685,7 @@ function questionApi(document: Document, options: { items?: (conversationId: str
     : [{ id: "message:u", type: "user_message", createdAt: 1, text: "which branch?" }, pendingQuestion("q1", 2)];
   return {
     status: async () => ([{
-      agent: { id: "test", name: "Test" },
+      agent: { id: "test", name: "Test", login: TEST_LOGIN },
       availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: options.capabilities ?? ["questions"] } },
     }]),
     conversations: async () => (options.conversations ?? ["one"]).map(id => conversation(id)),
@@ -8570,7 +8813,7 @@ function installDomGlobals(document: Document, window: Window): void {
 }
 
 function conversation(id: string) {
-  return { id, title: id, createdAt: 1, updatedAt: 1, status: "idle" as const, agent: { id: "test", name: "Test" } };
+  return { id, title: id, createdAt: 1, updatedAt: 1, status: "idle" as const, agent: { id: "test", name: "Test", login: TEST_LOGIN } };
 }
 
 function snapshot(id: string): ConversationSnapshot {

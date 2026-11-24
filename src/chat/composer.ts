@@ -5,7 +5,7 @@ import { AutomaticBackgroundNotices, actionOrigin, automaticBackgroundNote } fro
 import { newRequestId } from "./ids";
 import { addAcceptedDraft, confirmAcceptedDraft, dropQueuedMessage, markDraftUnconfirmed, noteQueuedMessage, projectionFromSnapshot, removeAcceptedDraft, type ChatProjection } from "./projection";
 import { localHistoryOperation, parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, isLiveConversationStatus } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, isLiveConversationStatus, steerRefusedRequestId } from "./types";
 import type { AutomaticBackgroundFeedback, ChatCapability, ChatCommand, ChatEvent, ConversationConfiguration, ConversationSnapshot, MessageAttachment, MessageDelivery, QueuedMessage, ReversibleHistoryResult } from "./types";
 
 export type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
@@ -13,6 +13,14 @@ export type PendingAction = "remove" | "edit" | "queue" | "steer" | "send-now" |
 export type HistoryOperation = "undo" | "redo" | "revert" | "restore";
 export type PendingQueueAction = { terminal?: boolean };
 const TOO_LATE = "Too late — already delivered";
+
+/** Whether busy ordinary text steers: held by the agent until a step boundary
+ * (`steering`), or handed to the running turn at once (`immediate-steering`).
+ * Either way the composer offers the same steer and queue deliveries; only
+ * `steering` has pending Steer entries in the dock. */
+export function steersWhileBusy(declares: (capability: ChatCapability) => boolean): boolean {
+  return declares("steering") || declares("immediate-steering");
+}
 const messageOf = (error: unknown) => error instanceof Error ? error.message : "Chat failed";
 
 /** Projection stays with its existing owner. These operations run synchronously;
@@ -75,6 +83,14 @@ export class Composer {
   private readonly withdrawals = new Map<string, Map<string, { operation: string; entry: QueuedMessage }>>();
   private readonly actions = new Map<string, Map<string, PendingQueueAction>>();
   private readonly unknown = new Map<string, ChatProjection["acceptedDrafts"]>();
+  // Steer refusals seen for drafts not yet settled, by conversation and
+  // request, with the agent's reason: a refusal can arrive before the
+  // submission's receipt, or while another conversation is open.
+  private readonly refusedSteers = new Map<string, Map<string, string>>();
+  // Requests whose own user row has been seen, by conversation (the latest
+  // few): the row settles the draft for good, so neither a receipt that
+  // comes after it nor a reopen whose newest page lacks it brings it back.
+  private readonly confirmedRequests = new Map<string, Set<string>>();
   private readonly notices = new AutomaticBackgroundNotices();
   private readonly answers = new Map<string, { question: string; text: string; failed?: boolean }>();
   private readonly generating = new Set<string>();
@@ -111,10 +127,20 @@ export class Composer {
   historyResync(id: string): boolean { if (!this.histories.has(id)) return false; this.historyResyncs.add(id); return true; }
   acceptedDrafts(id: string) { return [...(this.unknown.get(id) ?? [])]; }
   acceptSnapshot(snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"]): ChatProjection {
-    const current = this.protect(projectionFromSnapshot(snapshot, acceptedDrafts));
+    let current = this.protect(projectionFromSnapshot(snapshot, acceptedDrafts));
     const unknown = current.acceptedDrafts.filter(draft => draft.unconfirmed);
     if (unknown.length) boundedSet(this.unknown, current.conversationId, unknown.slice(-20), 100);
     else this.unknown.delete(current.conversationId);
+    // A refusal that came while this conversation was not open is in its
+    // history: it settles the draft it names now.
+    const drafts = new Set(current.acceptedDrafts.map(draft => draft.requestId));
+    for (const item of snapshot.items) {
+      const refused = steerRefusedRequestId(item);
+      if (refused && drafts.has(refused) && item.type === "notice") this.noteSteerRefusal(current.conversationId, refused, item.message);
+    }
+    current = this.settleRefusedSteers(current.conversationId, current);
+    for (const item of snapshot.items) if (item.type === "user_message" && item.requestId) this.noteConfirmed(current.conversationId, item.requestId);
+    current = this.dropConfirmed(current.conversationId, current);
     this.historyRefresh.delete(current.conversationId);
     return current;
   }
@@ -122,6 +148,16 @@ export class Composer {
    * consumes positive settlement evidence, never infers it from queue absence. */
   observe(event: ChatEvent, applied: boolean): void {
     if (event.type === "conversation.status") this.statusChanged(event.conversationId, event.status);
+    // A refusal is evidence however the projection classified its event.
+    const refused = event.type === "item.upsert" ? steerRefusedRequestId(event.item) : undefined;
+    if (refused && event.type === "item.upsert" && event.item.type === "notice") {
+      this.noteSteerRefusal(event.conversationId, refused, event.item.message);
+      this.settleRefusedSteers(event.conversationId);
+    }
+    if (event.type === "item.upsert" && event.item.type === "user_message" && event.item.requestId) {
+      this.noteConfirmed(event.conversationId, event.item.requestId);
+      this.dropConfirmed(event.conversationId);
+    }
     if (!applied) return;
     if (event.type === "conversation.queue" && (event.change.kind === "removed" || event.change.kind === "delivered")) this.terminal(event.conversationId, event.change.messageId);
     if (event.type === "conversation.queue" || event.type === "item.upsert") this.update(event.conversationId, current => this.protect(current));
@@ -215,6 +251,60 @@ export class Composer {
     try { await task; } finally { if (this.staging.get(id) === task) this.staging.delete(id); }
     this.changed("attachments");
   }
+  private noteConfirmed(id: string, requestId: string): void {
+    const known = new Set(this.confirmedRequests.get(id));
+    known.delete(requestId); known.add(requestId);
+    for (const oldest of known) { if (known.size <= 50) break; known.delete(oldest); }
+    boundedSet(this.confirmedRequests, id, known, 100);
+  }
+  /** Drafts whose own row was seen are settled: dropped from the retained
+   * copies and from the open projection, or from `current` when given. */
+  private dropConfirmed(id: string): void;
+  private dropConfirmed(id: string, current: ChatProjection): ChatProjection;
+  private dropConfirmed(id: string, current?: ChatProjection): ChatProjection | void {
+    const confirmed = this.confirmedRequests.get(id);
+    if (!confirmed?.size) return current;
+    const pending = this.unknown.get(id) ?? [];
+    const rest = pending.filter(draft => !confirmed.has(draft.requestId));
+    if (rest.length !== pending.length) { if (rest.length) boundedSet(this.unknown, id, rest, 100); else this.unknown.delete(id); }
+    const settle = (projection: ChatProjection) => projection.acceptedDrafts.some(draft => confirmed.has(draft.requestId))
+      ? { ...projection, acceptedDrafts: projection.acceptedDrafts.filter(draft => !confirmed.has(draft.requestId)) }
+      : projection;
+    if (current) return settle(current);
+    this.update(id, settle);
+  }
+  private noteSteerRefusal(id: string, requestId: string, reason: string): void {
+    const known = this.refusedSteers.get(id) ?? new Map<string, string>();
+    known.delete(requestId); known.set(requestId, reason);
+    for (const oldest of known.keys()) { if (known.size <= 20) break; known.delete(oldest); }
+    boundedSet(this.refusedSteers, id, known, 100);
+  }
+  /** The agent refused a steer it was sent: each unconfirmed draft it names
+   * returns to the composer with the reason. Without `current` the open
+   * projection is updated; with it (a snapshot being installed), that one is
+   * returned settled. */
+  private settleRefusedSteers(id: string): void;
+  private settleRefusedSteers(id: string, current: ChatProjection): ChatProjection;
+  private settleRefusedSteers(id: string, current?: ChatProjection): ChatProjection | void {
+    const refused = this.refusedSteers.get(id);
+    const pending = this.unknown.get(id) ?? [];
+    const settled = refused ? pending.filter(draft => refused.has(draft.requestId)) : [];
+    if (!refused || !settled.length) return current;
+    const rest = pending.filter(draft => !refused.has(draft.requestId));
+    if (rest.length) boundedSet(this.unknown, id, rest, 100); else this.unknown.delete(id);
+    for (const draft of settled) {
+      const reason = refused.get(draft.requestId)!;
+      refused.delete(draft.requestId);
+      if (current) current = removeAcceptedDraft(current, draft.requestId);
+      else this.update(id, p => removeAcceptedDraft(p, draft.requestId));
+      this.merge(id, draft.text);
+      this.changed("restored", id);
+      this.presentation.error(`${reason}. Draft restored.`, id);
+    }
+    if (!refused.size) this.refusedSteers.delete(id);
+    return current;
+  }
+
   private merge(id: string, text: string): void {
     if (!text.trim()) return;
     const newer = this.drafts.read(id);
@@ -286,8 +376,13 @@ export class Composer {
     // Retrying the same logical request can return a cached acceptance. It
     // does not renew the original attempt's permission to insert a message.
     const authority = retried ? retry!.authority : { conversationId: id, epoch, generation: current.generation };
-    const delivery = this.conversation.declares("steering") ? refs.length ? "queue" : options.delivery ?? "steer" : undefined;
-    const nativeSteer = this.conversation.declares("steering") && !parsePromptSlashCommand(text, this.conversation.commands()) && (current.reversibleHistory?.staged === true || delivery === "steer" && (isLiveConversationStatus(current.status) || current.queued.length > 0));
+    const steers = steersWhileBusy(capability => this.conversation.declares(capability));
+    const delivery = steers ? refs.length ? "queue" : options.delivery ?? "steer" : undefined;
+    // An immediate steer is only ever one while the turn runs; idle, the
+    // workspace dispatches or holds it like any other submission.
+    const nativeSteer = steers && !parsePromptSlashCommand(text, this.conversation.commands()) && (this.conversation.declares("steering")
+      ? current.reversibleHistory?.staged === true || delivery === "steer" && (isLiveConversationStatus(current.status) || current.queued.length > 0)
+      : delivery === "steer" && isLiveConversationStatus(current.status));
     this.update(id, p => addAcceptedDraft(p, { requestId, messageId: `pending:${requestId}`, text, ...(refs.length ? { attachments: refs } : {}) }));
     this.putAttachments(id, []); this.putUnavailable(id, []); this.presentation.note("Sending..."); this.changed("submit", id);
     const agentId = this.conversation.agentId();
@@ -301,6 +396,22 @@ export class Composer {
     try {
       const accepted = await this.transport.prompt(id, requestId, text, configuration.model, configuration.mode, configuration.variant, refs.length ? refs : undefined, delivery);
       if (this.disposed) return;
+      if (accepted.awaitingConfirmation) {
+        // Sent to the agent, confirmed later (D9): kept as an unconfirmed
+        // draft that its row or a refusal settles, never resent.
+        this.retries.delete(id);
+        this.presentation.accepted(accepted);
+        const draft = { requestId, messageId: `pending:${requestId}`, text, ...(refs.length ? { attachments: refs } : {}), unconfirmed: true as const, awaiting: true as const };
+        boundedSet(this.unknown, id, [...(this.unknown.get(id) ?? []).filter(entry => entry.requestId !== requestId), draft].slice(-20), 100);
+        this.update(id, p => ({ ...p, acceptedDrafts: p.acceptedDrafts.map(entry => entry.requestId === requestId ? draft : entry) }));
+        this.changed("accepted", id);
+        this.presentation.note(null); this.presentation.error(null, id);
+        for (const entry of staged) this.release(entry.previewUrl);
+        // Its refusal, or its row, may have come before this receipt.
+        this.settleRefusedSteers(id);
+        this.dropConfirmed(id);
+        return;
+      }
       if (reload) { reload.messageId = accepted.messageId; if (!accepted.pending && accepted.operation !== "reload") retireReload(); }
       this.retries.delete(id);
       if (accepted.delivery !== "steer") this.conversation.consumeConfiguration(id, stage);
@@ -336,6 +447,8 @@ export class Composer {
         this.update(id, p => { p = markDraftUnconfirmed(p, requestId); const ids = new Set(retained.map(entry => entry.requestId)); return { ...p, acceptedDrafts: p.acceptedDrafts.filter(entry => !entry.unconfirmed || ids.has(entry.requestId)) }; });
         this.changed("projection", id);
         for (const entry of staged) this.release(entry.previewUrl);
+        this.settleRefusedSteers(id);
+        this.dropConfirmed(id);
         void this.checkUnknown(id, requestId, `Steer (${requestId})`, text);
       } else {
         const message = messageOf(error); this.presentation.announce(message, true);

@@ -9,6 +9,7 @@ import {
   SESSION_STARTUP_INACTIVITY_MS,
   SESSION_STDIO,
   sessionServeArgv,
+  SIGTERM_GRACE_MS,
   takePolicyBootstrapFlag,
 } from "./spawn";
 
@@ -37,6 +38,10 @@ describe("spawn shape", () => {
 
   test("a silent session is given 30 seconds", () => {
     expect(SESSION_STARTUP_INACTIVITY_MS).toBe(30_000);
+  });
+
+  test("a stopped session is killed 3 seconds after SIGTERM", () => {
+    expect(SIGTERM_GRACE_MS).toBe(3_000);
   });
 
   test("isSourceRun tells a script path from a compiled binary's entry", () => {

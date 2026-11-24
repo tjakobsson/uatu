@@ -4,9 +4,8 @@ import { realpath, mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerRefusedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
-import { CLAUDE_TURN, type ClaudeTextIdentity } from "./claude/normalization-types";
 import type { TranscriptEntry } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
 import type { BackgroundTaskItem, ChatAgent, ChatActionContext } from "./types";
@@ -21,7 +20,7 @@ import type {
   ProviderSession,
   StoredMessageAccounting,
 } from "./provider";
-import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
+import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type SteerConfirmation } from "./provider";
 import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, ConversationSnapshot, MessageDelivery, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
@@ -38,8 +37,16 @@ import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
+import { ChatApiClient } from "./client";
+import { Composer } from "./composer";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
-import { isVisualTurnLive, OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_START_FALLBACK, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { OPENCODE_COMPLETION_ALIAS, OPENCODE_TEXT_START_FALLBACK } from "./opencode/normalization-types";
+import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN, CHAT_TURN_CONTINUES, executionEvidence, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, provisionalTurn, type ChatStatusLiveness, type ChatTextSeal, type ChatTurnIdentity } from "./turn-liveness";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
+
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
+const TEXT_ENDED_FACT = { [CHAT_TEXT_SEAL]: "ended" as const };
 import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
@@ -70,7 +77,7 @@ test.each(["completed", "failed", "interrupted"] as const)("ordered Claude %s se
   const history = () => normalizeTranscriptEntries(entries).items;
   projection.seed(history());
   const originals = projection.items();
-  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+  const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN];
   const originalToken = turn(originals[0]!)!;
   expect(originalToken.completed).toBe(false);
   expect(turn(originals[1]!)).toBe(originalToken);
@@ -95,7 +102,7 @@ test.each(["completed", "failed", "interrupted"] as const)("ordered Claude %s se
   const prefixJson = JSON.stringify(prefix);
   emit({ type: "stream_event", event: { type: "content_block_stop", index: 0 } });
   emit({ type: "user", message: { content: "Steer, not a new execution" } });
-  projection.statusUpdate("failed", "Retryable step", true, { [OPENCODE_STEP_LIVE]: true });
+  projection.statusUpdate("failed", "Retryable step", true, { [CHAT_TURN_CONTINUES]: true });
   projection.statusUpdate("retrying");
   projection.statusUpdate("completed", undefined, false); // Synthetic status is not a native boundary.
   expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(false);
@@ -150,8 +157,8 @@ test("equal-JSON Claude recovery retains authoritative completion without an ext
   expect(JSON.stringify(terminal)).toBe(JSON.stringify(original));
   expect(projection.recover([{ kind: "upsert", item: terminal }])).toBe(true);
   expect(projection.replay.latestCursor()).toBe(cursor);
-  expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
-  expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+  expect((projection.get(original.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
+  expect((original as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
 });
 
 test("covered adapter history folds equal-JSON Claude completion and cannot return a later stale live token", async () => {
@@ -170,15 +177,445 @@ test("covered adapter history folds equal-JSON Claude completion and cannot retu
       parentUuid: null, isSidechain: false, parentToolUseId: null, message: {} });
     const ended = await adapter.history("metadata");
     expect(JSON.stringify(ended.items[0])).toBe(JSON.stringify(original));
-    expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((projection.get(original.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     expect(projection.replay.latestCursor()).toBe(cursor);
     entries.pop(); // An independently normalized lagging transcript must not reopen the native row.
     const stale = await adapter.history("metadata");
-    expect((stale.items[0] as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
-    expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
-    expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect((stale.items[0] as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
+    expect((projection.get(original.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
+    expect((original as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
     expect(projection.replay.latestCursor()).toBe(cursor);
   } finally { await adapter.dispose(); }
+});
+
+test("an ordered frame cannot reopen a Claude reply the projection already closed, while a new reply opens despite a sealed producer turn", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const turn = (item: ConversationItem | undefined) => (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+  const memory = createClaudeEventMemory();
+  const frame = (uuid: string, record: Record<string, unknown>) => normalizeClaudeMessage({ uuid, timestamp: 1, ...record }, memory, "live").updates;
+  const reply = (uuid: string) => frame(uuid, { type: "assistant", message: { id: `api-${uuid}`, content: [{ type: "text", text: "![Later](later.png)" }] } });
+  projection.statusUpdate("running");
+  const first = reply("first");
+  for (const update of first) projection.apply(update);
+  for (const update of frame("end", { type: "result", subtype: "success", is_error: false })) projection.apply(update);
+  const closed = turn(projection.get("message:first"))!;
+  expect(closed.completed).toBe(true);
+  // A late restatement of the same native row, normalized into a new producer turn.
+  const late = reply("first");
+  expect(turn(late[0]!.kind === "upsert" ? late[0]!.item : undefined)?.completed).toBe(false);
+  for (const update of late) projection.apply(update);
+  expect(turn(projection.get("message:first"))).toBe(closed);
+  // The producer may normalize a whole turn before any of it is applied.
+  const second = reply("second");
+  frame("second-end", { type: "result", subtype: "success", is_error: false });
+  expect(turn(second[0]!.kind === "upsert" ? second[0]!.item : undefined)?.completed).toBe(true);
+  for (const update of second) projection.apply(update);
+  expect(turn(projection.get("message:second"))?.completed).toBe(false);
+  expect(Object.isFrozen(turn(projection.get("message:second")))).toBe(true);
+});
+
+// Characterization for generalize-chat-agent-seam D1. Stored OpenCode 2.x
+// execution evidence is authoritative: unlike a Claude turn, which a stale row
+// cannot reopen (see above), the projection adopts it in either direction.
+// Authoritative evidence comes only from stored rows (seed, replace, recovery,
+// direct upsert). Ordered provider input never carries it, so apply ignores it.
+test("stored execution evidence is adopted in both directions by every stored-row entry point, and ignored on ordered apply", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  const stored = (running?: boolean) => normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), running)[0]!;
+  const id = stored().id;
+  const current = () => executionLive(projection.get(id)!);
+  expect(executionLive(stored())).toBeUndefined();
+  projection.seed([stored(true)]);
+  projection.statusUpdate("running");
+  projection.statusUpdate("completed");
+  expect(current()).toBe(false);
+  const cursor = projection.replay.latestCursor();
+  for (const evidence of [true, false, true]) {
+    expect(projection.recover([{ kind: "upsert", item: stored(evidence) }])).toBe(true);
+    expect(current()).toBe(evidence);
+  }
+  for (const evidence of [false, true]) {
+    projection.seed([stored(evidence)]);
+    expect(current()).toBe(evidence);
+  }
+  // A row without evidence keeps what the projection already holds.
+  expect(projection.recover([{ kind: "upsert", item: stored() }])).toBe(true);
+  projection.seed([stored()]);
+  expect(current()).toBe(true);
+  expect(projection.replay.latestCursor()).toBe(cursor); // Equal public JSON: no frame for evidence alone.
+  for (const evidence of [false, true]) {
+    projection.apply({ kind: "upsert", item: stored(evidence) });
+    expect(current()).toBe(true); // Ignored: the projection keeps its stored evidence.
+  }
+  for (const evidence of [false, true]) {
+    projection.upsert(stored(evidence));
+    expect(current()).toBe(evidence);
+  }
+  projection.upsert(stored(false));
+  projection.apply({ kind: "upsert", item: stored(true) });
+  expect(current()).toBe(false); // Ignored in either direction.
+  projection.apply({ kind: "upsert", item: { ...stored(true), id: "fresh" } });
+  expect(executionLive(projection.get("fresh")!)).toBeUndefined(); // Even on the row it creates.
+  projection.upsert(stored(true));
+  projection.apply({ kind: "upsert", item: stored() });
+  expect(current()).toBe(true);
+  for (const evidence of [false, true]) {
+    projection.replace([stored(evidence)]);
+    expect(current()).toBe(evidence);
+  }
+  projection.replace([stored()]);
+  expect(current()).toBeUndefined(); // Replacement is not a sparse merge.
+});
+
+test("covered adapter history republishes nothing for equal-JSON execution evidence, yet adopts it in both directions", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  let running = true;
+  provider.listMessages = async () => ({ items: normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), running), accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    const original = (await adapter.history("metadata")).items[0]!;
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    expect(executionLive(original)).toBe(true);
+    for (const evidence of [false, true, false]) {
+      running = evidence;
+      const read = (await adapter.history("metadata")).items[0]!;
+      expect(JSON.stringify(read)).toBe(JSON.stringify(original));
+      expect(executionLive(read)).toBe(evidence);
+      expect(executionLive(projection.get(original.id)!)).toBe(evidence);
+    }
+    expect(executionLive(original)).toBe(true); // Earlier snapshots keep their own evidence.
+    expect(projection.replay.latestCursor()).toBe(cursor);
+  } finally { await adapter.dispose(); }
+});
+
+// The liveness contract (D1): a reply carries one token kind for life. These
+// pin its rules at every projection entry point.
+test.each(["recover", "seed", "replace", "upsert", "apply"] as const)("%s never reopens a closed provisional turn with an open provisional or unannotated row", entry => {
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  for (const [weaker, item] of Object.entries({ "open provisional": { ...row, [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem, unannotated: row })) {
+    const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+    projection.seed([{ ...row, [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem]);
+    projection.statusUpdate("running");
+    projection.statusUpdate("completed");
+    if (entry === "recover") projection.recover([{ kind: "upsert", item }]);
+    else if (entry === "seed") projection.seed([item]);
+    else if (entry === "replace") projection.replace([item]);
+    else if (entry === "upsert") projection.upsert(item);
+    else projection.apply({ kind: "upsert", item });
+    expect([weaker, (projection.get(row.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]]).toMatchObject([weaker, { completed: true, authority: "provisional" }]);
+    expect([weaker, isReplyLive(projection.get(row.id) as AssistantMessageItem, true)]).toEqual([weaker, false]);
+  }
+});
+
+// A repeat counts only on completed: on any other status the marker is
+// ignored and the status is processed normally (a failed or interrupted one
+// ends the turn).
+test.each(["running", "sending", "retrying", "compacting", "idle", "failed", "interrupted"] as const)("a %s status marked as a repeat is processed as an ordinary status", status => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  projection.statusUpdate("running");
+  projection.statusUpdate("completed");
+  const frame = projection.apply({ kind: "status", status, [CHAT_STATUS_REPEAT]: true } as NormalizedProviderUpdate)!;
+  expect(frame).toMatchObject({ type: "conversation.status", status });
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(projection.status).toBe(status);
+  const summary = projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status });
+  expect(isVisualTurnLive(frame as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(isVisualTurnLive(summary));
+});
+
+// A sparse merge treats an explicitly undefined reply fact as absent, so it
+// keeps the projection's value; only a full replacement takes the row as given.
+// The completion seal relies on completedAt, so an explicitly undefined
+// completedAt is absent in a sparse merge too (no current path writes one).
+test.each(["recover", "seed", "upsert", "apply", "replace"] as const)("%s treats an explicitly undefined completedAt as absent, unless it replaces the row", entry => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "[shot]: s.png\n\n![shot]", completedAt: 2 };
+  projection.seed([{ ...row, [CHAT_TEXT_SEAL]: "completion" } as AssistantMessageItem]);
+  projection.statusUpdate("running");
+  const incoming = { ...row, completedAt: undefined, [CHAT_TEXT_SEAL]: "completion" } as AssistantMessageItem;
+  if (entry === "recover") projection.recover([{ kind: "upsert", item: incoming }]);
+  else if (entry === "seed") projection.seed([incoming]);
+  else if (entry === "upsert") projection.upsert(incoming);
+  else if (entry === "apply") projection.apply({ kind: "upsert", item: incoming });
+  else projection.replace([incoming]);
+  const kept = projection.get(row.id) as AssistantMessageItem;
+  expect(kept.completedAt).toBe(entry === "replace" ? undefined : 2);
+  expect(isTextSealed(kept)).toBe(entry !== "replace");
+});
+
+test.each(["recover", "seed", "upsert", "apply", "replace"] as const)("%s treats an explicitly undefined token or text seal as absent, unless it replaces the row", entry => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)", completedAt: 2 };
+  projection.seed([{ ...row, ...executionEvidence(true), ...TEXT_ENDED_FACT } as AssistantMessageItem]);
+  projection.statusUpdate("running");
+  const incoming = { ...row, [CHAT_TURN]: undefined, [CHAT_TEXT_SEAL]: undefined } as AssistantMessageItem;
+  if (entry === "recover") projection.recover([{ kind: "upsert", item: incoming }]);
+  else if (entry === "seed") projection.seed([incoming]);
+  else if (entry === "upsert") projection.upsert(incoming);
+  else if (entry === "apply") projection.apply({ kind: "upsert", item: incoming });
+  else projection.replace([incoming]);
+  const kept = projection.get(row.id) as AssistantMessageItem & ChatTextSeal;
+  expect([executionLive(kept), kept[CHAT_TEXT_SEAL]]).toEqual(entry === "replace" ? [undefined, undefined] : [true, "ended"]);
+  expect(isReplyLive(kept, true)).toBe(entry !== "replace"); // Erased evidence would fall back to completedAt.
+});
+
+// Covered history adopts, for a row whose public JSON is unchanged, only a
+// changed turn-token state. Other in-process facts on that row (a text seal)
+// are returned by the read but not staged into the projection (inherited).
+test("covered adapter history does not stage an equal-JSON row whose only change is a text seal", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  let facts: object = {};
+  provider.listMessages = async () => ({ items: [{ ...row, ...facts } as AssistantMessageItem], accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    await adapter.history("metadata");
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    facts = TEXT_ENDED_FACT;
+    const read = (await adapter.history("metadata")).items.find(item => item.id === row.id) as AssistantMessageItem & ChatTextSeal;
+    expect(read[CHAT_TEXT_SEAL]).toBe("ended");
+    expect((projection.get(row.id) as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBeUndefined();
+    expect(projection.replay.latestCursor()).toBe(cursor);
+  } finally { await adapter.dispose(); }
+});
+
+// A token appearing (or a same-kind open/closed change) triggers staging; the
+// staged row then carries all its facts, its text seal included. Without this
+// an OpenCode 2.x row first seen live would lose its first execution boundary.
+test("covered adapter history stages an equal-JSON row whose first token appears, with its text seal", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  let facts: object = {};
+  provider.listMessages = async () => ({ items: [{ ...row, ...facts } as AssistantMessageItem], accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    await adapter.history("metadata");
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    expect(executionLive(projection.get(row.id)!)).toBeUndefined();
+    facts = { ...executionEvidence(true), ...TEXT_ENDED_FACT };
+    await adapter.history("metadata");
+    const staged = projection.get(row.id) as AssistantMessageItem & ChatTextSeal;
+    expect(executionLive(staged)).toBe(true);
+    expect(staged[CHAT_TEXT_SEAL]).toBe("ended");
+    expect(projection.replay.latestCursor()).toBe(cursor); // Equal public JSON: no frame.
+  } finally { await adapter.dispose(); }
+});
+
+// A status is a repeat or a continuation, never both: a repeat preserves the
+// turn's current liveness but never restores it.
+test("a repeat carrying a continuation after a genuine end leaves the turn finished", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const reply = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([reply]);
+  projection.statusUpdate("running");
+  projection.statusUpdate("completed");
+  const summary = () => projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status });
+  const repeat = projection.apply({ kind: "status", status: "completed", [CHAT_STATUS_REPEAT]: true, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined(); // Ignored on a repeat.
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(isVisualTurnLive(repeat as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(false);
+  expect(isVisualTurnLive(summary())).toBe(false); // What a reloading client reads.
+  expect(executionLive(projection.get(reply.id)!)).toBe(false);
+});
+
+test("a failed status whose turn continues seals no reply, and a repeat after it continues the turn", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const provisional = { id: "provisional", type: "assistant_message", createdAt: 1, markdown: "", [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem;
+  const authoritative = { id: "authoritative", type: "assistant_message", createdAt: 2, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([provisional, authoritative]);
+  projection.statusUpdate("running");
+  const open = () => [provisional.id, authoritative.id].map(id => executionLive(projection.get(id)!));
+  const summary = () => projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status });
+  // A stub agent's normalizer: a retryable failed step.
+  const phase = projection.apply({ kind: "status", status: "failed", [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((phase as typeof phase & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
+  expect(isVisualTurnLive(phase as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(true);
+  expect(isVisualTurnLive(summary())).toBe(true);
+  expect(open()).toEqual([true, true]);
+  const repeat = projection.apply(normalizeProviderEvent({ id: "alias", type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!)!;
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBe(true);
+  expect(isVisualTurnLive(summary())).toBe(true);
+  expect(open()).toEqual([true, true]);
+  const end = projection.statusUpdate("failed");
+  expect(isVisualTurnLive(end as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(false);
+  expect(isVisualTurnLive(summary())).toBe(false);
+  expect(open()).toEqual([false, false]);
+});
+
+// "Turn continues" means something only on a failed status that is not a
+// repeat; on completed or interrupted it is ignored and the status ends the turn.
+test.each(["completed", "interrupted"] as const)("a %s status carrying the turn-continues flag ends the turn as usual", terminal => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const provisional = { id: "provisional", type: "assistant_message", createdAt: 1, markdown: "", [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem;
+  const authoritative = { id: "authoritative", type: "assistant_message", createdAt: 2, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([provisional, authoritative]);
+  projection.statusUpdate("running");
+  const frame = projection.apply({ kind: "status", status: terminal, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
+  expect(isVisualTurnLive(frame as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(false);
+  expect(isVisualTurnLive(projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: terminal }))).toBe(false);
+  expect([provisional.id, authoritative.id].map(id => executionLive(projection.get(id)!))).toEqual([false, false]);
+});
+
+// A staged recovery row merges over the projected one: facts the stored row
+// omits, such as an explicit text end seen live, are kept.
+test("covered adapter history keeps a live text seal when an equal-JSON row adds its first token without one", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  let facts: object = TEXT_ENDED_FACT;
+  provider.listMessages = async () => ({ items: [{ ...row, ...facts } as AssistantMessageItem], accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    await adapter.history("metadata");
+    const projection = adapter.projectionForTests("metadata");
+    expect((projection.get(row.id) as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
+    facts = executionEvidence(true);
+    await adapter.history("metadata");
+    const staged = projection.get(row.id) as AssistantMessageItem & ChatTextSeal;
+    expect(executionLive(staged)).toBe(true);
+    expect(staged[CHAT_TEXT_SEAL]).toBe("ended");
+  } finally { await adapter.dispose(); }
+});
+
+// Flag precedence on a status carrying both (out of contract; the conformance
+// helper reports it as "both"): on failed the invalid repeat flag is dropped
+// first, then the continues flag is evaluated; on completed the continues flag
+// is ignored and the repeat applies.
+test("a failed status carrying both flags keeps its continuation: the repeat flag is dropped first", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const reply = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([reply]);
+  projection.statusUpdate("running");
+  const frame = projection.apply({ kind: "status", status: "failed", [CHAT_STATUS_REPEAT]: true, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
+  expect(isVisualTurnLive(frame as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(true);
+  expect(isVisualTurnLive(projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "failed" }))).toBe(true); // Reload.
+  expect(executionLive(projection.get(reply.id)!)).toBe(true);
+});
+
+test("a repeated retryable failure ends the turn: the repeat marker counts only on completed", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const reply = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([reply]);
+  projection.statusUpdate("running");
+  const summary = () => projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status });
+  const live = (event: ChatEvent) => isVisualTurnLive(event as Extract<ChatEvent, { type: "conversation.status" }>);
+  // A stub agent's normalizer: a retryable failed step, then a restatement of it.
+  expect(live(projection.apply({ kind: "status", status: "failed", [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!)).toBe(true);
+  const repeat = projection.apply({ kind: "status", status: "failed", [CHAT_STATUS_REPEAT]: true } as NormalizedProviderUpdate)!;
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(live(repeat)).toBe(false);
+  expect(isVisualTurnLive(summary())).toBe(false); // What a reloading client reads.
+  expect(executionLive(projection.get(reply.id)!)).toBe(false);
+});
+
+// Reply facts travel with whole items: a text update to an existing row never
+// changes them (base behaviour; facts are read from a text update only when it
+// creates the row).
+test("a later text update's reply facts are ignored, in either seal form and for either token kind", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const markdown = "[shot]: shot.png\n\n![shot]";
+  const text = (id: string, item: object, value = markdown): NormalizedProviderUpdate => ({ kind: "text", itemId: id, identity: id, mode: "cumulative", text: value,
+    item: { id, type: "assistant_message", createdAt: 1, markdown: "", ...item } as AssistantMessageItem });
+  const row = (id: string) => projection.get(id) as AssistantMessageItem & ChatTextSeal & ChatTurnIdentity;
+  projection.statusUpdate("running");
+  // One token kind per reply: a live reply offered provisional tokens, a stored one authoritative.
+  for (const [id, token] of [["live", { [CHAT_TURN]: provisionalTurn() }], ["stored", executionEvidence(false)]] as const) {
+    expect(projection.apply(text(id, {}))).toMatchObject({ type: "item.upsert", item: { markdown } });
+    for (const facts of [TEXT_ENDED_FACT, { [CHAT_TEXT_SEAL]: "completion", completedAt: 5 }, token]) {
+      expect(projection.apply(text(id, facts))).toBeUndefined(); // Unchanged text: nothing to publish.
+      expect(row(id)[CHAT_TEXT_SEAL]).toBeUndefined();
+      expect(row(id)[CHAT_TURN]).toBeUndefined();
+      expect(row(id).completedAt).toBeUndefined();
+    }
+    expect(projection.apply(text(id, TEXT_ENDED_FACT, `${markdown} more`))).toMatchObject({ type: "item.text_delta", delta: " more" });
+    expect(row(id)[CHAT_TEXT_SEAL]).toBeUndefined();
+  }
+  // The item that creates a row does carry its facts.
+  expect(projection.apply({ kind: "text", itemId: "other", identity: "other", mode: "cumulative", text: markdown, item: { id: "other", type: "assistant_message", createdAt: 2, markdown: "", ...TEXT_ENDED_FACT } as AssistantMessageItem }))
+    .toMatchObject({ type: "item.upsert" });
+  expect((projection.get("other") as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
+});
+
+// Inherited: a native turn footer (Claude's turn_duration, which emits no
+// updates) closes only the producer's token, so snapshot and transcript
+// evidence. The live projection holds its own frozen copy, and only an
+// ordered terminal status closes it.
+test("a turn footer closes the producer's token, while only the ordered terminal status closes the live projection", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const memory = createClaudeEventMemory();
+  const frame = (record: Record<string, unknown>) => normalizeClaudeMessage({ uuid: `f-${Math.random()}`, timestamp: 1, ...record }, memory, "live").updates;
+  const turn = (item: ConversationItem | undefined) => (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+  projection.statusUpdate("running");
+  const reply = frame({ type: "assistant", message: { id: "api", content: [{ type: "text", text: "![Later](later.png)" }] } });
+  const produced = reply.find(update => update.kind === "upsert" && update.item.type === "assistant_message");
+  if (produced?.kind !== "upsert") throw new Error("expected the reply");
+  for (const update of reply) projection.apply(update);
+  expect(frame({ type: "system", subtype: "turn_duration", durationMs: 5 })).toEqual([]); // The footer emits nothing.
+  expect(turn(produced.item)?.completed).toBe(true); // Producer, snapshot and transcript evidence.
+  expect(turn(projection.get(produced.item.id))?.completed).toBe(false); // The live projection is still open.
+  projection.statusUpdate("completed");
+  expect(turn(projection.get(produced.item.id))?.completed).toBe(true);
+});
+
+test("only the projection freezes authoritative evidence: producers hand it fresh tokens", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const produced = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  const token = (item: ConversationItem | undefined) => (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+  expect(Object.isFrozen(token(produced))).toBe(false);
+  projection.seed([produced]);
+  expect(Object.isFrozen(token(projection.get("reply")))).toBe(true);
+  expect(token(projection.get("reply"))).not.toBe(token(produced));
+  expect(token(projection.get("reply"))).toEqual({ completed: false, authority: "authoritative" });
+  expect(Object.isFrozen(token(produced))).toBe(false);
+});
+
+// Characterization for generalize-chat-agent-seam D1: which ordered status
+// sequences keep a turn capture-live, and which seal its retained replies.
+test.each([
+  { steps: ["running"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "repeat"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "repeat", "repeat"], frame: true, snapshot: true, reply: true },
+  { steps: ["repeat"], frame: false, snapshot: false, reply: true }, // Nothing live to continue; a repeat still never seals.
+  { steps: ["running", "completed", "repeat"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "repeat", "running", "completed"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "retryable failure"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "retryable failure", "repeat"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "retryable failure", "retrying"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "retryable failure", "failed"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "failed"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "interrupted"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "synthetic completed"], frame: false, snapshot: false, reply: true }, // Not a native boundary.
+] as const)("ordered statuses $steps: capture-live frame=$frame snapshot=$snapshot, reply still live=$reply", ({ steps, frame, snapshot, reply }) => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  const stored = normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), true)[0]!;
+  projection.seed([stored]);
+  const normalizeV2 = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  let last: ChatEvent | undefined, sequence = 0;
+  const status = (updates: NormalizedProviderUpdate[]) => projection.apply(updates.find(update => update.kind === "status")!)!;
+  for (const step of steps) {
+    if (step === "repeat") last = status(normalizeProviderEvent({ id: `repeat-${++sequence}`, type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates);
+    else if (step === "retryable failure") last = status(normalizeV2({ id: `step-${++sequence}`, created: sequence, type: "session.step.failed", location: { directory: "/workspace" }, data: { sessionID: "c", assistantMessageID: "api", error: { message: "Rate limited" } } }, memory).updates);
+    else if (step === "synthetic completed") last = projection.statusUpdate("completed", undefined, false);
+    else last = projection.statusUpdate(step);
+  }
+  if (last?.type !== "conversation.status") throw new Error("expected a status frame");
+  expect(isVisualTurnLive(last)).toBe(frame);
+  expect(isVisualTurnLive(projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status }))).toBe(snapshot);
+  expect(executionLive(projection.get(stored.id)!)).toBe(reply);
+  expect(executionLive(stored)).toBe(true); // Earlier frames keep their evidence.
 });
 
 test.each(["completed", "failed", "interrupted"] as const)("Claude producer result ahead of the adapter session await cannot seal the retained prefix before ordered %s", async terminal => {
@@ -224,9 +661,9 @@ test.each(["completed", "failed", "interrupted"] as const)("Claude producer resu
   const store = new VisualStore(process.cwd(), directory);
   store.setReader(async source => { reads[source] = (reads[source] ?? 0) + 1; if (!available) throw new VisualReadError(true); return original; });
   const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: adapter.dispose.bind(adapter) } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   const answer = (page: { items: ConversationItem[] }, id: string) => page.items.find(item => item.id === id) as AssistantMessageItem;
-  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+  const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN]!;
   let attached: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined, restarted: MultiAgentChatService | undefined;
   try {
     await entered.promise; // Real ChatAdapter pump/requireSession barrier; no tail row has applied.
@@ -258,7 +695,7 @@ test.each(["completed", "failed", "interrupted"] as const)("Claude producer resu
     expect(turn(initial).completed).toBe(false); expect(turn(opened.item).completed).toBe(false);
     expect(initial.visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
     const reloadStore = new VisualStore(process.cwd(), directory); reloadStore.setReader(async () => { throw new Error("must not read future bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     expect(answer(await restarted.history("claude:capture"), final.id).visuals).toEqual(final.visuals);
     expect((await restarted.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(original);
   } finally { release.resolve(); attached?.events.cancel(); await restarted?.dispose(); await router.dispose(); await pumping.catch(() => undefined); await rm(directory, { recursive: true, force: true }); }
@@ -318,11 +755,11 @@ test.each([
     if (!available) throw new VisualReadError(true);
     return png;
   });
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   const prefix = '![Later](later.png)\r\n\r\n```svg\r\n<svg><rect width="10"';
   const close = '/></svg>\r\n```\r\n';
   const svg = '<svg><rect width="10"/></svg>\r\n';
-  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+  const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN]!;
   const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
     const item = snapshot.items.find(item => item.id === id);
     if (item?.type !== "assistant_message") throw new Error(`Missing assistant ${id}`);
@@ -427,7 +864,7 @@ test.each([
     expect((await router.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(png);
     const reloadedStore = new VisualStore(process.cwd(), directory);
     reloadedStore.setReader(async () => { throw new Error("immutable captures must not reread future-turn bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     const reloaded = answer(await restarted.history("claude:capture"), final.id);
     expect(reloaded.visuals).toEqual(final.visuals);
     expect(await restarted.resolveVisual(reloaded.visuals![1]!.id!)).toEqual(capturedSvg);
@@ -487,7 +924,7 @@ test.each([
     subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
     dispose: () => adapter.dispose(),
   } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   let subscription: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
   let restarted: MultiAgentChatService | undefined;
   const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
@@ -499,7 +936,7 @@ test.each([
     projection.statusUpdate("running");
     const seeded = await adapter.history("capture"); // No MultiAgent history/subscribe/capture yet.
     const old = answer(seeded, "old");
-    const oldToken = (old as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    const oldToken = (old as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]!;
     expect(oldToken.completed).toBe(false);
     expect(reads).toEqual({});
     const before = decodeReplayCursor(projection.replay.latestCursor())!;
@@ -507,7 +944,7 @@ test.each([
     expect(ended).toHaveLength(1);
     expect(ended[0]).toMatchObject({ type: "conversation.status", status: terminal, sequence: before.sequence + 1 });
     expect(oldToken.completed).toBe(false);
-    expect((projection.get(old.id) as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((projection.get(old.id) as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     // New native input does not retroactively own the previous answer. Keep
     // history deliberately stale (no persisted turn_duration) on every read.
     projection.statusUpdate("running");
@@ -519,7 +956,7 @@ test.each([
     else { subscription = await router.subscribe("claude:capture"); first = subscription.snapshot; }
     const captured = answer(first, "old");
     expect(captured.visuals?.map(visual => visual.status)).toEqual(["unavailable", "ready"]);
-    expect((captured as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((captured as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     expect(answer(first, "current").visuals?.map(visual => visual.status)).toEqual(["pending"]);
     expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
     expect(reads).toEqual({ "old-missing.png": 1, "old-ready.png": 1, "current.png": 1 });
@@ -552,7 +989,7 @@ test.each([
     expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
     const reloadedStore = new VisualStore(process.cwd(), directory);
     reloadedStore.setReader(async () => { throw new Error("terminal records must not reread current execution files"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     const reloaded = await restarted.history("claude:capture");
     expect(answer(reloaded, "old").visuals).toEqual(captured.visuals);
     expect(answer(reloaded, "current").visuals).toEqual(answer(completed, "current").visuals);
@@ -574,7 +1011,7 @@ test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execu
   const membership = storedExecutionLiveness([native]);
   projection.seed(normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), membership.get(native.id)));
   const original = projection.items()[0]!;
-  const live = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  const live = (item: object) => executionLive(item);
   const failed = emit("session.step.failed", { assistantMessageID: "api", error: { type: "rate-limit", message: "Retry" } });
   expect(failed.some(event => event.type === "conversation.status" && event.status === "failed")).toBe(true);
   expect(live(projection.get(original.id)!)).toBe(true);
@@ -595,24 +1032,28 @@ test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execu
 
 test.each(["completed", "failed", "interrupted"] as const)("source-witnessed V1 aliases preserve current execution membership until genuine %s without mutating earlier frames", terminal => {
   const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
-  const old: AssistantMessageItem & OpenCodeExecutionIdentity = { id: "part:old", type: "assistant_message", createdAt: 1, markdown: "![Old](old.png)", [OPENCODE_EXECUTION_LIVE]: false };
-  const current: AssistantMessageItem & OpenCodeExecutionIdentity = { id: "part:current", type: "assistant_message", createdAt: 2, markdown: "![Current](current.png)", [OPENCODE_EXECUTION_LIVE]: true };
+  const old: AssistantMessageItem & ChatTurnIdentity = { id: "part:old", type: "assistant_message", createdAt: 1, markdown: "![Old](old.png)", ...executionEvidence(false) };
+  const current: AssistantMessageItem & ChatTurnIdentity = { id: "part:current", type: "assistant_message", createdAt: 2, markdown: "![Current](current.png)", ...executionEvidence(true) };
   projection.seed([old, current]); projection.statusUpdate("running");
-  projection.statusUpdate("failed", "Retryable step", true, { [OPENCODE_STEP_LIVE]: true });
+  // Seeding freezes the producers' evidence into the projection's own rows.
+  const [retainedOld, retainedCurrent] = [projection.get(old.id)!, projection.get(current.id)!];
+  expect([executionLive(retainedOld), executionLive(retainedCurrent)]).toEqual([false, true]);
+  projection.statusUpdate("failed", "Retryable step", true, { [CHAT_TURN_CONTINUES]: true });
   const update = normalizeProviderEvent({ id: "old-idle-alias", type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!;
   const alias = projection.apply(update)!;
   expect(JSON.parse(JSON.stringify(alias))).toMatchObject({ type: "conversation.status", status: "completed" });
-  expect((alias as typeof alias & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBe(true);
-  expect(projection.get(current.id)).toBe(current); // The alias must not seal a newer retained row.
+  expect((alias as typeof alias & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBe(true);
+  expect(projection.get(current.id)).toBe(retainedCurrent); // The alias must not seal a newer retained row.
   const snapshot = projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" });
   expect(isVisualTurnLive(snapshot)).toBe(true);
   projection.statusUpdate("running");
   const ended = projection.statusUpdate(terminal);
-  expect((ended as typeof ended & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBeUndefined();
-  expect((projection.get(current.id) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(false);
-  expect(projection.get(old.id)).toBe(old);
-  expect(current[OPENCODE_EXECUTION_LIVE]).toBe(true); // Earlier row/frame references remain immutable.
-  expect((alias as typeof alias & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBe(true);
+  expect((ended as typeof ended & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(executionLive(projection.get(current.id)!)).toBe(false);
+  expect(projection.get(old.id)).toBe(retainedOld);
+  expect(executionLive(current)).toBe(true); // Earlier row/frame references remain immutable.
+  expect(executionLive(retainedCurrent)).toBe(true);
+  expect((alias as typeof alias & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBe(true);
   expect(isVisualTurnLive(snapshot)).toBe(true); // No queued mutation of an older boundary.
   expect(isVisualTurnLive(projection.withVisualStatus(snapshot))).toBe(false);
 });
@@ -630,7 +1071,7 @@ test("native step-live hints are immutable on ordered status frames and adapter 
     emit("session.execution.started", {});
     const failed = emit("session.step.failed", { assistantMessageID: "m", error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
     expect(JSON.parse(JSON.stringify(failed))).toMatchObject({ type: "conversation.status", status: "failed", message: "Rate limited" });
-    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect((failed as typeof failed & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
     const snapshot = await adapter.subscribe("step-live");
     snapshot.events.cancel();
     expect(snapshot.snapshot.conversation.status).toBe("failed");
@@ -640,15 +1081,15 @@ test("native step-live hints are immutable on ordered status frames and adapter 
     expect(isVisualTurnLive(history.conversation)).toBe(true);
     const terminal = emit("session.execution.failed", { error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
     expect(JSON.parse(JSON.stringify(terminal))).toMatchObject({ type: "conversation.status", status: "failed", message: "Rate limited" });
-    expect((terminal as typeof terminal & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBeUndefined();
+    expect((terminal as typeof terminal & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
     const ended = await adapter.history("step-live");
     expect(isVisualTurnLive(ended.conversation)).toBe(false);
     expect(isVisualTurnLive(history.conversation)).toBe(true);
     expect(isVisualTurnLive(snapshot.snapshot.conversation)).toBe(true);
-    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect((failed as typeof failed & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
     expect(isVisualTurnLive(projection.withVisualStatus(history.conversation))).toBe(false); // No stale coverage hint.
     const generic = projection.statusUpdate("failed", "Unannotated terminal failure");
-    expect((generic as typeof generic & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBeUndefined();
+    expect((generic as typeof generic & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
     expect(isVisualTurnLive(projection.withVisualStatus(history.conversation))).toBe(false);
   } finally { await adapter.dispose(); }
 });
@@ -678,7 +1119,7 @@ test.each([
     subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
     dispose: () => adapter.dispose(),
   } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service }] });
   let frame = 0;
   const emit = (type: string, data: Record<string, unknown>) => {
     const normalized = normalize({ id: `frame-${++frame}`, type, created: frame, location: { directory: process.cwd() }, data: { sessionID: "capture", ...data } }, memory);
@@ -748,7 +1189,7 @@ test.each([
     if (created) expect((await router.resolveVisual(answer(complete).visuals![0]!.id!))?.bytes).toEqual(png);
     const restartedStore = new VisualStore(process.cwd(), directory);
     restartedStore.setReader(async () => { reads++; throw new Error("sealed captures must not reread after reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: OPENCODE_AGENT, service }] });
     const reloaded = await restarted.history("opencode:capture");
     expect(answer(reloaded).visuals).toEqual(answer(complete).visuals);
     if (created) expect((await restarted.resolveVisual(answer(reloaded).visuals![0]!.id!))?.bytes).toEqual(png);
@@ -17976,5 +18417,371 @@ describe("steering (opencode-v2-steering)", () => {
     watch.stop();
     await adapter.dispose();
     await plain.adapter.dispose();
+  });
+});
+
+describe("immediate steering (add-antigravity-chat D9)", () => {
+  // A fake shaped like Antigravity: it takes a second prompt into the running
+  // turn at once, keeps no inbox, and reports the turn's end once, after the
+  // steered part. It declares `immediate-steering` and `send-now`, never
+  // `steering`.
+  function immediate(options: { steerAdmissionTimeoutMs?: number } = {}) {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now"] };
+    provider.sessions = [fixtureSession("session")];
+    let n = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++n}`, coalesceWindowMs: 1, steerAdmissionTimeoutMs: options.steerAdmissionTimeoutMs });
+    const steer = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "steer");
+    const queue = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "queue");
+    const status = (value: "running" | "completed" | "interrupted") => provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "status", status: value }], outcome: "handled", eventType: `status.${value}` } });
+    // The live timeline: history() rereads the fake's (empty) stored pages.
+    const userRows = async () => adapter.projectionForTests("session").items().filter(item => item.type === "user_message");
+    return { provider, adapter, steer, queue, status, userRows };
+  }
+
+  test("a busy steer goes to the provider at once, with no dock entry and no configuration", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const steered = await steer("r-s", "and also this");
+      expect(steered).toEqual(expect.objectContaining({ pending: false, delivery: "steer", messageId: "id-1" }));
+      expect(provider.prompts).toEqual([expect.objectContaining({ id: "id-1", text: "and also this", delivery: "steer" })]);
+      expect(provider.prompts[0]!.model).toBeUndefined();
+      expect(provider.prompts[0]!.mode).toBeUndefined();
+      const history = await adapter.history("session");
+      expect(history.queued ?? []).toEqual([]);
+      expect(history.conversation.status).toBe("running");
+      expect((await userRows()).map(item => item.id)).toEqual(["message:id-1"]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("the provider's own row for an accepted steer does not duplicate it", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const steered = await steer("r-s", "steer once");
+      provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "upsert", item: { id: `message:${steered.messageId}`, type: "user_message", createdAt: 5, text: "steer once" } }], outcome: "handled", eventType: "user_message_chunk" } });
+      await liveEventsApplied(adapter, provider);
+      expect((await userRows()).map(item => [item.id, item.type === "user_message" && item.text])).toEqual([[`message:${steered.messageId}`, "steer once"]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const order of ["acceptance first", "provider row first"] as const) test(`an accepted steer keeps the provider's timeline position (${order})`, async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const row = { id: "message:native-steer", type: "user_message" as const, createdAt: 5, text: "steer" };
+      const reply = { id: "message:reply", type: "assistant_message" as const, createdAt: 6, markdown: "Reply to the steer" };
+      const publish = (...items: ConversationItem[]) => provider.eventQueue.push({ normalized: { conversationId: "session", updates: items.map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "update" } });
+      provider.prompt = async () => {
+        if (order === "provider row first") { publish(row, reply); await liveEventsApplied(adapter, provider); }
+        return { messageId: "native-steer", ...(order === "acceptance first" ? { createdAt: 5 } : {}) };
+      };
+      await steer("r-s", "steer");
+      if (order === "acceptance first") { publish(row, reply); await liveEventsApplied(adapter, provider); }
+      expect(await userRows()).toEqual([expect.objectContaining({ id: "message:native-steer", createdAt: 5, requestId: "r-s" })]);
+      const ids = adapter.projectionForTests("session").items().map(item => item.id);
+      expect(ids.indexOf("message:native-steer")).toBeLessThan(ids.indexOf("message:reply"));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("held messages wait for the carried turn's end, not for the steer", async () => {
+    const { adapter, provider, steer, queue, status } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-q", "after the turn");
+      expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      await steer("r-s", "into the turn");
+      expect(provider.prompts.map(prompt => [prompt.text, prompt.delivery])).toEqual([["into the turn", "steer"]]);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.delivery])).toEqual([["after the turn", "queue"]]);
+      status("completed");
+      await waitUntil(() => provider.prompts.length === 2);
+      expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "after the turn", delivery: "queue" }));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a refused steer publishes nothing and leaves the turn running", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      provider.prompt = async () => { throw new Error("agy refused the prompt"); };
+      const refusal = steer("r-s", "refused");
+      await expect(refusal).rejects.toBeInstanceOf(SteerRefusedError);
+      await expect(refusal).rejects.toThrow("agy refused the prompt");
+      expect(await userRows()).toEqual([]);
+      expect((await adapter.history("session")).conversation.status).toBe("running");
+      expect((await adapter.history("session")).queued ?? []).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a definite refusal crosses the route as a 409 with the agent's reason, and the composer restores the draft", async () => {
+    const { adapter, provider } = immediate();
+    adapter.projectionForTests("session").statusUpdate("running");
+    provider.prompt = async () => { throw new Error("Antigravity finished its turn before the steer was sent"); };
+    const asset = "src/assets/uatu-logo.svg";
+    const routes = buildRoutes({ mode: "prod", assets: { mermaid: asset, logo: asset, icon192: asset, icon512: asset, manifest: asset,
+      fonts: { hackMono: asset, hackLicense: asset, nerdFontsLicense: asset, notices: asset } },
+    getSession: () => { throw new Error("Unexpected document access"); }, chatService: adapter as never,
+    getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
+    const child = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, routes });
+    const statuses: number[] = [];
+    const client = new ChatApiClient(async (input, init) => {
+      const url = new URL(String(input), child.url);
+      url.searchParams.set("t", "fixture-only");
+      const response = await fetch(url, { ...init, headers: { ...init?.headers as Record<string, string>, origin: url.origin } });
+      statuses.push(response.status);
+      return response;
+    });
+    let browser = projectionFromSnapshot(await adapter.history("session"));
+    const texts = new Map<string, string>();
+    const errors: Array<string | null> = [];
+    const composer = new Composer({
+      selected: () => "session", read: () => browser, write: value => { browser = value; }, epoch: () => 0, cancelling: () => false,
+      declares: capability => capability !== "steering", commands: () => [], commandsAvailable: () => true, reloadCommands: async () => true,
+      agentId: () => "fake", refreshCommands: () => {}, configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
+      imageSupport: () => ({ supported: true }), refresh: async () => true,
+    }, client, { read: id => texts.get(id) ?? "", write: (id, text) => { texts.set(id, text); } }, {
+      changed: () => {}, error: message => { errors.push(message); }, note: () => {}, announce: () => {}, accepted: () => {}, heldByHold: () => {},
+    }, { create: () => "blob:preview", release: () => {}, id: () => "request-1" });
+    try {
+      composer.edit("Steer that the agent refuses");
+      await composer.submit();
+      expect(statuses).toEqual([409]);
+      expect(texts.get("session")).toBe("Steer that the agent refuses");
+      expect(browser.acceptedDrafts).toEqual([]);
+      expect(errors.findLast(message => message !== null)).toBe("Antigravity finished its turn before the steer was sent. Draft restored.");
+      expect(adapter.projectionForTests("session").items().filter(item => item.type === "user_message")).toEqual([]);
+    } finally { composer.dispose(); child.stop(true); await adapter.dispose(); }
+  });
+
+  test("an unknown admission is retained by its receipt and never resent", async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let calls = 0;
+      provider.prompt = () => { calls++; return new Promise(() => undefined); };
+      await expect(steer("r-s", "maybe delivered")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      await expect(steer("r-s", "maybe delivered")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      expect(calls).toBe(1);
+      expect(await userRows()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const order of ["acceptance before the provider's row", "provider's row before the acceptance"] as const) test(`a late acceptance ties the request to its message without resending (${order})`, async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let calls = 0;
+      let accept!: (value: { messageId: string; createdAt: number }) => void;
+      provider.prompt = () => { calls++; return new Promise(resolve => { accept = resolve; }); };
+      await expect(steer("r-late", "late steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      // The submitting client holds an unconfirmed draft for the request.
+      let browser = addAcceptedDraft(projectionFromSnapshot(await adapter.history("session")), { requestId: "r-late", messageId: "pending:r-late", text: "late steer", unconfirmed: true });
+      const { events } = await adapter.subscribe("session", { cursor: browser.cursor });
+      const row = { id: "message:native-late", type: "user_message" as const, createdAt: 7, text: "late steer" };
+      const publishRow = async () => {
+        provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "upsert", item: row }], outcome: "handled", eventType: "update" } });
+        await liveEventsApplied(adapter, provider);
+      };
+      if (order === "provider's row before the acceptance") await publishRow();
+      accept({ messageId: "native-late", createdAt: 7 });
+      await waitUntil(() => adapter.projectionForTests("session").get("message:native-late")?.type === "user_message"
+        && (adapter.projectionForTests("session").get("message:native-late") as { requestId?: string }).requestId === "r-late");
+      if (order === "acceptance before the provider's row") await publishRow();
+      expect(await userRows()).toEqual([expect.objectContaining({ id: "message:native-late", createdAt: 7, requestId: "r-late" })]);
+      const iterator = events[Symbol.asyncIterator]();
+      const deadline = Date.now() + 2_000;
+      while (browser.acceptedDrafts.length > 0 && Date.now() < deadline) {
+        const next = await Promise.race([iterator.next(), Bun.sleep(100).then(() => null)]);
+        if (!next || next.done) continue;
+        browser = applyChatEvent(browser, next.value).projection;
+      }
+      expect(browser.acceptedDrafts).toEqual([]);
+      expect(browser.items.filter(item => item.type === "user_message")).toEqual([expect.objectContaining({ id: "message:native-late", requestId: "r-late" })]);
+      expect(calls).toBe(1);
+      events.cancel();
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const late of ["refused confirmation", "rejection"] as const) test(`a late admission settles like a timely one: a ${late} records no row, only the refusal`, async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let admit!: (value: { messageId: string; createdAt: number; confirmation: Promise<SteerConfirmation> }) => void, fail!: (error: Error) => void;
+      let refuse!: (value: SteerConfirmation) => void;
+      provider.prompt = () => new Promise((resolve, reject) => { admit = resolve; fail = reject; });
+      await expect(steer("r-late", "late steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      if (late === "rejection") fail(new Error("agy did not take it"));
+      else {
+        // Sent late, and refused later still.
+        admit({ messageId: "native-late", createdAt: 7, confirmation: new Promise(resolve => { refuse = resolve; }) });
+        await Bun.sleep(0);
+        expect(await userRows()).toEqual([]);
+        refuse({ outcome: "refused", reason: "agy did not take it" });
+      }
+      await waitUntil(() => adapter.projectionForTests("session").get("notice:steer-refused:r-late") !== undefined);
+      expect(adapter.projectionForTests("session").get("notice:steer-refused:r-late")).toEqual(expect.objectContaining({ code: "steer-refused", message: "agy did not take it" }));
+      expect(await userRows()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a refusal settled while no one watched comes back in the conversation's snapshot", async () => {
+    const { adapter, provider, steer } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let refuse!: (confirmation: SteerConfirmation) => void;
+      provider.prompt = async () => ({ messageId: "provisional", createdAt: 5, confirmation: new Promise<SteerConfirmation>(resolve => { refuse = resolve; }) });
+      expect(await steer("r-away", "refused while away")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      refuse({ outcome: "refused", reason: "agy did not take it" });
+      await Bun.sleep(0);
+      // The browser reopens the conversation from a snapshot, not the live stream.
+      const snapshot = await adapter.history("session");
+      expect(snapshot.items.find(item => item.id === "notice:steer-refused:r-away")).toEqual(expect.objectContaining({ code: "steer-refused", message: "agy did not take it" }));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("commands queue, an idle backlog holds, and an idle conversation dispatches whatever the delivery", async () => {
+    const { adapter, provider, steer } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      expect(await steer("r-c", "/review focus")).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(provider.prompts).toEqual([]);
+      await adapter.abort("session", "stop");
+      // Dormant after Stop: a steer joins the back of the held queue rather
+      // than overtaking it, because there is no running turn to join.
+      expect(await steer("r-d", "after stop")).toEqual(expect.objectContaining({ delivery: "queue" }));
+      expect(provider.prompts.every(prompt => prompt.delivery === "queue")).toBe(true);
+      const idle = immediate();
+      try {
+        expect(await idle.steer("r-i", "go")).toEqual(expect.objectContaining({ pending: false, delivery: "queue" }));
+        expect(idle.provider.prompts).toEqual([expect.objectContaining({ text: "go", delivery: "queue" })]);
+      } finally { await idle.adapter.dispose(); }
+    } finally { await adapter.dispose(); }
+  });
+
+  test("an explicit steer with attachments is held in the queue, not steered", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-immediate-attachment-"));
+    const image = path.join(directory, "pixel.png");
+    await Bun.write(image, new Uint8Array([137, 80, 78, 71]));
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now", "attachments"] };
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1,
+      resolveAttachment: async id => id === "att-1" ? { id, mimeType: "image/png", sizeBytes: 4, absolutePath: image } as never : null });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const accepted = await adapter.prompt("session", "r-image", "Look at this", undefined, undefined, undefined, [{ id: "att-1", name: "pixel.png", mimeType: "image/png" }], "steer");
+      expect(accepted).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(provider.prompts).toEqual([]);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.delivery, entry.attachments?.length])).toEqual([["Look at this", "queue", 1]]);
+    } finally { await adapter.dispose(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("a carried turn sends no completion notification and keeps the workspace working until it ends", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now"] };
+    provider.sessions = [fixtureSession("session")];
+    const notifications: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => notifications.push(event) });
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    const turn = (status: "running" | "completed", phase: "started" | "completed") => provider.eventQueue.push({ normalized: {
+      conversationId: "session", updates: [{ kind: "status", status }], outcome: "handled", eventType: `turn.${phase}`,
+      notificationTurns: [{ sourceId: "turn-1", phase, createdAt: Date.now() }],
+    } });
+    const completions = () => notifications.filter(event => event.type === "notification" && event.notification.kind === "turn-completed");
+    try {
+      await adapter.history("session");
+      turn("running", "started");
+      await liveEventsApplied(adapter, provider);
+      expect(adapter.activity().working).toBe(true);
+      const held = await adapter.prompt("session", "r-q", "after the turn", undefined, undefined, undefined, undefined, "queue");
+      await adapter.prompt("session", "r-s", "into the turn", undefined, undefined, undefined, undefined, "steer");
+      // The provider reports nothing for the earlier prompt's end, so the
+      // steered turn is still the same running turn once every event the
+      // provider sent has been applied.
+      await liveEventsApplied(adapter, provider);
+      expect(completions()).toEqual([]);
+      expect(adapter.activity().working).toBe(true);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => entry.id)).toEqual([held.messageId]);
+      turn("completed", "completed");
+      await waitUntil(() => completions().length === 1);
+      await waitUntil(() => provider.prompts.length === 2);
+      expect(provider.prompts.map(prompt => [prompt.text, prompt.delivery])).toEqual([["into the turn", "steer"], ["after the turn", "queue"]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("Stop goes ahead of a steer the agent has not answered, and the steer then settles", async () => {
+    const { adapter, provider, steer, queue } = immediate({ steerAdmissionTimeoutMs: 10_000 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      // Both prompts are pending with the agent: the turn's own, and the
+      // steer, which the agent answers only when the turn ends.
+      let settleSteer!: (outcome: "refused" | "unknown") => void;
+      let steerSent!: () => void;
+      const sent = new Promise<void>(resolve => { steerSent = resolve; });
+      provider.prompt = () => new Promise((_, reject) => {
+        settleSteer = outcome => reject(outcome === "unknown" ? new OperationOutcomeUnknownError() : new Error("agy did not take it"));
+        steerSent();
+      });
+      provider.interrupt = async sessionId => { provider.interrupts.push(sessionId); };
+      const held = await queue("r-q", "held");
+      const steering = steer("r-s", "into the turn");
+      void steering.catch(() => undefined);
+      await sent;
+      // Stop answers while the steer is still unanswered: it is not held
+      // behind the steer's admission (which would never settle here).
+      expect(await adapter.abort("session", "stop")).toEqual({ cancelled: true });
+      expect(provider.interrupts).toEqual(["session"]);
+      settleSteer("unknown");
+      await expect(steering).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      // Stop's queue pause still holds the held message.
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.id, entry.paused])).toEqual([[held.messageId, true]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a steer the agent confirms later frees the conversation at once: follow-ups queue, a second steer is sent, and each settles", async () => {
+    const { adapter, provider, steer, queue, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const confirmations: Array<(confirmation: SteerConfirmation) => void> = [];
+      const accept = provider.prompt.bind(provider);
+      provider.prompt = async (sessionId, input) => {
+        const sent = await accept(sessionId, input);
+        if (input.delivery !== "steer") return sent;
+        return { ...sent, createdAt: 5, confirmation: new Promise<SteerConfirmation>(resolve => confirmations.push(resolve)) };
+      };
+      const first = await steer("r-1", "first steer");
+      expect(first).toEqual(expect.objectContaining({ pending: false, delivery: "steer", awaitingConfirmation: true }));
+      expect(await userRows()).toEqual([]);
+      // The lane is free: a follow-up queues, editable, and a second steer goes out.
+      const held = await queue("r-q", "after the turn");
+      expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.unconfirmed ?? false])).toEqual([["after the turn", false]]);
+      const second = await steer("r-2", "second steer");
+      expect(second).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      expect(provider.prompts.filter(prompt => prompt.delivery === "steer").map(prompt => prompt.text)).toEqual(["first steer", "second steer"]);
+      confirmations[0]!({ outcome: "accepted", messageId: first.messageId, createdAt: 5 });
+      confirmations[1]!({ outcome: "refused", reason: "agy did not take it" });
+      await waitUntil(() => adapter.projectionForTests("session").items().some(item => item.type === "notice"));
+      expect(await userRows()).toEqual([expect.objectContaining({ id: `message:${first.messageId}`, requestId: "r-1", text: "first steer" })]);
+      expect(adapter.projectionForTests("session").items().find(item => item.type === "notice")).toEqual(expect.objectContaining({ id: "notice:steer-refused:r-2", code: "steer-refused", message: "agy did not take it" }));
+      // A retry of the same request is the cached answer, never a resend.
+      expect(await steer("r-1", "first steer")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      expect(provider.prompts.filter(prompt => prompt.delivery === "steer")).toHaveLength(2);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("Send now keeps the rule for agents without steering", async () => {
+    const { adapter, queue } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-q", "held");
+      await expect(adapter.sendNow("session", held.messageId, "send-now")).rejects.toBeInstanceOf(SendNowUnavailableError);
+    } finally { await adapter.dispose(); }
   });
 });

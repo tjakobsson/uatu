@@ -6,8 +6,10 @@ import { ProviderTextReconciler } from "../../text-reconciler";
 import { ConversationProjection } from "../../adapter";
 import { parseConversationItem } from "../../validation";
 import { visualAdmissionIdentity } from "../../visual-identity";
-import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeCompletionAlias, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
+import { CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN_CONTINUES, isVisualTurnLive, type ChatStatusLiveness, type ChatTextSeal } from "../../turn-liveness";
+import { OPENCODE_COMPLETION_ALIAS, type OpenCodeCompletionAlias } from "../normalization-types";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
+import { livenessChecker, livenessConformance } from "../../../../tests/fixtures/liveness-conformance";
 
 test("native and classic text events plus both history shapes retain the parent admission identity outside JSON", () => {
   const messageId = "native:api:id";
@@ -42,8 +44,8 @@ describe("OpenCode provider completion timestamps", () => {
     const ordinary = normalizeProviderEvent(raw).updates[0]!;
     const witnessed = normalizeProviderEvent({ ...raw, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!;
     expect(JSON.stringify(witnessed)).toBe(JSON.stringify(ordinary));
-    expect(({ ...witnessed } as typeof witnessed & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBe(true);
-    expect((ordinary as typeof ordinary & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBeUndefined();
+    expect(({ ...witnessed } as typeof witnessed & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBe(true);
+    expect((ordinary as typeof ordinary & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
     expect((raw as typeof raw & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBeUndefined();
   });
   test("native step failure stays live for capture, but classic session.error and idle remain terminal", () => {
@@ -51,17 +53,17 @@ describe("OpenCode provider completion timestamps", () => {
       const normalized = normalizeProviderEvent({ type, properties: { sessionID: "s", timestamp: 1, assistantMessageID: "m", error: { message: "Rate limited" } } });
       const update = normalized.updates.find(update => update.kind === "status");
       if (update?.kind !== "status") throw new Error("expected native status");
-      return update as typeof update & OpenCodeStepStatus;
+      return update as typeof update & ChatStatusLiveness;
     };
     const step = status("session.next.step.failed");
     expect(JSON.parse(JSON.stringify(step))).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
-    expect(step[OPENCODE_STEP_LIVE]).toBe(true);
+    expect(step[CHAT_TURN_CONTINUES]).toBe(true);
     expect(isVisualTurnLive(step)).toBe(true);
     const error = status("session.error");
     expect(error).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
     expect(isVisualTurnLive(error)).toBe(false);
     expect(isVisualTurnLive(status("session.idle"))).toBe(false);
-    expect(step[OPENCODE_STEP_LIVE]).toBe(true); // Later ends never mutate the earlier frame.
+    expect(step[CHAT_TURN_CONTINUES]).toBe(true); // Later ends never mutate the earlier frame.
   });
   test.each([
     { name: "ordinary reply", initial: "Answer", final: "Answer completed" },
@@ -80,7 +82,7 @@ describe("OpenCode provider completion timestamps", () => {
     expect(completed[0]).toMatchObject({ type: "item.upsert", generation: "g", conversationId: "s", sequence: 3, item: { id: "part:p", createdAt: 10, markdown: final } });
     const item = projection.items()[0]!;
     expect(item).not.toHaveProperty("completedAt");
-    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((item as typeof item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     expect(visualAdmissionIdentity(item)).toBe("opencode:message:m");
     expect(projection.items().map(item => [item.id, item.createdAt])).toEqual([["part:p", 10], ["message:steer", 20]]);
     const applied = applyChatEvent(projectionFromSnapshot(before), completed[0]!);
@@ -101,7 +103,7 @@ describe("OpenCode provider completion timestamps", () => {
     const update = normalized.updates[0]!;
     expect(update).toMatchObject({ kind: "upsert", item: { id: "part:p", createdAt: expected, markdown: "Final" } });
     if (update.kind !== "upsert") throw new Error("expected native completion upsert");
-    expect((update.item as typeof update.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((update.item as typeof update.item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     expect(update.item).not.toHaveProperty("completedAt");
   });
   test("a history-loaded row uses creation explicitly attached to its first part frame without requiring an initial text stream", () => {
@@ -138,7 +140,7 @@ describe("OpenCode provider completion timestamps", () => {
       expect(ended).toHaveLength(1);
       expect(ended[0]).toMatchObject({ type: "item.upsert", item: { id: "part:p", createdAt: 10, markdown: part.text } });
       const item = projection.items()[0]!;
-      expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+      expect((item as typeof item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
       expect(item).not.toHaveProperty("completedAt");
       expect(visualAdmissionIdentity(item)).toBe("opencode:message:m");
       const json = JSON.parse(JSON.stringify(item));
@@ -147,7 +149,7 @@ describe("OpenCode provider completion timestamps", () => {
       for (const completed of [undefined, 40]) {
         const [stored] = normalizeProviderMessage({ info: { id: "m", role: "assistant", time: { created: 10, ...(completed === undefined ? {} : { completed }) } }, parts: [{ ...part, time: { end } }] });
         expect(stored?.type).toBe("assistant_message");
-        expect((stored as typeof stored & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+        expect((stored as typeof stored & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
         if (completed === undefined) expect(stored).not.toHaveProperty("completedAt");
         else expect(stored).toHaveProperty("completedAt", completed);
       }
@@ -160,7 +162,7 @@ describe("OpenCode provider completion timestamps", () => {
       const update = normalized.updates[0]!;
       expect(update).toMatchObject({ kind: "text", mode: "cumulative", text: "reference" });
       if (update.kind !== "text" || !update.item) throw new Error("expected provisional cumulative text");
-      expect((update.item as typeof update.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+      expect((update.item as typeof update.item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBeUndefined();
       expect(update.item).not.toHaveProperty("completedAt");
     }
   });
@@ -175,8 +177,8 @@ describe("OpenCode provider completion timestamps", () => {
     expect(ended[0]).toMatchObject({ type: "item.upsert", item: { id: "part:p", createdAt: 1, markdown: "[shot]: old.png\n\n![shot]" } });
     const item = projection.items()[0]!;
     expect(item).not.toHaveProperty("completedAt");
-    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
-    expect(JSON.stringify(item)).not.toContain("opencode-text-end");
+    expect((item as typeof item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
+    expect(JSON.parse(JSON.stringify(item))).toEqual({ id: "part:p", type: "assistant_message", createdAt: 1, markdown: "[shot]: old.png\n\n![shot]" }); // The text seal stays off the wire.
     expect(emit("delta", 4, { delta: "![shot]" })).toEqual([]); // Covered trailing delta remains deduplicated.
   });
   test("classic live parts and history preserve each tool's terminal time, not the message completion", () => {
@@ -766,7 +768,7 @@ describe("token usage", () => {
     expect(part).toMatchObject({ id: "part:prt", markdown: final, createdAt: 10 });
     expect(part).not.toHaveProperty("usage");
     expect(part).not.toHaveProperty("completedAt");
-    expect((part as typeof part & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((part as typeof part & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     const applied = applyChatEvent(projectionFromSnapshot(before), completed[0]!);
     expect(applied.outcome).toBe("applied");
     expect(prependSnapshot(applied.projection, snapshot()).items.map(item => [item.id, item.createdAt])).toEqual(ordered);
@@ -1406,4 +1408,33 @@ describe("OpenCode 1.x login failures", () => {
       expect(notice?.kind === "upsert" && notice.item.type === "notice" && notice.item.code).toBeFalsy();
     }
   });
+});
+
+// D1 liveness contract: OpenCode 1.x carries no turn tokens, and a status is a
+// repeat (the provider marks only a witnessed session.idle) or a continuation
+// (a retryable failed step), never both.
+test("OpenCode 1.x normalization conforms to the liveness contract", () => {
+  const memory = createProviderEventMemory(), checker = livenessChecker();
+  const event = (type: string, properties: Record<string, unknown> = {}, alias = false) =>
+    checker.observe(normalizeProviderEvent({ type, properties: { sessionID: "s", timestamp: 1, assistantMessageID: "m", ...properties }, ...(alias ? { [OPENCODE_COMPLETION_ALIAS]: true } : {}) }, memory).updates);
+  const updates = [
+    ...event("session.status", { status: { type: "busy" } }),
+    ...event("message.part.updated", { part: { id: "p", messageID: "m", type: "text", text: "![shot](s.png)" } }),
+    ...event("message.part.updated", { part: { id: "p", messageID: "m", type: "text", text: "![shot](s.png)", time: { end: 2 } } }),
+    ...event("session.next.text.started", { textID: "t", text: "" }),
+    ...event("session.next.text.delta", { textID: "t", delta: "Hi" }),
+    ...event("session.next.text.ended", { textID: "t", text: "Hi" }),
+    ...event("session.next.step.failed", { error: { message: "Rate limited" } }),
+    ...event("session.status", { status: { type: "retry", attempt: 1, message: "Retrying", next: 2 } }),
+    ...event("session.status", { status: { type: "idle" } }),
+    ...event("session.idle", {}, true),
+    ...event("session.idle"),
+    ...event("session.error", { error: { name: "UnknownError", data: { message: "Boom" } } }),
+  ];
+  const history = normalizeProviderMessage({ info: { id: "api", role: "assistant", time: { created: 1, completed: 2 } }, parts: [{ id: "h", type: "text", text: "![shot](s.png)" }] });
+  expect(updates.length).toBeGreaterThan(0);
+  expect(checker.result()).toMatchObject({ tokens: 0, both: 0, repeatOffCompleted: 0, continuesOffFailed: 0, textFactChanges: [], tokenChanges: [] });
+  expect(checker.result().repeats).toBeGreaterThan(0);
+  expect(checker.result().continuations).toBeGreaterThan(0);
+  expect(livenessConformance(history)).toMatchObject({ tokens: 0 });
 });

@@ -7,7 +7,7 @@ import { NotificationFeed } from "../../src/chat/notification-feed";
 import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteeringUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
-import { ReversibleHistoryTargetError } from "../../src/chat/provider";
+import { AgentLoginRequiredError, ReversibleHistoryTargetError } from "../../src/chat/provider";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import { isLiveConversationStatus, type AgentUsageReport, type ChatAccountChange, type ChatLoginState, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult } from "../../src/chat/types";
@@ -48,9 +48,14 @@ type FakeE2EChatServiceOptions = {
   // The persistent-approval sentence this fake's permission cards carry —
   // per agent, exactly as the real descriptors declare their own.
   permissionScopeNote?: string;
+  // The agent's own login command, for its login-required refusals.
+  loginCommand?: string;
   // Capabilities this fake declares beyond the shared default set (a
   // Claude-shaped fixture declares typed model ids; the OpenCode one does not).
   extraCapabilities?: ChatCapability[];
+  // The whole declaration instead of the default set, for a fixture shaped
+  // like an agent that lacks some of the defaults (Antigravity).
+  capabilities?: ChatCapability[];
 };
 
 export type UsageReadOutcome = {
@@ -68,6 +73,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private generation = "e2e-chat-1";
   private nextId = 1;
   private readonly conversations = new Map<string, ConversationSummary>();
+  // Immediate steers sent and not yet confirmed, per conversation.
+  private readonly awaitingSteers = new Map<string, ConversationItem[]>();
   private readonly items = new Map<string, Map<string, ConversationItem>>();
   private readonly authoritativeItems = new Map<string, ConversationItem[]>();
   private readonly revertBoundaries = new Map<string, string>();
@@ -116,6 +123,11 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  private refuseCreationForLogin = false;
+
+  refuseCreation(refuse: boolean): void {
+    this.refuseCreationForLogin = refuse;
+  }
   private failNextReversible: "undo" | "redo" | null = null;
   private failNextHistory = false;
   private failNextOlderHistory = false;
@@ -155,7 +167,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   private defaultCapabilities(): ChatCapability[] {
-    return [...FakeE2EChatService.DEFAULT_CAPABILITIES, ...(this.options.extraCapabilities ?? [])];
+    return [...this.options.capabilities ?? FakeE2EChatService.DEFAULT_CAPABILITIES, ...(this.options.extraCapabilities ?? [])];
   }
 
   private static defaultModels(): ChatModel[] {
@@ -348,6 +360,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
+    // An agent that owns its login refuses creation while it has none.
+    if (this.refuseCreationForLogin) throw new AgentLoginRequiredError(`${this.agentName} is not logged in. Run ${this.options.loginCommand ?? "its login command"} where UatuCode runs and sign in.`);
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
@@ -407,7 +421,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.attachmentStore.resolve(id);
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], _delivery?: MessageDelivery): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery): Promise<{
     messageId: string;
     pending: boolean;
     delivery: MessageDelivery;
@@ -421,6 +435,21 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { messageId: string; pending: boolean; delivery: MessageDelivery; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
+    // An `immediate-steering` agent takes a busy steer into the running turn
+    // as the adapter reports it for Antigravity: answered at once as sent,
+    // with no dock entry and no configuration change, and confirmed with its
+    // row only when the turn carrying it completes (add-antigravity-chat D9).
+    if (delivery === "steer" && this.capabilities.includes("immediate-steering") && !this.capabilities.includes("steering")
+      && (conversation.status === "running" || conversation.status === "sending")
+      && !(text.startsWith("/") && (await this.commands()).some(command => text.slice(1).split(/\s/, 1)[0] === command.name))) {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      const messageId = `message-${this.nextId++}`;
+      const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, requestId, ...(attachments?.length ? { attachments } : {}) };
+      this.awaitingSteers.set(id, [...this.awaitingSteers.get(id) ?? [], item]);
+      const result = { messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(id) ?? {}, awaitingConfirmation: true as const };
+      this.receipts.set(key, result);
+      return result;
+    }
     const previousConfiguration = this.configurations.get(id) ?? {};
     const configuration: ConversationConfiguration = {
       ...previousConfiguration,
@@ -801,6 +830,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   reset(): void {
+    this.awaitingSteers.clear();
+    this.refuseCreationForLogin = false;
     this.login = undefined;
     this.accountsRevision = 0;
     this.catalogRevision = 0;
@@ -1275,6 +1306,17 @@ export class FakeE2EChatService implements WorkspaceChatService {
       this.notificationFeed.publish({ type: "notification", notification: {
         id: JSON.stringify([id, "turn-completed", sourceId]), conversationId: id, sourceId, kind: "turn-completed", createdAt: Date.now(),
       } });
+    }
+    // The turn's end confirms the steers it carried; one that did not
+    // complete leaves them unconfirmed.
+    const awaiting = this.awaitingSteers.get(id);
+    if (awaiting && !isLiveConversationStatus(status)) {
+      this.awaitingSteers.delete(id);
+      if (status === "completed") for (const item of awaiting) {
+        this.authoritativeItems.get(id)!.push(item);
+        this.items.get(id)!.set(item.id, item);
+        this.replay.get(id)!.publish({ type: "item.upsert", item });
+      }
     }
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
     this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });
