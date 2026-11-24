@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readdirSync } from "node:fs";
+import path from "node:path";
 
 import { AccountOperationError, AttemptExpiredError, type AccountAdapter, type AccountAdapterStatus, type StartedLogin } from "./agent-account-adapter";
 import { RedirectRefusedError } from "./agent-account-redirect";
 import type { AccountRuntime, AccountRuntimeStart } from "./agent-account-runtime";
-import { AgentAccountService, AgentNotReadyError, AttemptNotFoundError, scrubSecrets, type Timers } from "./agent-account-service";
+import { ACCOUNT_AGENTS, AgentAccountService, AgentNotReadyError, AttemptNotFoundError, scrubSecrets, type Timers } from "./agent-account-service";
 import type { ChatAccountChange } from "../chat/types";
 import type { AccountAgentId } from "./agent-account-types";
 
@@ -142,6 +144,38 @@ function harness(options: { claude?: () => AccountRuntimeStart; fetch?: (input: 
   });
   return { clock, adapters, runtimes, changed, changes, service, setNotify: (next: typeof notify) => { notify = next; } };
 }
+
+describe("account agents", () => {
+  test("list OpenCode and Claude Code, each with its own login command, before and after a read", async () => {
+    const { service } = harness({ claude: () => ({ state: "unavailable", message: "Claude Code is not installed or is not available on PATH." }) });
+    const listed = (snapshot: { agents: Array<{ agent: string; name: string; loginCommand: string }> }) =>
+      snapshot.agents.map(agent => [agent.agent, agent.name, agent.loginCommand]);
+    const expected = [["opencode", "OpenCode", "opencode auth login"], ["claude", "Claude Code", "claude auth login"]];
+    expect(listed(service.snapshot())).toEqual(expected);
+    expect(listed(await service.read())).toEqual(expected);
+  });
+
+  test("are exactly the agents whose descriptor declares a Hub-managed login", async () => {
+    // Every agent stack under src/chat/ has a descriptor.ts, the one cli.ts
+    // registers: a new agent declaring a Hub-managed login must get an
+    // Agent accounts card, and every card must be such an agent's.
+    const chat = path.join(import.meta.dir, "..", "chat");
+    const descriptors: Array<{ id: string; name: string; login: { command: string; hubManaged: boolean } }> = [];
+    for (const entry of readdirSync(chat, { withFileTypes: true })) {
+      const file = path.join(chat, entry.name, "descriptor.ts");
+      if (!entry.isDirectory() || !existsSync(file)) continue;
+      for (const value of Object.values(await import(file) as Record<string, unknown>)) {
+        const candidate = value as { id?: unknown; name?: unknown; login?: { command?: unknown; hubManaged?: unknown } };
+        if (typeof candidate?.id === "string" && typeof candidate.name === "string" && typeof candidate.login?.command === "string") descriptors.push(candidate as typeof descriptors[number]);
+      }
+    }
+    expect(descriptors.length).toBeGreaterThanOrEqual(2);
+    const hubManaged = descriptors.filter(descriptor => descriptor.login.hubManaged === true)
+      .map(descriptor => [descriptor.id, descriptor.name, descriptor.login.command]);
+    const cards = ACCOUNT_AGENTS.map(agent => [agent.agent, agent.name, agent.loginCommand]);
+    expect([...cards].sort()).toEqual([...hubManaged].sort());
+  });
+});
 
 describe("account runtimes", () => {
   test("start on the first read, report each agent, and keep one runtime per agent", async () => {

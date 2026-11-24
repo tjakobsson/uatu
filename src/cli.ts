@@ -18,8 +18,12 @@ import index from "./index.html";
 import { parseCommand, serveRemovedText, usageText, versionText, type WatchOptions } from "./cli/parse";
 import { LazyChatService } from "./chat/service";
 import { MultiAgentChatService } from "./chat/agents";
+import { CLAUDE_CODE_AGENT } from "./chat/claude/descriptor";
 import { ClaudeProvider } from "./chat/claude/provider";
 import { ClaudeRuntime } from "./chat/claude/runtime";
+import { openCodeAgentRuntime } from "./chat/opencode/agent-runtime";
+import { OPENCODE_AGENT } from "./chat/opencode/descriptor";
+import { pathAgentRuntime } from "./chat/path-agent-runtime";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
 import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
@@ -210,30 +214,28 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     // spawned loopback server, Claude Code as probe-only with
     // per-conversation SDK sessions. Registration order is the picker
     // order and the server default.
-    const claudeRuntime = new ClaudeRuntime({ workspacePath: chatRoot });
     chatService = new MultiAgentChatService({
       workspacePath: chatRoot,
       agents: [
         {
-          descriptor: { id: "opencode", name: "OpenCode" },
-          service: new LazyChatService({ workspacePath: chatRoot, metrics }),
-        },
-        {
-          descriptor: { id: "claude", name: "Claude Code" },
+          descriptor: OPENCODE_AGENT,
           service: new LazyChatService({
             workspacePath: chatRoot,
             metrics,
-            agentRuntime: {
-              status: () => Promise.resolve(claudeRuntime.peekStatus()),
-              ensure: () => claudeRuntime.ensure(),
-              restart: () => claudeRuntime.restart(),
-              dispose: async () => claudeRuntime.dispose(),
-              createProvider: () => {
-                const executable = claudeRuntime.executablePath();
-                if (!executable) return null;
-                return new ClaudeProvider({ workspacePath: chatRoot, executable });
-              },
-            },
+            agentName: OPENCODE_AGENT.name,
+            runtime: openCodeAgentRuntime({ workspacePath: chatRoot }),
+          }),
+        },
+        {
+          descriptor: CLAUDE_CODE_AGENT,
+          service: new LazyChatService({
+            workspacePath: chatRoot,
+            metrics,
+            agentName: CLAUDE_CODE_AGENT.name,
+            runtime: pathAgentRuntime(
+              new ClaudeRuntime({ workspacePath: chatRoot }),
+              executable => new ClaudeProvider({ workspacePath: chatRoot, executable }),
+            ),
           }),
         },
       ],

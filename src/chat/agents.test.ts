@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,18 +7,25 @@ import path from "node:path";
 import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId, UnknownAgentError, type RegisteredChatAgent } from "./agents";
 import { ConversationProjection } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
-import { CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History, prepareStoredMessage, storedExecutionLiveness } from "./opencode/v2/normalization";
-import { OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "./opencode/normalization-types";
+import { OPENCODE_COMPLETION_ALIAS } from "./opencode/normalization-types";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, decodeReplayCursor, encodeReplayCursor, ReplaySubscription } from "./replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
+import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN, CHAT_TURN_CONTINUES, executionEvidence, executionLive, isVisualTurnLive, type ChatStatusLiveness, type ChatTextSeal, type ChatTurnIdentity } from "./turn-liveness";
+import { CHAT_TEXT_BLOCKS, nativeVisualMessageIdentity, visualCaptureIdentity } from "./visual-identity";
+import type { NormalizedProviderUpdate } from "./provider";
 import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
 import type { AssistantMessageItem, ChatActivity, ChatAvailability, ChatEvent, ConversationItem, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
+import { CLAUDE_CODE_AGENT } from "./claude/descriptor";
+
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
 
 test.each([
   { entry: "history", completion: "message" }, { entry: "history", completion: "conversation" },
@@ -49,7 +57,7 @@ test.each([
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { expect(source).toBe("later.png"); reads++; if (!available) throw new VisualReadError(true); return png; });
-    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: provider }] });
     services.push(service);
     return service;
   };
@@ -116,7 +124,7 @@ test.each(["completedAt", "turn_status"] as const)("historical visuals stay term
   let available = false;
   const store = new VisualStore("/workspace", directory);
   store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]); });
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "test", name: "Test" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "test", name: "Test", login: TEST_LOGIN }, service: provider }] });
   try {
     const first = (await service.history("test:c")).items[0] as AssistantMessageItem;
     expect(first.visuals?.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
@@ -161,7 +169,7 @@ test.each([
       if (!available) throw new VisualReadError(true);
       return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
     });
-    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: provider }] });
     services.push(service);
     return service;
   };
@@ -215,7 +223,7 @@ async function visualSubscriptionHarness(agentId: string, initial: ConversationI
     if (!files.available) throw new VisualReadError(true);
     return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
   });
-  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: agentId, name: agentId }, service: provider as unknown as WorkspaceChatService }] });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: agentId, name: agentId, login: TEST_LOGIN }, service: provider as unknown as WorkspaceChatService }] });
   const subscription = await service.subscribe(`${agentId}:c`);
   return {
     replay, projection, current, provider, store, files, service, subscription, directory,
@@ -308,8 +316,8 @@ test.each([
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toMatchObject({ type: "item.upsert", generation: stopped[0]!.generation, sequence: stopped[0]!.sequence, item: { markdown, visuals: [{ status: missing ? "pending" : "ready" }] } });
     expect(answer().completedAt).toBeDefined();
-    expect((answer() as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
-    expect(claudeVisualIdentity(answer(), "offset:0")).toEqual({ messageId: "claude:text:native-definition:0", key: "offset:0" });
+    expect((answer() as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
+    expect(visualCaptureIdentity(answer(), "offset:0")).toEqual({ messageId: "claude:text:native-definition:0", key: "offset:0" });
     expect(h.projection.status).toBe("running");
     expect(reads).toBe(1);
     const firstVisuals = answer().visuals;
@@ -319,7 +327,7 @@ test.each([
       emit({ type: "assistant", uuid: "definition-durable", message: { id: "native-definition", content: [{ type: "text", text: markdown }] } });
       await deliveredBatch(h.replay, h.iterator, project);
       expect(answer().visuals).toEqual(firstVisuals);
-      expect(claudeVisualIdentity(answer(), "offset:0")).toEqual({ messageId: "claude:text:native-definition:0", key: "offset:0" });
+      expect(visualCaptureIdentity(answer(), "offset:0")).toEqual({ messageId: "claude:text:native-definition:0", key: "offset:0" });
       expect(reads).toBe(1); // Durable replacement shares the original block slot.
     }
     // Only after block completion does the next tool create/overwrite the file.
@@ -342,7 +350,7 @@ test.each([
     expect(reads).toBe(missing ? 2 : 1);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { reads++; throw new Error("immutable completed block capture must not reread the overwritten file"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:definition-durable") as AssistantMessageItem;
     expect(reloaded.visuals).toEqual(completed.visuals);
     expect((await restarted.resolveVisual(reloaded.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
@@ -390,8 +398,8 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
     const terminal = emit({ type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, ...(failed ? { errors: ["Turn failed after Write"] } : {}) })[0]!;
     if (opened.type !== "item.upsert") throw new Error("expected native opened text");
     expect(producerToken.completed).toBe(true);
-    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
-    expect(Object.isFrozen((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN])).toBe(true);
+    expect((opened.item as typeof opened.item & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
+    expect(Object.isFrozen((opened.item as typeof opened.item & ChatTurnIdentity)[CHAT_TURN])).toBe(true);
     expect(h.files.reads).toBe(0);
 
     let client = projectionFromSnapshot(h.subscription.snapshot);
@@ -441,7 +449,7 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
     h.provider.history = async () => ({ ...h.current(), items: nativeHistory });
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { h.files.reads++; throw new Error("immutable completed captures must not reread source files"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:durable") as AssistantMessageItem;
     expect(reloaded.markdown).toBe(markdown);
     expect(reloaded.visuals).toEqual(completed.visuals);
@@ -510,8 +518,8 @@ test.each([
     const terminal = emit({ type: "result", subtype: "success" })[0]!;
     if (opened.type !== "item.upsert") throw new Error("expected native open text item");
     expect(producerToken.completed).toBe(true);
-    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
-    expect(Object.isFrozen((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN])).toBe(true);
+    expect((opened.item as typeof opened.item & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
+    expect(Object.isFrozen((opened.item as typeof opened.item & ChatTurnIdentity)[CHAT_TURN])).toBe(true);
     release();
     const loaded = await loading;
     subscribed = loaded.events;
@@ -550,7 +558,7 @@ test.each([
     expect((completed.items.find(item => item.id === "message:old") as AssistantMessageItem).visuals).toEqual(initialOld.visuals);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { throw new Error("completed snapshots must not reread image files"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:durable-svg") as AssistantMessageItem;
     expect(reloaded.visuals).toEqual(finalSvg.visuals);
     expect(await restarted.resolveVisual(reloaded.visuals![0]!.id!)).toEqual(capturedSvg);
@@ -566,7 +574,7 @@ test.each(["status-error", "updated"] as const)("visual terminal refresh preserv
       : h.projection.conversationUpdate({ ...summary("c"), status: "completed", title: "Renamed by provider", updatedAt: 99 });
     const delivered = await deliveredBatch(h.replay, h.iterator);
     expect(delivered).toHaveLength(2);
-    expect(delivered[0]).toEqual({ ...original, conversationId: "test:c", ...(original.type === "conversation.updated" ? { conversation: { ...original.conversation, id: "test:c", agent: { id: "test", name: "test" } } } : {}) });
+    expect(delivered[0]).toEqual({ ...original, conversationId: "test:c", ...(original.type === "conversation.updated" ? { conversation: { ...original.conversation, id: "test:c", agent: { id: "test", name: "test", login: TEST_LOGIN } } } : {}) });
     expect(delivered[1]).toEqual({ generation: original.generation, sequence: original.sequence, conversationId: "test:c", type: "resync", reason: "conversation-rewritten" });
     const first = applyChatEvent(projectionFromSnapshot(h.subscription.snapshot), delivered[0]!);
     expect(first.outcome).toBe("applied");
@@ -619,7 +627,7 @@ test.each([false, true])("V2 reconnect text end keeps history order and captures
     expect((await h.service.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
     expect(reads).toBe(missing ? 2 : 1);
     const reloadedStore = new VisualStore("/workspace", h.directory); reloadedStore.setReader(async () => { throw new Error("must not reread overwritten bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = await restarted.history("opencode:c");
     expect((reloaded.items.find(item => item.id === captured.id) as AssistantMessageItem).visuals).toEqual(final.visuals);
     expect((await restarted.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
@@ -662,8 +670,8 @@ test.each(["history", "subscribe"] as const)("%s freezes all OpenCode execution 
     await reading;
     const initial = h.projection.get("part:last:text:0")!;
     for (const update of normalize({ id: "actual-end", type: "session.execution.succeeded", created: 10, location: { directory: "/workspace" }, data: { sessionID: "c" } }, memory).updates) h.projection.apply(update);
-    expect((h.projection.get(initial.id) as typeof initial & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(false);
-    expect((initial as typeof initial & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    expect(executionLive(h.projection.get(initial.id)!)).toBe(false);
+    expect(executionLive(initial)).toBe(true);
     release();
     const loaded = await loading; attached = loaded.events;
     expect(loaded.snapshot.cursor).toBe(boundary);
@@ -711,7 +719,7 @@ test("queued native step failure stays capture-live even when the provider has a
     emit("session.retry.scheduled", { message: "Retrying" });
     const terminal = emit("session.execution.succeeded", {}).find(event => event.type === "conversation.status")!;
     expect(h.projection.status).toBe("completed");
-    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect((failed as typeof failed & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
     let client = projectionFromSnapshot(h.subscription.snapshot);
     const received = await deliveredBatch(h.replay, h.iterator, event => {
       const applied = applyChatEvent(client, event);
@@ -777,7 +785,7 @@ test.each(["result", "updated", "footer"] as const)("paged-in Claude pending row
       client = applied.projection;
     });
     expect(delivered).toHaveLength(2);
-    expect(delivered[0]).toEqual({ ...terminal!, conversationId: "claude:c", ...(terminal?.type === "conversation.updated" ? { conversation: { ...terminal.conversation, id: "claude:c", agent: { id: "claude", name: "claude" } } } : {}) });
+    expect(delivered[0]).toEqual({ ...terminal!, conversationId: "claude:c", ...(terminal?.type === "conversation.updated" ? { conversation: { ...terminal.conversation, id: "claude:c", agent: { id: "claude", name: "claude", login: TEST_LOGIN } } } : {}) });
     expect(delivered[1]).toEqual({ generation: terminal!.generation, sequence: terminal!.sequence, conversationId: "claude:c", type: "resync", reason: "conversation-rewritten" });
     expect((await secondIterator.next()).value).toEqual(delivered[0]);
     expect((await secondIterator.next()).value).toEqual(delivered[1]);
@@ -877,7 +885,7 @@ test.each(["during-enrichment", "earlier-history", "before-native-handoff", "pag
     expect((await h.service.resolveVisual((client.snapshot.items[0] as AssistantMessageItem).visuals![0]!.id!))?.bytes).toEqual(seedBytes);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { throw new Error("sealed visuals must not be reread on reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude", login: TEST_LOGIN }, service: h.provider as unknown as WorkspaceChatService }] });
     const reload = (await restarted.history("claude:c", { cursor: "older" })).items[0] as AssistantMessageItem;
     expect(reload.visuals).toEqual(ready.visuals);
     expect((await restarted.resolveVisual(reload.visuals![0]!.id!))?.bytes).toEqual(pageBytes);
@@ -1397,7 +1405,7 @@ test.each([false, true])("streamed OpenCode shortcut-to-inline revision captures
     expect(await deliveredBatch(h.replay, h.iterator, project)).toEqual([{ ...terminal, conversationId: "opencode:c" }]);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async source => { reads.push(source); return oldBytes; });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
     expect(reloaded.markdown).toBe(markdown);
     expect(reloaded.visuals).toEqual(answer().visuals);
@@ -1449,7 +1457,7 @@ test.each([
     const delivered = await deliveredBatch(h.replay, h.iterator, project);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toMatchObject({ type: "item.upsert", sequence: ended[0]!.sequence, item: { markdown, createdAt: 1, visuals: [{ status: missing ? "pending" : "ready" }] } });
-    expect((answer() as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((answer() as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     expect(answer()).not.toHaveProperty("completedAt");
     expect(reads).toBe(1);
     h.projection.upsert({ id: "paused-tool", type: "tool", createdAt: 4, name: "Bash", status: "running" });
@@ -1469,7 +1477,7 @@ test.each([
     expect(reads).toBe(missing ? 2 : 1);
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async () => { reads++; throw new Error("completed source must remain immutable across reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
     expect(reloaded.visuals).toEqual(completed.visuals);
     expect((await restarted.resolveVisual(reloaded.visuals![0]!.id!))?.bytes).toEqual(png);
@@ -1515,7 +1523,7 @@ test.each([false, true])("classic OpenCode text-part end captures a final refere
     expect(ended).toHaveLength(1);
     expect(ended[0]).toMatchObject({ type: "item.upsert", generation: native[0]!.generation, sequence: native[0]!.sequence, item: { id: "part:classic-text", markdown, visuals: [{ status: missing ? "pending" : "ready" }] } });
     expect(answer()).not.toHaveProperty("completedAt");
-    expect((answer() as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((answer() as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     expect(h.projection.status).toBe("running");
     expect(reads).toEqual(["result.svg"]);
     const beforeTool = answer().visuals;
@@ -1548,7 +1556,7 @@ test.each([false, true])("classic OpenCode text-part end captures a final refere
     h.provider.history = async () => ({ ...h.current(), items: stored });
     const store = new VisualStore("/workspace", h.directory);
     store.setReader(async source => { reads.push(source); return new TextEncoder().encode("changed again"); });
-    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: h.provider as unknown as WorkspaceChatService }] });
     const reloaded = (await restarted.history("opencode:c")).items[0] as AssistantMessageItem;
     expect(reloaded.completedAt).toBe(6);
     expect(reloaded.markdown).toBe(markdown);
@@ -1662,7 +1670,7 @@ test("raw HTML image aliases pass the visual-capture precheck", async () => {
     history: async () => ({ ...snapshot("c"), items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: '<IMAGE src="result.png" alt="Result">' }] }),
     dispose: async () => {},
   } as unknown as WorkspaceChatService;
-  const service = new MultiAgentChatService({ workspacePath: workspace, visualStore: new VisualStore(workspace, path.join(directory, "state")), agents: [{ descriptor: { id: "test", name: "Test" }, service: provider }] });
+  const service = new MultiAgentChatService({ workspacePath: workspace, visualStore: new VisualStore(workspace, path.join(directory, "state")), agents: [{ descriptor: { id: "test", name: "Test", login: TEST_LOGIN }, service: provider }] });
   let reads = 0;
   service.configureVisualReader(async source => { expect(source).toBe("result.png"); reads++; return png; });
   try {
@@ -1697,7 +1705,7 @@ test("Claude native message admissions span text blocks, joined completion and f
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { reads.push(source); return png; });
-    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude Code" }, service: provider }] });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: CLAUDE_CODE_AGENT, service: provider }] });
   };
   const service = makeService();
   const firstText = Array.from({ length: 8 }, (_, i) => `![${i}](old-${i}.png)`).join("\n");
@@ -1778,7 +1786,7 @@ test.each([
   const makeService = () => {
     const store = new VisualStore("/workspace", directory);
     store.setReader(async source => { reads.push(source); return png; });
-    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service: provider }] });
   };
   const service = makeService();
   const messageId = "native:api:same";
@@ -1865,7 +1873,7 @@ test("Claude visual captures survive native stream completion and transcript his
     subscribe: async () => { const handoff = replay.handoff(cursor => ({ ...current(), cursor })); return { snapshot: handoff.snapshot, events: handoff.subscription }; },
     dispose: async () => {},
   } as unknown as WorkspaceChatService;
-  const agents: RegisteredChatAgent[] = [{ descriptor: { id: "claude", name: "Claude Code" }, service: provider }];
+  const agents: RegisteredChatAgent[] = [{ descriptor: CLAUDE_CODE_AGENT, service: provider }];
   let reads = 0;
   const reader = createWatchedVisualReader([{ kind: "dir", absolutePath: workspace } as never]);
   const makeService = () => {
@@ -1932,6 +1940,386 @@ test("Claude visual captures survive native stream completion and transcript his
     await restarted?.dispose();
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+// Characterization for generalize-chat-agent-seam D1: every capture-liveness
+// and text-seal decision shared code derives from a reply's annotations. The
+// trailing shortcut reference is the observable: it is read only once its text
+// is sealed or its reply is no longer live, and a missing file stays pending
+// only while the reply is live.
+describe("capture liveness and text-seal decisions from a reply's annotations", () => {
+  type Outcome = "live, text open" | "live, text sealed" | "terminal";
+  // The annotation builders are the only part of this table that names markers.
+  const textEnd = { [CHAT_TEXT_SEAL]: "ended" as const };
+  const execution = executionEvidence;
+  const completionSealsText = { [CHAT_TEXT_SEAL]: "completion" as const };
+  const textBlocks = (id: string) => ({ [CHAT_TEXT_BLOCKS]: [{ id: `claude:text:${id}:0`, offset: 0 }] });
+  const turn = (completed: boolean) => ({ [CHAT_TURN]: { completed, authority: "provisional" as const } });
+  const done = { completedAt: 2 };
+  const cases: Array<{ id: string; reply: object; newest: Outcome; behind: Outcome; ordered: Outcome }> = [
+    { id: "unannotated", reply: {}, newest: "live, text open", behind: "terminal", ordered: "live, text open" },
+    { id: "unannotated-completed", reply: done, newest: "terminal", behind: "terminal", ordered: "terminal" },
+    { id: "explicit-text-end", reply: textEnd, newest: "live, text sealed", behind: "terminal", ordered: "live, text sealed" },
+    { id: "explicit-text-end-completed", reply: { ...textEnd, ...done }, newest: "terminal", behind: "terminal", ordered: "terminal" },
+    { id: "execution-live-completed", reply: { ...execution(true), ...done }, newest: "live, text open", behind: "live, text open", ordered: "live, text open" },
+    { id: "execution-live-text-end-completed", reply: { ...execution(true), ...textEnd, ...done }, newest: "live, text sealed", behind: "live, text sealed", ordered: "live, text sealed" },
+    { id: "execution-ended", reply: execution(false), newest: "terminal", behind: "terminal", ordered: "terminal" },
+    { id: "completion-seals-text", reply: completionSealsText, newest: "live, text open", behind: "terminal", ordered: "live, text open" },
+    { id: "completion-seals-text-completed", reply: { ...completionSealsText, ...done }, newest: "live, text sealed", behind: "terminal", ordered: "live, text sealed" },
+    { id: "text-blocks-completed", reply: { ...textBlocks("text-blocks-completed"), ...completionSealsText, ...done }, newest: "live, text sealed", behind: "terminal", ordered: "live, text sealed" },
+    { id: "open-turn-completed", reply: { ...completionSealsText, ...turn(false), ...done }, newest: "live, text sealed", behind: "live, text sealed", ordered: "live, text sealed" },
+    { id: "open-turn-only-completed", reply: { ...turn(false), ...done }, newest: "live, text open", behind: "live, text open", ordered: "live, text open" },
+    // The asymmetry: a snapshot adopts the producer's turn end, while ordered
+    // projection waits for the in-order status and ignores it.
+    { id: "closed-turn-completed", reply: { ...completionSealsText, ...turn(true), ...done }, newest: "terminal", behind: "terminal", ordered: "live, text sealed" },
+    { id: "closed-turn", reply: { ...completionSealsText, ...turn(true) }, newest: "terminal", behind: "terminal", ordered: "live, text open" },
+    // Identity alone says nothing about liveness: neither a native message
+    // identity nor text blocks turn a completion time into a text-only seal.
+    { id: "native-identity-completed", reply: { ...nativeVisualMessageIdentity("any-agent", "native-identity-completed"), ...done }, newest: "terminal", behind: "terminal", ordered: "terminal" },
+    { id: "text-blocks-only-completed", reply: { ...textBlocks("text-blocks-only-completed"), ...done }, newest: "terminal", behind: "terminal", ordered: "terminal" },
+  ];
+  const replies = () => cases.map(({ id, reply }): AssistantMessageItem => ({ id, type: "assistant_message", createdAt: 1, markdown: `[shot]: ${id}.png\n\n![shot]`, ...reply }));
+  const footer: ConversationItem = { id: "turn:footer", type: "turn_status", createdAt: 3, status: "completed" };
+  const fixture = async () => {
+    const h = await visualSubscriptionHarness("any-agent");
+    const reads = new Set<string>();
+    h.store.setReader(async source => { reads.add(source); throw new VisualReadError(true); });
+    const outcome = (item: ConversationItem | undefined): Outcome => {
+      if (item?.type !== "assistant_message" || item.visuals?.length !== 1) throw new Error(`expected one visual on ${item?.id}`);
+      const status = item.visuals[0]!.status, read = reads.has(`${item.id}.png`);
+      if (status === "pending") return read ? "live, text sealed" : "live, text open";
+      if (status === "unavailable" && read) return "terminal";
+      throw new Error(`unexpected ${status} capture on ${item.id}`);
+    };
+    return { h, outcome };
+  };
+
+  test.each([
+    { page: "newest page", expected: "newest" }, { page: "page ending in a turn footer", expected: "behind" }, { page: "older page", expected: "behind" },
+  ] as const)("a running conversation's $page", async ({ page, expected }) => {
+    const { h, outcome } = await fixture();
+    h.provider.history = async () => ({ ...h.current(), items: page === "page ending in a turn footer" ? [...replies(), footer] : replies() });
+    try {
+      const snapshot = await h.service.history("any-agent:c", page === "older page" ? { cursor: "older" } : undefined);
+      expect(Object.fromEntries(cases.map(({ id }) => [id, outcome(snapshot.items.find(item => item.id === id))])))
+        .toEqual(Object.fromEntries(cases.map(entry => [entry.id, entry[expected]])));
+    } finally { await h.cleanup(); }
+  });
+
+  test("a settled conversation's snapshot is terminal whatever its replies carry", async () => {
+    const { h, outcome } = await fixture();
+    h.projection.status = "completed";
+    h.provider.history = async () => ({ ...h.current(), items: replies() });
+    try {
+      const snapshot = await h.service.history("any-agent:c");
+      expect(cases.map(({ id }) => outcome(snapshot.items.find(item => item.id === id)))).toEqual(cases.map(() => "terminal"));
+    } finally { await h.cleanup(); }
+  });
+
+  test("ordered upserts while the conversation runs", async () => {
+    const { h, outcome } = await fixture();
+    try {
+      for (const reply of replies()) h.projection.upsert(reply);
+      const delivered = await deliveredBatch(h.replay, h.iterator);
+      const upserts = new Map(delivered.flatMap(event => event.type === "item.upsert" ? [[event.item.id, event.item] as const] : []));
+      expect(Object.fromEntries(cases.map(({ id }) => [id, outcome(upserts.get(id))])))
+        .toEqual(Object.fromEntries(cases.map(({ id, ordered }) => [id, ordered])));
+    } finally { await h.cleanup(); }
+  });
+});
+
+test("a repeated completion status is delivered without finalizing captures or ending their live state", async () => {
+  const h = await visualSubscriptionHarness("opencode");
+  const answer = (items: ConversationItem[], id: string) => items.find(item => item.id === id) as AssistantMessageItem;
+  const upserts = (events: ChatEvent[]) => events.flatMap(event => event.type === "item.upsert" ? [event.item] : []);
+  try {
+    h.projection.upsert({ id: "part:first", type: "assistant_message", createdAt: 1, markdown: "![First](first.png)" });
+    expect(answer(upserts(await deliveredBatch(h.replay, h.iterator)), "part:first").visuals?.[0]?.status).toBe("pending");
+    expect(h.files.reads).toBe(1);
+    // The lagging source restates an idle the projection already ordered.
+    const repeat = normalizeOpenCodeV1({ id: "repeat", type: "session.idle", properties: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true })
+      .updates.map(update => h.projection.apply(update)!);
+    const delivered = await deliveredBatch(h.replay, h.iterator);
+    expect(delivered).toEqual([{ ...repeat[0]!, conversationId: "opencode:c" }]); // No visual resync.
+    expect(JSON.parse(JSON.stringify(delivered[0]))).toMatchObject({ type: "conversation.status", status: "completed" });
+    expect(h.files.reads).toBe(1);
+    h.projection.upsert({ id: "part:second", type: "assistant_message", createdAt: 2, markdown: "![Second](second.png)" });
+    expect(answer(upserts(await deliveredBatch(h.replay, h.iterator)), "part:second").visuals?.[0]?.status).toBe("pending");
+    const behind = await h.service.history("opencode:c");
+    expect(behind.conversation.status).toBe("completed");
+    expect(["part:first", "part:second"].map(id => answer(behind.items, id).visuals?.[0]?.status)).toEqual(["pending", "pending"]);
+    expect(h.files.reads).toBe(2); // One live attempt each; the completion retry is unspent.
+    h.files.available = true;
+    h.projection.statusUpdate("running");
+    const end = h.projection.statusUpdate("completed");
+    expect((await deliveredBatch(h.replay, h.iterator)).slice(-2)).toEqual([
+      { ...end, conversationId: "opencode:c" },
+      { generation: end.generation, sequence: end.sequence, conversationId: "opencode:c", type: "resync", reason: "conversation-rewritten" },
+    ]);
+    const completed = await h.service.history("opencode:c");
+    expect(["part:first", "part:second"].map(id => answer(completed.items, id).visuals?.[0]?.status)).toEqual(["ready", "ready"]);
+    expect(h.files.reads).toBe(4);
+  } finally { await h.cleanup(); }
+});
+
+// A stub agent's normalizer: one phase of its turn completed while a
+// file-producing tool still runs.
+test("a failed status carrying both flags keeps captures live: the repeat flag is dropped, the continuation kept", async () => {
+  const h = await visualSubscriptionHarness("stub-agent");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.upsert({ id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" });
+    await deliveredBatch(h.replay, h.iterator);
+    h.projection.apply({ kind: "status", status: "failed", [CHAT_STATUS_REPEAT]: true, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate);
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status"]); // No finalizing resync.
+    expect(h.files.reads).toBe(1); // The completion retry is unspent.
+    const reloaded = await h.service.history("stub-agent:c");
+    expect(isVisualTurnLive(reloaded.conversation)).toBe(true);
+    expect(status(reloaded.items.find(item => item.id === "reply"))).toBe("pending");
+  } finally { await h.cleanup(); }
+});
+
+test("a repeated retryable failure finalizes captures: the repeat marker counts only on completed", async () => {
+  const h = await visualSubscriptionHarness("stub-agent");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.upsert({ id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" });
+    await deliveredBatch(h.replay, h.iterator);
+    // A stub agent's normalizer: a retryable failed step, then a restatement of it.
+    h.projection.apply({ kind: "status", status: "failed", [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate);
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status"]);
+    expect(h.files.reads).toBe(1);
+    h.projection.apply({ kind: "status", status: "failed", [CHAT_STATUS_REPEAT]: true } as NormalizedProviderUpdate);
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status", "resync"]);
+    expect(h.files.reads).toBe(2); // The completion retry, spent at the failure the repeat marker no longer hides.
+    const reloaded = await h.service.history("stub-agent:c");
+    expect(isVisualTurnLive(reloaded.conversation)).toBe(false);
+    expect(status(reloaded.items.find(item => item.id === "reply"))).toBe("unavailable");
+  } finally { await h.cleanup(); }
+});
+
+// Inherited from base: background reconciliation can end a repeat
+// continuation. A completed repeat keeps the live turn going, but the
+// background status the adapter then reports for a running worker is not
+// live, so the router spends the pending capture's retry there.
+test("background reconciliation after a completed repeat ends the repeat continuation (inherited)", async () => {
+  const h = await visualSubscriptionHarness("opencode");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.upsert({ id: "task:k1", type: "background_task", createdAt: 1, taskId: "k1", description: "Build the image", status: "running" });
+    h.projection.upsert({ id: "reply", type: "assistant_message", createdAt: 2, markdown: "![Later](later.png)" });
+    await deliveredBatch(h.replay, h.iterator);
+    for (const update of normalizeOpenCodeV1({ id: "alias", type: "session.idle", properties: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates) h.projection.apply(update);
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status"]);
+    expect(isVisualTurnLive((await h.service.history("opencode:c")).conversation)).toBe(true);
+    expect(h.files.reads).toBe(1);
+    h.projection.statusUpdate("background"); // What syncBackgroundState reports for the running worker.
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status", "resync"]);
+    expect(h.files.reads).toBe(2);
+    const reloaded = await h.service.history("opencode:c");
+    expect(isVisualTurnLive(reloaded.conversation)).toBe(false);
+    expect(status(reloaded.items.find(item => item.id === "reply"))).toBe("unavailable");
+  } finally { await h.cleanup(); }
+});
+
+// Reply facts travel with whole items. A stub agent that seals its text on a
+// later text update is outside the contract: the seal is ignored, and the
+// trailing shortcut reference stays provisional until the turn ends.
+test("a later text update's text seal is ignored, in either form", async () => {
+  const h = await visualSubscriptionHarness("stub-agent");
+  const markdown = "[shot]: shot.png\n\n![shot]";
+  const text = (item: object): NormalizedProviderUpdate => ({ kind: "text", itemId: "reply", identity: "reply", mode: "cumulative", text: markdown,
+    item: { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...item } as AssistantMessageItem });
+  try {
+    h.projection.apply(text({}));
+    const created = (await deliveredBatch(h.replay, h.iterator)).flatMap(event => event.type === "item.upsert" ? [event.item] : [])[0] as AssistantMessageItem;
+    expect(created.visuals?.[0]?.status).toBe("pending");
+    for (const seal of [{ [CHAT_TEXT_SEAL]: "ended" }, { [CHAT_TEXT_SEAL]: "completion", completedAt: 5 }]) {
+      expect(h.projection.apply(text(seal))).toBeUndefined();
+    }
+    const snapshot = await h.service.history("stub-agent:c");
+    expect((snapshot.items.find(item => item.id === "reply") as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    expect(h.files.reads).toBe(0); // Still provisional: never read.
+  } finally { await h.cleanup(); }
+});
+
+test("a repeat carrying a continuation after a genuine end leaves captures finished for the live subscriber and a reload", async () => {
+  const h = await visualSubscriptionHarness("stub-agent");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.apply({ kind: "status", status: "completed" });
+    await deliveredBatch(h.replay, h.iterator);
+    h.projection.apply({ kind: "status", status: "completed", [CHAT_STATUS_REPEAT]: true, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate);
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status"]);
+    h.projection.upsert({ id: "late", type: "assistant_message", createdAt: 3, markdown: "![Late](late.png)" });
+    expect(status((await deliveredBatch(h.replay, h.iterator)).flatMap(event => event.type === "item.upsert" ? [event.item] : [])[0])).toBe("unavailable");
+    const reloaded = await h.service.history("stub-agent:c");
+    expect(isVisualTurnLive(reloaded.conversation)).toBe(false);
+    expect(status(reloaded.items.find(item => item.id === "late"))).toBe("unavailable");
+  } finally { await h.cleanup(); }
+});
+
+test("a duplicate running status marked as a repeat still reopens streaming for new captures", async () => {
+  const h = await visualSubscriptionHarness("stub-agent");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.apply({ kind: "status", status: "completed" });
+    await deliveredBatch(h.replay, h.iterator);
+    h.projection.apply({ kind: "status", status: "running", [CHAT_STATUS_REPEAT]: true } as NormalizedProviderUpdate);
+    const delivered = await deliveredBatch(h.replay, h.iterator);
+    expect(delivered.map(event => event.type)).toEqual(["conversation.status"]);
+    expect((delivered[0] as ChatEvent & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+    h.projection.upsert({ id: "new", type: "assistant_message", createdAt: 3, markdown: "![New](new.png)" });
+    expect(status((await deliveredBatch(h.replay, h.iterator)).flatMap(event => event.type === "item.upsert" ? [event.item] : [])[0])).toBe("pending");
+    const reloaded = await h.service.history("stub-agent:c");
+    expect(reloaded.conversation.status).toBe("running");
+    expect(status(reloaded.items.find(item => item.id === "new"))).toBe("pending");
+  } finally { await h.cleanup(); }
+});
+
+// The live router keeps a capture it has finished: an authoritative correction
+// that arrives later on the live stream does not reopen it (as at base).
+test("a finished OpenCode 2.x capture stays finished when a later live row carries open execution evidence", async () => {
+  const h = await visualSubscriptionHarness("opencode");
+  const reply = { id: "part:api:text:0", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)", ...executionEvidence(true) } as AssistantMessageItem;
+  const status = (events: ChatEvent[]) => (events.flatMap(event => event.type === "item.upsert" ? [event.item] : []).find(item => item.id === reply.id) as AssistantMessageItem | undefined)?.visuals?.[0]?.status;
+  try {
+    h.projection.upsert(reply);
+    expect(status(await deliveredBatch(h.replay, h.iterator))).toBe("pending");
+    h.projection.statusUpdate("completed");
+    await deliveredBatch(h.replay, h.iterator);
+    h.projection.statusUpdate("running");
+    await deliveredBatch(h.replay, h.iterator);
+    h.projection.upsert({ ...reply, ...executionEvidence(true) } as AssistantMessageItem);
+    expect(status(await deliveredBatch(h.replay, h.iterator))).toBe("unavailable");
+    expect(h.files.reads).toBe(2); // The live attempt and the completion retry; no reopened attempt.
+  } finally { await h.cleanup(); }
+});
+
+// "Turn continues" counts only on a failed status: on completed it is ignored,
+// so a running background task's later status cannot spend a retry twice.
+test("a completed status carrying the turn-continues flag finalizes captures as usual, with a background task running", async () => {
+  const h = await visualSubscriptionHarness("stub-agent");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.upsert({ id: "task:k1", type: "background_task", createdAt: 1, taskId: "k1", description: "Build the image", status: "running" });
+    h.projection.upsert({ id: "reply", type: "assistant_message", createdAt: 2, markdown: "![Later](later.png)" });
+    await deliveredBatch(h.replay, h.iterator);
+    expect(h.files.reads).toBe(1);
+    const frame = h.projection.apply({ kind: "status", status: "completed", [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+    expect((frame as typeof frame & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status", "resync"]);
+    expect(h.files.reads).toBe(2); // The completion retry, spent once.
+    const reloaded = await h.service.history("stub-agent:c");
+    expect(isVisualTurnLive(reloaded.conversation)).toBe(false);
+    expect(status(reloaded.items.find(item => item.id === "reply"))).toBe("unavailable");
+    h.projection.statusUpdate("background"); // What the adapter reports for the still-running task.
+    expect((await deliveredBatch(h.replay, h.iterator)).map(event => event.type)).toEqual(["conversation.status"]);
+    expect(h.files.reads).toBe(2);
+  } finally { await h.cleanup(); }
+});
+
+test("an idle alias after a genuine end does not make that turn capture-live again", async () => {
+  const h = await visualSubscriptionHarness("opencode");
+  const status = (item: ConversationItem | undefined) => item?.type === "assistant_message" ? item.visuals?.[0]?.status : undefined;
+  try {
+    h.projection.statusUpdate("completed");
+    await deliveredBatch(h.replay, h.iterator);
+    // Visual liveness reads the projection's derived continuation, never the repeat flag.
+    const repeat = normalizeOpenCodeV1({ id: "late-alias", type: "session.idle", properties: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true })
+      .updates.map(update => h.projection.apply(update)!);
+    const frame = repeat[0] as Extract<ChatEvent, { type: "conversation.status" }> & ChatStatusLiveness;
+    expect(frame[CHAT_STATUS_REPEAT]).toBe(true);
+    expect(frame[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+    expect(isVisualTurnLive(frame)).toBe(false);
+    await deliveredBatch(h.replay, h.iterator);
+    h.projection.upsert({ id: "part:late", type: "assistant_message", createdAt: 3, markdown: "![Late](late.png)" });
+    const delivered = (await deliveredBatch(h.replay, h.iterator)).flatMap(event => event.type === "item.upsert" ? [event.item] : []);
+    expect(status(delivered.find(item => item.id === "part:late"))).toBe("unavailable");
+    const snapshot = await h.service.history("opencode:c");
+    expect(isVisualTurnLive(snapshot.conversation)).toBe(false);
+    expect(status(snapshot.items.find(item => item.id === "part:late"))).toBe("unavailable");
+  } finally { await h.cleanup(); }
+});
+
+test.each([
+  { name: "a plain completed status", status: "completed", annotations: {}, finalizes: true },
+  { name: "a plain failed status", status: "failed", annotations: {}, finalizes: true },
+  { name: "a failed status whose turn continues", status: "failed", annotations: { [CHAT_TURN_CONTINUES]: true }, finalizes: false },
+  { name: "a completed status carrying the turn-continues flag", status: "completed", annotations: { [CHAT_TURN_CONTINUES]: true }, finalizes: true },
+  { name: "an interrupted status carrying the turn-continues flag", status: "interrupted", annotations: { [CHAT_TURN_CONTINUES]: true }, finalizes: true },
+  { name: "a plain interrupted status", status: "interrupted", annotations: {}, finalizes: true },
+  { name: "a completed status continued by a repeat", status: "completed", annotations: { [CHAT_REPEAT_CONTINUES]: true }, finalizes: false },
+  { name: "a repeat with no continuation of its own", status: "completed", annotations: { [CHAT_STATUS_REPEAT]: true }, finalizes: false },
+] as const)("$name finalizes pending captures: $finalizes", async ({ status, annotations, finalizes }) => {
+  const h = await visualSubscriptionHarness("any-agent");
+  const pending = async (id: string) => {
+    h.projection.upsert({ id, type: "assistant_message", createdAt: 1, markdown: `![Later](${id}.png)` });
+    const upsert = (await deliveredBatch(h.replay, h.iterator)).find(event => event.type === "item.upsert" && event.item.id === id);
+    return upsert?.type === "item.upsert" && upsert.item.type === "assistant_message" ? upsert.item.visuals?.[0]?.status : undefined;
+  };
+  try {
+    expect(await pending("before")).toBe("pending");
+    const frame = h.replay.publish({ type: "conversation.status", status, ...annotations });
+    const delivered = await deliveredBatch(h.replay, h.iterator);
+    expect(delivered[0]).toEqual({ ...frame, conversationId: "any-agent:c" });
+    expect(delivered.slice(1).map(event => event.type)).toEqual(finalizes ? ["resync"] : []);
+    expect(h.files.reads).toBe(finalizes ? 2 : 1);
+    expect(await pending("after")).toBe(finalizes ? "unavailable" : "pending");
+  } finally { await h.cleanup(); }
+});
+
+// Stored captures and admission ledgers are named by hashes of these strings,
+// so a reload finds them only while every agent keeps producing them exactly.
+describe("persisted capture and admission identities", () => {
+  const sha = (...parts: string[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+  const images = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `![${index}](${prefix}-${index}.png)`).join("\n");
+  const fixture = async (agentId: string, items: ConversationItem[]) => {
+    const h = await visualSubscriptionHarness(agentId);
+    h.files.available = true;
+    h.provider.history = async () => ({ ...h.current(), items });
+    const snapshot = await h.service.history(`${agentId}:c`);
+    const ids = (itemId: string) => (snapshot.items.find(item => item.id === itemId) as AssistantMessageItem).visuals!.map(visual => visual.id);
+    const ledgers = async () => new Set((await fs.readdir(h.directory, { recursive: true })).flatMap(name => name.match(/([0-9a-f]{64})\.slot-\d+\.json$/)?.[1] ?? []));
+    return { h, ids, ledgers };
+  };
+
+  test("Claude Code: block-relative captures, one admission ledger per API message", async () => {
+    const items = normalizeTranscriptEntries([{ kind: "assistant", uuid: "row", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+      message: { id: "api", content: [{ type: "text", text: "![one](one.png)" }, { type: "tool_use", id: "tool", name: "Read", input: {} }, { type: "text", text: "Then ![two](two.png)" }] } }]).items;
+    const { h, ids, ledgers } = await fixture("claude", items);
+    try {
+      expect(ids("message:row")).toEqual([sha("claude:c", "claude:text:api:0", "offset:0"), sha("claude:c", "claude:text:api:1", "offset:5")]);
+      expect(await ledgers()).toEqual(new Set([sha("claude:c", "claude:message:api")]));
+    } finally { await h.cleanup(); }
+  });
+
+  test.each(["v1", "v2"] as const)("OpenCode %s: per-part captures share their native message's eight admissions", async generation => {
+    const items = generation === "v1"
+      ? normalizeProviderMessage({ info: { id: "api", role: "assistant", time: { created: 1 } }, parts: [{ id: "first", type: "text", text: images("a", 5) }, { id: "second", type: "text", text: images("b", 5) }] })
+      : normalizeOpenCodeV2History({ id: "api", type: "assistant", time: { created: 1, completed: 2 }, content: [{ type: "text", text: images("a", 5) }, { type: "text", text: images("b", 5) }] });
+    const [first, second] = generation === "v1" ? ["part:first", "part:second"] : ["part:api:text:0", "part:api:text:1"];
+    const { h, ids, ledgers } = await fixture("opencode", items);
+    try {
+      const offsets = [0, 14, 28, 42, 56].map(offset => `offset:${offset}`); // Each image and its newline is 14 characters.
+      expect(ids(first!)).toEqual(offsets.map(key => sha("opencode:c", first!, key)));
+      expect(ids(second!)).toEqual(offsets.slice(0, 3).map(key => sha("opencode:c", second!, key)));
+      expect(await ledgers()).toEqual(new Set([sha("opencode:c", "opencode:message:api")]));
+    } finally { await h.cleanup(); }
+  });
+
+  test("a reply without native identity is captured and admitted under its own row", async () => {
+    const { h, ids, ledgers } = await fixture("any-agent", [
+      { id: "first", type: "assistant_message", createdAt: 1, markdown: images("a", 9) },
+      { id: "second", type: "assistant_message", createdAt: 2, markdown: images("b", 1) },
+    ]);
+    try {
+      expect(ids("first")).toHaveLength(8);
+      expect(ids("first")[0]).toBe(sha("any-agent:c", "first", "offset:0"));
+      expect(ids("second")).toEqual([sha("any-agent:c", "second", "offset:0")]);
+      expect(await ledgers()).toEqual(new Set([sha("any-agent:c", "first"), sha("any-agent:c", "second")]));
+    } finally { await h.cleanup(); }
+  });
 });
 
 // A real provider-sequenced marker drains every additional visual event from
@@ -2079,8 +2467,8 @@ function fixture(): { service: MultiAgentChatService; a: StubAgentService; b: St
   const a = new StubAgentService();
   const b = new StubAgentService();
   const agents: RegisteredChatAgent[] = [
-    { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
-    { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+    { descriptor: OPENCODE_AGENT, service: a },
+    { descriptor: CLAUDE_CODE_AGENT, service: b },
   ];
   return { service: new MultiAgentChatService({ workspacePath: process.cwd(), agents }), a, b };
 }
@@ -2116,7 +2504,7 @@ describe("qualified conversation ids", () => {
   test("agent ids with colons are rejected at registration", () => {
     expect(() => new MultiAgentChatService({
       workspacePath: process.cwd(),
-      agents: [{ descriptor: { id: "a:b", name: "Bad" }, service: new StubAgentService() }],
+      agents: [{ descriptor: { id: "a:b", name: "Bad", login: TEST_LOGIN }, service: new StubAgentService() }],
     })).toThrow('agent id must not contain ":"');
   });
 });
@@ -2130,7 +2518,7 @@ describe("routing", () => {
     // The result's conversation is re-qualified and attributed.
     expect(accepted.conversation).toEqual(expect.objectContaining({
       id: "claude:ses_1",
-      agent: { id: "claude", name: "Claude Code" },
+      agent: CLAUDE_CODE_AGENT,
     }));
   });
 
@@ -2170,8 +2558,8 @@ describe("status and retry", () => {
     b.status = async () => { throw new Error("probe exploded"); };
     const statuses = await service.status();
     expect(statuses).toEqual([
-      { agent: { id: "opencode", name: "OpenCode" }, availability: { state: "ready", version: "1.0.0" } },
-      { agent: { id: "claude", name: "Claude Code" }, availability: { state: "unavailable", reason: "startup-failed", message: "probe exploded" } },
+      { agent: OPENCODE_AGENT, availability: { state: "ready", version: "1.0.0" } },
+      { agent: CLAUDE_CODE_AGENT, availability: { state: "unavailable", reason: "startup-failed", message: "probe exploded" } },
     ]);
   });
 
@@ -2190,8 +2578,8 @@ describe("inventory", () => {
     a.conversations = [summary("old", 1)];
     b.conversations = [summary("new", 5)];
     expect(await service.listConversations()).toEqual([
-      expect.objectContaining({ id: "claude:new", agent: { id: "claude", name: "Claude Code" } }),
-      expect.objectContaining({ id: "opencode:old", agent: { id: "opencode", name: "OpenCode" } }),
+      expect.objectContaining({ id: "claude:new", agent: CLAUDE_CODE_AGENT }),
+      expect.objectContaining({ id: "opencode:old", agent: OPENCODE_AGENT }),
     ]);
   });
 
@@ -2216,8 +2604,8 @@ describe("inventory", () => {
       workspacePath: process.cwd(),
       inventoryContributionTimeoutMs: 25,
       agents: [
-        { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
-        { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
       ],
     });
     const subscription = await service.subscribeInventory();
@@ -2246,8 +2634,8 @@ describe("inventory", () => {
       workspacePath: process.cwd(),
       inventoryContributionTimeoutMs: 25,
       agents: [
-        { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
-        { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
       ],
     });
     // The merged subscription answers within the bound on a alone.
@@ -2378,7 +2766,7 @@ describe("qualification of snapshots and events", () => {
     expect(received.map(event => [event.type, event.generation, event.sequence])).toEqual([["conversation.updated", "g1", 1], ["item.upsert", "g1", 2]]);
     expect(received[0]).toEqual(expect.objectContaining({
       conversationId: "claude:ses_1",
-      conversation: expect.objectContaining({ id: "claude:ses_1", agent: { id: "claude", name: "Claude Code" } }),
+      conversation: expect.objectContaining({ id: "claude:ses_1", agent: CLAUDE_CODE_AGENT }),
     }));
     expect(received[1]).toEqual(expect.objectContaining({
       conversationId: "claude:ses_1",
@@ -2468,8 +2856,8 @@ describe("workspace activity merges across agents", () => {
     const service = new MultiAgentChatService({
       workspacePath: process.cwd(),
       agents: [
-        { descriptor: { id: "a", name: "A" }, service: a },
-        { descriptor: { id: "b", name: "B" }, service: b },
+        { descriptor: { id: "a", name: "A", login: TEST_LOGIN }, service: a },
+        { descriptor: { id: "b", name: "B", login: TEST_LOGIN }, service: b },
       ],
     });
     return { service, a, b };

@@ -303,3 +303,15 @@ describe("usage age", () => {
     expect(usageAsOf(readAt, readAt + 12 * 60_000)).toMatch(/^as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
   });
 });
+
+describe("usage read failure", () => {
+  test("names the agent that was asked; the other reasons read as before", async () => {
+    const { usageReadFailureLabel } = await import("./composer-status");
+    expect(usageReadFailureLabel("unavailable", "Claude Code")).toBe("Claude Code could not answer");
+    expect(usageReadFailureLabel("unavailable", "Stub Agent")).toBe("Stub Agent could not answer");
+    expect(usageReadFailureLabel("unavailable")).toBe("the agent could not answer");
+    expect(usageReadFailureLabel("timeout", "Claude Code")).toBe("timed out");
+    expect(usageReadFailureLabel("no-live-session", "Claude Code")).toBe("no session is running");
+    expect(usageReadFailureLabel("network", "Claude Code")).toBe("the workspace did not answer");
+  });
+});

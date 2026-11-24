@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { OpenCodeService, type OpenCodeGeneration } from "./opencode-service";
 import { LazyChatService } from "../service";
+import { openCodeAgentRuntime } from "./agent-runtime";
 import { describeToolDetail } from "../tool-detail";
 
 /**
@@ -66,6 +67,11 @@ async function isolated(prefix: string, generation: Generation, readme: string) 
   return { workspace, runtime };
 }
 
+// An OpenCode chat service over the given server, as cli.ts builds it.
+function openCodeChat(workspace: string, service: OpenCodeService): LazyChatService {
+  return new LazyChatService({ workspacePath: workspace, agentName: "OpenCode", runtime: openCodeAgentRuntime({ workspacePath: workspace, service }) });
+}
+
 async function expectReady(service: LazyChatService, runtime: OpenCodeService, generation: Generation): Promise<void> {
   const status = await service.status();
   expect(status.state).toBe("ready");
@@ -81,7 +87,7 @@ for (const generation of generations()) {
   describe.skipIf(!enabled)(`real OpenCode ${generation.label} integration`, () => {
     test("starts an isolated service, decides its generation, and normalizes a cancellable session", async () => {
       const { workspace, runtime } = await isolated("uatu-real-opencode-", generation, "# Isolated OpenCode smoke\n");
-      const service = new LazyChatService({ workspacePath: workspace, runtime });
+      const service = openCodeChat(workspace, runtime);
       let endpoint = "";
       try {
         // Conversation-scoped need starts the runtime; status alone does not.
@@ -116,7 +122,7 @@ for (const generation of generations()) {
         await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${id}\ndescription: ${description}\n---\n\nReply with the single word ${id}.\n`, "utf8");
       };
       await skill("uatu-probe", "A probe skill");
-      const service = new LazyChatService({ workspacePath: workspace, runtime });
+      const service = openCodeChat(workspace, runtime);
       try {
         await service.listConversations();
         await expectReady(service, runtime, generation);
@@ -157,7 +163,7 @@ for (const generation of generations()) {
 
     test("recovers persisted configuration through a fresh provider and adapter", async () => {
       const { workspace, runtime } = await isolated("uatu-real-opencode-configuration-", generation, "# Isolated OpenCode configuration smoke\n");
-      const writer = new LazyChatService({ workspacePath: workspace, runtime });
+      const writer = openCodeChat(workspace, runtime);
       let reader: LazyChatService | undefined;
       try {
         await writer.listConversations();
@@ -188,7 +194,7 @@ for (const generation of generations()) {
         // This service constructs another provider and adapter against the same
         // running server. The first adapter's accepted-configuration cache is
         // unreachable, so the snapshot must recover from OpenCode's records.
-        reader = new LazyChatService({ workspacePath: workspace, runtime });
+        reader = openCodeChat(workspace, runtime);
         await reader.listConversations();
         await expectReady(reader, runtime, generation);
         const deadline = Date.now() + 15_000;
@@ -218,7 +224,7 @@ for (const generation of generations()) {
      */
     test("a completed turn reports token usage on an assistant part, and mints no bubble for it", async () => {
       const { workspace, runtime } = await isolated("uatu-real-opencode-usage-", generation, "# Isolated OpenCode usage smoke\n");
-      const service = new LazyChatService({ workspacePath: workspace, runtime });
+      const service = openCodeChat(workspace, runtime);
       try {
         await service.listConversations();
         await expectReady(service, runtime, generation);
@@ -267,7 +273,7 @@ for (const generation of generations()) {
      */
     test("a subagent launch reads as an agent row whose child opens as a transcript", async () => {
       const { workspace, runtime } = await isolated("uatu-real-opencode-subagent-", generation, "# Isolated OpenCode subagent smoke\n");
-      const service = new LazyChatService({ workspacePath: workspace, runtime });
+      const service = openCodeChat(workspace, runtime);
       try {
         await service.listConversations();
         await expectReady(service, runtime, generation);

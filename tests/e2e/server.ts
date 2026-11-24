@@ -9,7 +9,7 @@ import { consumeChildPolicyDescriptor } from "../../src/session-contract/bootstr
 import { createSessionLink } from "../../src/session-contract/link";
 import { formatReadyLine, POLICY_BOOTSTRAP_FLAG } from "../../src/session-contract/spawn";
 import { mintSessionToken } from "../../src/session-contract/token";
-import { MultiAgentChatService } from "../../src/chat/agents";
+import { MultiAgentChatService, addressableItemIdFields, mapAddressableItemIds, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { VisualStore } from "../../src/chat/visual-store";
@@ -27,6 +27,8 @@ import fontNoticesAsset from "../../src/assets/fonts/NOTICES.md" with { type: "f
 
 import index from "../../src/index.html";
 import { e2ePort, promoteRootReadme, resetE2EWorkspace, workspaceRoot } from "./config";
+import { OPENCODE_AGENT } from "../../src/chat/opencode/descriptor";
+import { CLAUDE_CODE_AGENT } from "../../src/chat/claude/descriptor";
 
 // Per-process workspace root. Captured once at startup from the lazy
 // workspaceRoot() helper (which reads process.env.UATU_E2E_WORKSPACE if
@@ -65,7 +67,7 @@ import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
 import { startOpenCodeV2Fake } from "./opencode-v2-fake";
 import { e2eTerminalShell } from "./terminal-shell";
-import type { ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
+import type { ChatAgentDescriptor, ChatCapability, ChatCommand, ChatEvent, ChatModel, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, AgentUsageReport } from "../../src/chat/types";
 
 // One-shot hold on GET /api/terminal/sessions, armed by tests that need an
 // inventory read to complete at a moment they choose (after a pagehide, or
@@ -121,33 +123,6 @@ const fakeChatAgent = new FakeE2EChatService({
     await fs.writeFile(target, contents, "utf8");
   },
 });
-const E2E_AGENT_NAMES: Record<string, string> = { opencode: "OpenCode", claude: "Claude Code" };
-function qualifyControlValue<T>(value: T, agentId = "opencode"): T {
-  const walk = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(walk);
-    if (node && typeof node === "object") {
-      const record = node as Record<string, unknown>;
-      const next: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(record)) {
-        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string" && !entry.includes(":")) {
-          next[key] = `${agentId}:${entry}`;
-          continue;
-        }
-        next[key] = walk(entry);
-      }
-      // A conversation summary is recognizable by its shape; stamp the wire form.
-      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next && !(next.id as string).includes(":")) {
-        next.id = `${agentId}:${next.id as string}`;
-        next.agent = { id: agentId, name: E2E_AGENT_NAMES[agentId] ?? agentId };
-      }
-      return next;
-    }
-    return node;
-  };
-  return walk(value) as T;
-}
-const controlJson = (value: unknown, agentId = "opencode") => Response.json(qualifyControlValue(value, agentId));
-
 // A second stub agent, offered only when a spec opts in: most chat specs
 // exercise single-agent behavior (creation without a choice), and the agent
 // set is fixed per router — so the harness swaps routers behind a delegating
@@ -163,6 +138,34 @@ const fakeSecondAgent = new FakeE2EChatService({
   // (opencode-v2-steering D2): Send now dispatches a dormant queue's message.
   extraCapabilities: ["custom-model-id", "background-tasks", "scheduled-wakeups", "usage", "send-now"],
 });
+// Every fake agent, in the order a spec enables them (`{ action: "agents",
+// count }` offers the first `count`). Each is registered under its shared
+// descriptor; the descriptor's id is what the control body's `agent` field
+// and the wire's `<agentId>:<providerId>` qualifier name. The first is the
+// default target of every control.
+const E2E_FAKE_AGENTS: readonly { descriptor: ChatAgentDescriptor; service: FakeE2EChatService }[] = [
+  { descriptor: OPENCODE_AGENT, service: fakeChatAgent },
+  // `claude-fixture` internally, but registered as Claude Code.
+  { descriptor: CLAUDE_CODE_AGENT, service: fakeSecondAgent },
+];
+const E2E_FAKES_BY_ID = new Map(E2E_FAKE_AGENTS.map(fake => [fake.descriptor.id, fake]));
+const E2E_DEFAULT_AGENT_ID = E2E_FAKE_AGENTS[0]!.descriptor.id;
+// The registered agent a qualified id names, or undefined for a bare id or
+// one whose qualifier is not registered (which the control boundary rejects).
+function qualifyingAgent(value: string): string | undefined {
+  const agentId = parseQualifiedConversationId(value)?.agentId;
+  return agentId !== undefined && E2E_FAKES_BY_ID.has(agentId) ? agentId : undefined;
+}
+// A registered agent prefix with no provider id after it (`opencode:`) is
+// malformed, never a raw provider id.
+function hasEmptyReservedQualifier(value: string): boolean {
+  const colon = value.indexOf(":");
+  return colon >= 0 && E2E_FAKES_BY_ID.has(value.slice(0, colon)) && !parseQualifiedConversationId(value);
+}
+function stripAgentQualifier(value: string): string {
+  return qualifyingAgent(value) === undefined ? value : parseQualifiedConversationId(value)!.conversationId;
+}
+
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a
 // second store the fake would never see.
@@ -180,21 +183,14 @@ const fakeAttachmentStore = {
 // All routers represent the same workspace and share its reader and snapshots.
 const fakeVisualStore = new VisualStore(E2E_WORKSPACE_ROOT, path.join(E2E_WORKSPACE_ROOT, "..", "chat-visual-state"));
 
-const singleAgentRouter = new MultiAgentChatService({
+// fakeRouters[n - 1] offers the first n fakes.
+const fakeRouters = E2E_FAKE_AGENTS.map((_, index) => new MultiAgentChatService({
   workspacePath: E2E_WORKSPACE_ROOT,
-  agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent }],
+  agents: E2E_FAKE_AGENTS.slice(0, index + 1),
   attachmentStore: fakeAttachmentStore,
   visualStore: fakeVisualStore,
-});
-const dualAgentRouter = new MultiAgentChatService({
-  workspacePath: E2E_WORKSPACE_ROOT,
-  agents: [
-    { descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent },
-    { descriptor: { id: "claude", name: "Claude Code" }, service: fakeSecondAgent },
-  ],
-  attachmentStore: fakeAttachmentStore,
-  visualStore: fakeVisualStore,
-});
+}));
+const singleAgentRouter = fakeRouters[0]!;
 // The real 2.x stack (opencode-v2-steering D13): the real ChatAdapter and
 // OpenCodeV2Provider over a scripted fake OpenCode 2.0.28 server, selected
 // with `{ action: "agents", stack: "opencode-v2" }` and driven with
@@ -223,7 +219,8 @@ function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
   };
   const service = new LazyChatService({
     workspacePath: E2E_WORKSPACE_ROOT,
-    agentRuntime: runtime,
+    agentName: "OpenCode",
+    runtime,
     attachmentStore: fakeAttachmentStore,
     // A short settlement wait, so a withdrawal the fake never settles
     // decides from the inbox list within a test's patience.
@@ -231,7 +228,7 @@ function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
   });
   openCodeV2Router = new MultiAgentChatService({
     workspacePath: E2E_WORKSPACE_ROOT,
-    agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }],
+    agents: [{ descriptor: OPENCODE_AGENT, service }],
     attachmentStore: fakeAttachmentStore,
     visualStore: fakeVisualStore,
   });
@@ -369,8 +366,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   terminalCloseDelayMs = 0;
   terminalCloseHold?.release();
   terminalCloseHold = null;
-  fakeChatAgent.reset();
-  fakeSecondAgent.reset();
+  for (const fake of E2E_FAKE_AGENTS) fake.service.reset();
   activeChatRouter = singleAgentRouter;
   const retiringOpenCodeV2 = openCodeV2Router;
   openCodeV2Router = null;
@@ -453,6 +449,14 @@ async function handleE2EPersonalState(request: Request): Promise<Response> {
   return Response.json(personalState);
 }
 
+// The item fields each control reads; any other control ignores them.
+type ItemField = "items" | "older" | "item";
+const ITEM_FIELDS_BY_ACTION: Partial<Record<string, readonly ItemField[]>> = {
+  seed: ["items", "older"],
+  item: ["item"],
+  recoverItems: ["items"],
+};
+
 async function handleE2EChat(request: Request): Promise<Response> {
   const body = await request.json() as {
     action?: string;
@@ -476,7 +480,8 @@ async function handleE2EChat(request: Request): Promise<Response> {
     // A seeded conversation's last activity (epoch ms).
     updatedAt?: number;
     reversibleFiles?: ReversibleFileFixture[];
-    agent?: "opencode" | "claude";
+    // A registered agent id (E2E_FAKE_AGENTS); defaults to the first fake.
+    agent?: string;
     count?: number;
     // A shell task's fake output: what the task view's pane reads, set or
     // appended to while the task runs (design D7).
@@ -505,37 +510,230 @@ async function handleE2EChat(request: Request): Promise<Response> {
     childId?: string;
     inboxId?: string;
   };
-  // The chat wire is agent-qualified ("opencode:<id>") while the fake works
-  // in bare provider ids. The control boundary translates both directions so
-  // specs keep using the ids they see in the UI.
-  const stripQualifier = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(stripQualifier);
-    if (value && typeof value === "object") {
-      const record = { ...(value as Record<string, unknown>) };
-      for (const key of ["conversationId", "childConversationId"]) {
-        if (typeof record[key] === "string") record[key] = (record[key] as string).replace(/^(?:opencode|claude):/, "");
-      }
-      for (const [key, entry] of Object.entries(record)) {
-        if (key !== "conversationId" && key !== "childConversationId") record[key] = stripQualifier(entry);
-      }
-      return record;
-    }
-    return value;
-  };
-  if (typeof body.conversationId === "string") {
-    // The qualified id names the owning agent; remember it before stripping
-    // so conversation-scoped controls reach the right fake without every
-    // spec spelling `agent:` explicitly.
-    if (body.agent === undefined && body.conversationId.startsWith("claude:")) body.agent = "claude";
-    body.conversationId = body.conversationId.replace(/^(?:opencode|claude):/, "");
+  // A top-level conversationId, when present, must be a string.
+  if (body.conversationId !== undefined && typeof body.conversationId !== "string") {
+    return Response.json({ error: `conversationId must be a string, not ${JSON.stringify(body.conversationId)}` }, { status: 400 });
   }
-  if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
-  if (body.older) body.older = stripQualifier(body.older) as typeof body.older;
-  if (body.item) body.item = stripQualifier(body.item) as typeof body.item;
-  const targetFake = body.agent === "claude" ? fakeSecondAgent : fakeChatAgent;
+  // The scripted fake OpenCode 2.0.28 behind the real stack. Its controls go
+  // straight to that server and ignore `agent`; conversation ids arrive
+  // qualified or bare, and the fake works in bare session ids.
+  if (body.action === "opencode") {
+    if (typeof body.conversationId === "string" && hasEmptyReservedQualifier(body.conversationId)) {
+      return Response.json({ error: `malformed conversation id ${JSON.stringify(body.conversationId)}` }, { status: 400 });
+    }
+    // The scripted server is OpenCode's; another registered agent's id is
+    // never one of its sessions.
+    const scriptedOwner = typeof body.conversationId === "string" ? qualifyingAgent(body.conversationId) : undefined;
+    if (scriptedOwner !== undefined && scriptedOwner !== OPENCODE_AGENT.id) {
+      return Response.json({ error: `${body.conversationId} belongs to ${scriptedOwner}, not the scripted OpenCode server` }, { status: 400 });
+    }
+    if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
+    switch (body.op) {
+      case "losePromptResponse":
+        openCodeV2Fake.loseNextPromptResponse(); return Response.json({ ok: true });
+      case "unknownPromptBeforeAdmission":
+        openCodeV2Fake.unknownNextPromptBeforeAdmission(); return Response.json({ ok: true });
+      case "loseResumeResponse":
+        openCodeV2Fake.loseNextResumeResponse(); return Response.json({ ok: true });
+      case "refuseBackground":
+        openCodeV2Fake.refuseNextBackground(); return Response.json({ ok: true });
+      case "launchShellOnNextSteer":
+        if (body.conversationId) { openCodeV2Fake.launchShellOnNextSteer(body.conversationId); return Response.json({ ok: true }); }
+        break;
+      case "wakeParent":
+        if (body.conversationId) { openCodeV2Fake.wakeParent(body.conversationId); return Response.json({ ok: true }); }
+        break;
+      case "launchShell":
+        if (body.conversationId) return Response.json(openCodeV2Fake.launchShell(body.conversationId, body.background !== false));
+        break;
+      case "shellPhase":
+        if (body.shellId && body.shellPhase) { openCodeV2Fake.shellPhase(body.shellId, body.shellPhase); return Response.json({ ok: true }); }
+        break;
+      case "launchWorker":
+        if (body.conversationId) return Response.json(openCodeV2Fake.launchWorker(body.conversationId, body.background !== false, body.childId));
+        break;
+      case "launchRequestWorker":
+        if (body.conversationId) return Response.json(openCodeV2Fake.launchRequestWorker(body.conversationId));
+        break;
+      case "workerObservation":
+        if (body.childId && typeof body.observed === "boolean") { openCodeV2Fake.workerObservation(body.childId, body.observed); return Response.json({ ok: true }); }
+        break;
+      case "workerRequest":
+        if (body.childId && (body.requestKind === "permission" || body.requestKind === "question")) return Response.json(openCodeV2Fake.workerRequest(body.childId, body.requestKind));
+        break;
+      case "settleWorker":
+        if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }
+        break;
+      case "settleWorkerWithoutReport":
+        if (body.childId && body.idleOutcome) { openCodeV2Fake.settleWorkerWithoutReport(body.childId, body.idleOutcome, body.text ?? "Native child finished."); return Response.json({ ok: true }); }
+        break;
+      case "workerReport":
+        if (body.childId) { openCodeV2Fake.workerReport(body.childId, body.usedModel ?? "Fixture Model", body.usedEffort, body.costUsd); return Response.json({ ok: true }); }
+        break;
+      case "disconnect":
+        openCodeV2Fake.disconnect(); return Response.json({ ok: true });
+      case "pauseEvents":
+        openCodeV2Fake.pauseEvents(true); return Response.json({ ok: true });
+      case "reconnectEvents":
+        openCodeV2Fake.pauseEvents(false); return Response.json({ ok: true });
+      case "externalRevert":
+        if (body.conversationId && body.revertMessageId !== undefined) {
+          openCodeV2Fake.externalRevert(body.conversationId, body.revertMessageId);
+          return Response.json({ ok: true });
+        }
+        break;
+      case "appendHistory":
+        if (body.conversationId) { openCodeV2Fake.appendHistory(body.conversationId, body.count ?? 60); return Response.json({ ok: true }); }
+        break;
+      case "holdNextMessageRead":
+        if (body.conversationId) { openCodeV2Fake.holdNextMessageRead(body.conversationId); return Response.json({ ok: true }); }
+        break;
+      case "releaseMessageRead":
+        openCodeV2Fake.releaseMessageRead(); return Response.json({ ok: true });
+      case "resync":
+        if (body.conversationId && openCodeV2Adapter) {
+          openCodeV2Adapter.projectionForTests(body.conversationId).replay.publish({ type: "resync", reason: "retention-gap" });
+          return Response.json({ ok: true });
+        }
+        break;
+      case "loseBackgroundResponse":
+        openCodeV2Fake.loseNextBackgroundResponse(); return Response.json({ ok: true });
+      case "loseWorkerResponse":
+        openCodeV2Fake.loseNextWorkerResponse(); return Response.json({ ok: true });
+      case "step":
+        if (body.conversationId) return Response.json(openCodeV2Fake.step(body.conversationId));
+        break;
+      case "finish":
+        if (body.conversationId) {
+          const finished = openCodeV2Fake.finish(body.conversationId, body.text);
+          return finished ? Response.json(finished) : Response.json({ error: "no turn is running" }, { status: 409 });
+        }
+        break;
+      case "raceDeliverOnCancel":
+        if (body.inboxId) {
+          openCodeV2Fake.raceDeliverOnCancel(body.inboxId);
+          return Response.json({ ok: true });
+        }
+        break;
+      case "state":
+        return Response.json({ ...openCodeV2Fake.state(), ...(body.conversationId && openCodeV2Adapter ? {
+          workerModels: openCodeV2Adapter.projectionForTests(body.conversationId).filter(item => item.type === "background_task").map(item => item.type === "background_task" ? item.workerSession?.model : undefined),
+        } : {}) });
+    }
+    return Response.json({ error: "invalid chat control" }, { status: 400 });
+  }
+  // `agent` names a registered id when present; null or any other non-string
+  // is rejected below like an unregistered id, never read as "omitted".
+  if (body.agent !== undefined && typeof body.agent !== "string") {
+    return Response.json({ error: `no e2e agent registered as ${JSON.stringify(body.agent)}` }, { status: 400 });
+  }
+  // One rule for every id field: a leading segment that names a registered
+  // agent is a qualifier, and any other id is a raw provider id. Without
+  // `agent`, a qualified id names the owning agent: the top-level
+  // conversationId, else usageRead's outcome.conversationId or usageReport's
+  // report.conversationId. Remember it before stripping so conversation-scoped
+  // controls reach the right fake without every spec spelling `agent:`.
+  const usageId: unknown = body.action === "usageRead" ? body.outcome?.conversationId : body.action === "usageReport" ? body.report?.conversationId : undefined;
+  if (usageId !== undefined && typeof usageId !== "string") {
+    return Response.json({ error: `conversationId must be a string, not ${JSON.stringify(usageId)}` }, { status: 400 });
+  }
+  const ids = [body.conversationId, usageId].filter((id): id is string => typeof id === "string");
+  for (const id of ids) {
+    if (hasEmptyReservedQualifier(id)) {
+      return Response.json({ error: `malformed conversation id ${JSON.stringify(id)}` }, { status: 400 });
+    }
+    const qualifier = qualifyingAgent(id);
+    // A qualifier must agree with the agent already selected, whether named
+    // by `agent` or by an earlier id; a conflict is rejected before stripping.
+    if (qualifier !== undefined && body.agent !== undefined && qualifier !== body.agent) {
+      return Response.json({ error: `${id} belongs to ${qualifier}, not ${body.agent}` }, { status: 400 });
+    }
+    body.agent ??= qualifier;
+  }
+  // Only when no owner came from `agent` or any qualifier does an id's
+  // unregistered prefix (`claud:`) matter: it would otherwise silently reach
+  // the first fake.
+  const unowned = body.agent === undefined ? ids.find(id => id.includes(":")) : undefined;
+  if (unowned !== undefined) {
+    return Response.json({ error: `${JSON.stringify(unowned)} names no registered agent` }, { status: 400 });
+  }
+  const targetAgentId = body.agent ?? E2E_DEFAULT_AGENT_ID;
+  const targetFake = E2E_FAKES_BY_ID.get(targetAgentId)?.service;
+  if (!targetFake) return Response.json({ error: `no e2e agent registered as ${targetAgentId}` }, { status: 400 });
+  // The chat wire is agent-qualified ("<agentId>:<id>") while the fakes work
+  // in bare provider ids, so specs can use the ids they see in the UI. Nested
+  // ids in items: one qualified with the selected agent is stripped, one
+  // qualified with another registered agent is rejected before anything is
+  // stripped, and any other id (`sub:s1:worker`) stays a raw provider id.
+  let foreignId: string | undefined;
+  let malformedId: string | undefined;
+  // Boxed, so a rejected null is still recorded.
+  let nonStringId: { value: unknown } | undefined;
+  // Only the fields production's wire mappers address are checked and
+  // stripped (mapAddressableItemIds); an opaque payload such as a question's
+  // schema passes through untouched.
+  // The wire types say string; a fixture can still send anything, and the
+  // mapper skips a falsy value (`false`, `0`, `null`). So every addressable
+  // field the item carries (ADDRESSABLE_ITEM_ID_FIELDS, the mapper's own
+  // list) must be a string, whatever its value; an omitted one is fine.
+  const checkItemIdTypes = (value: ConversationItem): void => {
+    const record = value as unknown as Record<string, unknown>;
+    for (const field of addressableItemIdFields(record.type)) {
+      if (Object.hasOwn(record, field) && typeof record[field] !== "string") nonStringId ??= { value: record[field] };
+    }
+  };
+  const ownItemIds = (value: ConversationItem): ConversationItem => mapAddressableItemIds(value, id => {
+    if (hasEmptyReservedQualifier(id)) malformedId ??= id;
+    const owner = qualifyingAgent(id);
+    if (owner !== undefined && owner !== targetAgentId) foreignId ??= id;
+    return owner === targetAgentId ? stripAgentQualifier(id) : id;
+  });
+  // Items are checked only on the actions that consume them; any other
+  // control ignores an unused payload, as before. There, `items` and `older`
+  // must be lists and every entry an object with a string `type`.
+  // Each item-consuming control names the fields it reads; only those are
+  // checked, and they must be lists of (or one) object with a string `type`.
+  const consumed = typeof body.action === "string" && Object.hasOwn(ITEM_FIELDS_BY_ACTION, body.action) ? ITEM_FIELDS_BY_ACTION[body.action]! : [];
+  const isItem = (entry: unknown): boolean => typeof entry === "object" && entry !== null && !Array.isArray(entry) && typeof (entry as { type?: unknown }).type === "string";
+  const wellFormed = consumed.every(field => {
+    const value = body[field];
+    return value === undefined || (field === "item" ? isItem(value) : Array.isArray(value) && value.every(isItem));
+  });
+  if (!wellFormed) return Response.json({ error: `${consumed.join(" and ")} must hold objects with a string type` }, { status: 400 });
+  const entriesOf = (field: ItemField): ConversationItem[] => field === "item" ? (body.item ? [body.item] : []) : body[field] ?? [];
+  for (const field of consumed) for (const entry of entriesOf(field)) checkItemIdTypes(entry);
+  if (nonStringId !== undefined) return Response.json({ error: `conversation ids must be strings, not ${JSON.stringify(nonStringId.value)}` }, { status: 400 });
+  const items = consumed.includes("items") ? body.items?.map(ownItemIds) : body.items;
+  const older = consumed.includes("older") ? body.older?.map(ownItemIds) : body.older;
+  const item = consumed.includes("item") ? body.item && ownItemIds(body.item) : body.item;
+  if (malformedId !== undefined) return Response.json({ error: `malformed conversation id ${JSON.stringify(malformedId)}` }, { status: 400 });
+  if (foreignId !== undefined) return Response.json({ error: `${foreignId} does not belong to ${targetAgentId}` }, { status: 400 });
+  if (typeof body.conversationId === "string") body.conversationId = stripAgentQualifier(body.conversationId);
+  body.items = items;
+  body.older = older;
+  body.item = item;
+  // Every conversation a control returns is qualified with the agent it
+  // targeted, so request and response name the same owner.
+  // The fakes return bare provider ids, which may contain colons themselves
+  // (`sub:s1:worker`). Responses use production's own wire mappers, so a
+  // control returns exactly the ids the chat routes would.
+  const descriptor = E2E_FAKES_BY_ID.get(targetAgentId)!.descriptor;
+  const snapshotJson = (snapshot: ConversationSnapshot) => Response.json(qualifyAgentSnapshot(descriptor, snapshot));
+  const summaryJson = (summary: ConversationSummary) => Response.json(qualifyAgentSummary(descriptor, summary));
+  const eventJson = (event: ChatEvent) => Response.json(qualifyAgentEvent(descriptor, event));
   switch (body.action) {
     case "agents": {
-      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : body.count === 2 ? dualAgentRouter : singleAgentRouter;
+      // The only stack is "opencode-v2"; any other value, null included, is
+      // rejected. It offers one agent, so a count beside it may only be 1.
+      // Only an omitted count means one agent; an explicit null is rejected.
+      const stacked = body.stack !== undefined;
+      if (stacked && body.stack !== "opencode-v2") return Response.json({ error: `unknown stack ${JSON.stringify(body.stack)}` }, { status: 400 });
+      const maxCount = stacked ? 1 : fakeRouters.length;
+      const agentCount = body.count === undefined ? 1 : body.count;
+      if (!Number.isInteger(agentCount) || agentCount < 1 || agentCount > maxCount) {
+        return Response.json({ error: `count must be an integer from 1 to ${maxCount}` }, { status: 400 });
+      }
+      const next = stacked ? openCodeV2Stack(body.backgroundPreview) : fakeRouters[agentCount - 1]!;
       if (next !== activeChatRouter) {
         // Existing SSE subscriptions are bound to their original router;
         // changing the delegating proxy only affects new requests.
@@ -543,128 +741,32 @@ async function handleE2EChat(request: Request): Promise<Response> {
         activeChatRouter = next;
         setLiveSessionRunning(true);
       }
-      return Response.json({ agents: body.count === 2 && body.stack === undefined ? 2 : 1, ...(body.stack ? { stack: body.stack } : {}) });
+      return Response.json({ agents: agentCount, ...(body.stack ? { stack: body.stack } : {}) });
     }
-    // The scripted fake OpenCode 2.0.28 behind the real stack. Conversation
-    // ids arrive qualified or bare; the fake works in bare session ids.
-    case "opencode":
-      switch (body.op) {
-        case "losePromptResponse":
-          openCodeV2Fake.loseNextPromptResponse(); return Response.json({ ok: true });
-        case "unknownPromptBeforeAdmission":
-          openCodeV2Fake.unknownNextPromptBeforeAdmission(); return Response.json({ ok: true });
-        case "loseResumeResponse":
-          openCodeV2Fake.loseNextResumeResponse(); return Response.json({ ok: true });
-        case "refuseBackground":
-          openCodeV2Fake.refuseNextBackground(); return Response.json({ ok: true });
-        case "launchShellOnNextSteer":
-          if (body.conversationId) { openCodeV2Fake.launchShellOnNextSteer(body.conversationId); return Response.json({ ok: true }); }
-          break;
-        case "wakeParent":
-          if (body.conversationId) { openCodeV2Fake.wakeParent(body.conversationId); return Response.json({ ok: true }); }
-          break;
-        case "launchShell":
-          if (body.conversationId) return Response.json(openCodeV2Fake.launchShell(body.conversationId, body.background !== false));
-          break;
-        case "shellPhase":
-          if (body.shellId && body.shellPhase) { openCodeV2Fake.shellPhase(body.shellId, body.shellPhase); return Response.json({ ok: true }); }
-          break;
-        case "launchWorker":
-          if (body.conversationId) return Response.json(openCodeV2Fake.launchWorker(body.conversationId, body.background !== false, body.childId));
-          break;
-        case "launchRequestWorker":
-          if (body.conversationId) return Response.json(openCodeV2Fake.launchRequestWorker(body.conversationId));
-          break;
-        case "workerObservation":
-          if (body.childId && typeof body.observed === "boolean") { openCodeV2Fake.workerObservation(body.childId, body.observed); return Response.json({ ok: true }); }
-          break;
-        case "workerRequest":
-          if (body.childId && (body.requestKind === "permission" || body.requestKind === "question")) return Response.json(openCodeV2Fake.workerRequest(body.childId, body.requestKind));
-          break;
-        case "settleWorker":
-          if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }
-          break;
-        case "settleWorkerWithoutReport":
-          if (body.childId && body.idleOutcome) { openCodeV2Fake.settleWorkerWithoutReport(body.childId, body.idleOutcome, body.text ?? "Native child finished."); return Response.json({ ok: true }); }
-          break;
-        case "workerReport":
-          if (body.childId) { openCodeV2Fake.workerReport(body.childId, body.usedModel ?? "Fixture Model", body.usedEffort, body.costUsd); return Response.json({ ok: true }); }
-          break;
-        case "disconnect":
-          openCodeV2Fake.disconnect(); return Response.json({ ok: true });
-        case "pauseEvents":
-          openCodeV2Fake.pauseEvents(true); return Response.json({ ok: true });
-        case "reconnectEvents":
-          openCodeV2Fake.pauseEvents(false); return Response.json({ ok: true });
-        case "externalRevert":
-          if (body.conversationId && body.revertMessageId !== undefined) {
-            openCodeV2Fake.externalRevert(body.conversationId, body.revertMessageId);
-            return Response.json({ ok: true });
-          }
-          break;
-        case "appendHistory":
-          if (body.conversationId) { openCodeV2Fake.appendHistory(body.conversationId, body.count ?? 60); return Response.json({ ok: true }); }
-          break;
-        case "holdNextMessageRead":
-          if (body.conversationId) { openCodeV2Fake.holdNextMessageRead(body.conversationId); return Response.json({ ok: true }); }
-          break;
-        case "releaseMessageRead":
-          openCodeV2Fake.releaseMessageRead(); return Response.json({ ok: true });
-        case "resync":
-          if (body.conversationId && openCodeV2Adapter) {
-            openCodeV2Adapter.projectionForTests(body.conversationId).replay.publish({ type: "resync", reason: "retention-gap" });
-            return Response.json({ ok: true });
-          }
-          break;
-        case "loseBackgroundResponse":
-          openCodeV2Fake.loseNextBackgroundResponse(); return Response.json({ ok: true });
-        case "loseWorkerResponse":
-          openCodeV2Fake.loseNextWorkerResponse(); return Response.json({ ok: true });
-        case "step":
-          if (body.conversationId) return Response.json(openCodeV2Fake.step(body.conversationId));
-          break;
-        case "finish":
-          if (body.conversationId) {
-            const finished = openCodeV2Fake.finish(body.conversationId, body.text);
-            return finished ? Response.json(finished) : Response.json({ error: "no turn is running" }, { status: 409 });
-          }
-          break;
-        case "raceDeliverOnCancel":
-          if (body.inboxId) {
-            openCodeV2Fake.raceDeliverOnCancel(body.inboxId);
-            return Response.json({ ok: true });
-          }
-          break;
-        case "state":
-          return Response.json({ ...openCodeV2Fake.state(), ...(body.conversationId && openCodeV2Adapter ? {
-            workerModels: openCodeV2Adapter.projectionForTests(body.conversationId).filter(item => item.type === "background_task").map(item => item.type === "background_task" ? item.workerSession?.model : undefined),
-          } : {}) });
-      }
-      break;
     case "seed":
-      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt), body.agent ?? "opencode");
+      return snapshotJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt));
     case "externalCreate":
-      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }), body.agent ?? "opencode");
+      return snapshotJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }));
     case "externalRename":
-      if (body.conversationId) return controlJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
+      if (body.conversationId) return summaryJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
       break;
     case "externalDelete":
-      if (body.conversationId) return controlJson(targetFake.externalDelete(body.conversationId, body.invalidate !== false));
+      if (body.conversationId) return summaryJson(targetFake.externalDelete(body.conversationId, body.invalidate !== false));
       break;
     case "externalSetChild":
       if (body.conversationId && typeof body.child === "boolean") {
-        return controlJson(targetFake.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
+        return summaryJson(targetFake.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
       }
       break;
     case "item":
-      if (body.conversationId && body.item) return controlJson(targetFake.publishItem(body.conversationId, body.item));
+      if (body.conversationId && body.item) return eventJson(targetFake.publishItem(body.conversationId, body.item));
       break;
     case "removeItem":
-      if (body.conversationId && body.itemId) return controlJson(targetFake.removeItem(body.conversationId, body.itemId));
+      if (body.conversationId && body.itemId) return eventJson(targetFake.removeItem(body.conversationId, body.itemId));
       break;
     case "delta":
       if (body.conversationId && body.itemId && typeof body.delta === "string") {
-        return controlJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));
+        return eventJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));
       }
       break;
     case "status":
@@ -674,7 +776,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       break;
     case "configuration":
-      if (body.conversationId && body.configuration) return controlJson(targetFake.publishConfiguration(body.conversationId, body.configuration));
+      if (body.conversationId && body.configuration) return eventJson(targetFake.publishConfiguration(body.conversationId, body.configuration));
       break;
     case "reversibleFiles":
       if (body.conversationId) {
@@ -683,24 +785,28 @@ async function handleE2EChat(request: Request): Promise<Response> {
       }
       break;
     case "nextConversationConfiguration":
-      fakeChatAgent.configureNextConversation(body.configuration ?? {});
+      targetFake.configureNextConversation(body.configuration ?? {});
       return Response.json({ ok: true });
     case "disconnect":
-      fakeChatAgent.disconnect();
+      targetFake.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: [...fakeChatAgent.usageReads, ...fakeSecondAgent.usageReads].map(read => read.mode), ...targetFake.inventoryStats() });
+      // The usage outcome's conversationId goes out qualified with the
+      // selected agent, like every other returned id.
+      return Response.json({ statusCalls: targetFake.statusCalls, promptAttempts: targetFake.promptAttempts, promptModes: targetFake.promptModes, promptVariants: targetFake.promptVariants, promptConfigurations: targetFake.promptConfigurations, reversibleAttempts: targetFake.reversibleAttempts.map(attempt => ({ ...attempt, conversationId: qualifyConversationId(targetAgentId, attempt.conversationId) })), permissionChoices: targetFake.permissionChoices, usageReadOutcome: { ...targetFake.usageReadOutcome, ...(targetFake.usageReadOutcome.conversationId ? { conversationId: qualifyConversationId(targetAgentId, targetFake.usageReadOutcome.conversationId) } : {}) },
+        // Usage reads stay one list across every fake.
+        usageReads: E2E_FAKE_AGENTS.flatMap(fake => fake.service.usageReads).map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":
-      fakeChatAgent.invalidateInventory();
+      targetFake.invalidateInventory();
       return Response.json({ ok: true });
     case "inventoryInterrupt":
-      fakeChatAgent.interruptInventoryTransport();
+      targetFake.interruptInventoryTransport();
       return Response.json({ ok: true });
     case "inventoryResume":
-      fakeChatAgent.resumeInventoryTransport();
+      targetFake.resumeInventoryTransport();
       return Response.json({ ok: true });
     case "providerPumpRestart":
-      fakeChatAgent.restartProviderPump();
+      targetFake.restartProviderPump();
       return Response.json({ ok: true });
     case "delayNextInventoryList":
       targetFake.delayNextInventoryList();
@@ -730,10 +836,11 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.declareOnly(body.capabilities ?? []);
       return Response.json({ ok: true });
     case "usageReport":
+      // Stored exactly as supplied: the report's id only selected the agent.
       targetFake.setUsageReport(body.report ?? null);
       return Response.json({ ok: true });
     case "usageRead":
-      targetFake.setUsageReadOutcome({ ...(body.outcome ?? { outcome: "no-live-session" }), ...(body.outcome?.conversationId ? { conversationId: body.outcome.conversationId.replace(/^(?:opencode|claude):/, "") } : {}) });
+      targetFake.setUsageReadOutcome({ ...(body.outcome ?? { outcome: "no-live-session" }), ...(body.outcome?.conversationId ? { conversationId: stripAgentQualifier(body.outcome.conversationId) } : {}) });
       return Response.json({ ok: true });
     case "taskOutput":
       if (body.taskId) {
@@ -762,10 +869,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.recoverItems(body.conversationId!, body.items ?? []);
       return Response.json({ ok: true });
     case "resync":
-      fakeChatAgent.rotateGeneration();
+      targetFake.rotateGeneration();
       return Response.json({ ok: true });
     case "restart":
-      fakeChatAgent.restart();
+      targetFake.restart();
       return Response.json({ ok: true });
   }
   return Response.json({ error: "invalid chat control" }, { status: 400 });
@@ -964,8 +1071,7 @@ const shutdown = async () => {
   shuttingDown = true;
   liveEndpoint.endAll();
   liveBroker.dispose();
-  await singleAgentRouter.dispose();
-  await dualAgentRouter.dispose().catch(() => undefined);
+  for (const router of fakeRouters) await router.dispose().catch(() => undefined);
   await openCodeV2Router?.dispose().catch(() => undefined);
   await openCodeV2Fake.stop().catch(() => undefined);
   await watchSession.stop();

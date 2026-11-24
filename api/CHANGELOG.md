@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 15 / Workspace 39 - Unreleased (agent-declared login)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `ChatAgentDescriptor` gains required `login: { command, hubManaged }`. `command` is the agent's own login command. `hubManaged` says whether the Hub's Agent accounts manage that login. The descriptor rides every conversation summary and every agent's chat status, so the login is known in every availability state.
+- OpenCode declares `opencode auth login` and Claude Code declares `claude auth login`; the Hub manages both. Agent accounts still lists exactly these two agents, with unchanged login commands.
+- The Hub API and stored data are unchanged.
+
+### Migration
+
+Regenerate strict workspace validators for revision 39: revision 38's closed `ChatAgentDescriptor` rejects `login`. Read `login.hubManaged` before linking to Agent accounts: link to `/settings#agent-accounts/{agentId}` only on a Hub-served page and only when it is true; otherwise show `login.command` to run where UatuCode runs. Do not derive a login command from the agent id. No stored-data migration is required. Hub revision remains 15. Bundled-web revision 5 refreshes cached web assets whose validators would reject the new field.
+
 ## Hub 15 / Workspace 38 - Unreleased (withheld worker outcomes)
 
 Compatibility: breaking (workspace)

@@ -6,7 +6,6 @@ import path from "node:path";
 
 import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
-import { CLAUDE_TURN, type ClaudeTextIdentity } from "./claude/normalization-types";
 import type { TranscriptEntry } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
 import type { BackgroundTaskItem, ChatAgent, ChatActionContext } from "./types";
@@ -39,7 +38,13 @@ import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
-import { isVisualTurnLive, OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_START_FALLBACK, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { OPENCODE_COMPLETION_ALIAS, OPENCODE_TEXT_START_FALLBACK } from "./opencode/normalization-types";
+import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN, CHAT_TURN_CONTINUES, executionEvidence, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, provisionalTurn, type ChatStatusLiveness, type ChatTextSeal, type ChatTurnIdentity } from "./turn-liveness";
+import { OPENCODE_AGENT } from "./opencode/descriptor";
+
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
+const TEXT_ENDED_FACT = { [CHAT_TEXT_SEAL]: "ended" as const };
 import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
@@ -70,7 +75,7 @@ test.each(["completed", "failed", "interrupted"] as const)("ordered Claude %s se
   const history = () => normalizeTranscriptEntries(entries).items;
   projection.seed(history());
   const originals = projection.items();
-  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+  const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN];
   const originalToken = turn(originals[0]!)!;
   expect(originalToken.completed).toBe(false);
   expect(turn(originals[1]!)).toBe(originalToken);
@@ -95,7 +100,7 @@ test.each(["completed", "failed", "interrupted"] as const)("ordered Claude %s se
   const prefixJson = JSON.stringify(prefix);
   emit({ type: "stream_event", event: { type: "content_block_stop", index: 0 } });
   emit({ type: "user", message: { content: "Steer, not a new execution" } });
-  projection.statusUpdate("failed", "Retryable step", true, { [OPENCODE_STEP_LIVE]: true });
+  projection.statusUpdate("failed", "Retryable step", true, { [CHAT_TURN_CONTINUES]: true });
   projection.statusUpdate("retrying");
   projection.statusUpdate("completed", undefined, false); // Synthetic status is not a native boundary.
   expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(false);
@@ -150,8 +155,8 @@ test("equal-JSON Claude recovery retains authoritative completion without an ext
   expect(JSON.stringify(terminal)).toBe(JSON.stringify(original));
   expect(projection.recover([{ kind: "upsert", item: terminal }])).toBe(true);
   expect(projection.replay.latestCursor()).toBe(cursor);
-  expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
-  expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+  expect((projection.get(original.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
+  expect((original as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
 });
 
 test("covered adapter history folds equal-JSON Claude completion and cannot return a later stale live token", async () => {
@@ -170,15 +175,445 @@ test("covered adapter history folds equal-JSON Claude completion and cannot retu
       parentUuid: null, isSidechain: false, parentToolUseId: null, message: {} });
     const ended = await adapter.history("metadata");
     expect(JSON.stringify(ended.items[0])).toBe(JSON.stringify(original));
-    expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((projection.get(original.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     expect(projection.replay.latestCursor()).toBe(cursor);
     entries.pop(); // An independently normalized lagging transcript must not reopen the native row.
     const stale = await adapter.history("metadata");
-    expect((stale.items[0] as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
-    expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
-    expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect((stale.items[0] as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
+    expect((projection.get(original.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
+    expect((original as ConversationItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
     expect(projection.replay.latestCursor()).toBe(cursor);
   } finally { await adapter.dispose(); }
+});
+
+test("an ordered frame cannot reopen a Claude reply the projection already closed, while a new reply opens despite a sealed producer turn", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const turn = (item: ConversationItem | undefined) => (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+  const memory = createClaudeEventMemory();
+  const frame = (uuid: string, record: Record<string, unknown>) => normalizeClaudeMessage({ uuid, timestamp: 1, ...record }, memory, "live").updates;
+  const reply = (uuid: string) => frame(uuid, { type: "assistant", message: { id: `api-${uuid}`, content: [{ type: "text", text: "![Later](later.png)" }] } });
+  projection.statusUpdate("running");
+  const first = reply("first");
+  for (const update of first) projection.apply(update);
+  for (const update of frame("end", { type: "result", subtype: "success", is_error: false })) projection.apply(update);
+  const closed = turn(projection.get("message:first"))!;
+  expect(closed.completed).toBe(true);
+  // A late restatement of the same native row, normalized into a new producer turn.
+  const late = reply("first");
+  expect(turn(late[0]!.kind === "upsert" ? late[0]!.item : undefined)?.completed).toBe(false);
+  for (const update of late) projection.apply(update);
+  expect(turn(projection.get("message:first"))).toBe(closed);
+  // The producer may normalize a whole turn before any of it is applied.
+  const second = reply("second");
+  frame("second-end", { type: "result", subtype: "success", is_error: false });
+  expect(turn(second[0]!.kind === "upsert" ? second[0]!.item : undefined)?.completed).toBe(true);
+  for (const update of second) projection.apply(update);
+  expect(turn(projection.get("message:second"))?.completed).toBe(false);
+  expect(Object.isFrozen(turn(projection.get("message:second")))).toBe(true);
+});
+
+// Characterization for generalize-chat-agent-seam D1. Stored OpenCode 2.x
+// execution evidence is authoritative: unlike a Claude turn, which a stale row
+// cannot reopen (see above), the projection adopts it in either direction.
+// Authoritative evidence comes only from stored rows (seed, replace, recovery,
+// direct upsert). Ordered provider input never carries it, so apply ignores it.
+test("stored execution evidence is adopted in both directions by every stored-row entry point, and ignored on ordered apply", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  const stored = (running?: boolean) => normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), running)[0]!;
+  const id = stored().id;
+  const current = () => executionLive(projection.get(id)!);
+  expect(executionLive(stored())).toBeUndefined();
+  projection.seed([stored(true)]);
+  projection.statusUpdate("running");
+  projection.statusUpdate("completed");
+  expect(current()).toBe(false);
+  const cursor = projection.replay.latestCursor();
+  for (const evidence of [true, false, true]) {
+    expect(projection.recover([{ kind: "upsert", item: stored(evidence) }])).toBe(true);
+    expect(current()).toBe(evidence);
+  }
+  for (const evidence of [false, true]) {
+    projection.seed([stored(evidence)]);
+    expect(current()).toBe(evidence);
+  }
+  // A row without evidence keeps what the projection already holds.
+  expect(projection.recover([{ kind: "upsert", item: stored() }])).toBe(true);
+  projection.seed([stored()]);
+  expect(current()).toBe(true);
+  expect(projection.replay.latestCursor()).toBe(cursor); // Equal public JSON: no frame for evidence alone.
+  for (const evidence of [false, true]) {
+    projection.apply({ kind: "upsert", item: stored(evidence) });
+    expect(current()).toBe(true); // Ignored: the projection keeps its stored evidence.
+  }
+  for (const evidence of [false, true]) {
+    projection.upsert(stored(evidence));
+    expect(current()).toBe(evidence);
+  }
+  projection.upsert(stored(false));
+  projection.apply({ kind: "upsert", item: stored(true) });
+  expect(current()).toBe(false); // Ignored in either direction.
+  projection.apply({ kind: "upsert", item: { ...stored(true), id: "fresh" } });
+  expect(executionLive(projection.get("fresh")!)).toBeUndefined(); // Even on the row it creates.
+  projection.upsert(stored(true));
+  projection.apply({ kind: "upsert", item: stored() });
+  expect(current()).toBe(true);
+  for (const evidence of [false, true]) {
+    projection.replace([stored(evidence)]);
+    expect(current()).toBe(evidence);
+  }
+  projection.replace([stored()]);
+  expect(current()).toBeUndefined(); // Replacement is not a sparse merge.
+});
+
+test("covered adapter history republishes nothing for equal-JSON execution evidence, yet adopts it in both directions", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  let running = true;
+  provider.listMessages = async () => ({ items: normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), running), accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    const original = (await adapter.history("metadata")).items[0]!;
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    expect(executionLive(original)).toBe(true);
+    for (const evidence of [false, true, false]) {
+      running = evidence;
+      const read = (await adapter.history("metadata")).items[0]!;
+      expect(JSON.stringify(read)).toBe(JSON.stringify(original));
+      expect(executionLive(read)).toBe(evidence);
+      expect(executionLive(projection.get(original.id)!)).toBe(evidence);
+    }
+    expect(executionLive(original)).toBe(true); // Earlier snapshots keep their own evidence.
+    expect(projection.replay.latestCursor()).toBe(cursor);
+  } finally { await adapter.dispose(); }
+});
+
+// The liveness contract (D1): a reply carries one token kind for life. These
+// pin its rules at every projection entry point.
+test.each(["recover", "seed", "replace", "upsert", "apply"] as const)("%s never reopens a closed provisional turn with an open provisional or unannotated row", entry => {
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  for (const [weaker, item] of Object.entries({ "open provisional": { ...row, [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem, unannotated: row })) {
+    const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+    projection.seed([{ ...row, [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem]);
+    projection.statusUpdate("running");
+    projection.statusUpdate("completed");
+    if (entry === "recover") projection.recover([{ kind: "upsert", item }]);
+    else if (entry === "seed") projection.seed([item]);
+    else if (entry === "replace") projection.replace([item]);
+    else if (entry === "upsert") projection.upsert(item);
+    else projection.apply({ kind: "upsert", item });
+    expect([weaker, (projection.get(row.id) as ConversationItem & ChatTurnIdentity)[CHAT_TURN]]).toMatchObject([weaker, { completed: true, authority: "provisional" }]);
+    expect([weaker, isReplyLive(projection.get(row.id) as AssistantMessageItem, true)]).toEqual([weaker, false]);
+  }
+});
+
+// A repeat counts only on completed: on any other status the marker is
+// ignored and the status is processed normally (a failed or interrupted one
+// ends the turn).
+test.each(["running", "sending", "retrying", "compacting", "idle", "failed", "interrupted"] as const)("a %s status marked as a repeat is processed as an ordinary status", status => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  projection.statusUpdate("running");
+  projection.statusUpdate("completed");
+  const frame = projection.apply({ kind: "status", status, [CHAT_STATUS_REPEAT]: true } as NormalizedProviderUpdate)!;
+  expect(frame).toMatchObject({ type: "conversation.status", status });
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(projection.status).toBe(status);
+  const summary = projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status });
+  expect(isVisualTurnLive(frame as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(isVisualTurnLive(summary));
+});
+
+// A sparse merge treats an explicitly undefined reply fact as absent, so it
+// keeps the projection's value; only a full replacement takes the row as given.
+// The completion seal relies on completedAt, so an explicitly undefined
+// completedAt is absent in a sparse merge too (no current path writes one).
+test.each(["recover", "seed", "upsert", "apply", "replace"] as const)("%s treats an explicitly undefined completedAt as absent, unless it replaces the row", entry => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "[shot]: s.png\n\n![shot]", completedAt: 2 };
+  projection.seed([{ ...row, [CHAT_TEXT_SEAL]: "completion" } as AssistantMessageItem]);
+  projection.statusUpdate("running");
+  const incoming = { ...row, completedAt: undefined, [CHAT_TEXT_SEAL]: "completion" } as AssistantMessageItem;
+  if (entry === "recover") projection.recover([{ kind: "upsert", item: incoming }]);
+  else if (entry === "seed") projection.seed([incoming]);
+  else if (entry === "upsert") projection.upsert(incoming);
+  else if (entry === "apply") projection.apply({ kind: "upsert", item: incoming });
+  else projection.replace([incoming]);
+  const kept = projection.get(row.id) as AssistantMessageItem;
+  expect(kept.completedAt).toBe(entry === "replace" ? undefined : 2);
+  expect(isTextSealed(kept)).toBe(entry !== "replace");
+});
+
+test.each(["recover", "seed", "upsert", "apply", "replace"] as const)("%s treats an explicitly undefined token or text seal as absent, unless it replaces the row", entry => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)", completedAt: 2 };
+  projection.seed([{ ...row, ...executionEvidence(true), ...TEXT_ENDED_FACT } as AssistantMessageItem]);
+  projection.statusUpdate("running");
+  const incoming = { ...row, [CHAT_TURN]: undefined, [CHAT_TEXT_SEAL]: undefined } as AssistantMessageItem;
+  if (entry === "recover") projection.recover([{ kind: "upsert", item: incoming }]);
+  else if (entry === "seed") projection.seed([incoming]);
+  else if (entry === "upsert") projection.upsert(incoming);
+  else if (entry === "apply") projection.apply({ kind: "upsert", item: incoming });
+  else projection.replace([incoming]);
+  const kept = projection.get(row.id) as AssistantMessageItem & ChatTextSeal;
+  expect([executionLive(kept), kept[CHAT_TEXT_SEAL]]).toEqual(entry === "replace" ? [undefined, undefined] : [true, "ended"]);
+  expect(isReplyLive(kept, true)).toBe(entry !== "replace"); // Erased evidence would fall back to completedAt.
+});
+
+// Covered history adopts, for a row whose public JSON is unchanged, only a
+// changed turn-token state. Other in-process facts on that row (a text seal)
+// are returned by the read but not staged into the projection (inherited).
+test("covered adapter history does not stage an equal-JSON row whose only change is a text seal", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  let facts: object = {};
+  provider.listMessages = async () => ({ items: [{ ...row, ...facts } as AssistantMessageItem], accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    await adapter.history("metadata");
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    facts = TEXT_ENDED_FACT;
+    const read = (await adapter.history("metadata")).items.find(item => item.id === row.id) as AssistantMessageItem & ChatTextSeal;
+    expect(read[CHAT_TEXT_SEAL]).toBe("ended");
+    expect((projection.get(row.id) as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBeUndefined();
+    expect(projection.replay.latestCursor()).toBe(cursor);
+  } finally { await adapter.dispose(); }
+});
+
+// A token appearing (or a same-kind open/closed change) triggers staging; the
+// staged row then carries all its facts, its text seal included. Without this
+// an OpenCode 2.x row first seen live would lose its first execution boundary.
+test("covered adapter history stages an equal-JSON row whose first token appears, with its text seal", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  let facts: object = {};
+  provider.listMessages = async () => ({ items: [{ ...row, ...facts } as AssistantMessageItem], accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    await adapter.history("metadata");
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    expect(executionLive(projection.get(row.id)!)).toBeUndefined();
+    facts = { ...executionEvidence(true), ...TEXT_ENDED_FACT };
+    await adapter.history("metadata");
+    const staged = projection.get(row.id) as AssistantMessageItem & ChatTextSeal;
+    expect(executionLive(staged)).toBe(true);
+    expect(staged[CHAT_TEXT_SEAL]).toBe("ended");
+    expect(projection.replay.latestCursor()).toBe(cursor); // Equal public JSON: no frame.
+  } finally { await adapter.dispose(); }
+});
+
+// A status is a repeat or a continuation, never both: a repeat preserves the
+// turn's current liveness but never restores it.
+test("a repeat carrying a continuation after a genuine end leaves the turn finished", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const reply = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([reply]);
+  projection.statusUpdate("running");
+  projection.statusUpdate("completed");
+  const summary = () => projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status });
+  const repeat = projection.apply({ kind: "status", status: "completed", [CHAT_STATUS_REPEAT]: true, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined(); // Ignored on a repeat.
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(isVisualTurnLive(repeat as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(false);
+  expect(isVisualTurnLive(summary())).toBe(false); // What a reloading client reads.
+  expect(executionLive(projection.get(reply.id)!)).toBe(false);
+});
+
+test("a failed status whose turn continues seals no reply, and a repeat after it continues the turn", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const provisional = { id: "provisional", type: "assistant_message", createdAt: 1, markdown: "", [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem;
+  const authoritative = { id: "authoritative", type: "assistant_message", createdAt: 2, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([provisional, authoritative]);
+  projection.statusUpdate("running");
+  const open = () => [provisional.id, authoritative.id].map(id => executionLive(projection.get(id)!));
+  const summary = () => projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status });
+  // A stub agent's normalizer: a retryable failed step.
+  const phase = projection.apply({ kind: "status", status: "failed", [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((phase as typeof phase & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
+  expect(isVisualTurnLive(phase as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(true);
+  expect(isVisualTurnLive(summary())).toBe(true);
+  expect(open()).toEqual([true, true]);
+  const repeat = projection.apply(normalizeProviderEvent({ id: "alias", type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!)!;
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBe(true);
+  expect(isVisualTurnLive(summary())).toBe(true);
+  expect(open()).toEqual([true, true]);
+  const end = projection.statusUpdate("failed");
+  expect(isVisualTurnLive(end as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(false);
+  expect(isVisualTurnLive(summary())).toBe(false);
+  expect(open()).toEqual([false, false]);
+});
+
+// "Turn continues" means something only on a failed status that is not a
+// repeat; on completed or interrupted it is ignored and the status ends the turn.
+test.each(["completed", "interrupted"] as const)("a %s status carrying the turn-continues flag ends the turn as usual", terminal => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const provisional = { id: "provisional", type: "assistant_message", createdAt: 1, markdown: "", [CHAT_TURN]: provisionalTurn() } as AssistantMessageItem;
+  const authoritative = { id: "authoritative", type: "assistant_message", createdAt: 2, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([provisional, authoritative]);
+  projection.statusUpdate("running");
+  const frame = projection.apply({ kind: "status", status: terminal, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
+  expect(isVisualTurnLive(frame as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(false);
+  expect(isVisualTurnLive(projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: terminal }))).toBe(false);
+  expect([provisional.id, authoritative.id].map(id => executionLive(projection.get(id)!))).toEqual([false, false]);
+});
+
+// A staged recovery row merges over the projected one: facts the stored row
+// omits, such as an explicit text end seen live, are kept.
+test("covered adapter history keeps a live text seal when an equal-JSON row adds its first token without one", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.sessions = [fixtureSession("metadata")];
+  const row: AssistantMessageItem = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "![Later](later.png)" };
+  let facts: object = TEXT_ENDED_FACT;
+  provider.listMessages = async () => ({ items: [{ ...row, ...facts } as AssistantMessageItem], accounting: [] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    await adapter.history("metadata");
+    const projection = adapter.projectionForTests("metadata");
+    expect((projection.get(row.id) as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
+    facts = executionEvidence(true);
+    await adapter.history("metadata");
+    const staged = projection.get(row.id) as AssistantMessageItem & ChatTextSeal;
+    expect(executionLive(staged)).toBe(true);
+    expect(staged[CHAT_TEXT_SEAL]).toBe("ended");
+  } finally { await adapter.dispose(); }
+});
+
+// Flag precedence on a status carrying both (out of contract; the conformance
+// helper reports it as "both"): on failed the invalid repeat flag is dropped
+// first, then the continues flag is evaluated; on completed the continues flag
+// is ignored and the repeat applies.
+test("a failed status carrying both flags keeps its continuation: the repeat flag is dropped first", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const reply = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([reply]);
+  projection.statusUpdate("running");
+  const frame = projection.apply({ kind: "status", status: "failed", [CHAT_STATUS_REPEAT]: true, [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!;
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+  expect((frame as typeof frame & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
+  expect(isVisualTurnLive(frame as Extract<ChatEvent, { type: "conversation.status" }>)).toBe(true);
+  expect(isVisualTurnLive(projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "failed" }))).toBe(true); // Reload.
+  expect(executionLive(projection.get(reply.id)!)).toBe(true);
+});
+
+test("a repeated retryable failure ends the turn: the repeat marker counts only on completed", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const reply = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  projection.seed([reply]);
+  projection.statusUpdate("running");
+  const summary = () => projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status });
+  const live = (event: ChatEvent) => isVisualTurnLive(event as Extract<ChatEvent, { type: "conversation.status" }>);
+  // A stub agent's normalizer: a retryable failed step, then a restatement of it.
+  expect(live(projection.apply({ kind: "status", status: "failed", [CHAT_TURN_CONTINUES]: true } as NormalizedProviderUpdate)!)).toBe(true);
+  const repeat = projection.apply({ kind: "status", status: "failed", [CHAT_STATUS_REPEAT]: true } as NormalizedProviderUpdate)!;
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
+  expect((repeat as typeof repeat & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(live(repeat)).toBe(false);
+  expect(isVisualTurnLive(summary())).toBe(false); // What a reloading client reads.
+  expect(executionLive(projection.get(reply.id)!)).toBe(false);
+});
+
+// Reply facts travel with whole items: a text update to an existing row never
+// changes them (base behaviour; facts are read from a text update only when it
+// creates the row).
+test("a later text update's reply facts are ignored, in either seal form and for either token kind", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const markdown = "[shot]: shot.png\n\n![shot]";
+  const text = (id: string, item: object, value = markdown): NormalizedProviderUpdate => ({ kind: "text", itemId: id, identity: id, mode: "cumulative", text: value,
+    item: { id, type: "assistant_message", createdAt: 1, markdown: "", ...item } as AssistantMessageItem });
+  const row = (id: string) => projection.get(id) as AssistantMessageItem & ChatTextSeal & ChatTurnIdentity;
+  projection.statusUpdate("running");
+  // One token kind per reply: a live reply offered provisional tokens, a stored one authoritative.
+  for (const [id, token] of [["live", { [CHAT_TURN]: provisionalTurn() }], ["stored", executionEvidence(false)]] as const) {
+    expect(projection.apply(text(id, {}))).toMatchObject({ type: "item.upsert", item: { markdown } });
+    for (const facts of [TEXT_ENDED_FACT, { [CHAT_TEXT_SEAL]: "completion", completedAt: 5 }, token]) {
+      expect(projection.apply(text(id, facts))).toBeUndefined(); // Unchanged text: nothing to publish.
+      expect(row(id)[CHAT_TEXT_SEAL]).toBeUndefined();
+      expect(row(id)[CHAT_TURN]).toBeUndefined();
+      expect(row(id).completedAt).toBeUndefined();
+    }
+    expect(projection.apply(text(id, TEXT_ENDED_FACT, `${markdown} more`))).toMatchObject({ type: "item.text_delta", delta: " more" });
+    expect(row(id)[CHAT_TEXT_SEAL]).toBeUndefined();
+  }
+  // The item that creates a row does carry its facts.
+  expect(projection.apply({ kind: "text", itemId: "other", identity: "other", mode: "cumulative", text: markdown, item: { id: "other", type: "assistant_message", createdAt: 2, markdown: "", ...TEXT_ENDED_FACT } as AssistantMessageItem }))
+    .toMatchObject({ type: "item.upsert" });
+  expect((projection.get("other") as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
+});
+
+// Inherited: a native turn footer (Claude's turn_duration, which emits no
+// updates) closes only the producer's token, so snapshot and transcript
+// evidence. The live projection holds its own frozen copy, and only an
+// ordered terminal status closes it.
+test("a turn footer closes the producer's token, while only the ordered terminal status closes the live projection", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const memory = createClaudeEventMemory();
+  const frame = (record: Record<string, unknown>) => normalizeClaudeMessage({ uuid: `f-${Math.random()}`, timestamp: 1, ...record }, memory, "live").updates;
+  const turn = (item: ConversationItem | undefined) => (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+  projection.statusUpdate("running");
+  const reply = frame({ type: "assistant", message: { id: "api", content: [{ type: "text", text: "![Later](later.png)" }] } });
+  const produced = reply.find(update => update.kind === "upsert" && update.item.type === "assistant_message");
+  if (produced?.kind !== "upsert") throw new Error("expected the reply");
+  for (const update of reply) projection.apply(update);
+  expect(frame({ type: "system", subtype: "turn_duration", durationMs: 5 })).toEqual([]); // The footer emits nothing.
+  expect(turn(produced.item)?.completed).toBe(true); // Producer, snapshot and transcript evidence.
+  expect(turn(projection.get(produced.item.id))?.completed).toBe(false); // The live projection is still open.
+  projection.statusUpdate("completed");
+  expect(turn(projection.get(produced.item.id))?.completed).toBe(true);
+});
+
+test("only the projection freezes authoritative evidence: producers hand it fresh tokens", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const produced = { id: "reply", type: "assistant_message", createdAt: 1, markdown: "", ...executionEvidence(true) } as AssistantMessageItem;
+  const token = (item: ConversationItem | undefined) => (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+  expect(Object.isFrozen(token(produced))).toBe(false);
+  projection.seed([produced]);
+  expect(Object.isFrozen(token(projection.get("reply")))).toBe(true);
+  expect(token(projection.get("reply"))).not.toBe(token(produced));
+  expect(token(projection.get("reply"))).toEqual({ completed: false, authority: "authoritative" });
+  expect(Object.isFrozen(token(produced))).toBe(false);
+});
+
+// Characterization for generalize-chat-agent-seam D1: which ordered status
+// sequences keep a turn capture-live, and which seal its retained replies.
+test.each([
+  { steps: ["running"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "repeat"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "repeat", "repeat"], frame: true, snapshot: true, reply: true },
+  { steps: ["repeat"], frame: false, snapshot: false, reply: true }, // Nothing live to continue; a repeat still never seals.
+  { steps: ["running", "completed", "repeat"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "repeat", "running", "completed"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "retryable failure"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "retryable failure", "repeat"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "retryable failure", "retrying"], frame: true, snapshot: true, reply: true },
+  { steps: ["running", "retryable failure", "failed"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "failed"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "interrupted"], frame: false, snapshot: false, reply: false },
+  { steps: ["running", "synthetic completed"], frame: false, snapshot: false, reply: true }, // Not a native boundary.
+] as const)("ordered statuses $steps: capture-live frame=$frame snapshot=$snapshot, reply still live=$reply", ({ steps, frame, snapshot, reply }) => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  const stored = normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), true)[0]!;
+  projection.seed([stored]);
+  const normalizeV2 = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  let last: ChatEvent | undefined, sequence = 0;
+  const status = (updates: NormalizedProviderUpdate[]) => projection.apply(updates.find(update => update.kind === "status")!)!;
+  for (const step of steps) {
+    if (step === "repeat") last = status(normalizeProviderEvent({ id: `repeat-${++sequence}`, type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates);
+    else if (step === "retryable failure") last = status(normalizeV2({ id: `step-${++sequence}`, created: sequence, type: "session.step.failed", location: { directory: "/workspace" }, data: { sessionID: "c", assistantMessageID: "api", error: { message: "Rate limited" } } }, memory).updates);
+    else if (step === "synthetic completed") last = projection.statusUpdate("completed", undefined, false);
+    else last = projection.statusUpdate(step);
+  }
+  if (last?.type !== "conversation.status") throw new Error("expected a status frame");
+  expect(isVisualTurnLive(last)).toBe(frame);
+  expect(isVisualTurnLive(projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: projection.status }))).toBe(snapshot);
+  expect(executionLive(projection.get(stored.id)!)).toBe(reply);
+  expect(executionLive(stored)).toBe(true); // Earlier frames keep their evidence.
 });
 
 test.each(["completed", "failed", "interrupted"] as const)("Claude producer result ahead of the adapter session await cannot seal the retained prefix before ordered %s", async terminal => {
@@ -224,9 +659,9 @@ test.each(["completed", "failed", "interrupted"] as const)("Claude producer resu
   const store = new VisualStore(process.cwd(), directory);
   store.setReader(async source => { reads[source] = (reads[source] ?? 0) + 1; if (!available) throw new VisualReadError(true); return original; });
   const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: adapter.dispose.bind(adapter) } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   const answer = (page: { items: ConversationItem[] }, id: string) => page.items.find(item => item.id === id) as AssistantMessageItem;
-  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+  const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN]!;
   let attached: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined, restarted: MultiAgentChatService | undefined;
   try {
     await entered.promise; // Real ChatAdapter pump/requireSession barrier; no tail row has applied.
@@ -258,7 +693,7 @@ test.each(["completed", "failed", "interrupted"] as const)("Claude producer resu
     expect(turn(initial).completed).toBe(false); expect(turn(opened.item).completed).toBe(false);
     expect(initial.visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
     const reloadStore = new VisualStore(process.cwd(), directory); reloadStore.setReader(async () => { throw new Error("must not read future bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     expect(answer(await restarted.history("claude:capture"), final.id).visuals).toEqual(final.visuals);
     expect((await restarted.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(original);
   } finally { release.resolve(); attached?.events.cancel(); await restarted?.dispose(); await router.dispose(); await pumping.catch(() => undefined); await rm(directory, { recursive: true, force: true }); }
@@ -318,11 +753,11 @@ test.each([
     if (!available) throw new VisualReadError(true);
     return png;
   });
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   const prefix = '![Later](later.png)\r\n\r\n```svg\r\n<svg><rect width="10"';
   const close = '/></svg>\r\n```\r\n';
   const svg = '<svg><rect width="10"/></svg>\r\n';
-  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+  const turn = (item: ConversationItem) => (item as ConversationItem & ChatTurnIdentity)[CHAT_TURN]!;
   const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
     const item = snapshot.items.find(item => item.id === id);
     if (item?.type !== "assistant_message") throw new Error(`Missing assistant ${id}`);
@@ -427,7 +862,7 @@ test.each([
     expect((await router.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(png);
     const reloadedStore = new VisualStore(process.cwd(), directory);
     reloadedStore.setReader(async () => { throw new Error("immutable captures must not reread future-turn bytes"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     const reloaded = answer(await restarted.history("claude:capture"), final.id);
     expect(reloaded.visuals).toEqual(final.visuals);
     expect(await restarted.resolveVisual(reloaded.visuals![1]!.id!)).toEqual(capturedSvg);
@@ -487,7 +922,7 @@ test.each([
     subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
     dispose: () => adapter.dispose(),
   } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
   let subscription: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
   let restarted: MultiAgentChatService | undefined;
   const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
@@ -499,7 +934,7 @@ test.each([
     projection.statusUpdate("running");
     const seeded = await adapter.history("capture"); // No MultiAgent history/subscribe/capture yet.
     const old = answer(seeded, "old");
-    const oldToken = (old as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    const oldToken = (old as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]!;
     expect(oldToken.completed).toBe(false);
     expect(reads).toEqual({});
     const before = decodeReplayCursor(projection.replay.latestCursor())!;
@@ -507,7 +942,7 @@ test.each([
     expect(ended).toHaveLength(1);
     expect(ended[0]).toMatchObject({ type: "conversation.status", status: terminal, sequence: before.sequence + 1 });
     expect(oldToken.completed).toBe(false);
-    expect((projection.get(old.id) as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((projection.get(old.id) as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     // New native input does not retroactively own the previous answer. Keep
     // history deliberately stale (no persisted turn_duration) on every read.
     projection.statusUpdate("running");
@@ -519,7 +954,7 @@ test.each([
     else { subscription = await router.subscribe("claude:capture"); first = subscription.snapshot; }
     const captured = answer(first, "old");
     expect(captured.visuals?.map(visual => visual.status)).toEqual(["unavailable", "ready"]);
-    expect((captured as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((captured as AssistantMessageItem & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     expect(answer(first, "current").visuals?.map(visual => visual.status)).toEqual(["pending"]);
     expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
     expect(reads).toEqual({ "old-missing.png": 1, "old-ready.png": 1, "current.png": 1 });
@@ -552,7 +987,7 @@ test.each([
     expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
     const reloadedStore = new VisualStore(process.cwd(), directory);
     reloadedStore.setReader(async () => { throw new Error("terminal records must not reread current execution files"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude", login: TEST_LOGIN }, service }] });
     const reloaded = await restarted.history("claude:capture");
     expect(answer(reloaded, "old").visuals).toEqual(captured.visuals);
     expect(answer(reloaded, "current").visuals).toEqual(answer(completed, "current").visuals);
@@ -574,7 +1009,7 @@ test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execu
   const membership = storedExecutionLiveness([native]);
   projection.seed(normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), membership.get(native.id)));
   const original = projection.items()[0]!;
-  const live = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  const live = (item: object) => executionLive(item);
   const failed = emit("session.step.failed", { assistantMessageID: "api", error: { type: "rate-limit", message: "Retry" } });
   expect(failed.some(event => event.type === "conversation.status" && event.status === "failed")).toBe(true);
   expect(live(projection.get(original.id)!)).toBe(true);
@@ -595,24 +1030,28 @@ test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execu
 
 test.each(["completed", "failed", "interrupted"] as const)("source-witnessed V1 aliases preserve current execution membership until genuine %s without mutating earlier frames", terminal => {
   const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
-  const old: AssistantMessageItem & OpenCodeExecutionIdentity = { id: "part:old", type: "assistant_message", createdAt: 1, markdown: "![Old](old.png)", [OPENCODE_EXECUTION_LIVE]: false };
-  const current: AssistantMessageItem & OpenCodeExecutionIdentity = { id: "part:current", type: "assistant_message", createdAt: 2, markdown: "![Current](current.png)", [OPENCODE_EXECUTION_LIVE]: true };
+  const old: AssistantMessageItem & ChatTurnIdentity = { id: "part:old", type: "assistant_message", createdAt: 1, markdown: "![Old](old.png)", ...executionEvidence(false) };
+  const current: AssistantMessageItem & ChatTurnIdentity = { id: "part:current", type: "assistant_message", createdAt: 2, markdown: "![Current](current.png)", ...executionEvidence(true) };
   projection.seed([old, current]); projection.statusUpdate("running");
-  projection.statusUpdate("failed", "Retryable step", true, { [OPENCODE_STEP_LIVE]: true });
+  // Seeding freezes the producers' evidence into the projection's own rows.
+  const [retainedOld, retainedCurrent] = [projection.get(old.id)!, projection.get(current.id)!];
+  expect([executionLive(retainedOld), executionLive(retainedCurrent)]).toEqual([false, true]);
+  projection.statusUpdate("failed", "Retryable step", true, { [CHAT_TURN_CONTINUES]: true });
   const update = normalizeProviderEvent({ id: "old-idle-alias", type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!;
   const alias = projection.apply(update)!;
   expect(JSON.parse(JSON.stringify(alias))).toMatchObject({ type: "conversation.status", status: "completed" });
-  expect((alias as typeof alias & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBe(true);
-  expect(projection.get(current.id)).toBe(current); // The alias must not seal a newer retained row.
+  expect((alias as typeof alias & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBe(true);
+  expect(projection.get(current.id)).toBe(retainedCurrent); // The alias must not seal a newer retained row.
   const snapshot = projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" });
   expect(isVisualTurnLive(snapshot)).toBe(true);
   projection.statusUpdate("running");
   const ended = projection.statusUpdate(terminal);
-  expect((ended as typeof ended & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBeUndefined();
-  expect((projection.get(current.id) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(false);
-  expect(projection.get(old.id)).toBe(old);
-  expect(current[OPENCODE_EXECUTION_LIVE]).toBe(true); // Earlier row/frame references remain immutable.
-  expect((alias as typeof alias & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBe(true);
+  expect((ended as typeof ended & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBeUndefined();
+  expect(executionLive(projection.get(current.id)!)).toBe(false);
+  expect(projection.get(old.id)).toBe(retainedOld);
+  expect(executionLive(current)).toBe(true); // Earlier row/frame references remain immutable.
+  expect(executionLive(retainedCurrent)).toBe(true);
+  expect((alias as typeof alias & ChatStatusLiveness)[CHAT_REPEAT_CONTINUES]).toBe(true);
   expect(isVisualTurnLive(snapshot)).toBe(true); // No queued mutation of an older boundary.
   expect(isVisualTurnLive(projection.withVisualStatus(snapshot))).toBe(false);
 });
@@ -630,7 +1069,7 @@ test("native step-live hints are immutable on ordered status frames and adapter 
     emit("session.execution.started", {});
     const failed = emit("session.step.failed", { assistantMessageID: "m", error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
     expect(JSON.parse(JSON.stringify(failed))).toMatchObject({ type: "conversation.status", status: "failed", message: "Rate limited" });
-    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect((failed as typeof failed & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
     const snapshot = await adapter.subscribe("step-live");
     snapshot.events.cancel();
     expect(snapshot.snapshot.conversation.status).toBe("failed");
@@ -640,15 +1079,15 @@ test("native step-live hints are immutable on ordered status frames and adapter 
     expect(isVisualTurnLive(history.conversation)).toBe(true);
     const terminal = emit("session.execution.failed", { error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
     expect(JSON.parse(JSON.stringify(terminal))).toMatchObject({ type: "conversation.status", status: "failed", message: "Rate limited" });
-    expect((terminal as typeof terminal & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBeUndefined();
+    expect((terminal as typeof terminal & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
     const ended = await adapter.history("step-live");
     expect(isVisualTurnLive(ended.conversation)).toBe(false);
     expect(isVisualTurnLive(history.conversation)).toBe(true);
     expect(isVisualTurnLive(snapshot.snapshot.conversation)).toBe(true);
-    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect((failed as typeof failed & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
     expect(isVisualTurnLive(projection.withVisualStatus(history.conversation))).toBe(false); // No stale coverage hint.
     const generic = projection.statusUpdate("failed", "Unannotated terminal failure");
-    expect((generic as typeof generic & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBeUndefined();
+    expect((generic as typeof generic & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBeUndefined();
     expect(isVisualTurnLive(projection.withVisualStatus(history.conversation))).toBe(false);
   } finally { await adapter.dispose(); }
 });
@@ -678,7 +1117,7 @@ test.each([
     subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
     dispose: () => adapter.dispose(),
   } as unknown as WorkspaceChatService;
-  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: OPENCODE_AGENT, service }] });
   let frame = 0;
   const emit = (type: string, data: Record<string, unknown>) => {
     const normalized = normalize({ id: `frame-${++frame}`, type, created: frame, location: { directory: process.cwd() }, data: { sessionID: "capture", ...data } }, memory);
@@ -748,7 +1187,7 @@ test.each([
     if (created) expect((await router.resolveVisual(answer(complete).visuals![0]!.id!))?.bytes).toEqual(png);
     const restartedStore = new VisualStore(process.cwd(), directory);
     restartedStore.setReader(async () => { reads++; throw new Error("sealed captures must not reread after reload"); });
-    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: OPENCODE_AGENT, service }] });
     const reloaded = await restarted.history("opencode:capture");
     expect(answer(reloaded).visuals).toEqual(answer(complete).visuals);
     if (created) expect((await restarted.resolveVisual(answer(reloaded).visuals![0]!.id!))?.bytes).toEqual(png);

@@ -6,6 +6,9 @@ import type { LiveChannel } from "../shell/live-channel";
 import { ChatConnectionInterruptedError, ChatTransportError, type ChatApiClient } from "./client";
 import type { ConversationSnapshot } from "./types";
 
+// A login this file's fake agents declare; the Hub does not manage it.
+const TEST_LOGIN = { command: "test-agent login", hubManaged: false };
+
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 const savedGlobals = new Map<string, unknown>();
 const CHILD_PROCESS_FLAG = "UATU_CHAT_LIFECYCLE_TEST_CHILD";
@@ -51,7 +54,7 @@ describe("chat lifecycle recovery", () => {
     const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
     let selected = "";
     Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
-    const agent = { id: "opencode", name: "OpenCode", capabilities: ["models", "modes", "commands"] };
+    const agent = { id: "opencode", name: "OpenCode", login: TEST_LOGIN, capabilities: ["models", "modes", "commands"] };
     const previous = { ...conversation(selectedId), agent };
     const other = { ...conversation("opencode:newest"), agent };
     const inventory = [other, previous]; // Restore the stored id, not the first entry.
@@ -491,7 +494,7 @@ describe("chat lifecycle recovery", () => {
 
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
       }]),
       conversations: async () => {
@@ -625,7 +628,7 @@ describe("chat lifecycle recovery", () => {
       }
       if (url.endsWith("/api/chat/status")) {
         return Response.json({ agents: [{
-          agent: { id: "test", name: "Test" },
+          agent: { id: "test", name: "Test", login: TEST_LOGIN },
           availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
         }] });
       }
@@ -742,7 +745,7 @@ describe("chat lifecycle recovery", () => {
       }
       if (url.endsWith("/api/chat/status")) {
         return Response.json({ agents: [{
-          agent: { id: "test", name: "Test" },
+          agent: { id: "test", name: "Test", login: TEST_LOGIN },
           availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
         }] });
       }
@@ -873,7 +876,7 @@ describe("chat lifecycle recovery", () => {
       if (url.includes("/api/hub/live/")) return Response.json({ ok: true });
       if (url.endsWith("/api/chat/status")) {
         return Response.json({ agents: [{
-          agent: { id: "test", name: "Test" },
+          agent: { id: "test", name: "Test", login: TEST_LOGIN },
           availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
         }] });
       }
@@ -979,7 +982,7 @@ describe("chat lifecycle recovery", () => {
     let snapshots = 0;
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
       }]),
       conversations: async () => [conversation("one")],
@@ -1087,7 +1090,7 @@ describe("chat lifecycle recovery", () => {
 
     const api = {
       status: async () => ([{
-        agent: { id: "test", name: "Test" },
+        agent: { id: "test", name: "Test", login: TEST_LOGIN },
         availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
       }]),
       conversations: async () => [conversation("one")],
@@ -1179,7 +1182,7 @@ async function startupFixture(options: { savedId?: string | null; multipleAgents
   const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
   let selected = "";
   Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
-  const agent = { id: "opencode", name: "OpenCode", capabilities: ["models", "modes", "commands"] };
+  const agent = { id: "opencode", name: "OpenCode", login: TEST_LOGIN, capabilities: ["models", "modes", "commands"] };
   const summary = (id: string) => ({ ...conversation(id), agent });
   const history = (id: string): ConversationSnapshot => ({
     ...snapshot(id), conversation: summary(id),
@@ -1261,7 +1264,7 @@ async function startupFixture(options: { savedId?: string | null; multipleAgents
 }
 
 function conversation(id: string) {
-  return { id, title: id, createdAt: 1, updatedAt: 1, status: "idle" as const, agent: { id: "test", name: "Test" } };
+  return { id, title: id, createdAt: 1, updatedAt: 1, status: "idle" as const, agent: { id: "test", name: "Test", login: TEST_LOGIN } };
 }
 
 // One brokered stream, driven by hand: hello and envelopes as the hub would

@@ -2,10 +2,7 @@ import { ChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./a
 import type { ChatActionContext, AutomaticBackgroundFeedback } from "./types";
 import { NotificationFeed } from "./notification-feed";
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
-import { OpenCodeService, type OpenCodeGeneration, type OpenCodeServiceOptions } from "./opencode/opencode-service";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
-import { createOpenCodeV1Provider } from "./opencode/v1/provider";
-import { createOpenCodeV2Provider } from "./opencode/v2/provider";
 import type { ChatProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
 import type {
@@ -114,8 +111,9 @@ export class ChatUnavailableError extends Error {
 
 /**
  * The lifecycle every agent runtime shares (D4). OpenCode implements it with
- * a spawned loopback server; an agent with no long-lived idle process (a
- * per-conversation runtime) implements the same surface from probes alone.
+ * a spawned loopback server (`opencode/agent-runtime.ts`); an agent with no
+ * long-lived idle process (a per-conversation runtime) implements the same
+ * surface from probes alone (`path-agent-runtime.ts`).
  */
 export interface AgentRuntime {
   /**
@@ -136,27 +134,13 @@ export interface AgentRuntime {
   createProvider(): ChatProvider | null;
 }
 
-/**
- * Builds the provider for a ready OpenCode server. Which factory runs is the
- * server's generation, decided by its readiness answer: the 1.x stack over
- * `@opencode-ai/sdk`, the 2.x stack over `@opencode/client`.
- */
-export type OpenCodeProviderFactory = (options: { endpoint: string; password: string; directory: string; generation: OpenCodeGeneration }) => ChatProvider;
-export type OpenCodeProviderFactories = Partial<Record<OpenCodeGeneration, OpenCodeProviderFactory>>;
-
-const DEFAULT_PROVIDER_FACTORIES: Record<OpenCodeGeneration, OpenCodeProviderFactory> = {
-  1: createOpenCodeV1Provider,
-  2: createOpenCodeV2Provider,
-};
-
-export type LazyChatServiceOptions = OpenCodeServiceOptions & {
-  // A complete agent stack. When present it owns lifecycle and provider
-  // construction, and the OpenCode-specific options below are unused.
-  agentRuntime?: AgentRuntime;
-  runtime?: OpenCodeService;
-  // One factory for every generation (a test double), or a factory per
-  // generation, each defaulting to the real stack for that generation.
-  createProvider?: OpenCodeProviderFactory | OpenCodeProviderFactories;
+export type LazyChatServiceOptions = {
+  workspacePath: string;
+  // The owning agent's name, for the availability messages this service
+  // writes itself once its runtime has reported ready.
+  agentName: string;
+  // The agent's complete stack: it owns lifecycle and provider construction.
+  runtime: AgentRuntime;
   createAdapter?: (options: ChatAdapterOptions) => ChatAdapter;
   // Overrides the XDG-resolved store; the e2e harness points this at a
   // temporary directory.
@@ -169,6 +153,7 @@ export type LazyChatServiceOptions = OpenCodeServiceOptions & {
 export class LazyChatService implements WorkspaceChatService {
   readonly notificationFeed = new NotificationFeed();
   private readonly runtime: AgentRuntime;
+  private readonly agentName: string;
   private readonly workspacePath: string;
   private readonly createAdapter: NonNullable<LazyChatServiceOptions["createAdapter"]>;
   private readonly attachmentStore: AttachmentStore;
@@ -186,7 +171,8 @@ export class LazyChatService implements WorkspaceChatService {
 
   constructor(options: LazyChatServiceOptions) {
     this.workspacePath = options.workspacePath;
-    this.runtime = options.agentRuntime ?? openCodeAgentRuntime(options);
+    this.runtime = options.runtime;
+    this.agentName = options.agentName;
     this.createAdapter = options.createAdapter ?? (adapterOptions => new ChatAdapter(adapterOptions));
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
     this.metrics = options.metrics;
@@ -232,12 +218,12 @@ export class LazyChatService implements WorkspaceChatService {
       // request — must not lock chat into "unavailable" for the process
       // lifetime; a genuinely incompatible server just fails the probe again.
       if (error instanceof ChatUnavailableError) {
-        return { state: "unavailable", reason: "startup-failed", message: "OpenCode is restarting; chat will retry." };
+        return { state: "unavailable", reason: "startup-failed", message: `${this.agentName} is restarting; chat will retry.` };
       }
       return {
         state: "unavailable",
         reason: "unsupported",
-        message: "The installed OpenCode version is not compatible with chat.",
+        message: `The installed ${this.agentName} version is not compatible with chat.`,
       };
     }
   }
@@ -443,37 +429,4 @@ export class LazyChatService implements WorkspaceChatService {
       }
     })();
   }
-}
-
-/**
- * The OpenCode agent stack: one spawned loopback server whose connection
- * (endpoint + password) feeds the SDK provider. The connection details stay
- * below this seam — the service never sees them.
- */
-export function openCodeAgentRuntime(options: LazyChatServiceOptions): AgentRuntime {
-  const runtime = options.runtime ?? new OpenCodeService(options);
-  const factories = resolveProviderFactories(options.createProvider);
-  return {
-    status: () => Promise.resolve(runtime.peekStatus()),
-    ensure: () => runtime.status(),
-    restart: () => runtime.restart(),
-    dispose: () => runtime.dispose(),
-    createProvider: () => {
-      // The connection carries the generation its server answered with, so a
-      // restart that finds a replaced binary builds the other stack.
-      const connection = runtime.currentConnection();
-      if (!connection) return null;
-      return factories[connection.generation]({
-        endpoint: connection.endpoint,
-        password: connection.password,
-        directory: options.workspacePath,
-        generation: connection.generation,
-      });
-    },
-  };
-}
-
-export function resolveProviderFactories(override: LazyChatServiceOptions["createProvider"]): Record<OpenCodeGeneration, OpenCodeProviderFactory> {
-  if (typeof override === "function") return { 1: override, 2: override };
-  return { ...DEFAULT_PROVIDER_FACTORIES, ...(override ?? {}) };
 }

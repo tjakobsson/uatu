@@ -11,10 +11,11 @@ import type { AssistantMessageItem } from "../../types";
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
 import { visualAdmissionIdentity } from "../../visual-identity";
-import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
+import { CHAT_TEXT_SEAL, CHAT_TURN_CONTINUES, executionLive, isVisualTurnLive, type ChatStatusLiveness, type ChatTextSeal } from "../../turn-liveness";
 import { ConversationProjection } from "../../adapter";
 import { ConversationReplay, decodeReplayCursor } from "../../replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
+import { livenessChecker, livenessConformance } from "../../../../tests/fixtures/liveness-conformance";
 
 test.each([
   { entry: "seed", visual: false }, { entry: "seed", visual: true },
@@ -40,7 +41,7 @@ test.each([
   const ended = emit("session.text.ended", 30, { text: final });
   expect(ended).toHaveLength(1); // Unchanged nonempty text still carries its real syntax boundary.
   expect(ended[0]).toMatchObject({ type: "item.upsert", sequence: beforeSequence + 2, item: { id: "part:reply:text:0", createdAt: 10, markdown: final } });
-  expect((projection.get("part:reply:text:0") as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+  expect((projection.get("part:reply:text:0") as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
   expect(projection.get("part:reply:text:0")).not.toHaveProperty("completedAt");
   for (const event of ended) browser = applyChatEvent(browser, event).projection;
   const order = [["part:reply:text:0", 10], ["message:steer", 20]];
@@ -66,7 +67,7 @@ test.each([
   emit("session.text.delta", 25, { ordinal: 0, delta: history ? " continued" : "Answer" });
   emit("session.text.ended", 30, { ordinal: 0, text: "Answer continued" });
   expect(projection.get("part:reply:text:0")).toMatchObject({ createdAt: expected, markdown: "Answer continued" });
-  expect((projection.get("part:reply:text:0") as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+  expect((projection.get("part:reply:text:0") as AssistantMessageItem & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
 });
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
@@ -132,14 +133,14 @@ test("captured API tool/stop completions do not end execution; the stored idle d
   };
   const running = normalize(prefix);
   expect(running.length).toBeGreaterThan(0);
-  expect(running.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true)).toBe(true);
+  expect(running.every(item => executionLive(item) === true)).toBe(true);
   const sealed = normalize(stored);
-  expect(sealed.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === false)).toBe(true);
+  expect(sealed.every(item => executionLive(item) === false)).toBe(true);
   expect(JSON.stringify(running)).toBe(JSON.stringify(sealed)); // No new public fields.
-  expect(running.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true)).toBe(true);
+  expect(running.every(item => executionLive(item) === true)).toBe(true);
   for (const message of prefix.filter(message => message.type === "assistant")) {
     const unannotated = normalizeStoredMessage(message);
-    expect(unannotated.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    expect(unannotated.every(item => executionLive(item) === undefined)).toBe(true);
   }
 });
 
@@ -173,7 +174,7 @@ test("stored V2 parent completion seals text syntax independently of execution, 
   for (const completed of [undefined, 40]) {
     const [item] = normalizeStoredMessage({ id: "m", type: "assistant", time: { created: 10, ...(completed === undefined ? {} : { completed }) }, content: [{ type: "text", text: "![shot][ref]\n\n[ref]: result.png", time: { start: 11, end: 20 } }] });
     expect(item?.type).toBe("assistant_message");
-    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(completed === undefined ? undefined : true);
+    expect((item as typeof item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe(completed === undefined ? undefined : "ended");
     if (completed === undefined) expect(item).not.toHaveProperty("completedAt");
     else expect(item).toHaveProperty("completedAt", completed);
     expect(parseConversationItem(JSON.parse(JSON.stringify(item)))).toMatchObject({ id: "part:m:text:0", type: "assistant_message" });
@@ -193,8 +194,8 @@ test.each([undefined, null, "40", -1, NaN, Infinity, -Infinity, 0, 40])("stored 
   const texts = items.filter((item): item is AssistantMessageItem => item.type === "assistant_message" && item.markdown !== "");
   expect(texts).toHaveLength(2);
   for (const item of texts) {
-    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(valid ? true : undefined);
-    expect((item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    expect((item as typeof item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe(valid ? "ended" : undefined);
+    expect(executionLive(item)).toBe(true);
     if (valid) expect(item.completedAt).toBe(completed as number);
     else expect(item.completedAt).toBeUndefined();
     const json = JSON.parse(JSON.stringify(item));
@@ -203,7 +204,7 @@ test.each([undefined, null, "40", -1, NaN, Infinity, -Infinity, 0, 40])("stored 
   }
   // Message completion is not a synthesized reasoning/tool end, nor does the
   // usage-only carrier need a text-syntax marker.
-  for (const item of items.filter(item => !texts.some(text => text === item))) expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+  for (const item of items.filter(item => !texts.some(text => text === item))) expect((item as typeof item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBeUndefined();
   expect(items.find(item => item.type === "reasoning")).toMatchObject({ status: "running" });
 });
 
@@ -674,7 +675,7 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     expect(textEnded!.updates[0]).toMatchObject({ kind: "upsert", item: { type: "assistant_message", markdown: "`##`" } });
     const endedUpdate = textEnded!.updates[0]!;
     if (endedUpdate.kind !== "upsert") throw new Error("expected authoritative text-end upsert");
-    expect((endedUpdate.item as typeof endedUpdate.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((endedUpdate.item as typeof endedUpdate.item & ChatTextSeal)[CHAT_TEXT_SEAL]).toBe("ended");
     expect(endedUpdate.item).not.toHaveProperty("completedAt");
   });
 
@@ -979,13 +980,13 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_r", ...data } }, memory);
     at("session.execution.started", {});
     const failed = at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } });
-    const expectedFailedStatus: Extract<NormalizedProviderUpdate, { kind: "status" }> & OpenCodeStepStatus = {
-      kind: "status", status: "failed", message: "Rate limited", [OPENCODE_STEP_LIVE]: true,
+    const expectedFailedStatus: Extract<NormalizedProviderUpdate, { kind: "status" }> & ChatStatusLiveness = {
+      kind: "status", status: "failed", message: "Rate limited", [CHAT_TURN_CONTINUES]: true,
     };
     expect(failed.updates).toContainEqual(expectedFailedStatus);
     const failedStatus = failed.updates.find(update => update.kind === "status");
     if (failedStatus?.kind !== "status") throw new Error("expected failed step status");
-    expect(isVisualTurnLive(failedStatus as typeof failedStatus & OpenCodeStepStatus)).toBe(true);
+    expect(isVisualTurnLive(failedStatus as typeof failedStatus & ChatStatusLiveness)).toBe(true);
     const retry = at("session.retry.scheduled", { message: "Retrying in 3s" });
     expect(retry.updates).toEqual([
       { kind: "upsert", item: expect.objectContaining({ type: "notice", level: "warning", message: "Retrying in 3s" }) },
@@ -995,7 +996,7 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     if (terminal?.kind !== "status") throw new Error("expected execution failure");
     expect(terminal).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
     expect(isVisualTurnLive(terminal)).toBe(false);
-    expect((failedStatus as typeof failedStatus & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect((failedStatus as typeof failedStatus & ChatStatusLiveness)[CHAT_TURN_CONTINUES]).toBe(true);
   });
 
   test("a stored assistant record ended by a Stop carries no failure notice; a real error still does", () => {
@@ -1167,4 +1168,23 @@ describe("OpenCode 2.x login failures", () => {
     const other = upserts(at("session.execution.failed", { error: { type: "provider.no-route", message: "Model unavailable" } }))[0];
     expect(other).not.toHaveProperty("code");
   });
+});
+
+// D1 liveness contract: OpenCode 2.x puts authoritative tokens only on stored
+// history rows, never on a live item, and sends no repeat statuses.
+test("OpenCode 2.x normalization conforms to the liveness contract", () => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE), memory = createOpenCodeV2Memory();
+  const retryable = { id: "retryable-step", created: 1, type: "session.step.failed", location: { directory: WORKSPACE }, data: { sessionID: "s", assistantMessageID: "api", error: { message: "Rate limited" } } };
+  const events = [...FIXTURES.turnWithPermissionAndTool, ...FIXTURES.formsShellRenameDelete, ...FIXTURES.compactionFailedAndAgentSwitch, ...FIXTURES.interruptedTool, retryable];
+  const checker = livenessChecker();
+  const live = events.flatMap(event => checker.observe(normalize(event, memory).updates));
+  const stored = FIXTURES.storedMessages.data;
+  const membership = storedExecutionLiveness(stored);
+  const history = stored.flatMap(message => normalizeStoredMessage(message, true, undefined, prepareStoredMessage(message), membership.get(message.id as string)));
+  expect(checker.result()).toMatchObject({ tokens: 0, repeats: 0, both: 0, repeatOffCompleted: 0, continuesOffFailed: 0, textFactChanges: [], tokenChanges: [] });
+  expect(checker.result().continuations).toBeGreaterThan(0);
+  const facts = livenessConformance(history);
+  expect(facts.tokens).toBeGreaterThan(0);
+  expect([...facts.authorities]).toEqual(["authoritative"]);
+  expect(livenessConformance([...history, ...live]).mixed).toEqual([]);
 });

@@ -10,6 +10,7 @@
 //          `http://127.0.0.1:<port><basePath>?t=<token>`
 //   exit   the Hub holds the session's stdin open for its whole life; EOF
 //          (including by Hub death) is the session's signal to exit
+//   stop   SIGTERM is the clean stop; SIGKILL follows SIGTERM_GRACE_MS later
 
 // INACTIVITY timeout, not a startup deadline: the session emits periodic
 // progress lines while preparing (a large tree's watcher setup alone can
@@ -21,6 +22,11 @@
 // exiting stops re-arming this timer and is reaped one inactivity window
 // after that cap.
 export const SESSION_STARTUP_INACTIVITY_MS = 30_000;
+
+// How long a session has between the Hub's SIGTERM and its SIGKILL. A
+// session's own shutdown work must fit well inside it (the Claude provider's
+// shutdown budget is held to it by a test).
+export const SIGTERM_GRACE_MS = 3_000;
 
 // stdin stays a pipe the Hub holds open; descriptor 3 carries the policy
 // bootstrap (see bootstrap.ts).

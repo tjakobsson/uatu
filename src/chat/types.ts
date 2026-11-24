@@ -116,10 +116,16 @@ export type ChatAgent = {
   permissionScopeNote?: string;
 };
 
+// How an agent is logged in: its own login command, and whether the Hub's
+// Settings (Agent accounts) manages that login. Declared at registration, so
+// it is known in every availability state.
+export type ChatAgentLogin = { command: string; hubManaged: boolean };
+
 // The agent identity a conversation or status entry names on the wire.
-// Deliberately just identity: capabilities ride the agent's availability
-// (`ChatAvailability.agent`), which only exists once its runtime has spoken.
-export type ChatAgentDescriptor = { id: string; name: string };
+// Deliberately just identity and its declared login: capabilities ride the
+// agent's availability (`ChatAvailability.agent`), which only exists once its
+// runtime has spoken.
+export type ChatAgentDescriptor = { id: string; name: string; login: ChatAgentLogin };
 
 // One offered agent with its independently reported availability. The
 // workspace's chat status is a list of these, in presentation order; the

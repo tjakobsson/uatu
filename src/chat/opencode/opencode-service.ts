@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import type { ChatAvailability, ChatProbeOutcome, ChatStartupDiagnostics } from "../types";
 import { discoverExecutableCandidates } from "../executable";
 import { describeProbe } from "../diagnostics";
+import { BoundedTextCapture, ManagedProcess, type KillGroup, type SpawnedProcess } from "../managed-process";
 import { preparePresentationGuidanceFile, removePresentationGuidanceFile, withPresentationInstructions } from "../presentation-guidance";
 
 const HOSTNAME = "127.0.0.1";
@@ -23,15 +24,12 @@ const TERM_GRACE_MS = 3_000;
 const STDERR_LIMIT_BYTES = 16 * 1024;
 const BIND_ATTEMPTS = 3;
 
-export type SpawnedOpenCode = {
-  pid: number;
-  exited: Promise<number | null>;
+export type SpawnedOpenCode = SpawnedProcess & {
   stderr: ReadableStream<Uint8Array>;
   // Captured for diagnostics only. Readiness never depends on OpenCode's output
   // format — that is a property of the user's independently-installed binary,
   // not of the pinned SDK, so nothing here feeds control flow.
   stdout?: ReadableStream<Uint8Array>;
-  kill(signal: NodeJS.Signals): void;
 };
 
 // Which OpenCode the spawned server is, decided by its readiness answer and
@@ -63,7 +61,7 @@ export type OpenCodeServiceOptions = {
   fetch?: FetchLike;
   randomPassword?: () => string;
   sleep?: (milliseconds: number) => Promise<void>;
-  killGroup?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  killGroup?: KillGroup;
   // Injected so budget behavior is deterministic under test: a stubbed `sleep`
   // that resolves immediately would otherwise spin against the real clock.
   now?: () => number;
@@ -196,8 +194,9 @@ export class OpenCodeService {
       // Both captures redact the generated password. Structurally it is never
       // placed in a diagnostic field; scrubbing covers the case where OpenCode
       // itself echoes its own environment into its output.
-      const capture = new BoundedTextCapture(this.stderrLimitBytes, password);
-      const stdoutCapture = new BoundedTextCapture(this.stderrLimitBytes, password);
+      const scrub = (text: string) => scrubPassword(text, password);
+      const capture = new BoundedTextCapture(this.stderrLimitBytes, scrub);
+      const stdoutCapture = new BoundedTextCapture(this.stderrLimitBytes, scrub);
       let spawned: SpawnedOpenCode;
       try {
         if (this.closed) return this.stoppedAvailability();
@@ -235,7 +234,7 @@ export class OpenCodeService {
         });
       }
 
-      const managed = new ManagedProcess(spawned, capture, this.killGroup, this.sleep, this.termGraceMs);
+      const managed = new ManagedProcess(spawned, { capture, killGroup: this.killGroup, sleep: this.sleep, termGraceMs: this.termGraceMs });
       this.process = managed;
       capture.consume(spawned.stderr);
       if (spawned.stdout) stdoutCapture.consume(spawned.stdout);
@@ -420,11 +419,11 @@ export class OpenCodeService {
 
   private async handleUnexpectedExit(managed: ManagedProcess, code: number | null): Promise<void> {
     if (this.process !== managed) return;
-    await managed.capture.done;
+    await managed.capture?.done;
     this.process = null;
     this.connection = null;
     if (!this.closed) {
-      const detail = managed.capture.snapshot();
+      const detail = managed.capture?.snapshot() ?? "";
       this.setUnavailable("startup-failed", `OpenCode exited unexpectedly with code ${code ?? "unknown"}.${detail ? ` ${detail}` : ""}`);
     }
   }
@@ -544,54 +543,16 @@ export function allocateLoopbackPort(): Promise<number> {
   });
 }
 
-class BoundedTextCapture {
-  private bytes = new Uint8Array();
-  private resolveDone!: () => void;
-  readonly done = new Promise<void>(resolve => {
-    this.resolveDone = resolve;
-  });
-
-  constructor(private readonly limit: number, private readonly secret?: string) {}
-
-  // For a stream that will never arrive, so `done` still settles.
-  close(): void {
-    this.resolveDone();
+// The literal (base64url, so no quoted or percent-encoded variant exists) and
+// the Basic credential the health probe sends: an OpenCode that echoes
+// request headers would otherwise leak the password in its base64 form.
+function scrubPassword(text: string, password: string): string {
+  if (!password) return text;
+  let scrubbed = text;
+  for (const encoding of [password, Buffer.from(`opencode:${password}`).toString("base64")]) {
+    scrubbed = scrubbed.split(encoding).join("[redacted]");
   }
-
-  consume(stream: ReadableStream<Uint8Array>): void {
-    void (async () => {
-      try {
-        for await (const chunk of stream) {
-          const combined = new Uint8Array(this.bytes.length + chunk.length);
-          combined.set(this.bytes);
-          combined.set(chunk, this.bytes.length);
-          this.bytes = combined.length <= this.limit ? combined : combined.slice(combined.length - this.limit);
-        }
-      } catch {
-        // Preserve the diagnostics collected before the stream closed.
-      } finally {
-        this.resolveDone();
-      }
-    })();
-  }
-
-  snapshot(): string {
-    const text = this.decoded();
-    if (!this.secret) return text;
-    // The literal (base64url, so no quoted or percent-encoded variant exists)
-    // and the Basic credential the health probe sends: an OpenCode that
-    // echoes request headers would otherwise leak the password in its
-    // base64 form.
-    let scrubbed = text;
-    for (const encoding of [this.secret, Buffer.from(`opencode:${this.secret}`).toString("base64")]) {
-      scrubbed = scrubbed.split(encoding).join("[redacted]");
-    }
-    return scrubbed;
-  }
-
-  private decoded(): string {
-    return new TextDecoder().decode(this.bytes).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
-  }
+  return scrubbed;
 }
 
 // A short, bounded `opencode --version`. Runs only after startup has already
@@ -611,48 +572,6 @@ export async function probeOpenCodeVersion(executable: string, timeoutMs = 3_000
   } catch {
     return null;
   }
-}
-
-class ManagedProcess {
-  private terminating: Promise<void> | null = null;
-
-  constructor(
-    private readonly process: SpawnedOpenCode,
-    readonly capture: BoundedTextCapture,
-    private readonly killGroup: (pid: number, signal: NodeJS.Signals | 0) => void,
-    private readonly sleep: (milliseconds: number) => Promise<void>,
-    private readonly termGraceMs: number,
-  ) {}
-
-  terminate(): Promise<void> {
-    this.terminating ??= this.terminateOnce();
-    return this.terminating;
-  }
-
-  private async terminateOnce(): Promise<void> {
-    signalProcess(this.process, this.killGroup, "SIGTERM");
-    if (!await settlesWithin(this.process.exited, this.termGraceMs, this.sleep)) {
-      signalProcess(this.process, this.killGroup, "SIGKILL");
-      await this.process.exited.catch(() => undefined);
-    }
-    await this.capture.done;
-  }
-}
-
-function signalProcess(child: SpawnedOpenCode, killGroup: (pid: number, signal: NodeJS.Signals | 0) => void, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform === "win32") child.kill(signal);
-    else killGroup(child.pid, signal);
-  } catch {
-    // The child may have exited between state inspection and signaling.
-  }
-}
-
-async function settlesWithin(promise: Promise<unknown>, milliseconds: number, sleep: (ms: number) => Promise<void>): Promise<boolean> {
-  return Promise.race([
-    promise.then(() => true, () => true),
-    sleep(milliseconds).then(() => false),
-  ]);
 }
 
 function isBindFailure(message: string): boolean {

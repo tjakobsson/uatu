@@ -29,13 +29,13 @@ import {
   text,
   timestamp,
   tokensToUsage,
-  usageUpsert, compactionNoticeId } from "../normalization";
+  usageUpsert, compactionNoticeId, TEXT_ENDED } from "../normalization";
 import type { ConversationItem, MessageAttachment, MessageDelivery, StructuredQuestion, TokenUsage } from "../../types";
 import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 import type { InboxDelta, PendingInboxEntry } from "../../provider";
 import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellBirthIdentity, shellCommandFingerprint, type ShellBirthIdentity, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
+import { executionEvidence } from "../../turn-liveness";
 import { nativeVisualMessageIdentity } from "../../visual-identity";
-import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END } from "../normalization-types";
 
 export type { NormalizedProviderEvent };
 
@@ -761,7 +761,7 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
       // Stored V2 text parts carry no independent completion clock. The API
       // message's validated completion seals their Markdown syntax, not the
       // execution: a following tool may still create a missing image file.
-      const textEnd = completed.completedAt === undefined ? {} : { [OPENCODE_TEXT_END]: true as const };
+      const textEnd = completed.completedAt === undefined ? {} : TEXT_ENDED;
       const items = assistantContentUpdates(id, array(message.content), createdAt, undefined, tools).flatMap(update => {
         const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;
         return item ? [item.type === "assistant_message" ? { ...item, ...completed, ...textEnd } : item] : [];
@@ -781,8 +781,10 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
       for (const file of stringArray(record(message.snapshot).files)) {
         items.push({ id: `file:${id}:${file}`, type: "file_change", createdAt, path: file, operation: "update" });
       }
+      // Execution membership is independent of API-message completion. true:
+      // no native execution end follows this row; false: a native end seals it.
       return executionLive === undefined ? items : items.map(item => item.type === "assistant_message"
-        ? { ...item, [OPENCODE_EXECUTION_LIVE]: executionLive } : item);
+        ? { ...item, ...executionEvidence(executionLive) } : item);
     }
     case "shell": {
       const exit = number(message.exit);

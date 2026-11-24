@@ -20,7 +20,11 @@
           "status": "idle",
           "agent": {
             "id": "opencode",
-            "name": "OpenCode"
+            "name": "OpenCode",
+            "login": {
+              "command": "opencode auth login",
+              "hubManaged": true
+            }
           }
         }
       }

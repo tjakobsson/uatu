@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 15.38.0-experimental
+  version: 15.39.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 15 and workspace revision 38
+  summary: Hub revision 15 and workspace revision 39
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -22,7 +22,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 15
-    workspaceApiRevision: 38
+    workspaceApiRevision: 39
 servers:
   - url: https://{hubHost}
     variables:
@@ -150,8 +150,8 @@ paths:
                   value:
                     version: 0.5.1 (abcdef0)
                     hubApiRevision: 15
-                    workspaceApiRevision: 38
-                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 38, shells: [{ attached: false, label: zsh }] }]
+                    workspaceApiRevision: 39
+                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 39, shells: [{ attached: false, label: zsh }] }]
                     workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
                 worktrees:
                   summary: A main workspace and one linked worktree
@@ -2366,7 +2366,8 @@ components:
         agents: { type: array, items: { $ref: '#/components/schemas/AgentAccountStatus' } }
         attempts: { type: array, items: { $ref: '#/components/schemas/AgentAccountAttempt' } }
       additionalProperties: false
-    ChatAgentDescriptor: { type: object, required: [id, name], description: "The identity of one offered agent. Capabilities ride the agent's availability, which only exists once its runtime has spoken.", properties: { id: { type: string, minLength: 1, maxLength: 64, pattern: '^[^:]+$' }, name: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    ChatAgentDescriptor: { type: object, required: [id, name, login], description: "The identity of one offered agent and its declared login, present in every availability state. Capabilities ride the agent's availability, which only exists once its runtime has spoken.", properties: { id: { type: string, minLength: 1, maxLength: 64, pattern: '^[^:]+$' }, name: { type: string, minLength: 1, maxLength: 512 }, login: { $ref: '#/components/schemas/ChatAgentLogin' } }, additionalProperties: false }
+    ChatAgentLogin: { type: object, required: [command, hubManaged], description: "How the agent is logged in. `command` is the agent's own login command, to run where UatuCode runs. `hubManaged` is true when the Hub's Agent accounts manage this login; only then may a Hub-served client link to `/settings#agent-accounts/{agentId}`, and otherwise it names `command`.", properties: { command: { type: string, minLength: 1, maxLength: 512 }, hubManaged: { type: boolean } }, additionalProperties: false }
     ConversationStatus: { enum: [idle, sending, running, completed, interrupted, failed, background, retrying, compacting, scheduled], description: "`background`: no turn is running but the agent still holds live background work; prompting is possible. Presented only for agents declaring `background-tasks`. `scheduled`: nothing runs, but the agent's session holds one or more future turns it scheduled for itself (pending `scheduled_wakeup` items); prompting is possible, and the session can be released. Presented only for agents declaring `scheduled-wakeups`; `background` wins when both hold. `retrying` and `compacting` are live-turn states with a name: the agent is waiting to retry a failed API request, or compacting its context; both return to `running` when the turn resumes." }
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ConversationSummary:

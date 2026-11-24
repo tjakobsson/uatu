@@ -181,16 +181,19 @@ function paintLiveUsagePane(): void {
 
 type UsageReadHandler = (mode: UsageReadMode) => Promise<UsageReadResult>;
 let readHandler: UsageReadHandler | undefined;
+// The name of the agent that answers the reads, for the failure it reports.
+let readAgentName: string | undefined;
 let inFlight: { mode: UsageReadMode; promise: Promise<boolean> } | undefined;
 const state: UsageReadState = { reading: false };
 
 /**
- * The chat surface registers how a read is made once an agent that reports
- * plan usage is known; before that the controls stay hidden — there is
- * nothing to ask.
+ * The chat surface registers how a read is made, and which agent answers it,
+ * once an agent that reports plan usage is known; before that the controls
+ * stay hidden — there is nothing to ask.
  */
-export function onUsageRead(handler: UsageReadHandler | undefined): void {
+export function onUsageRead(handler: UsageReadHandler | undefined, agentName?: string): void {
   readHandler = handler;
+  readAgentName = handler ? agentName : undefined;
   paintLiveUsagePane();
   notify();
   if (usageSurfaceShown()) refreshUsageIfStale();
@@ -218,7 +221,10 @@ export function readUsageNow(mode: UsageReadMode): Promise<boolean> {
     if (inFlight.mode === mode || mode === "live-only") return inFlight.promise;
     return inFlight.promise.then(() => readUsageNow(mode));
   }
+  // The agent that answers this read, captured with its handler: another
+  // agent can take the reads while this one is out.
   const handler = readHandler;
+  const agentName = readAgentName;
   if (!handler) return Promise.resolve(false);
   state.reading = true;
   delete state.failure;
@@ -231,7 +237,7 @@ export function readUsageNow(mode: UsageReadMode): Promise<boolean> {
         noteUsageReport({ plan: result.report.plan, reportedAt: result.report.readAt, ...(result.report.conversationId ? { conversationId: result.report.conversationId } : {}) });
         return true;
       }
-      if (!(mode === "live-only" && result.reason === "no-live-session")) state.failure = usageReadFailureLabel(result.reason);
+      if (!(mode === "live-only" && result.reason === "no-live-session")) state.failure = usageReadFailureLabel(result.reason, agentName);
       return false;
     } catch {
       state.failure = usageReadFailureLabel("network");
@@ -287,6 +293,7 @@ export function initUsagePaneControls(root: Document = document): void {
 export function resetUsagePaneForTests(): void {
   current = undefined;
   readHandler = undefined;
+  readAgentName = undefined;
   inFlight = undefined;
   state.reading = false;
   delete state.failure;

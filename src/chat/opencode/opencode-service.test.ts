@@ -724,3 +724,83 @@ describe("OpenCodeService disposal", () => {
     expect(await service.status()).toEqual(expect.objectContaining({ state: "unavailable", reason: "startup-failed" }));
   });
 });
+
+// How a started OpenCode is stopped: SIGTERM to its process group, a grace
+// period, then SIGKILL, once however many callers ask, and only after its
+// stderr has drained.
+// Off Windows only: there the child itself is signalled, never the injected
+// group signaller these fixtures settle through.
+describe.skipIf(process.platform === "win32")("OpenCodeService termination", () => {
+  test("a server that exits on SIGTERM is never sent SIGKILL, and the group is signalled", async () => {
+    const targets: number[] = [];
+    const exit = deferred<number | null>();
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const { service } = fixture({
+      killGroup(pid: number, signal: NodeJS.Signals | 0) {
+        targets.push(pid);
+        signals.push(signal);
+        exit.resolve(143);
+      },
+      spawn: () => ({ pid: 42, exited: exit.promise, stderr: stream(), kill() {} }),
+    });
+    await service.status();
+    await service.dispose();
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(targets).toEqual([42]);
+  });
+
+  test("a server that ignores SIGTERM is sent SIGKILL after the grace period", async () => {
+    const exit = deferred<number | null>();
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const sleeps: number[] = [];
+    const { service } = fixture({
+      termGraceMs: 1_234,
+      sleep: async (milliseconds: number) => { sleeps.push(milliseconds); },
+      killGroup(_pid: number, signal: NodeJS.Signals | 0) {
+        signals.push(signal);
+        if (signal === "SIGKILL") exit.resolve(137);
+      },
+      spawn: () => ({ pid: 42, exited: exit.promise, stderr: stream(), kill() {} }),
+    });
+    await service.status();
+    sleeps.length = 0;
+    await Promise.all([service.dispose(), service.dispose()]);
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sleeps).toEqual([1_234]);
+  });
+
+  test("a server whose stderr is already locked still starts and stops", async () => {
+    const exit = deferred<number | null>();
+    const stderr = stream("held elsewhere");
+    stderr.getReader();
+    const { service } = fixture({
+      killGroup() { exit.resolve(143); },
+      spawn: () => ({ pid: 42, exited: exit.promise, stderr, kill() {} }),
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "1.18.18" });
+    await service.dispose();
+    expect(service.currentConnection()).toBeNull();
+  });
+
+  test("termination waits for the server's stderr to drain", async () => {
+    const exit = deferred<number | null>();
+    let closeStderr!: () => void;
+    let stderrClosed = false;
+    const stderr = new ReadableStream<Uint8Array>({
+      start(controller) {
+        closeStderr = () => { stderrClosed = true; controller.close(); };
+      },
+    });
+    const { service } = fixture({
+      killGroup() {
+        exit.resolve(143);
+        // Closed on a later macrotask, after the exit has settled.
+        setTimeout(closeStderr, 0);
+      },
+      spawn: () => ({ pid: 42, exited: exit.promise, stderr, kill() {} }),
+    });
+    await service.status();
+    await service.dispose();
+    expect(stderrClosed).toBe(true);
+  });
+});

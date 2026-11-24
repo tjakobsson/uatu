@@ -25,6 +25,7 @@ import {
   SESSION_STARTUP_INACTIVITY_MS,
   SESSION_STDIO,
   sessionServeArgv,
+  SIGTERM_GRACE_MS,
   type ReadyLine,
 } from "../session-contract/spawn";
 
@@ -43,8 +44,6 @@ export type RunningSession = {
 export interface SessionBackend {
   start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession>;
 }
-
-const SIGTERM_GRACE_MS = 3_000;
 
 export type LocalBackendOptions = {
   // How to invoke the uatu CLI. In a compiled binary this is

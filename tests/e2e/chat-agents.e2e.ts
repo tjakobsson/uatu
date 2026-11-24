@@ -29,6 +29,154 @@ async function bootDualAgentChat(page: Page, request: APIRequestContext): Promis
 }
 
 test.describe("multi-agent chat", () => {
+  // The harness routes a control to the fake it names (ARCHITECTURE.md, "Add
+  // an e2e test"); a control aimed at Claude must leave OpenCode's fake alone.
+  test("harness controls reach the agent they name", async ({ request, baseURL }) => {
+    await request.post("/__e2e/reset");
+    await control(request, { action: "agents", count: 2 });
+    const interrupted = async (agent: string) => (await control(request, { action: "stats", agent }) as { inventoryTransportInterrupted: boolean }).inventoryTransportInterrupted;
+    await control(request, { action: "inventoryInterrupt", agent: "claude" });
+    expect(await interrupted("claude")).toBe(true);
+    expect(await interrupted("opencode")).toBe(false);
+    // An explicit null is not an omitted agent.
+    expect((await request.post("/__e2e/chat", { data: { action: "inventoryResume", agent: null } })).status()).toBe(400);
+    await control(request, { action: "inventoryResume", agent: "claude" });
+    expect(await interrupted("claude")).toBe(false);
+    // Scripted OpenCode controls bypass agent selection, and an agent count
+    // must be an integer the harness has fakes for.
+    await control(request, { action: "opencode", op: "state", agent: null });
+    // They still reject a malformed id before dispatch.
+    expect((await request.post("/__e2e/chat", { data: { action: "opencode", op: "launchShell", conversationId: "opencode:" } })).status()).toBe(400);
+    // ...and an id another registered agent owns.
+    expect((await request.post("/__e2e/chat", { data: { action: "opencode", op: "state", conversationId: "claude:conversation-1" } })).status()).toBe(400);
+    expect((await request.post("/__e2e/chat", { data: { action: "agents", count: "2" } })).status()).toBe(400);
+    // An explicit null count is rejected too, and leaves both agents offered.
+    const token = (await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string }).token;
+    const offered = async () => ((await request.get(`/api/chat/status?t=${encodeURIComponent(token)}`).then(response => response.json())) as { agents: unknown[] }).agents.length;
+    expect(await offered()).toBe(2);
+    expect((await request.post("/__e2e/chat", { data: { action: "agents", count: null } })).status()).toBe(400);
+    expect(await offered()).toBe(2);
+    // Only the opencode-v2 stack exists, and it offers one agent.
+    for (const data of [{ stack: "opencode-v3" }, { stack: null }, { stack: "opencode-v2", count: 2 }, { stack: "opencode-v2", count: null }]) {
+      expect((await request.post("/__e2e/chat", { data: { action: "agents", ...data } })).status()).toBe(400);
+    }
+    expect(await offered()).toBe(2);
+    // A bare provider id may contain colons; it still goes out in the wire form.
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Colon child",
+      items: [{ id: "tool:worker", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "sub:s1:worker" }],
+    }) as { conversation: { id: string }; items: Array<{ childConversationId?: string }> };
+    expect(seeded.conversation.id.startsWith("claude:")).toBe(true);
+    expect(seeded.items[0]!.childConversationId).toBe("claude:sub:s1:worker");
+    // The seed response qualifies exactly what the production snapshot does:
+    // a tool's childConversationId, not a descendant line's raw conversationId.
+    type Descended = { items: Array<{ descendants?: Array<{ conversationId: string }> }> };
+    const parent = await control(request, {
+      action: "seed", agent: "claude", title: "Descendants",
+      items: [{ id: "tool:parent", type: "tool", createdAt: 1, name: "task", status: "completed",
+        descendants: [{ id: "line:1", parentId: "tool:parent", description: "worker", conversationId: "sub:s1:worker" }] }],
+    }) as Descended & { conversation: { id: string } };
+    const served = await request.get(`/api/chat/conversations/${encodeURIComponent(parent.conversation.id)}?t=${encodeURIComponent(token)}`).then(response => response.json()) as Descended;
+    expect(parent.items[0]!.descendants![0]!.conversationId).toBe(served.items[0]!.descendants![0]!.conversationId);
+    expect(parent.items[0]!.descendants![0]!.conversationId).toBe("sub:s1:worker");
+    // Exactly one qualifier is stripped: Claude's child `claude:opencode:worker`
+    // is stored as the raw `opencode:worker` and qualified once on the way out.
+    const nested = await control(request, {
+      action: "seed", agent: "claude", title: "Strip once",
+      items: [{ id: "tool:strip-once", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "claude:opencode:worker" }],
+    }) as { conversation: { id: string }; items: Array<{ childConversationId?: string }> };
+    expect(nested.items[0]!.childConversationId).toBe("claude:opencode:worker");
+    const nestedServed = await request.get(`/api/chat/conversations/${encodeURIComponent(nested.conversation.id)}?t=${encodeURIComponent(token)}`).then(response => response.json()) as { items: Array<{ childConversationId?: string }> };
+    expect(nestedServed.items[0]!.childConversationId).toBe("claude:opencode:worker");
+    // A nested id owned by another registered agent is rejected, not restamped.
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "seed", agent: "claude", title: "Foreign child",
+      items: [{ id: "tool:foreign", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "opencode:conversation-7" }],
+    } })).status()).toBe(400);
+    // Only addressable id fields are checked: an opaque question schema that
+    // happens to hold a foreign-looking conversationId seeds untouched.
+    const schema = { type: "object", properties: { conversationId: { const: "opencode:example" } }, conversationId: "opencode:example" };
+    const question = await control(request, {
+      action: "seed", agent: "claude", title: "Opaque schema",
+      items: [{ id: "question:1", type: "question", createdAt: 1, requestId: "q1", questions: [], status: "pending", source: "elicitation", schema }],
+    }) as { items: Array<{ schema?: unknown }> };
+    expect(question.items[0]!.schema).toEqual(schema);
+    // A non-string addressable id is rejected too, falsy ones included; an
+    // omitted one is fine.
+    for (const childConversationId of [42, false, 0, null]) {
+      expect((await request.post("/__e2e/chat", { data: {
+        action: "seed", agent: "claude", title: "Non-string child",
+        items: [{ id: "tool:non-string", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId }],
+      } })).status()).toBe(400);
+    }
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Question without owner",
+      items: [{ id: "question:2", type: "question", createdAt: 1, requestId: "q2", questions: [], status: "pending", conversationId: null }] } })).status()).toBe(400);
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "No child",
+      items: [{ id: "tool:no-child", type: "tool", createdAt: 1, name: "task", status: "completed" }] } })).status()).toBe(200);
+    // An id that cannot even be coerced to a string is a clean 400, not a crash.
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Uncoercible child",
+      items: [{ id: "tool:uncoercible", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: { toString: null } }] } })).status()).toBe(400);
+    // Items are validated only where consumed: a malformed entry is a 400 on
+    // seed, and an unused payload on another control is ignored.
+    expect((await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Null item", items: [null] } })).status()).toBe(400);
+    expect((await request.post("/__e2e/chat", { data: { action: "stats", agent: "claude", items: [null] } })).status()).toBe(200);
+    // ...and a control checks only the item fields it reads.
+    const host = await control(request, { action: "seed", agent: "claude", title: "Item host", items: [] }) as { conversation: { id: string } };
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "item", conversationId: host.conversation.id, older: [null],
+      item: { id: "message:unused-older", type: "assistant_message", createdAt: 1, markdown: "fine" },
+    } })).status()).toBe(200);
+    // So is a nested reserved prefix with nothing after it.
+    expect((await request.post("/__e2e/chat", { data: {
+      action: "seed", agent: "claude", title: "Malformed child",
+      items: [{ id: "tool:malformed", type: "tool", createdAt: 1, name: "task", status: "completed", childConversationId: "opencode:" }],
+    } })).status()).toBe(400);
+    // Without `agent`, usageRead's qualified outcome.conversationId picks the fake.
+    const outcomeOf = async (agent: string) => (await control(request, { action: "stats", agent }) as { usageReadOutcome: { outcome: string; conversationId?: string } }).usageReadOutcome;
+    await control(request, { action: "usageRead", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } });
+    expect(await outcomeOf("claude")).toEqual({ outcome: "fail", conversationId: "claude:conversation-1" });
+    expect((await outcomeOf("opencode")).outcome).toBe("no-live-session");
+    // A raw top-level id does not stop the usage qualifier from naming the owner.
+    await control(request, { action: "usageRead", conversationId: "sub:s1:worker", outcome: { outcome: "ok", conversationId: "claude:conversation-1" } });
+    expect((await outcomeOf("claude")).outcome).toBe("ok");
+    // So does a reversible attempt's conversationId.
+    await control(request, { action: "declareOnly", agent: "claude", capabilities: ["reversible-history", "usage"] });
+    const undone = await control(request, { action: "seed", agent: "claude", title: "Undo target", items: [] }) as { conversation: { id: string } };
+    await request.post(`/api/chat/conversations/${encodeURIComponent(undone.conversation.id)}/undo?t=${encodeURIComponent(token)}`, {
+      headers: { origin: new URL(baseURL!).origin }, data: { requestId: "harness-undo" },
+    });
+    const attempts = (await control(request, { action: "stats", agent: "claude" }) as { reversibleAttempts: Array<{ conversationId: string; requestId: string }> }).reversibleAttempts;
+    expect(attempts.find(attempt => attempt.requestId === "harness-undo")?.conversationId).toBe(undone.conversation.id);
+    // usageReport's report.conversationId selects the agent the same way (the
+    // OpenCode fake declares no usage), and the report is served exactly as
+    // supplied.
+    const reportOf = async (agent: string) => ((await request.get(`/api/chat/usage?agent=${agent}&t=${encodeURIComponent(token)}`).then(response => response.json())) as { report: { conversationId?: string } | null }).report;
+    const report = { plan: { fiveHour: { utilization: 9 } }, readAt: 1, conversationId: "claude:conversation-1" };
+    await control(request, { action: "usageReport", report });
+    expect(await reportOf("claude")).toEqual(report);
+    // With `agent` given, an id whose prefix names no registered agent is a
+    // raw provider id, stored as supplied.
+    const rawReport = { ...report, conversationId: "sub:s1:worker" };
+    await control(request, { action: "usageReport", agent: "claude", report: rawReport });
+    expect(await reportOf("claude")).toEqual(rawReport);
+    expect((await request.post("/__e2e/chat", { data: { action: "usageReport", agent: "opencode", report } })).status()).toBe(400);
+    // A qualifier that names no registered agent is rejected, not sent to the first fake.
+    for (const data of [
+      { action: "status", conversationId: "claud:conversation-1", status: "idle" },
+      { action: "usageRead", outcome: { outcome: "fail", conversationId: "claud:conversation-1" } },
+      // A qualifier without a provider id is malformed.
+      { action: "status", conversationId: "claude:", status: "idle" },
+      // A top-level or usage id must be a string.
+      { action: "status", conversationId: 42, status: "idle" },
+      { action: "usageReport", report: { plan: { fiveHour: { utilization: 9 } }, readAt: 1, conversationId: 42 } },
+    ]) expect((await request.post("/__e2e/chat", { data })).status()).toBe(400);
+    // An explicit agent that disagrees with the id's owner is rejected too.
+    for (const data of [
+      { action: "status", agent: "opencode", conversationId: "claude:conversation-1", status: "idle" },
+      { action: "usageRead", agent: "opencode", outcome: { outcome: "fail", conversationId: "claude:conversation-1" } },
+    ]) expect((await request.post("/__e2e/chat", { data })).status()).toBe(400);
+  });
+
   test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {
     await request.post("/__e2e/reset");
     const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
