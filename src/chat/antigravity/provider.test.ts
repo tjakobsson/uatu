@@ -329,8 +329,10 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
         expect.not.objectContaining({ variants: expect.anything() }),
       ]);
       expect((await provider.listModes()).map(mode => mode.name)).toEqual(["default", "accept-edits", "plan"]);
-      await Bun.sleep(50);
-      expect((await provider.listCommands()).map(command => command.name)).toEqual(["compact", "goal", "plan"]);
+      // agy sends its commands in an update after `session/new` answers.
+      const names = async () => (await provider.listCommands()).map(command => command.name);
+      for (let i = 0; i < 1_600 && (await names()).length === 0; i++) await Bun.sleep(5);
+      expect(await names()).toEqual(["compact", "goal", "plan"]);
     });
 
     test("a resumed conversation's prompt runs on its chosen model, thinking level and mode", async () => {
@@ -391,7 +393,8 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
       const steer = await provider.prompt(session.id, { id: "s", text: "Also write BANANA", delivery: "steer" });
       await ended(session.id);
-      await Bun.sleep(50);
+      // The earlier prompt ended before the steer was accepted, so every
+      // status this turn will publish is in by now.
       expect(statuses(session.id)).toEqual(["completed"]);
       expect(events.flatMap(event => event.notificationTurns ?? []).map(turn => turn.phase)).toEqual(["started", "completed"]);
       expect(upserts(session.id).filter(item => item.id === `message:${steer.messageId}`)).toHaveLength(1);
