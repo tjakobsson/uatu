@@ -85,6 +85,23 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect((await fake.log()).filter(entry => entry.method === "initialize")).toHaveLength(1);
     });
 
+    test("a conversation created here is read again, with its transcript's details, after its process is released", async () => {
+      const { fake, provider, run, waitFor } = await setup({ idleReleaseMs: 100 });
+      const session = await provider.createSession("a");
+      const first = await run(session.id, "read: README.md");
+      const readTool = async () => (await provider.listMessages(session.id, { limit: 100 })).items.find(item => item.type === "tool" && item.name === "read_file") as Extract<ConversationItem, { type: "tool" }> | undefined;
+      expect((await readTool())?.output).toBeUndefined();
+      await Bun.write(path.join(fake.stateDirectory, "home", ".gemini", "antigravity-cli", "brain", session.id, ".system_generated", "logs", "transcript.jsonl"), [
+        { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nread: README.md\n</USER_REQUEST>" },
+        { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", input_tokens: 10, output_tokens: 1, tool_calls: [{ name: "read_file", args: {} }] },
+        { step_index: 2, type: "GENERIC", status: "DONE", content: "1: # Fixture workspace" },
+      ].map(step => JSON.stringify(step)).join("\n"));
+      await waitFor(() => (provider as unknown as { conversations: Map<string, { process?: unknown }> }).conversations.get(session.id)!.process === undefined, "idle release");
+      expect((await readTool())?.output).toBe("1: # Fixture workspace");
+      const users = (await provider.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
+      expect(users.map(item => item.id)).toEqual([`message:${first.messageId}`]);
+    });
+
     test("dispose ends every process it started", async () => {
       const { fake, provider } = await setup();
       await provider.createSession("a");

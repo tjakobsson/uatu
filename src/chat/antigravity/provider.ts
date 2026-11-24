@@ -720,10 +720,21 @@ export class AntigravityProvider implements ChatProvider {
       if (!process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0) return;
       conversation.process = undefined;
       conversation.applied = null;
+      // uatu keeps no copy of its own (D10): the history goes with the
+      // process, and the next read loads it again, replay and transcript.
+      this.forgetHistory(conversation);
       void this.closeProcess(process);
     }, this.idleReleaseMs);
     (timer as { unref?: () => void }).unref?.();
     conversation.idle = timer;
+  }
+
+  private forgetHistory(conversation: Conversation): void {
+    conversation.seeded = false;
+    conversation.items.splice(0);
+    conversation.accounting.splice(0);
+    conversation.version = randomUUID();
+    Object.assign(conversation.memory, createAcpMemory(conversation.sessionId, this.workspacePath));
   }
 
   private async applyConfiguration(conversation: Conversation, process: AcpProcess, input: { model?: ModelSelection; mode?: string; variant?: string }): Promise<void> {
