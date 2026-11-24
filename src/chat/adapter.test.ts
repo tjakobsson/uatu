@@ -14546,6 +14546,107 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("an older pre-move lookup miss does not veto a newer pending move-in confirmation, and a finished recovered worker is not resurrected when parent moves out", async () => {
+    // 1. Pre-move getConversation() miss resolves while a newer move-in confirmation is still pending; move-in still launches active.probe and seeds running.
+    const probeTasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        if (name.startsWith("active.probe:") || name.startsWith("background.recovery:")) probeTasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const arrived = fixtureSession("older-miss-arrived");
+    const resolvers: Array<(session: ProviderSession | null) => void> = [];
+    provider.listActiveSessions = async () => ["older-miss-arrived"];
+    provider.getSession = () => new Promise<ProviderSession | null>(resolve => { resolvers.push(resolve); });
+    const pump = adapter.startEventPump();
+
+    // Older lookup starts BEFORE move-in.
+    const olderMiss = adapter.getConversation("older-miss-arrived").catch(() => undefined);
+    await waitUntil(() => resolvers.length === 1);
+
+    // Newer move-in starts its ownership confirmation lookup.
+    const moveDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "older-miss-arrived",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "older-miss-arrived", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await waitUntil(() => resolvers.length === 2);
+
+    // Older miss resolves null BEFORE the newer move-in confirmation resolves local.
+    resolvers[0]!(null);
+    await olderMiss;
+    resolvers[1]!(arrived);
+    await moveDone;
+    await waitUntil(() => probeTasks.has("active.probe:older-miss-arrived"));
+    await probeTasks.get("active.probe:older-miss-arrived");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("older-miss-arrived").status).toBe("running");
+
+    // 2. A background-recovered worker child that already finished before its parent moves out must not be resurrected as running.
+    const parent = fixtureSession("done-bg-parent");
+    const doneWorker = { ...fixtureSession("done-bg-worker"), parentId: "done-bg-parent" };
+    provider.sessions = [parent, doneWorker];
+    provider.getSession = async id => (id === "done-bg-parent" ? parent : id === "done-bg-worker" ? doneWorker : null);
+    provider.reconcileBackgroundTasks = async id => id === "done-bg-parent" ? [{
+      id: "task:done-worker",
+      type: "background_task",
+      taskId: "done-worker",
+      taskType: "agent",
+      childConversationId: "done-bg-worker",
+      description: "Finished worker",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    // Clear arrived first so workspace working comes solely from done-bg-parent's recovered worker.
+    adapter.projectionForTests("older-miss-arrived").apply({ kind: "status", status: "completed" });
+    expect(adapter.activity().working).toBe(false);
+
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => probeTasks.has("background.recovery:done-bg-parent"));
+    await probeTasks.get("background.recovery:done-bg-parent");
+    expect(adapter.activity().working).toBe(true);
+
+    // Child emits its terminal completion frame before the parent's worker row refreshes.
+    adapter.projectionForTests("done-bg-worker").apply({ kind: "status", status: "completed" });
+    expect(adapter.projectionForTests("done-bg-worker").status).toBe("completed");
+
+    // Now only the parent moves out while done-bg-worker remains local; must not resurrect done-bg-worker as running.
+    const parentMoveDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "done-bg-parent",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "done-bg-parent", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await parentMoveDone;
+    expect(adapter.projectionForTests("done-bg-worker").status).toBe("completed");
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
