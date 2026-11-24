@@ -854,7 +854,7 @@ export class ChatAdapter {
   // Retain the evidence source alongside the existing per-conversation fact:
   // a stream gap must withdraw verified work even after projection eviction,
   // without changing providers' authoritative legacy background behavior.
-  private readonly backgroundWork = new Map<string, { legacy: boolean; verified: boolean }>();
+  private readonly backgroundWork = new Map<string, { legacy: boolean; verified: boolean; workerChildren?: Set<string> }>();
   private readonly unresolvedBackgroundWork = new Set<string>();
   private readonly backgroundRecoveries = new Map<string, BackgroundRecovery>();
   // Losing disposable scheduling ownership never waives an exhausted floor.
@@ -2629,9 +2629,33 @@ export class ChatAdapter {
     await this.verifyTrackedSessions(missing, signal);
   }
 
-  private async reconcileMovedChildren(parentId: string, signal?: AbortSignal): Promise<void> {
+  private async reconcileMovedChildren(parentId: string, signal?: AbortSignal, recoveredWorkerChildren: readonly string[] = []): Promise<void> {
     const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
     await this.verifyTrackedSessions(descendants, signal);
+    const verifiedDescendants = new Set(descendants);
+    for (const childId of recoveredWorkerChildren) {
+      if (this.disposed || signal?.aborted) return;
+      if (childId === parentId || verifiedDescendants.has(childId)) continue;
+      const started = ++this.presenceClock;
+      const statusBaseline = this.statusSequence(childId);
+      try {
+        const session = await this.provider.getSession(childId);
+        if (this.disposed || signal?.aborted) return;
+        const inWorkspace = Boolean(session && await this.isInWorkspace(session, false));
+        if (this.disposed || signal?.aborted) return;
+        if (inWorkspace && session) {
+          this.bumpPresenceSequence(childId, started);
+          boundedSet(this.sessionParents, childId, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
+          const stop = this.stoppingTurns.get(childId);
+          if (stop) stop.activeProbeBaseline = statusBaseline;
+          else this.seedProbedRunning(childId, statusBaseline);
+        } else if (this.presenceSequence(childId) <= started) {
+          this.forgetMissingSession(childId);
+        }
+      } catch {
+        // Keep tracked activity when a transient provider error prevents verification.
+      }
+    }
   }
 
   private seedProbedRunning(id: string, baseline: number): void {
@@ -6454,6 +6478,7 @@ export class ChatAdapter {
 
   private trackBackgroundActivity(id: string, projection: ConversationProjection, status: ConversationStatus): void {
     let legacy = false, verified = false, unresolved = false, hasActivity = false;
+    const workerChildren = new Set<string>();
     for (const item of projection.filter(item => item.type === "background_task" && !item.foreground)) {
       if (item.type !== "background_task" || item.foreground) continue;
       if (item.activity) {
@@ -6461,12 +6486,20 @@ export class ChatAdapter {
         const state = workerState(item.status, item.stateUncertain, item.activity);
         verified ||= state === "working";
         unresolved ||= state === "unknown";
-      } else if (this.provider.reconcileBackgroundTasks && item.status === "running") legacy = true;
+        if (state === "working" && item.childConversationId) workerChildren.add(item.childConversationId);
+      } else if (this.provider.reconcileBackgroundTasks && item.status === "running") {
+        legacy = true;
+        if (item.childConversationId) workerChildren.add(item.childConversationId);
+      }
     }
     // Providers without independent observations retain their authoritative
     // background-status behavior; uncertainty must not turn it off globally.
     legacy ||= status === "background" && !hasActivity;
-    if (legacy || verified) this.backgroundWork.set(id, { legacy, verified }); else this.backgroundWork.delete(id);
+    if (legacy || verified) {
+      this.backgroundWork.set(id, { legacy, verified, ...(workerChildren.size > 0 ? { workerChildren } : {}) });
+    } else {
+      this.backgroundWork.delete(id);
+    }
     if (unresolved) this.unresolvedBackgroundWork.add(id); else this.unresolvedBackgroundWork.delete(id);
   }
 
@@ -7193,6 +7226,7 @@ export class ChatAdapter {
   }
 
   private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<boolean> {
+    const priorWorkerChildren = [...(this.backgroundWork.get(lifecycle.id)?.workerChildren ?? [])];
     if (lifecycle.kind === "deleted") {
       this.cancelRevertReconciliation(lifecycle.id);
       this.forgetActivity(lifecycle.id);
@@ -7214,7 +7248,7 @@ export class ChatAdapter {
           this.rememberInventorySession(lifecycle.id, next, true);
           if (wasListed && !inventoryVisible(previous)) this.inventory.invalidate();
         }
-        await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal);
+        await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal, priorWorkerChildren);
         return false;
       };
       if (!inWorkspace) return finishMovedOut();
@@ -7288,7 +7322,7 @@ export class ChatAdapter {
       this.inventory.invalidate();
     }
     if (lifecycle.kind === "deleted" || !next.inWorkspace) {
-      await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal);
+      await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal, priorWorkerChildren);
     }
     return next.inWorkspace;
   }

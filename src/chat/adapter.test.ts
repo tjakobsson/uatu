@@ -14393,6 +14393,98 @@ describe("workspace activity summary", () => {
     await stopAdapter.dispose();
     await stopPump;
   });
+
+  test("moving a parent out preserves verified background-recovered worker children that remain local and forgets moved ones", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("bg-parent");
+    const stayedWorker = { ...fixtureSession("bg-worker-stayed"), parentId: "bg-parent" };
+    const movedWorker = { ...fixtureSession("bg-worker-moved"), parentId: "bg-parent" };
+    provider.sessions = [parent, stayedWorker, movedWorker];
+    provider.reconcileBackgroundTasks = async id => id === "bg-parent" ? [
+      {
+        id: "task:w-stayed",
+        type: "background_task",
+        taskId: "w-stayed",
+        taskType: "agent",
+        childConversationId: "bg-worker-stayed",
+        description: "Local worker",
+        status: "running",
+        createdAt: 1,
+        activity: { kind: "working", observedAt: 1 },
+      },
+      {
+        id: "task:w-moved",
+        type: "background_task",
+        taskId: "w-moved",
+        taskType: "agent",
+        childConversationId: "bg-worker-moved",
+        description: "Moved worker",
+        status: "running",
+        createdAt: 2,
+        activity: { kind: "working", observedAt: 2 },
+      },
+    ] : [];
+
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has("background.recovery:bg-parent"));
+    await tasks.get("background.recovery:bg-parent");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+    // Neither worker emitted a live execution-start event; activity lived solely on bg-parent's backgroundWork.
+    expect(adapter.projectionForTests("bg-worker-stayed").status).toBe("idle");
+    expect(adapter.projectionForTests("bg-worker-moved").status).toBe("idle");
+
+    // Parent and bg-worker-moved relocate; bg-worker-stayed remains local.
+    const checkedChildren: string[] = [];
+    provider.getSession = async id => {
+      checkedChildren.push(id);
+      return id === "bg-worker-stayed" ? stayedWorker : null;
+    };
+    const moveDone = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: "bg-parent",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "bg-parent", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await moveDone;
+
+    expect(checkedChildren).toContain("bg-worker-stayed");
+    expect(checkedChildren).toContain("bg-worker-moved");
+    expect(adapter.projectionForTests("bg-parent").status).toBe("idle");
+    expect(adapter.projectionForTests("bg-worker-stayed").status).toBe("running");
+    expect(adapter.projectionForTests("bg-worker-moved").status).toBe("idle");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    // Once the local worker finishes, workspace activity settles to false.
+    adapter.projectionForTests("bg-worker-stayed").apply({ kind: "status", status: "completed" });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
