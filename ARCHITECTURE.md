@@ -1124,9 +1124,11 @@ delivery puts a steer in the transcript. One bound covers both owners:
 An agent declaring `immediate-steering` instead of `steering`
 (`add-antigravity-chat` D9) has no inbox and no Steer entries. A busy steer goes
 straight to `provider.prompt` with `delivery: "steer"` and no configuration,
-under the steer admission bound; its user row goes in at acceptance, a refusal
-publishes nothing, and an unknown outcome stays in the receipt and is never
-resent. The provider reports the turn's end once, after the steered part, so
+under the steer admission bound; its user row goes in at acceptance. Any
+provider rejection other than `OperationOutcomeUnknownError` is a definite
+refusal (`SteerRefusedError`, answered as a 409 `steer-refused` carrying the
+agent's reason) that publishes nothing, so the composer restores the draft;
+an unknown outcome stays in the receipt and is never resent. The provider reports the turn's end once, after the steered part, so
 held messages still wait for the carried turn.
 
 Paused held messages reflect dormancy/revert. Pending steers stay paused after

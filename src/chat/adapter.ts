@@ -584,6 +584,16 @@ export class SteerWithdrawalUnconfirmedError extends Error {
   }
 }
 
+// add-antigravity-chat D9: an immediate-steering agent definitely did not
+// take the steer. Nothing was delivered or published, so the submitting
+// client restores the draft with the agent's own reason.
+export class SteerRefusedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "SteerRefusedError";
+  }
+}
+
 export class SteeringUnsupportedError extends Error {
   constructor() {
     super("this agent does not support steering");
@@ -3640,9 +3650,11 @@ export class ChatAdapter {
 
   /**
    * Hand a busy message to an `immediate-steering` agent's running turn
-   * (add-antigravity-chat D9). A refusal propagates with nothing published,
-   * so the composer restores the draft; an admission that neither answers in
-   * time nor fails is an unknown outcome the receipt retains, never resent.
+   * (add-antigravity-chat D9). A provider rejection other than an unknown
+   * outcome is a definite refusal: nothing is published and the client
+   * restores the draft with the agent's reason. An admission that neither
+   * answers in time nor fails is an unknown outcome the receipt retains and
+   * never resends.
    * The accepted message's row goes in at acceptance under the same id
    * dispatchPrompt uses, which the provider's own row and replay share.
    */
@@ -3652,7 +3664,13 @@ export class ChatAdapter {
       id: input.messageId, text: input.text, delivery: "steer",
       ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
     }));
-    const accepted = await this.boundedSteerAdmission(admission, input.messageId);
+    let accepted: { messageId: string };
+    try {
+      accepted = await this.boundedSteerAdmission(admission, input.messageId);
+    } catch (error) {
+      if (error instanceof OperationOutcomeUnknownError) throw error;
+      throw new SteerRefusedError(errorMessage(error));
+    }
     projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text: input.text, requestId: input.requestId, ...(input.attachments.length ? { attachments: input.attachments } : {}) });
     return accepted;
   }

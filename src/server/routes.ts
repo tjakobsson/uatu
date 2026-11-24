@@ -12,7 +12,7 @@
 import type { Serve } from "bun";
 import path from "node:path";
 
-import { ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerRefusedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { OperationOutcomeUnknownError, BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { createWatchedVisualReader, VISUAL_CSP } from "../chat/visual-store";
@@ -1518,6 +1518,8 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof SteerAlreadyDeliveredError) return chatError(409, error.message, "steer-already-delivered");
   if (error instanceof SteerWithdrawalUnconfirmedError) return chatError(409, error.message, "steer-withdrawal-unconfirmed");
   if (error instanceof SteeringUnsupportedError) return chatError(409, error.message);
+  // A definite refusal carries the agent's reason; the client restores the draft.
+  if (error instanceof SteerRefusedError) return chatError(409, error.message, "steer-refused");
   if (error instanceof SendNowUnsupportedError) return chatError(409, error.message);
   if (error instanceof SendNowUnavailableError) return chatError(409, error.message);
   if (error instanceof CommandSteeringError) return chatError(409, error.message);

@@ -430,6 +430,8 @@ export interface ChatProvider {
    * `immediate-steering` is asked too, only while its turn runs: it takes the
    * steer into that turn at once and resolves on acceptance, and it reports
    * the turn's end once, after the steered part (add-antigravity-chat D9).
+   * Its steer rejects with OperationOutcomeUnknownError when the steer may
+   * have reached the agent; any other rejection is a definite refusal.
    */
   prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   /** Native identity known before dispatch, for read-only unknown recovery. */

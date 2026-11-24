@@ -4,7 +4,7 @@ import { realpath, mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerRefusedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
 import type { TranscriptEntry } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
@@ -37,6 +37,8 @@ import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
+import { ChatApiClient } from "./client";
+import { Composer } from "./composer";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
 import { OPENCODE_COMPLETION_ALIAS, OPENCODE_TEXT_START_FALLBACK } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN, CHAT_TURN_CONTINUES, executionEvidence, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, provisionalTurn, type ChatStatusLiveness, type ChatTextSeal, type ChatTurnIdentity } from "./turn-liveness";
@@ -16524,11 +16526,53 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     try {
       adapter.projectionForTests("session").statusUpdate("running");
       provider.prompt = async () => { throw new Error("agy refused the prompt"); };
-      await expect(steer("r-s", "refused")).rejects.toThrow("agy refused the prompt");
+      const refusal = steer("r-s", "refused");
+      await expect(refusal).rejects.toBeInstanceOf(SteerRefusedError);
+      await expect(refusal).rejects.toThrow("agy refused the prompt");
       expect(await userRows()).toEqual([]);
       expect((await adapter.history("session")).conversation.status).toBe("running");
       expect((await adapter.history("session")).queued ?? []).toEqual([]);
     } finally { await adapter.dispose(); }
+  });
+
+  test("a definite refusal crosses the route as a 409 with the agent's reason, and the composer restores the draft", async () => {
+    const { adapter, provider } = immediate();
+    adapter.projectionForTests("session").statusUpdate("running");
+    provider.prompt = async () => { throw new Error("Antigravity finished its turn before the steer was sent"); };
+    const asset = "src/assets/uatu-logo.svg";
+    const routes = buildRoutes({ mode: "prod", assets: { mermaid: asset, logo: asset, icon192: asset, icon512: asset, manifest: asset,
+      fonts: { hackMono: asset, hackLicense: asset, nerdFontsLicense: asset, notices: asset } },
+    getSession: () => { throw new Error("Unexpected document access"); }, chatService: adapter as never,
+    getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
+    const child = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, routes });
+    const statuses: number[] = [];
+    const client = new ChatApiClient(async (input, init) => {
+      const url = new URL(String(input), child.url);
+      url.searchParams.set("t", "fixture-only");
+      const response = await fetch(url, { ...init, headers: { ...init?.headers as Record<string, string>, origin: url.origin } });
+      statuses.push(response.status);
+      return response;
+    });
+    let browser = projectionFromSnapshot(await adapter.history("session"));
+    const texts = new Map<string, string>();
+    const errors: Array<string | null> = [];
+    const composer = new Composer({
+      selected: () => "session", read: () => browser, write: value => { browser = value; }, epoch: () => 0, cancelling: () => false,
+      declares: capability => capability !== "steering", commands: () => [], commandsAvailable: () => true, reloadCommands: async () => true,
+      agentId: () => "fake", refreshCommands: () => {}, configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
+      imageSupport: () => ({ supported: true }), refresh: async () => true,
+    }, client, { read: id => texts.get(id) ?? "", write: (id, text) => { texts.set(id, text); } }, {
+      changed: () => {}, error: message => { errors.push(message); }, note: () => {}, announce: () => {}, accepted: () => {}, heldByHold: () => {},
+    }, { create: () => "blob:preview", release: () => {}, id: () => "request-1" });
+    try {
+      composer.edit("Steer that the agent refuses");
+      await composer.submit();
+      expect(statuses).toEqual([409]);
+      expect(texts.get("session")).toBe("Steer that the agent refuses");
+      expect(browser.acceptedDrafts).toEqual([]);
+      expect(errors.findLast(message => message !== null)).toBe("Antigravity finished its turn before the steer was sent. Draft restored.");
+      expect(adapter.projectionForTests("session").items().filter(item => item.type === "user_message")).toEqual([]);
+    } finally { composer.dispose(); child.stop(true); await adapter.dispose(); }
   });
 
   test("an unknown admission is retained by its receipt and never resent", async () => {
