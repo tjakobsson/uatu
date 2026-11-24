@@ -2647,9 +2647,9 @@ export class ChatAdapter {
           && (reversible?.staged || delivery === "steer")
           && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
         // add-antigravity-chat D9: an agent declaring `immediate-steering`
-        // takes a busy steer into its running turn at once. Commands stay the
-        // workspace queue's, as on a steering agent.
-        const immediate = !reversible?.staged && delivery === "steer"
+        // takes a busy steer into its running turn at once. Commands and
+        // drafts with attachments stay the workspace queue's.
+        const immediate = !reversible?.staged && delivery === "steer" && attachmentRefs.length === 0
           && this.agent().capabilities.includes("immediate-steering") && !this.agent().capabilities.includes("steering")
           && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
         if (reversible?.staged) {

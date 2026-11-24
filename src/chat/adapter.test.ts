@@ -16664,6 +16664,24 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     } finally { await adapter.dispose(); }
   });
 
+  test("an explicit steer with attachments is held in the queue, not steered", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-immediate-attachment-"));
+    const image = path.join(directory, "pixel.png");
+    await Bun.write(image, new Uint8Array([137, 80, 78, 71]));
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now", "attachments"] };
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1,
+      resolveAttachment: async id => id === "att-1" ? { id, mimeType: "image/png", sizeBytes: 4, absolutePath: image } as never : null });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const accepted = await adapter.prompt("session", "r-image", "Look at this", undefined, undefined, undefined, [{ id: "att-1", name: "pixel.png", mimeType: "image/png" }], "steer");
+      expect(accepted).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(provider.prompts).toEqual([]);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.delivery, entry.attachments?.length])).toEqual([["Look at this", "queue", 1]]);
+    } finally { await adapter.dispose(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   test("Send now keeps the rule for agents without steering", async () => {
     const { adapter, queue } = immediate();
     try {
