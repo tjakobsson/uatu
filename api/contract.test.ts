@@ -320,7 +320,7 @@ describe("API contract structure", () => {
     expect(Object.entries(streaming.channels).filter(([, channel]) => channel.path?.startsWith("/s/")).map(([name]) => name)).toEqual([]);
     expect(excluded.exclusions.find(item => item.id === "workspace-api")?.pathPattern).toBe("/s/{workspaceId}/api/*");
     // The streams the Hub refuses say where their events went.
-    for (const id of ["workspace-state-stream-refused", "workspace-inventory-stream-refused", "workspace-conversation-stream-refused", "workspace-activity-stream-refused"]) {
+    for (const id of ["workspace-state-stream-refused", "workspace-inventory-stream-refused", "workspace-conversation-stream-refused", "workspace-activity-stream-refused", "workspace-notification-stream-refused"]) {
       expect(excluded.exclusions.find(item => item.id === id)?.reason).toContain("/api/hub/live");
     }
   });

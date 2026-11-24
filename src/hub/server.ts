@@ -48,8 +48,6 @@ import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage }
 import { isPathAtOrBelow, normalizeAbsolutePath, pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
-  childUrlFor,
-  isLocalDiscardAction,
   proxyHttp,
   upgradeToBridge,
   type BridgeData,
@@ -69,7 +67,9 @@ import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
 import { OnboardingError, resolveOnboardingAssignments, type WorkspaceOnboardingCoordinator } from "./onboarding";
 import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
-import { isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
+import { PAGE_ORIGIN_HEADER } from "../session-contract/headers";
+import { classifySessionPath, classifySessionRequest, parseSessionPath, SESSION_TERMINAL_SESSIONS_PATH } from "../session-contract/paths";
+import type { VerifiedChatPolicy } from "../session-contract/policy";
 import { PersonalChatPreferencesError, type PersonalChatPreferencesStore } from "./personal-chat-preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { WorkerDismissalsStore } from "./worker-dismissals";
@@ -77,7 +77,6 @@ import { handleWorkerDismissals, readAuthoritativeWorkerEvidence, WORKER_DISMISS
 import { observeWorkerProjection } from "./worker-dismissals-observation";
 import type { ActivityMarkSink } from "./activity-marks";
 import type { SessionManager } from "./sessions";
-import { PAGE_ORIGIN_HEADER } from "../terminal/auth";
 import type { TerminalSessionInfo } from "../terminal/server";
 import { MetricsRegistry } from "../debug/metrics";
 import { LIVE_STREAM_PATH } from "../shared/live-protocol";
@@ -171,12 +170,7 @@ type HubServer = UpgradableServer & {
   requestIP?(request: Request): { address: string } | null;
 };
 
-const SESSION_PATH = /^\/s\/([^/]+)(\/|$)/;
 const LIVE_SUBSCRIPTIONS_PATH = /^\/api\/hub\/live\/([^/]+)\/subscriptions$/;
-// The child's per-stream SSE routes are the internal hub↔child protocol the
-// broker subscribes to; through the hub they are refused, never proxied.
-// `/api/activity` is internal too (the activity summary the broker reads).
-const REFUSED_CHILD_STREAM_SUFFIXES = /^\/api\/(events|activity|chat\/notifications\/events|chat\/conversations\/(events|[^/]+\/events))$/;
 const CREDENTIAL_PATH = "/api/hub/credentials";
 const CREDENTIAL_TOOL_PATH = "/api/hub/credential-tools";
 
@@ -570,7 +564,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         let shells: Pick<TerminalSessionInfo, "attached" | "label">[] | undefined;
         if (running) {
           try {
-            const url = childUrlFor(running, new URL(`http://x/s/${entry.id}/api/terminal/sessions`));
+            const url = running.link.url(SESSION_TERMINAL_SESSIONS_PATH);
             // Bounded: a wedged child that accepts but never answers must
             // degrade to an omitted summary, not hang the whole dashboard
             // state endpoint. Two seconds is generous for a loopback call.
@@ -1616,7 +1610,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     // straight past the child's own gate to an interactive shell. Browsers
     // always send Origin on WebSocket upgrades and cross-origin fetches;
     // absent Origin (same-origin GETs, non-browser clients) passes.
-    const sessionMatch = SESSION_PATH.exec(pathname);
+    const sessionMatch = parseSessionPath(pathname);
     if (sessionMatch) {
       if (!csrfOk(request, session.transport)) {
         return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
@@ -1633,11 +1627,11 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       let workspaceId: string;
       try {
-        workspaceId = decodeURIComponent(sessionMatch[1]!);
+        workspaceId = decodeURIComponent(sessionMatch.workspaceId);
       } catch {
         return json(400, { error: "malformed workspace id" });
       }
-      const suffix = pathname.slice(sessionMatch[0].endsWith("/") ? sessionMatch[0].length - 1 : sessionMatch[0].length);
+      const { suffix } = sessionMatch;
       if (suffix === WORKER_DISMISSALS_PATH) {
         // Shares the session route's authenticated principal and cookie-origin
         // protection. The lifecycle lock excludes concurrent forget/restart.
@@ -1712,14 +1706,25 @@ export function createHubFetchHandler(deps: HubDeps) {
         liveBroker.acknowledgeViewed(session.user, workspaceId);
         return new Response(null, { status: 204, headers: NO_STORE_HEADERS });
       }
-      if (REFUSED_CHILD_STREAM_SUFFIXES.test(suffix)) {
-        // Gone, not proxied: no request reaches the child for these. The
+      // The session's per-stream SSE routes, and its activity summary, are
+      // internal sources the live broker subscribes to; the session contract
+      // names them and through the hub they are refused, never proxied.
+      const refusal = classifySessionPath(request.method, suffix);
+      if (refusal === "refused-stream") {
+        // Gone, not proxied: no request reaches the session for these. The
         // body names the replacement so an old client or integration knows
         // where to go.
         return json(410, {
           error: `${suffix} is not served through the hub; live updates are delivered by the brokered stream at ${LIVE_STREAM_PATH}`,
           replacement: LIVE_STREAM_PATH,
         }, NO_STORE_HEADERS);
+      }
+      // Routes only the Hub calls, on the session's own listener: the
+      // readiness proof and the account-change notice. No page uses them and
+      // nothing replaces them, so through the hub they do not exist. Answered
+      // before the running-session check, so no request reaches the session.
+      if (refusal === "refused-internal") {
+        return json(404, { error: "not found" }, NO_STORE_HEADERS);
       }
       const running = sessions.get(workspaceId);
       if (!running) {
@@ -1728,11 +1733,12 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         return upgradeToBridge(request, server, running);
       }
-      if (isLocalDiscardAction(request.method, url.pathname, running.basePath)) {
+      const pathClass = classifySessionRequest(request.method, url.pathname, running.link.basePath);
+      if (pathClass === "local-discard") {
         // Identity only: discard cannot consult or apply automatic policy.
         return proxyHttp(request, running, { principal: session.user, revision: 0, autoBackgroundOnSteer: false });
       }
-      if (isChildPolicyAction(request.method, url.pathname, running.basePath)) {
+      if (pathClass === "policy-action") {
         let policy: VerifiedChatPolicy;
         try {
           const state = deps.personalChatPreferences?.get(session.user);
@@ -2220,6 +2226,15 @@ function bindWorkerDismissals(store: WorkerDismissalsStore, live: LiveEndpoint):
 
 // Starts the public HTTP/TLS media boundary around the private Bun router
 // and its existing WebSocket bridge handlers.
+// Which requests the Hub's media boundary streams: a session's media path,
+// under any workspace prefix, as the session contract classifies it. The
+// classification is method-independent; the boundary admits only GET and
+// HEAD itself.
+export function isHubMediaRequest(request: Request): boolean {
+  const session = parseSessionPath(new URL(request.url).pathname);
+  return session !== null && classifySessionPath(request.method, session.suffix) === "media";
+}
+
 export function startHubServer(deps: HubDeps) {
   const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
     processFactory: new CloneProcessAdapter({ gitCommand: deps.gitCommand }),
@@ -2254,7 +2269,7 @@ export function startHubServer(deps: HubDeps) {
     },
   });
   boundary = startMediaHttpBoundary({ server: inner, hostname: deps.config.host, port: deps.config.port, tls,
-    isMediaRequest: request => /^\/s\/[^/]+\/api\/media$/.test(new URL(request.url).pathname),
+    isMediaRequest: isHubMediaRequest,
     fetch: (request, server) => handler(request, server),
   });
   return Object.assign(boundary.server, { ready: boundary.ready, cloneJobs, live, liveBroker, worktreeReconciler });

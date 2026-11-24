@@ -146,6 +146,19 @@ src/
 │                   login attempts, loopback-redirect delivery, and the
 │                   notice that tells running workspaces; the pane is
 │                   `agent-accounts-pane.ts`), pages, server, main
+├── session-contract/  the private agreement between the Hub and a workspace
+│                   session, server-only and imported by both sides (never by
+│                   the browser bundle, never one side from the other): spawn
+│                   (serve argv, stdio, ready-line formatter and parser),
+│                   bootstrap (fd-3 policy bootstrap + readiness proof), policy
+│                   (chat-policy signing and verification), paths (the
+│                   `/s/<id>/` base path, the internal session paths, and
+│                   `classifySessionPath`, which says what the Hub does with a
+│                   session path), headers (what crosses the hop), token (the
+│                   session token), link (the session link: the Hub's one
+│                   handle to a running session); its real-process check is
+│                   `session.integration.test.ts`, its test adapter
+│                   `tests/contracts/session-link.ts`
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA assets, shared browser notification enrollment UI,
@@ -173,7 +186,13 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   parallel test tree under `src/`.
 - **The HTTP route table is declared once** in `src/server/routes.ts`
   via `buildRoutes(deps)`. `cli.ts` (prod) and `tests/e2e/server.ts`
-  (e2e) both call it with mode-specific deps.
+  (e2e) both call it with mode-specific deps. Internal Hub-facing routes
+  (the ones only the Hub calls) are keyed by constants from
+  `src/session-contract/paths.ts`; public and browser routes stay literal.
+- **Hub and session code meet only in `src/session-contract/`.** Session
+  code (`cli.ts`, `cli/`, `server/`, `terminal/`, `chat/`) does not import
+  `src/hub/` for any part of that agreement, and Hub code reaches a running
+  session only through its session link.
 - **appState lives in `src/shell/state.ts`.** It's a module-level
   mutable singleton. Other modules import it directly; do not duplicate.
 - **Cross-cutting helpers** like `escapeHtml` live in `src/shared/`.

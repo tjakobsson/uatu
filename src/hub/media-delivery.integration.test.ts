@@ -11,6 +11,7 @@ import { createWatchSession, type WatchSession } from "../server/watch-session";
 import { mediaUrl as sharedMediaUrl } from "../shared/media";
 import type { RevisionedDocument } from "../shared/document-updates";
 import type { DocumentMeta } from "../shared/types";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import { HubSessionStore, hubCookieName } from "./auth";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { SseFrameParser } from "./live-sse";
@@ -97,10 +98,11 @@ beforeAll(async () => {
   child = boundary.server;
   const registry = new WorkspaceRegistry(path.join(directory, "registry.json"));
   await registry.load(); await registry.register(first);
-  sessions = new SessionManager(registry, { local: { start: async (workspace, basePath) => ({
-    workspaceId: workspace.id, basePath, instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-    endpoint: { hostname: "127.0.0.1", port: child.port! }, token: credential,
-    exited: new Promise(() => {}), stop: async () => {},
+  sessions = new SessionManager(registry, { local: { start: async (workspace, basePath) => testRunningSession({
+    workspaceId: workspace.id,
+    basePath,
+    port: child.port!,
+    token: credential,
   }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   await sessions.start("project");
   const sessionStore = new HubSessionStore(path.join(directory, "sessions.json"));

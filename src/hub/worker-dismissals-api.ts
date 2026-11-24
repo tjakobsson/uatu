@@ -1,7 +1,8 @@
-// Hub-only personal resource. Child reads use the existing loopback/token
-// authority, never forwarded client claims, usernames or provider mutations.
+// Hub-only personal resource. Session reads go through the session link's
+// loopback/token authority, never forwarded client claims, usernames or
+// provider mutations.
 import type { RunningSession } from "./backend";
-import { childRequestHeaders, childUrlFor } from "./proxy";
+import { sessionWorkerEvidencePath } from "../session-contract/paths";
 import { WORKER_EVIDENCE_LIMIT } from "../chat/worker-dismissal-evidence";
 import { dismissalIdentifier, WorkerDismissalsError, type WorkerDismissalEvidence, type WorkerDismissalChanges, type WorkerDismissalState, type WorkerDismissalsStore } from "./worker-dismissals";
 
@@ -28,8 +29,8 @@ async function boundedText(response: Response | Request, maxBytes: number): Prom
 }
 
 export async function readAuthoritativeWorkerEvidence(running: RunningSession, conversationId: string): Promise<WorkerDismissalEvidence[]> {
-  const url = new URL(`${running.basePath}api/chat/conversations/${encodeURIComponent(conversationId)}/worker-evidence`, "http://child.invalid");
-  const response = await fetch(childUrlFor(running, url), { headers: childRequestHeaders(running), signal: AbortSignal.timeout(WORKER_EVIDENCE_TIMEOUT_MS), redirect: "error" });
+  const { link } = running;
+  const response = await fetch(link.url(sessionWorkerEvidencePath(conversationId)), { headers: link.requestHeaders(), signal: AbortSignal.timeout(WORKER_EVIDENCE_TIMEOUT_MS), redirect: "error" });
   if (!response.ok) { await response.body?.cancel(); throw new WorkerDismissalsError(response.status === 507 ? "capacity" : "unavailable", "authoritative worker status is unavailable"); }
   const malformed = (): never => { throw new WorkerDismissalsError("unavailable", "invalid authoritative worker evidence"); };
   let input: unknown;

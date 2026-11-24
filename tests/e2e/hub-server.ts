@@ -66,6 +66,8 @@ import { hashPassword, HubSessionStore } from "../../src/hub/auth";
 import type { RunningSession, SessionBackend } from "../../src/hub/backend";
 import { LocalProcessBackend } from "../../src/hub/backend";
 import type { HubConfig } from "../../src/hub/config";
+import { createSessionLink } from "../../src/session-contract/link";
+import { createReadyLineScanner } from "../../src/session-contract/spawn";
 import {
   EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
   EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
@@ -150,11 +152,11 @@ const PRESENCE_GRACE_MS = Number.parseInt(process.env.UATU_E2E_HUB_PRESENCE_GRAC
 
 const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-hub-e2e-")));
 
-// One harness process per workspace. The hub's own LocalProcessBackend
-// contract is kept where it matters — a RunningSession with a loopback
-// endpoint, the child's workspace credential as `token` (so brokered child
-// requests authenticate), and `exited`/`stop` — but the child is the e2e
-// harness, told its port, folder, and hub-shaped base path through env.
+// One harness process per workspace. The session contract is kept where it
+// matters — a RunningSession whose session link holds the loopback endpoint
+// and the harness's session token (so brokered requests authenticate), plus
+// `exited`/`stop` — but the workspace session is the e2e harness, told its
+// port, folder, and hub-shaped base path through env.
 class HarnessBackend implements SessionBackend {
   private nextPort = CHILD_BASE_PORT;
   // A workspace keeps its port across restarts, so the `childOrigin` the
@@ -187,7 +189,7 @@ class HarnessBackend implements SessionBackend {
         },
       });
       const session = await backend.start(workspace, basePath, credentials);
-      if (session.policyTrust !== "ready") { await session.stop(); throw new Error("trusted E2E child did not establish private policy trust"); }
+      if (session.link.policyTrust !== "ready") { await session.stop(); throw new Error("trusted E2E child did not establish private policy trust"); }
       this.trustedChildren.add(session);
       const stop = session.stop;
       session.stop = async () => { await stop(); this.trustedChildren.delete(session); };
@@ -213,11 +215,20 @@ class HarnessBackend implements SessionBackend {
         () => reject(new Error(`harness child for '${workspace.id}' did not announce within ${CHILD_START_TIMEOUT_MS / 1000}s`)),
         CHILD_START_TIMEOUT_MS,
       );
+      // The harness announces with the contract's ready line, here without
+      // a token (see below). The listener keeps draining stdout for the
+      // child's whole life, but scans only until the ready line: after it,
+      // the scanner no longer trims its buffer.
+      const scanner = createReadyLineScanner();
+      let announced = false;
       child.stdout!.on("data", (chunk: Buffer) => {
-        if (chunk.toString().includes(`127.0.0.1:${port}`)) {
-          clearTimeout(timeout);
-          resolve();
-        }
+        if (announced) return;
+        const ready = scanner.push(chunk.toString());
+        if (!ready) return;
+        announced = true;
+        clearTimeout(timeout);
+        if (ready.endpoint.port === port) resolve();
+        else reject(new Error(`harness child for '${workspace.id}' announced ${ready.text}, expected port ${port}`));
       });
       child.on("error", reject);
       child.on("exit", code => {
@@ -226,8 +237,8 @@ class HarnessBackend implements SessionBackend {
       });
     });
 
-    // The harness does not print its credential the way cli.ts does; its
-    // e2e-only route exposes it.
+    // In this mode the harness does not print its session token the way
+    // cli.ts does; its e2e-only route exposes it.
     const tokenResponse = await fetch(`http://127.0.0.1:${port}${basePath}__e2e/terminal-token`);
     if (!tokenResponse.ok) {
       throw new Error(`harness child for '${workspace.id}' refused its token probe (${tokenResponse.status})`);
@@ -238,11 +249,15 @@ class HarnessBackend implements SessionBackend {
       child.on("exit", code => resolve(code));
     });
     return {
-      workspaceId: workspace.id,
-      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-      basePath,
-      endpoint: { hostname: "127.0.0.1", port },
-      token,
+      // No policy authority: this mode models a session that never
+      // established policy trust.
+      link: createSessionLink({
+        workspaceId: workspace.id,
+        instanceId: crypto.randomUUID(),
+        basePath,
+        endpoint: { hostname: "127.0.0.1", port },
+        token,
+      }),
       exited,
       stop: async () => {
         this.children.delete(workspace.id);
@@ -400,7 +415,7 @@ for (const name of WORKSPACE_NAMES) {
 }
 for (const workspace of workspaces) {
   const running = await sessions.start(workspace.id);
-  workspace.childOrigin = `http://${running.endpoint.hostname}:${running.endpoint.port}`;
+  workspace.childOrigin = running.link.origin;
 }
 
 const notificationStorePath = path.join(tempRoot, "notifications.json");

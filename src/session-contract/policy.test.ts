@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createChildPolicyAuthority, readChildPolicyBootstrap } from "./child-policy";
+import { createChildPolicyAuthority, readChildPolicyBootstrap } from "./policy";
 
 test("independent per-child authority binds action, body, principal scope and fresh instance", () => {
   const first = createChildPolicyAuthority("project", "/s/project/");

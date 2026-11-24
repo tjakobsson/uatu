@@ -2,13 +2,8 @@ import { expect, test } from "bun:test";
 
 import { readYaml } from "../scripts/validate-api";
 import { WORKER_DISMISSALS_PATH } from "../src/hub/worker-dismissals-api";
-import {
-  CHILD_ACTIVITY_PATH,
-  CHILD_NOTIFICATIONS_PATH,
-  CHILD_DOCUMENT_EVENTS_PATH,
-  CHILD_INVENTORY_EVENTS_PATH,
-  childConversationEventsPath,
-} from "../src/shared/live-protocol";
+import * as sessionPaths from "../src/session-contract/paths";
+import { classifySessionPath, INTERNAL_SESSION_PATHS } from "../src/session-contract/paths";
 
 type Operation = { operationId: string; domain: "hub" | "workspace"; method: string; path: string; childPath?: string; runtime: string };
 type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string; methods?: string[] };
@@ -48,10 +43,32 @@ test("every workspace child route is an explicit internal exclusion", async () =
   const literalRoutes = [...source.matchAll(/p\("([^"]+)"\)/g)].map(match => match[1]!);
   expect(literalRoutes.length).toBeGreaterThan(0);
   expect(literalRoutes.filter(path => !classified(path))).toEqual([]);
-  // Routes registered through a shared constant escape the literal sweep.
-  // Each one must be known here and classified below.
+  // Internal Hub-facing routes are keyed by session-contract constants and
+  // escape the literal sweep. Each key must be a contract path constant, be
+  // classified, and be covered by the contract's list of internal paths.
+  const contractPaths = sessionPaths as unknown as Record<string, unknown>;
   const constantRoutes = [...source.matchAll(/p\(([A-Z][A-Z0-9_]*)\)/g)].map(match => match[1]!);
-  expect(constantRoutes.filter(name => name !== "CHILD_ACTIVITY_PATH" && name !== "CHILD_NOTIFICATIONS_PATH")).toEqual([]);
+  expect([...constantRoutes].sort()).toEqual([
+    "SESSION_ACCOUNTS_CHANGED_PATH",
+    "SESSION_ACTIVITY_PATH",
+    "SESSION_CONVERSATION_EVENTS_ROUTE",
+    "SESSION_DOCUMENT_EVENTS_PATH",
+    "SESSION_INVENTORY_EVENTS_PATH",
+    "SESSION_NOTIFICATIONS_PATH",
+    "SESSION_POLICY_PROOF_PATH",
+    "SESSION_WORKER_EVIDENCE_ROUTE",
+  ]);
+  const sample = (route: string) => route.replace(/:[A-Za-z0-9_]+/g, "sample");
+  const internal = INTERNAL_SESSION_PATHS.map(item => item.path);
+  for (const name of constantRoutes) {
+    const route = contractPaths[name];
+    expect(typeof route).toBe("string");
+    expect(classified(route as string)).toBe(true);
+    expect(internal).toContain(sample(route as string));
+  }
+  // No internal path is registered by literal, where it could drift from
+  // the contract.
+  expect(literalRoutes.filter(path => internal.includes(sample(path)))).toEqual([]);
   // The fetch fallback dispatches on requestUrl.pathname comparisons rather
   // than p("...") literals. Sweep those too, so a new fallback branch cannot
   // escape both the contract and the exclusion list unnoticed.
@@ -61,18 +78,28 @@ test("every workspace child route is an explicit internal exclusion", async () =
   ].filter(path => path.startsWith("/"));
   expect(fallbackPaths.length).toBeGreaterThan(0);
   expect(fallbackPaths.filter(path => !classified(path) && !classified(`${path}/`))).toEqual([]);
-  expect(sessionsSource).toContain('const SESSIONS_PATH = "/api/terminal/sessions"');
+  expect(sessionsSource).toContain("SESSION_TERMINAL_SESSIONS_PATH as SESSIONS_PATH");
+  expect(sessionPaths.SESSION_TERMINAL_SESSIONS_PATH).toBe("/api/terminal/sessions");
   expect(classified("/api/terminal/sessions")).toBe(true);
   expect(classified("/api/terminal/sessions/{terminalSessionId}")).toBe(true);
-  // The SSE routes the Hub's live broker subscribes to, and the workspace
-  // activity stream, are hub-to-child protocol. They must exist and be
-  // classified like every other child route.
-  for (const marker of ['p("/api/events")', 'p("/api/chat/conversations/events")', 'p("/api/chat/conversations/:conversationId/events")']) {
-    expect(source).toContain(marker);
-  }
-  expect(source.includes(`p(${JSON.stringify(CHILD_ACTIVITY_PATH)})`) || source.includes("p(CHILD_ACTIVITY_PATH)")).toBe(true);
-  for (const path of [CHILD_DOCUMENT_EVENTS_PATH, CHILD_INVENTORY_EVENTS_PATH, childConversationEventsPath("sample"), CHILD_ACTIVITY_PATH, CHILD_NOTIFICATIONS_PATH]) {
-    expect(classified(path)).toBe(true);
+  // Every internal path of the session contract — the SSE routes the Hub's
+  // live broker subscribes to, the workspace activity stream, and the routes
+  // the Hub calls directly — is classified like every other session route.
+  expect(internal.length).toBeGreaterThan(0);
+  expect(internal.filter(path => !classified(path))).toEqual([]);
+  // The browser routes the Hub intercepts stay literal in the route table
+  // (the browser reaches them through appUrl literals too). Pin that the
+  // contract's classification still matches the registered shapes.
+  for (const [method, route, expected] of [
+    ["GET", "/api/media", "media"],
+    ["GET", "/api/chat/conversations/:conversationId", "conversation-snapshot"],
+    ["POST", "/api/chat/conversations/:conversationId/prompts", "policy-action"],
+    ["PATCH", "/api/chat/conversations/:conversationId/queue/:messageId", "policy-action"],
+    ["POST", "/api/chat/conversations/:conversationId/queue/:messageId/send-now", "policy-action"],
+    ["POST", "/api/chat/conversations/:conversationId/queue/:messageId/discard-unconfirmed", "local-discard"],
+  ] as const) {
+    expect(source).toContain(`p(${JSON.stringify(route)})`);
+    expect(classifySessionPath(method, sample(route))).toBe(expected);
   }
 });
 
@@ -189,11 +216,12 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     item.pathPattern?.endsWith("*") && path.startsWith(item.pathPattern.slice(0, -1)),
   );
   expect(exactPaths.filter(path => !publicPaths.has(path) && !excludedPaths.has(path) && !matchesExcludedPattern(path))).toEqual([]);
-  // Under a workspace prefix the Hub dispatches on the suffix after
-  // SESSION_PATH. A suffix it answers itself, such as personal state, is a
-  // public Hub operation. The rest of the prefix is proxied to the child and
-  // classified by the child-route check.
-  expect(source).toContain("const SESSION_PATH = /^\\/s\\/([^/]+)(\\/|$)/;");
+  // Under a workspace prefix the Hub dispatches on the suffix the session
+  // contract parses off the path. A suffix it answers itself, such as
+  // personal state, is a public Hub operation. The rest of the prefix is
+  // proxied to the session and classified by the session-route check.
+  expect(source).toContain("const sessionMatch = parseSessionPath(pathname);");
+  expect(sessionPaths.parseSessionPath("/s/sample/api/personal-state")).toEqual({ workspaceId: "sample", suffix: "/api/personal-state" });
   const hubServedWorkspacePaths = [...source.matchAll(/suffix === "([^"]+)"/g)].map(match => `/s/{workspaceId}${match[1]!}`);
   if (source.includes("suffix === WORKER_DISMISSALS_PATH")) hubServedWorkspacePaths.push(`/s/{workspaceId}${WORKER_DISMISSALS_PATH}`);
   expect(hubServedWorkspacePaths.length).toBeGreaterThan(0);

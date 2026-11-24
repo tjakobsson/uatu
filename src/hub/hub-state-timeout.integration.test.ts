@@ -6,6 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession, SessionBackend } from "./backend";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
@@ -38,14 +39,10 @@ beforeAll(async () => {
   await registry.register(path.join(tempRoot, "workspaces", "wedged"));
 
   const backend: SessionBackend = {
-    start: async (workspace, _basePath, _credentials): Promise<RunningSession> => ({
+    start: async (workspace, _basePath, _credentials): Promise<RunningSession> => testRunningSession({
       workspaceId: workspace.id,
-      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-      basePath: `/s/${workspace.id}/`,
-      endpoint: { hostname: "127.0.0.1", port: tarpit!.port! },
+      port: tarpit!.port!,
       token: "tok",
-      exited: new Promise<number | null>(() => undefined),
-      stop: async () => undefined,
     }),
   };
   sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
