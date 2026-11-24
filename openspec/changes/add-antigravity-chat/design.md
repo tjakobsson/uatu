@@ -283,9 +283,13 @@ the next prompt.
 The transcript reader then reads
 `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl`
 (resolved against the workspace process's home directory) read-only and with
-a size bound. It validates each line's shape and adds permission outcomes,
-file-read output, and per-turn tokens and model to the matching replayed rows,
-matched by tool call id and turn order. A missing file, an unreadable file,
+a size bound on the bytes one open handle yields. It validates each line's
+shape and adds permission outcomes, file-read output, and per-turn tokens and
+model to the matching replayed rows. The transcript records no tool call ids,
+so a turn is matched by identity, the user's words agy recorded for it, and
+its tools by their order within it; a turn whose words do not match keeps its
+replayed rows, and a transcript with no matching turn is another
+conversation's. A missing file, an unreadable file,
 or a file whose shape is not recognized leaves the replayed history unchanged
 and is logged at debug level only. When agy refuses to load a listed
 conversation because its login has expired, the transcript alone gives its

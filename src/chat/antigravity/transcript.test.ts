@@ -87,6 +87,8 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
     ["missing", null],
     ["truncated", async () => { const full = await readFile(FIXTURE, "utf8"); return full.slice(0, full.length - 40); }],
     ["foreign", async () => (await readFile(FIXTURE, "utf8")).split("\n").slice(0, 2).join("\n")],
+    // Another conversation with the same shape: as many turns and tools, other words.
+    ["foreign with the same counts", async () => (await readFile(FIXTURE, "utf8")).replace("Say hello", "Say goodbye").replace("read: README.md", "read: NOTES.md").replace("write: a file", "write: another file")],
     ["unrecognized", async () => '{"role":"user","text":"hi"}\n'],
   ] as const) {
     test(`a ${name} transcript leaves the replayed history as it is, without an error`, async () => {
@@ -118,6 +120,23 @@ describe.skipIf(process.platform === "win32")("transcript enrichment (D10)", () 
       expect(carriers(items)).toHaveLength(3);
       expect(provider.loginState()).toBe("missing");
     } finally { await fake.setFlag("auth-missing", false); await provider.dispose(); }
+  });
+
+  test("a turn whose words differ from the recording keeps its replayed rows; the others are enriched", async () => {
+    await placeTranscript((await readFile(FIXTURE, "utf8")).replace("read: README.md", "read: NOTES.md"));
+    const items = await reopen();
+    expect(tool(items, "read_file")?.output).toBeUndefined();
+    expect(tool(items, "write_file")?.error).toBe('permission check failed for write_file "hello.txt"');
+    expect(carriers(items).map(item => item.id)).toEqual([`usage:${sessionId}.t1`, `usage:${sessionId}.t3`]);
+  });
+
+  test.skipIf(process.platform === "win32")("the size bound holds on what is read, not on a size taken first", async () => {
+    // A pipe reports no size, then yields more than the bound.
+    const fifo = path.join(home, "growing.jsonl");
+    await Bun.$`mkfifo ${fifo}`;
+    const writer = Bun.spawn(["sh", "-c", `head -c 300 /dev/zero > '${fifo}'`]);
+    try { expect(await readTranscript(fifo, 100)).toEqual({ skipped: "too-large" }); }
+    finally { writer.kill(); await writer.exited; }
   });
 
   test("reading the transcript leaves it byte-identical", async () => {

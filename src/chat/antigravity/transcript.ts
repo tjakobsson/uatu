@@ -38,7 +38,14 @@ type Step = {
 };
 
 export type TranscriptTool = { output?: string; error?: string };
-export type TranscriptTurn = { model?: string; usage?: TokenUsage; tools: TranscriptTool[] };
+// `request` is what the user asked, as agy recorded it: the turn's identity.
+export type TranscriptTurn = { request?: string; model?: string; usage?: TokenUsage; tools: TranscriptTool[] };
+
+/** The user's own words in a recorded input, without agy's request wrapper and metadata. */
+export function transcriptRequest(content: string | undefined): string | undefined {
+  if (content === undefined) return undefined;
+  return (content.match(/<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/)?.[1] ?? content).trim();
+}
 
 const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 const text = (value: unknown) => typeof value === "string" ? value : undefined;
@@ -46,13 +53,24 @@ const text = (value: unknown) => typeof value === "string" ? value : undefined;
 /** The steps of a transcript, or why there are none. Never throws. */
 export async function readTranscript(file: string, maxBytes = TRANSCRIPT_MAX_BYTES): Promise<{ steps: Step[] } | { skipped: "missing" | "too-large" | "unreadable" | "unrecognized" }> {
   let raw: string;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    const stat = await fs.stat(file);
-    if (!stat.isFile()) return { skipped: "unreadable" };
-    if (stat.size > maxBytes) return { skipped: "too-large" };
-    raw = await fs.readFile(file, { encoding: "utf8", flag: "r" });
+    // The bound is on what one open handle yields, read to at most one byte
+    // past it, not on a size read beforehand that a growing file outruns.
+    handle = await fs.open(file, "r");
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+      if (length > maxBytes) return { skipped: "too-large" };
+    }
+    raw = buffer.subarray(0, length).toString("utf8");
   } catch (error) {
     return { skipped: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable" };
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
   const steps: Step[] = [];
   for (const line of raw.split("\n")) {
@@ -75,7 +93,7 @@ export async function readTranscript(file: string, maxBytes = TRANSCRIPT_MAX_BYT
 export function transcriptTurns(steps: Step[]): TranscriptTurn[] {
   const turns: TranscriptTurn[] = [];
   for (const step of steps) {
-    if (step.type === "USER_INPUT") { turns.push({ tools: [] }); continue; }
+    if (step.type === "USER_INPUT") { turns.push({ request: transcriptRequest(step.content), tools: [] }); continue; }
     const turn = turns.at(-1);
     if (!turn) continue;
     if (step.type === "PLANNER_RESPONSE") {
@@ -104,9 +122,11 @@ export type Enrichment = { items: ConversationItem[]; accounting: StoredMessageA
 
 /**
  * Replayed items with the transcript's additions, or null when the
- * transcript does not describe this replay (its user turns do not line up).
- * Tools are matched by their order within a turn; a turn whose tool count
- * differs keeps its replayed tools. Each turn gains a usage carrier with the
+ * transcript does not describe this replay (its user turns do not line up,
+ * or none of them carries the same words). Only turns whose user message
+ * matches the recorded request are enriched; tools are matched by their
+ * order within such a turn, and a turn whose tool count differs keeps its
+ * replayed tools. Each turn gains a usage carrier with the
  * id a live turn's carrier has.
  */
 export function enrichReplay(items: ConversationItem[], sessionId: string, turns: TranscriptTurn[], options: {
@@ -115,6 +135,11 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
 }): Enrichment | null {
   const users = items.filter(item => item.type === "user_message");
   if (users.length !== turns.length) return null;
+  // Counts alone prove nothing: a turn is the transcript's only when the
+  // user's words match what agy recorded for it. A transcript with no
+  // matching turn is another conversation's.
+  const matched = new Set(users.flatMap((user, index) => user.type === "user_message" && user.text.trim() !== "" && user.text.trim() === turns[index]!.request ? [index + 1] : []));
+  if (matched.size === 0) return null;
   const toolsByTurn = new Map<number, number[]>();
   let turn = 0;
   items.forEach((item, index) => {
@@ -125,6 +150,7 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
   });
   const enriched = [...items];
   for (const [number, indexes] of toolsByTurn) {
+    if (!matched.has(number)) continue;
     const recorded = turns[number - 1]!.tools;
     if (recorded.length !== indexes.length) continue;
     indexes.forEach((index, position) => {
@@ -142,7 +168,7 @@ export function enrichReplay(items: ConversationItem[], sessionId: string, turns
   const result: ConversationItem[] = [];
   let current = 0;
   const closeTurn = (createdAt: number) => {
-    const recorded = current > 0 ? turns[current - 1] : undefined;
+    const recorded = current > 0 && matched.has(current) ? turns[current - 1] : undefined;
     if (!recorded?.usage) return;
     const modelId = recorded.model ? options.family(recorded.model) : undefined;
     const model: ModelSelection | undefined = modelId ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId } : undefined;
@@ -178,8 +204,7 @@ export function historyFromTranscript(steps: Step[], sessionId: string, createdA
   for (const step of steps) {
     if (step.type === "USER_INPUT") {
       user += 1; block = 0;
-      const request = step.content?.match(/<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/)?.[1] ?? step.content ?? "";
-      items.push({ id: `message:${sessionId}.u${user}`, type: "user_message", createdAt, text: request.trim() });
+      items.push({ id: `message:${sessionId}.u${user}`, type: "user_message", createdAt, text: transcriptRequest(step.content) ?? "" });
     } else if (user > 0 && step.type === "PLANNER_RESPONSE") {
       if (step.thinking) {
         block += 1;
