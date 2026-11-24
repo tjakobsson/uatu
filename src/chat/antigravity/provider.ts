@@ -89,7 +89,8 @@ type Conversation = {
   turn?: Turn;
   // History reads and prompts being prepared: the process is in use.
   holds: number;
-  idle?: ReturnType<typeof setTimeout>;
+  // Cancels the pending idle release, if any.
+  idle?: () => void;
   readonly cancels: Set<() => void>;
   permissions: number;
 };
@@ -101,6 +102,9 @@ export type AntigravityProviderOptions = {
   executable: string;
   env?: NodeJS.ProcessEnv;
   idleReleaseMs?: number;
+  // Arms the idle release and answers its cancel: a timer unless a test
+  // fires it by hand.
+  idleTimer?: (release: () => void, milliseconds: number) => () => void;
   now?: () => number;
   spawn?: AcpSpawn;
   stdinCloseGraceMs?: number;
@@ -130,6 +134,7 @@ export class AntigravityProvider implements ChatProvider {
   private readonly executable: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly idleReleaseMs: number;
+  private readonly idleTimer: (release: () => void, milliseconds: number) => () => void;
   private readonly now: () => number;
   private readonly spawn?: AcpSpawn;
   private readonly stdinCloseGraceMs?: number;
@@ -158,6 +163,7 @@ export class AntigravityProvider implements ChatProvider {
     this.executable = options.executable;
     this.env = options.env ?? process.env;
     this.idleReleaseMs = options.idleReleaseMs ?? IDLE_RELEASE_MS;
+    this.idleTimer = options.idleTimer ?? armIdleTimer;
     this.now = options.now ?? (() => Date.now());
     this.spawn = options.spawn;
     this.stdinCloseGraceMs = options.stdinCloseGraceMs;
@@ -379,7 +385,7 @@ export class AntigravityProvider implements ChatProvider {
     memory.model = conversation.applied?.model ?? conversation.configuration.model;
     this.store(conversation, [{ kind: "upsert", item: user }]);
     this.publish({ conversationId: sessionId, updates: [], outcome: "handled", eventType: "session/prompt", notificationTurns: [{ sourceId: turn.id, phase: "started", createdAt: now }] });
-    clearTimeout(conversation.idle);
+    conversation.idle?.();
     this.send(conversation, process, turn, blocks);
     return { messageId: userMessageId(memory, memory.userCount), createdAt: user.createdAt };
   }
@@ -611,7 +617,7 @@ export class AntigravityProvider implements ChatProvider {
       sourceToolId: `tool:${toolCallId}`,
     };
     conversation.permissions += 1;
-    clearTimeout(conversation.idle);
+    conversation.idle?.();
     const settled = this.interactions.await<RequestPermissionResponse>({
       conversationId: conversation.sessionId,
       item,
@@ -810,10 +816,10 @@ export class AntigravityProvider implements ChatProvider {
   }
 
   private scheduleIdle(conversation: Conversation): void {
-    clearTimeout(conversation.idle);
+    conversation.idle?.();
     conversation.idle = undefined;
     if (!conversation.process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0 || this.disposed) return;
-    const timer = setTimeout(() => {
+    conversation.idle = this.idleTimer(() => {
       const process = conversation.process;
       if (!process || conversation.turn || conversation.permissions > 0 || conversation.holds > 0) return;
       conversation.process = undefined;
@@ -823,8 +829,6 @@ export class AntigravityProvider implements ChatProvider {
       this.forgetHistory(conversation);
       void this.closeProcess(process);
     }, this.idleReleaseMs);
-    (timer as { unref?: () => void }).unref?.();
-    conversation.idle = timer;
   }
 
   private refreshAdvertisedLevels(configOptions: unknown): void {
@@ -980,7 +984,7 @@ export class AntigravityProvider implements ChatProvider {
     if (this.disposed) return;
     this.disposed = true;
     for (const conversation of this.conversations.values()) {
-      clearTimeout(conversation.idle);
+      conversation.idle?.();
       this.interactions.abandon(conversation.sessionId, INTERRUPTED_REASON);
     }
     const processes = [...this.processes];
@@ -988,6 +992,13 @@ export class AntigravityProvider implements ChatProvider {
     await Promise.all(processes.map(process => process.settled));
     this.events_.close();
   }
+}
+
+/** The idle release on a timer that does not keep the process alive. */
+function armIdleTimer(release: () => void, milliseconds: number): () => void {
+  const timer = setTimeout(release, milliseconds);
+  (timer as { unref?: () => void }).unref?.();
+  return () => clearTimeout(timer);
 }
 
 /** The promise's outcome, or a failure naming the step once the deadline passes. */

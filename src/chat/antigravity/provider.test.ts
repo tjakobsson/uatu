@@ -13,7 +13,7 @@ import type { AntigravityPriceTable } from "./pricing";
 import { ChatAdapter } from "../adapter";
 import { SIGTERM_GRACE_MS } from "../../hub/backend";
 import { STDIN_CLOSE_GRACE_MS, TERM_GRACE_MS } from "./connection";
-import { AntigravityProvider } from "./provider";
+import { AntigravityProvider, type AntigravityProviderOptions } from "./provider";
 import { AntigravityRuntime } from "./runtime";
 
 // Every test drives the real provider against the fake `agy` (fake-agy.ts),
@@ -23,9 +23,9 @@ import { AntigravityRuntime } from "./runtime";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(options: { idleReleaseMs?: number; prices?: AntigravityPriceTable; setupDeadlineMs?: number } = {}) {
+async function setup(options: { idleReleaseMs?: number; idleTimer?: AntigravityProviderOptions["idleTimer"]; prices?: AntigravityPriceTable; setupDeadlineMs?: number } = {}) {
   const fake = await installFakeAgy();
-  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs, homeDirectory: path.join(fake.stateDirectory, "home") });
+  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, idleTimer: options.idleTimer, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs, homeDirectory: path.join(fake.stateDirectory, "home") });
   const events: NormalizedProviderEvent[] = [];
   const controller = new AbortController();
   void (async () => { for await (const event of provider.events(controller.signal)) events.push(event); })();
@@ -75,11 +75,25 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
     });
 
     test("idle release waits for a prompt that is still being prepared", async () => {
-      const { fake, provider, ended, statuses } = await setup({ idleReleaseMs: 30 });
+      // Idle release fires when the test says, not on a clock.
+      const armed = new Set<() => void>();
+      const idleTimer = (release: () => void) => { armed.add(release); return () => { armed.delete(release); }; };
+      const { fake, provider, ended, statuses } = await setup({ idleTimer });
       const session = await provider.createSession("a");
-      await fake.setFlag("slow-config", true);
-      // Applying the model outlasts the idle bound several times over.
-      await provider.prompt(session.id, { id: "p", text: "Say hello", delivery: "queue", model: { providerId: "antigravity", modelId: "gemini-4-argon" } });
+      await fake.setFlag("hold-config", true);
+      const changes = async () => (await fake.log()).filter(entry => entry.method === "session/set_config_option").length;
+      const before = await changes();
+      const prompted = provider.prompt(session.id, { id: "p", text: "Say hello", delivery: "queue", model: { providerId: "antigravity", modelId: "gemini-4-argon" } });
+      // The prompt is being prepared: agy holds the model change unanswered.
+      let configuring = false;
+      for (const deadline = Date.now() + 8_000; !configuring && Date.now() < deadline; await Bun.sleep(5)) {
+        configuring = await changes() > before;
+      }
+      expect(configuring).toBe(true);
+      expect(armed.size).toBeGreaterThan(0);
+      for (const release of [...armed]) release();
+      await fake.setFlag("hold-config", false);
+      await prompted;
       await ended(session.id);
       expect(statuses(session.id)).toEqual(["completed"]);
       expect((await fake.log()).filter(entry => entry.method === "initialize")).toHaveLength(1);

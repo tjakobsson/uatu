@@ -20,7 +20,8 @@
 //   end-then-refuse-steer present: a prompt sent during a run ends the earlier
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
-//   slow-config          present: `session/set_config_option` answers after 300 ms
+//   hold-config          present: `session/set_config_option` waits to answer until
+//                        it is removed
 //   fail-load            present: `session/load` fails after sending its replay
 //   legacy-only          present: no config options; models are chosen by legacy
 //                        id through `session/set_model`
@@ -196,7 +197,7 @@ app.onRequest(methods.agent.session.load, async ({ params, client }) => {
 app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
   log({ method: "session/set_config_option", params });
   if (flag("legacy-only")) throw RequestError.methodNotFound("session/set_config_option");
-  if (flag("slow-config")) await Bun.sleep(300);
+  while (flag("hold-config")) await Bun.sleep(5);
   let answer: ReturnType<typeof configOptions> = [];
   updateSession(params.sessionId, session => {
     const value = String(params.value);
