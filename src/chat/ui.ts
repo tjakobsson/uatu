@@ -1,5 +1,5 @@
 import { boundedSet } from "../shared/bounded-map";
-import { Composer, type PendingQueueAction } from "./composer";
+import { Composer, steersWhileBusy, type PendingQueueAction } from "./composer";
 import { escapeHtml } from "../shared/html";
 import { createLoadingSignal } from "../preview/loading-signal";
 import { appState } from "../shell/state";
@@ -9,7 +9,7 @@ import { registerBackInterceptor } from "../shell/history";
 import { liveChannel, onManualRecovery, registerLiveTeardown, registerRecoveryWork, requestManualRecovery } from "../shell/live";
 import { isHubPage } from "../shared/app-url";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
-import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
+import { AGENT_LOGIN_REQUIRED_CODE, ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type TimelinePosition } from "./anchor";
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
 import { reducedMotion, scrollFollowMotion } from "./scroll-motion";
@@ -2795,7 +2795,7 @@ export function initChat(api = new ChatApiClient()): void {
     }
     syncSendDescription();
     syncConfigurationScope();
-    sendGroup?.toggleAttribute("data-steering", declares("steering"));
+    sendGroup?.toggleAttribute("data-steering", steersWhileBusy(declares));
     configurationTrigger.disabled = composer.submitting || !projection || catalogLoading;
     configurationTrigger.toggleAttribute("aria-busy", catalogLoading);
     if (renameButton) renameButton.disabled = !projection || selectedConversationDeleted;
@@ -2825,7 +2825,7 @@ export function initChat(api = new ChatApiClient()): void {
     // A held submission can commit conversation configuration before the
     // running turn ends. These controls describe future turns, not evidence
     // of the active turn's settings, even after the local stage is consumed.
-    const nextTurn = declares("steering") && (deliveryChoiceOffered() || projection?.reversibleHistory?.staged === true);
+    const nextTurn = steersWhileBusy(declares) && (deliveryChoiceOffered() || projection?.reversibleHistory?.staged === true);
     const staged = projection && stagedConfigurations.get(projection.conversationId);
     const effective = projection?.configuration;
     const changed = nextTurn && Boolean(staged && (
@@ -3572,7 +3572,12 @@ export function initChat(api = new ChatApiClient()): void {
         input.focus();
         announce(newConversationAnnouncement(projection?.configuration ?? snapshot.configuration));
       }
-    } catch (error) { announce(messageOf(error), true); }
+    } catch (error) {
+      announce(messageOf(error), true);
+      // The agent has no usable login: reread its status so its login
+      // notice, with how to log in, replaces the failed creation.
+      if (error instanceof ChatTransportError && error.code === AGENT_LOGIN_REQUIRED_CODE) rereadStatuses();
+    }
     finally { newButton.disabled = false; }
   });
 
@@ -3792,16 +3797,19 @@ export function initChat(api = new ChatApiClient()): void {
   // Fixed keyboard delivery; Alt+Enter queues this submission only.
   let requestedDelivery: MessageDelivery | undefined;
   function deliveryChoiceOffered(): boolean {
-    return Boolean(projection) && declares("steering") && (isLiveConversationStatus(projection?.status) || (projection?.queued.length ?? 0) > 0);
+    // A steering agent's inbox also wakes a resting session with a backlog;
+    // an immediate steer only ever joins a running turn.
+    return Boolean(projection) && (declares("steering") && (isLiveConversationStatus(projection?.status) || (projection?.queued.length ?? 0) > 0)
+      || declares("immediate-steering") && isLiveConversationStatus(projection?.status));
   }
   function sendSupportsHold(): boolean {
     const draft = input?.value ?? "";
-    return declares("steering") && !sideQuestionOperation(draft) && !localHistoryOperation(draft, commands, declares("reversible-history"));
+    return steersWhileBusy(declares) && !sideQuestionOperation(draft) && !localHistoryOperation(draft, commands, declares("reversible-history"));
   }
   function syncSendDescription(): void {
     const touch = document.documentElement.dataset.uiMode === "touch";
     const sendAction = sideQuestionOperation(input?.value ?? "") ? "Ask side question" : localHistoryOperation(input?.value ?? "", commands, declares("reversible-history")) ? "Send message" : isLiveConversationStatus(projection?.status)
-      ? declares("steering") && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0 ? "Send as steer; hold 2.5 seconds to queue" : declares("steering") ? "Send to queue" : "Queue message"
+      ? steersWhileBusy(declares) && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0 ? "Send as steer; hold 2.5 seconds to queue" : steersWhileBusy(declares) ? "Send to queue" : "Queue message"
       : "Send message";
     send?.setAttribute("aria-label", sendAction);
     if (send) send.title = sendAction;

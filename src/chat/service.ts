@@ -66,6 +66,7 @@ export interface WorkspaceChatService {
     delivery: MessageDelivery;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
+    awaitingConfirmation?: true;
   } & AutomaticBackgroundFeedback>;
   /** Remove a held message, or withdraw a steer from the agent (D7). */
   removeQueued(id: string, messageId: string, requestId: string): Promise<{ removed: true }>;

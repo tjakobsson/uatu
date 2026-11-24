@@ -2,13 +2,16 @@ import type { ChatProvider } from "./provider";
 import type { AgentRuntime } from "./service";
 import type { ChatAvailability, ChatStartupDiagnostics } from "./types";
 import { discoverExecutableCandidates } from "./executable";
+import { BoundedTextCapture, ManagedProcess } from "./managed-process";
 
 // A version probe is one short-lived process, killed this long after it
-// starts so a hung mount or a wedged install cannot run on. The probe then
-// still waits for the child's output pipes to close, so a descendant that
-// keeps one open can delay the answer past this deadline.
+// starts so a hung mount or a wedged install cannot run on. The deadline is
+// also the answer's: output pipes a descendant still holds open are released
+// then, keeping what was read so far.
 const PROBE_TIMEOUT_MS = 10_000;
 const OUTPUT_LIMIT_BYTES = 16 * 1024;
+// How long a probe's leftover helpers get to leave after SIGTERM.
+const PROBE_REAP_GRACE_MS = 500;
 
 export type VersionProbeResult = {
   // The probe's exit code, or null when it was killed on timeout.
@@ -239,26 +242,42 @@ export function pathAgentRuntime(runtime: PathAgentRuntime, createProvider: (exe
   };
 }
 
-async function runProbe(argv: string[], timeoutMs: number): Promise<VersionProbeResult> {
+/** Run one version probe. It answers by `timeoutMs` whatever its child or a
+ * descendant holding its pipes does: a child still running then is killed and
+ * reported as timed out; one that exited keeps its exit code. Either way the
+ * output read so far is the evidence. Exported for its own tests. */
+export async function runProbe(argv: string[], timeoutMs: number): Promise<VersionProbeResult> {
   const child = Bun.spawn(argv, {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-  });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
+    // A group leader, so whatever the probe starts can be reaped with it.
+    detached: process.platform !== "win32",
+  } as Parameters<typeof Bun.spawn>[1]) as unknown as ReturnType<typeof Bun.spawn> & { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array> };
+  // Bounded from the start: the version leads the output, and nothing a
+  // probe prints can grow this process's memory past the limit.
+  const stdout = new BoundedTextCapture(OUTPUT_LIMIT_BYTES, undefined, "start");
+  const stderr = new BoundedTextCapture(OUTPUT_LIMIT_BYTES, undefined, "start");
+  stdout.consume(child.stdout);
+  stderr.consume(child.stderr);
+  let exitCode: number | null = null;
+  let exited = false;
+  const childExited = child.exited.then(code => { exitCode = code; exited = true; });
+  let expire!: () => void;
+  const deadline = new Promise<void>(resolve => { expire = resolve; });
+  const timer = setTimeout(expire, timeoutMs);
   (timer as unknown as { unref?: () => void }).unref?.();
   try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { exitCode: timedOut ? null : exitCode, stdout, stderr, timedOut };
+    await Promise.race([Promise.all([stdout.done, stderr.done, childExited]), deadline]);
   } finally {
     clearTimeout(timer);
   }
+  const timedOut = !exited;
+  if (timedOut) child.kill("SIGKILL");
+  stdout.release();
+  stderr.release();
+  // The answer does not wait, but nothing the probe started outlives it: its
+  // process group is ended in the background (SIGTERM, a grace, SIGKILL).
+  void new ManagedProcess(child, { termGraceMs: PROBE_REAP_GRACE_MS, escalation: "group" }).terminate().catch(() => undefined);
+  return { exitCode: timedOut ? null : exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut };
 }

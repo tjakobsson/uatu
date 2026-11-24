@@ -87,6 +87,9 @@ export type MultiAgentChatServiceOptions = {
   // the others are served without it (its late arrival ticks the
   // inventory so clients re-fetch). Tests shorten it.
   inventoryContributionTimeoutMs?: number;
+  // How long a listing that arrived after that bound serves every read of
+  // its agent (45 s). Tests shorten it.
+  lateListingTtlMs?: number;
 };
 
 /**
@@ -203,7 +206,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             this.inventoryHub.refresh();
           });
         }
-        return source;
+        return source && this.invalidatingLateList(agent.descriptor.id, source);
       });
     }))).filter((source): source is ConversationInventorySubscription => source !== null));
 
@@ -227,9 +230,24 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
     this.visualStore = options.visualStore ?? new VisualStore(options.workspacePath);
     this.inventoryContributionTimeoutMs = options.inventoryContributionTimeoutMs ?? 4_000;
+    this.lateListingTtlMs = options.lateListingTtlMs ?? 45_000;
   }
 
   private readonly inventoryContributionTimeoutMs: number;
+  // A list that arrived after its read gave up on it, by agent: the next
+  // read takes it rather than starting a listing that would be as slow.
+  // Shared and read-only, never consumed: every read within the TTL gets it,
+  // and a newer completed listing, a conversation created or renamed here,
+  // or an inventory tick from the agent ends it. Bumping an agent's epoch
+  // keeps a listing started before such a change from caching what it missed,
+  // and read order fences the rest: a listing that completes after one
+  // started later has completed caches nothing.
+  private readonly lateLists = new Map<string, { list: AgentConversationSummary[]; at: number }>();
+  private readonly lateListEpochs = new Map<string, number>();
+  // Per agent: the last listing started, and the latest-started one completed.
+  private readonly listingsStarted = new Map<string, number>();
+  private readonly listingsSettled = new Map<string, number>();
+  private readonly lateListingTtlMs: number;
   private readonly activitySubscriptions = new Set<MergedActivitySubscription>();
 
   agents(): ChatAgentDescriptor[] {
@@ -283,6 +301,20 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
    */
   async listConversations(): Promise<AgentConversationSummary[]> {
     const lists = await Promise.all(this.order.map(async agent => {
+      const id = agent.descriptor.id;
+      const late = this.lateLists.get(id);
+      if (late && Date.now() - late.at < this.lateListingTtlMs) return late.list;
+      if (late) this.lateLists.delete(id);
+      const epoch = this.lateListEpochs.get(id) ?? 0;
+      const sequence = (this.listingsStarted.get(id) ?? 0) + 1;
+      this.listingsStarted.set(id, sequence);
+      // True for the latest-started listing to complete so far; an older one
+      // completing after it is superseded.
+      const newest = () => {
+        if (sequence < (this.listingsSettled.get(id) ?? 0)) return false;
+        this.listingsSettled.set(id, sequence);
+        return true;
+      };
       const read = (async () => {
         const conversations = await agent.service.listConversations();
         return conversations.map(summary => qualifyAgentSummary(agent.descriptor, summary));
@@ -290,8 +322,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       read.catch(() => undefined);
       // One agent's stalled startup (a cold probe can run to its timeout)
       // must not withhold another agent's already-answered list: the
-      // straggler is bounded, and its late arrival ticks the inventory so
-      // clients re-fetch and see it.
+      // straggler is bounded, and its late arrival is kept for the next read
+      // and ticks the inventory so clients re-fetch and see it.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bounded = await Promise.race([
         read.catch(() => [] as AgentConversationSummary[]),
@@ -301,8 +333,16 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         }),
       ]);
       if (timer !== undefined) clearTimeout(timer);
-      if (bounded !== null) return bounded;
-      void read.then(late => { if (late.length > 0) this.inventoryHub.tick(); }, () => undefined);
+      if (bounded !== null) {
+        // A listing in time is newer than any late one.
+        void read.then(() => { if (newest()) this.lateLists.delete(id); }, () => undefined);
+        return bounded;
+      }
+      void read.then(late => {
+        if (!newest() || (this.lateListEpochs.get(id) ?? 0) !== epoch) return;
+        this.lateLists.set(id, { list: late, at: Date.now() });
+        if (late.length > 0) this.inventoryHub.tick();
+      }, () => undefined);
       return [] as AgentConversationSummary[];
     }));
     return lists.flat().sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
@@ -354,7 +394,33 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async createConversation(agentId?: string): Promise<AgentConversationSnapshot> {
     const agent = this.requireAgent(agentId ?? this.defaultAgentId());
-    return qualifyAgentSnapshot(agent.descriptor, await agent.service.createConversation());
+    const created = await agent.service.createConversation();
+    this.invalidateLateList(agent.descriptor.id);
+    return qualifyAgentSnapshot(agent.descriptor, created);
+  }
+
+  /** The agent's late listing no longer stands, and none started before now will. */
+  private invalidateLateList(agentId: string): void {
+    this.lateLists.delete(agentId);
+    this.lateListEpochs.set(agentId, (this.lateListEpochs.get(agentId) ?? 0) + 1);
+  }
+
+  // The agent's inventory subscription, ending its late listing on every
+  // tick after the one each subscription opens with.
+  private invalidatingLateList(agentId: string, source: ConversationInventorySubscription): ConversationInventorySubscription {
+    let opened = false;
+    return new Proxy(source, {
+      get: (target, property, receiver) => {
+        if (property === "next") {
+          return () => target.next().then(result => {
+            if (!result.done) { if (opened) this.invalidateLateList(agentId); opened = true; }
+            return result;
+          });
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
   }
 
   async history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot> {
@@ -773,6 +839,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }> {
     const { agent, conversationId } = this.resolve(id);
     const renamed = await agent.service.renameConversation(conversationId, requestId, title);
+    this.invalidateLateList(agent.descriptor.id);
     return { conversation: qualifyAgentSummary(agent.descriptor, renamed.conversation) };
   }
 

@@ -123,7 +123,9 @@ export async function settlesWithin(promise: Promise<unknown>, milliseconds: num
 }
 
 /**
- * The last `limit` bytes of a stream, for diagnostics. The snapshot is
+ * The last `limit` bytes of a stream, for diagnostics, or with
+ * `retain: "start"` its first `limit` bytes (a version probe's answer leads
+ * its output); either way the stream is read to its end. The snapshot is
  * decoded, stripped of control characters other than tab, newline and
  * carriage return, and trimmed, then passed through the optional scrubber,
  * which is where a runtime redacts secrets its child might echo.
@@ -138,7 +140,7 @@ export class BoundedTextCapture {
     this.resolveDone = resolve;
   });
 
-  constructor(private readonly limit: number, private readonly scrub?: (text: string) => string) {}
+  constructor(private readonly limit: number, private readonly scrub?: (text: string) => string, private readonly retain: "start" | "end" = "end") {}
 
   // For a stream that will never arrive, so `done` still settles.
   close(): void {
@@ -172,10 +174,12 @@ export class BoundedTextCapture {
           // Released while this read was answered: the snapshot is frozen
           // from the moment release() returns.
           if (done || this.reader !== reader) break;
+          if (this.retain === "start" && this.bytes.length >= this.limit) continue;
           const combined = new Uint8Array(this.bytes.length + value.length);
           combined.set(this.bytes);
           combined.set(value, this.bytes.length);
-          this.bytes = combined.length <= this.limit ? combined : combined.slice(combined.length - this.limit);
+          this.bytes = combined.length <= this.limit ? combined
+            : this.retain === "start" ? combined.slice(0, this.limit) : combined.slice(combined.length - this.limit);
         }
       } catch {
         // Preserve the diagnostics collected before the stream closed.
@@ -203,6 +207,11 @@ export class BoundedTextCapture {
       reader.releaseLock();
     }
     this.resolveDone();
+  }
+
+  /** The bytes kept, decoded as they are, without the snapshot's cleanup. */
+  text(): string {
+    return new TextDecoder().decode(this.bytes);
   }
 
   snapshot(): string {

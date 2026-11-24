@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ChatProvider } from "./provider";
-import { PathAgentRuntime, pathAgentMessages, pathAgentRuntime, type PathAgentConfiguration } from "./path-agent-runtime";
+import { PathAgentRuntime, pathAgentMessages, pathAgentRuntime, runProbe, type PathAgentConfiguration } from "./path-agent-runtime";
 
 // A made-up agent, so nothing here leans on Claude Code's configuration.
 const FAKE_AGENT: PathAgentConfiguration = {
@@ -88,6 +88,45 @@ describe.skipIf(process.platform === "win32")("PathAgentRuntime", () => {
         probes: 1,
       }),
     });
+  }, 10_000);
+
+  test("the bound is the answer's deadline even while a descendant holds the probe's output open", async () => {
+    // The child is killed on the bound, but a background descendant keeps
+    // its pipes for 3 s more; the answer must not wait for it.
+    const fake = await fakeExecutable("(sleep 3) &\nexec sleep 3");
+    const started = Date.now();
+    const availability = await runtime({ PATH: fake.directory }, { probeTimeoutMs: 300 }).ensure();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(availability).toEqual(expect.objectContaining({ state: "unavailable", reason: "startup-failed", diagnostics: expect.objectContaining({ lastProbe: { kind: "abandoned" } }) }));
+  }, 10_000);
+
+  test("a probe's leftover helpers are reaped after it answers, without delaying the answer", async () => {
+    const home = await directory();
+    const pidFile = path.join(home, "helper.pid");
+    const fake = await fakeExecutable(`echo 'fake-agent 2.0.0'\nsleep 30 >/dev/null 2>&1 &\necho $! > '${pidFile}'\nexit 0`, home);
+    const started = Date.now();
+    expect(await runtime({ PATH: fake.directory }, { probeTimeoutMs: 2_000 }).ensure()).toEqual({ state: "ready", version: "2.0.0" });
+    expect(Date.now() - started).toBeLessThan(1_500);
+    const pid = Number((await readFile(pidFile, "utf8")).trim());
+    const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    for (let i = 0; i < 400 && alive(); i++) await Bun.sleep(5);
+    expect(alive()).toBe(false);
+  }, 10_000);
+
+  test("a probe that exited answers with its version at the bound when a descendant keeps its output open", async () => {
+    const fake = await fakeExecutable("echo 'fake-agent 2.0.0'\n(sleep 3) &\nexit 0");
+    const started = Date.now();
+    const availability = await runtime({ PATH: fake.directory }, { probeTimeoutMs: 300 }).ensure();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(availability).toEqual({ state: "ready", version: "2.0.0" });
+  }, 10_000);
+
+  test("a probe's output is bounded from its start, so a long answer keeps its version line", async () => {
+    const fake = await fakeExecutable("echo 'fake-agent 3.0.0'\nhead -c 1048576 /dev/zero | tr '\\0' 'x'");
+    const result = await runProbe([fake.executable, "version", "--plain"], 5_000);
+    expect(result.stdout.length).toBeLessThanOrEqual(16 * 1024);
+    expect(result.stdout.startsWith("fake-agent 3.0.0\n")).toBe(true);
+    expect(await runtime({ PATH: fake.directory }).ensure()).toEqual({ state: "ready", version: "3.0.0" });
   }, 10_000);
 
   test("what a timed-out probe printed before the bound is kept as evidence", async () => {

@@ -10,16 +10,16 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting, ProviderHistoryPage, WorkerSourceGuard, WorkerResultFallback, WorkerRecoverySource, WorkerAssociationWatch } from "./provider";
 import { describeToolDetail } from "./tool-detail";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type SteerConfirmation, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { isLiveConversationStatus } from "./types";
+import { isLiveConversationStatus, steerRefusedNotice } from "./types";
 import { OPENCODE_TEXT_START_FALLBACK, type OpenCodeTextStart } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TURN, CHAT_TURN_CONTINUES, isTerminalStatus, withRetainedReplyFacts, type ChatStatusLiveness, type ChatTurnIdentity, type ChatTurnToken } from "./turn-liveness";
-import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
+import type { ChatActionContext, NoticeItem, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
 import { unverifyWorkerTask, workerExecutionClockRuns, workerState } from "./worker-state";
@@ -584,6 +584,16 @@ export class SteerWithdrawalUnconfirmedError extends Error {
   }
 }
 
+// add-antigravity-chat D9: an immediate-steering agent definitely did not
+// take the steer. Nothing was delivered or published, so the submitting
+// client restores the draft with the agent's own reason.
+export class SteerRefusedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "SteerRefusedError";
+  }
+}
+
 export class SteeringUnsupportedError extends Error {
   constructor() {
     super("this agent does not support steering");
@@ -914,6 +924,13 @@ export class ChatAdapter {
   private readonly nativeAccountingReads = new Map<string, { controller: AbortController; promise: Promise<void>; callers: number; sources: WorkerSourceRead }>();
   private readonly automaticBackgroundTimeoutMs: number;
   private readonly steerAdmissionTimeoutMs: number;
+  // Immediate steers awaiting the agent's answer, per conversation: Stop
+  // does not queue behind them.
+  private readonly immediateSteers = new Map<string, number>();
+  // The steer-refused notices this adapter published, by conversation (the
+  // latest few): the provider's history never holds them, so a snapshot
+  // carries them, and a client that missed one live still restores its draft.
+  private readonly steerRefusals = new Map<string, NoticeItem[]>();
   private inboxClock = 0;
   // Internal held-submission order survives delivery switches and uncertain
   // admissions. Retained only on bounded pending owners/admission fences, not
@@ -1751,6 +1768,11 @@ export class ChatAdapter {
       } catch {
         // No paused list: the conversation reads as it would without one.
       }
+    }
+    // The latest page carries the steer refusals published here, which the
+    // provider's history does not hold.
+    if (!cursor) for (const notice of this.steerRefusals.get(id) ?? []) {
+      if (!items.some(item => item.id === notice.id)) items.push(notice);
     }
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
@@ -2597,6 +2619,9 @@ export class ChatAdapter {
     // What the provider actually ran, when it was not an ordinary turn.
     operation?: "reload";
     automaticBackground?: AutomaticBackgroundOutcome;
+    // An immediate steer the agent was sent and has not confirmed yet: its
+    // row, or a refusal notice naming this request, follows (D9).
+    awaitingConfirmation?: true;
   }> {
     if (sideQuestionOperation(text)) throw new SideGenerationUnsupportedError("Use the separate side-answer action for /btw; it is never sent to conversation history");
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
@@ -2636,6 +2661,12 @@ export class ChatAdapter {
         const steerable = this.agent().capabilities.includes("steering")
           && (reversible?.staged || delivery === "steer")
           && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
+        // add-antigravity-chat D9: an agent declaring `immediate-steering`
+        // takes a busy steer into its running turn at once. Commands and
+        // drafts with attachments stay the workspace queue's.
+        const immediate = !reversible?.staged && delivery === "steer" && attachmentRefs.length === 0
+          && this.agent().capabilities.includes("immediate-steering") && !this.agent().capabilities.includes("steering")
+          && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
         if (reversible?.staged) {
           if (steerable) {
             // A replacement is another pending inbox entry, not an escape
@@ -2668,6 +2699,13 @@ export class ChatAdapter {
           return { ...dispatched, pending: false, delivery: "queue" };
         }
         const busy = this.turnActive(conversationId, projection);
+        if (busy && immediate) {
+          // Never a dock entry and never a configuration change: the steer
+          // joins the turn being run, and held messages keep waiting for that
+          // turn's end, which the provider reports once, after the steer.
+          const steered = await this.dispatchImmediateSteer(conversationId, projection, { messageId: this.id(), text, requestId, attachments: attachmentRefs });
+          return { messageId: steered.messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(conversationId) ?? currentConfiguration, ...(steered.awaitingConfirmation ? { awaitingConfirmation: true as const } : {}) };
+        }
         const queue: HeldQueue = this.heldQueues.get(conversationId) ?? [];
         // Order is absolute: while anything is held, a new submission joins the
         // back of the queue even when the conversation is momentarily idle —
@@ -3625,6 +3663,86 @@ export class ChatAdapter {
     }
   }
 
+  /**
+   * Hand a busy message to an `immediate-steering` agent's running turn
+   * (add-antigravity-chat D9). A provider rejection other than an unknown
+   * outcome is a definite refusal: nothing is published and the client
+   * restores the draft with the agent's reason. An admission that neither
+   * answers in time nor fails is an unknown outcome the receipt retains and
+   * never resends; a later acceptance still records its row.
+   * The accepted message's row goes in under the same id dispatchPrompt
+   * uses, which the provider's own row and replay share.
+   */
+  private async dispatchImmediateSteer(conversationId: string, projection: ConversationProjection, input: { messageId: string; text: string; requestId: string; attachments: MessageAttachment[] }): Promise<{ messageId: string; awaitingConfirmation?: true }> {
+    const providerAttachments = await this.locateAttachments(input.attachments);
+    const admission = Promise.resolve().then(() => this.provider.prompt(conversationId, {
+      id: input.messageId, text: input.text, delivery: "steer",
+      ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
+    }));
+    let accepted: { messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> };
+    this.immediateSteers.set(conversationId, (this.immediateSteers.get(conversationId) ?? 0) + 1);
+    try {
+      accepted = await this.boundedSteerAdmission(admission, input.messageId).finally(() => {
+        const left = (this.immediateSteers.get(conversationId) ?? 1) - 1;
+        if (left > 0) this.immediateSteers.set(conversationId, left); else this.immediateSteers.delete(conversationId);
+      });
+    } catch (error) {
+      if (error instanceof OperationOutcomeUnknownError) {
+        // Late evidence, never a resend: an admission that answers after the
+        // bound settles like a timely one, so the client's unconfirmed draft
+        // settles against the delivered row, or returns on a refusal.
+        void admission.then(
+          late => this.settleImmediateSteer(conversationId, late, input),
+          late => { if (!(late instanceof OperationOutcomeUnknownError)) this.settleImmediateSteer(conversationId, { outcome: "refused", reason: errorMessage(late) }, input); },
+        );
+        throw error;
+      }
+      throw new SteerRefusedError(errorMessage(error));
+    }
+    if (accepted.confirmation) {
+      // Sent, not yet confirmed: the conversation is free again at once, and
+      // the agent's answer settles the steer later. An unknown outcome stays
+      // unconfirmed with the submitting client and is never resent.
+      this.settleImmediateSteer(conversationId, accepted, input);
+      return { messageId: accepted.messageId, awaitingConfirmation: true };
+    }
+    this.recordImmediateSteer(projection, accepted, input);
+    return accepted;
+  }
+
+  // The one settlement for a steer's outcome, timely or late: a row for an
+  // acceptance, a `steer-refused` notice naming the request for a refusal,
+  // and a confirmation still to come is awaited first, so a "sent" never
+  // records a row that the agent later refuses.
+  private settleImmediateSteer(conversationId: string, outcome: { messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> } | SteerConfirmation, input: { text: string; requestId: string; attachments: MessageAttachment[] }): void {
+    if (this.disposed) return;
+    if ("confirmation" in outcome && outcome.confirmation) {
+      void outcome.confirmation.then(confirmation => this.settleImmediateSteer(conversationId, confirmation, input));
+      return;
+    }
+    if ("outcome" in outcome && outcome.outcome === "refused") {
+      const notice = steerRefusedNotice(input.requestId, outcome.reason, Date.now());
+      this.steerRefusals.set(conversationId, [...(this.steerRefusals.get(conversationId) ?? []).filter(known => known.id !== notice.id), notice].slice(-20));
+      this.projection(conversationId).upsert(notice);
+      return;
+    }
+    if ("outcome" in outcome && outcome.outcome !== "accepted") return;
+    this.recordImmediateSteer(this.projection(conversationId), outcome, input);
+  }
+
+  // The accepted steer's row, at the provider's position: a row the provider
+  // already published keeps its own place and only gains the request id;
+  // otherwise the provider's acceptance names the position.
+  private recordImmediateSteer(projection: ConversationProjection, accepted: { messageId: string; createdAt?: number }, input: { text: string; requestId: string; attachments: MessageAttachment[] }): void {
+    const id = `message:${accepted.messageId}`;
+    const existing = projection.get(id);
+    if (existing?.type === "user_message") {
+      if (existing.requestId !== input.requestId) projection.upsert({ ...existing, requestId: input.requestId });
+      return;
+    }
+    projection.upsert({ id, type: "user_message", createdAt: accepted.createdAt ?? Date.now(), text: input.text, requestId: input.requestId, ...(input.attachments.length ? { attachments: input.attachments } : {}) });
+  }
+
   // Provider events can update the cache while prompt admission awaits.
   // Merge onto the latest value synchronously so omitted fields preserve
   // that newer state rather than restoring the pre-admission snapshot.
@@ -3854,7 +3972,10 @@ export class ChatAdapter {
     // dormant flag alone, so cancellation waits for it to finish admitting
     // and then interrupts the turn it just started — while deliveries that
     // have not started find the queue paused.
-    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
+    // An immediate steer holds the lane until the agent answers it, which
+    // may be the end of the turn being stopped: Stop goes ahead of it, and
+    // the steer then settles as refused or unknown (add-antigravity-chat D9).
+    const stopNow = async (): Promise<{ cancelled: true }> => {
       await this.requireSession(conversationId);
       // Cancel means stop: held messages stay queued and removable, and none
       // of them rides the idle transition this interrupt causes. Paused
@@ -3888,7 +4009,10 @@ export class ChatAdapter {
         if (stop.resumed) this.projection(conversationId);
         this.stoppingTurns.delete(conversationId);
       }
-    }));
+    };
+    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => (this.immediateSteers.get(conversationId) ?? 0) > 0
+      ? stopNow()
+      : this.enqueuePromptAdmission(conversationId, stopNow));
   }
 
   undo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {

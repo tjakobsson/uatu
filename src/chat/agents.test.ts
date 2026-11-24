@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId, UnknownAgentError, type RegisteredChatAgent } from "./agents";
 import { ConversationProjection } from "./adapter";
+import { createAcpMemory, normalizeAcpUpdate } from "./antigravity/normalization";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
@@ -2294,6 +2295,17 @@ describe("persisted capture and admission identities", () => {
     } finally { await h.cleanup(); }
   });
 
+  test("Antigravity: a reply's captures are admitted under antigravity:message:<id>", async () => {
+    const memory = createAcpMemory("c", "/workspace");
+    const items = [{ sessionUpdate: "user_message_chunk", content: { type: "text", text: "Draw" } }, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "![one](one.png)" } }]
+      .flatMap(update => normalizeAcpUpdate({ sessionId: "c", update }, memory, 1).updates.flatMap(change => change.kind === "upsert" ? [change.item] : []));
+    const { h, ids, ledgers } = await fixture("antigravity", items);
+    try {
+      expect(ids("message:c.a1.1")).toHaveLength(1);
+      expect(await ledgers()).toEqual(new Set([sha("antigravity:c", "antigravity:message:c.a1.1")]));
+    } finally { await h.cleanup(); }
+  });
+
   test.each(["v1", "v2"] as const)("OpenCode %s: per-part captures share their native message's eight admissions", async generation => {
     const items = generation === "v1"
       ? normalizeProviderMessage({ info: { id: "api", role: "assistant", time: { created: 1 } }, parts: [{ id: "first", type: "text", text: images("a", 5) }, { id: "second", type: "text", text: images("b", 5) }] })
@@ -2620,6 +2632,105 @@ describe("inventory", () => {
     releaseB([summary("late", 9)]);
     expect(await tick).toEqual({ value: undefined, done: false });
     expect((await service.listConversations()).map(conversation => conversation.id)).toEqual(["claude:late", "opencode:ready"]);
+    subscription.cancel();
+  });
+
+  // An agent whose every listing is healthy but slower than the bound.
+  function slowListing(options: { lateListingTtlMs?: number } = {}) {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    a.conversations = [summary("ready", 5)];
+    const listed = { reads: 0, ids: ["slow"] };
+    b.listConversations = () => { listed.reads += 1; const ids = [...listed.ids]; return Bun.sleep(80).then(() => ids.map((id, index) => summary(id, 9 - index))); };
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      inventoryContributionTimeoutMs: 25,
+      ...options,
+      agents: [
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
+      ],
+    });
+    const ids = async () => (await service.listConversations()).map(conversation => conversation.id);
+    const arrived = async () => { for (let attempt = 0; attempt < 200 && listed.reads > 0; attempt += 1) await Bun.sleep(5); };
+    return { a, b, service, listed, ids, arrived };
+  }
+
+  test("a listing slower than the bound serves every read until its TTL, without starting another", async () => {
+    const { service, listed, ids } = slowListing();
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    expect(await ids()).toEqual(["opencode:ready"]);
+    // Its late arrival ticks; from then on two readers both get it.
+    expect(await subscription.next()).toEqual({ value: undefined, done: false });
+    expect(await ids()).toEqual(["claude:slow", "opencode:ready"]);
+    expect(await ids()).toEqual(["claude:slow", "opencode:ready"]);
+    expect(listed.reads).toBe(1);
+    subscription.cancel();
+  });
+
+  test("a listing that completes after a later-started one answered caches nothing", async () => {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    a.conversations = [summary("ready", 5)];
+    // The first listing is slow and answers last, with a conversation since removed.
+    let answerFirst!: (value: ConversationSummary[]) => void;
+    const answers: Array<() => Promise<ConversationSummary[]>> = [
+      () => new Promise(resolve => { answerFirst = resolve; }),
+      async () => [summary("created", 9)],
+      async () => [summary("created", 9)],
+    ];
+    let reads = 0;
+    b.listConversations = () => answers[reads++]!();
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      inventoryContributionTimeoutMs: 25,
+      agents: [
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
+      ],
+    });
+    const ids = async () => (await service.listConversations()).map(conversation => conversation.id);
+    expect(await ids()).toEqual(["opencode:ready"]);
+    expect(await ids()).toEqual(["claude:created", "opencode:ready"]);
+    answerFirst([summary("removed", 7)]);
+    await Bun.sleep(0);
+    expect(await ids()).toEqual(["claude:created", "opencode:ready"]);
+    expect(reads).toBe(3);
+  });
+
+  test("a late listing ends with its TTL: the next read lists again", async () => {
+    const { service, listed, ids } = slowListing({ lateListingTtlMs: 150 });
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    await ids();
+    await subscription.next();
+    expect(await ids()).toEqual(["claude:slow", "opencode:ready"]);
+    await Bun.sleep(200);
+    expect(await ids()).toEqual(["opencode:ready"]);
+    expect(listed.reads).toBe(2);
+    subscription.cancel();
+  });
+
+  for (const change of ["creating a conversation", "an inventory tick from the agent"] as const) test(`${change} ends the late listing, and a listing started before it caches nothing`, async () => {
+    const { b, service, listed, ids } = slowListing();
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    // A cold listing is in flight when the conversation appears.
+    expect(await ids()).toEqual(["opencode:ready"]);
+    listed.ids = ["slow", "created"];
+    if (change === "creating a conversation") await service.createConversation("claude");
+    else {
+      b.inventory.invalidate();
+      // The agent's tick reaches clients too.
+      expect(await subscription.next()).toEqual({ value: undefined, done: false });
+    }
+    await Bun.sleep(120);
+    // Its stale answer was not kept: the read lists again and does not hide the new one.
+    expect(await ids()).toEqual(["opencode:ready"]);
+    expect(listed.reads).toBe(2);
+    await subscription.next();
+    expect(await ids()).toEqual(["claude:slow", "claude:created", "opencode:ready"]);
     subscription.cancel();
   });
 

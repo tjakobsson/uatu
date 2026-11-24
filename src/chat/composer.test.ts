@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { Composer, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
+import { Composer, steersWhileBusy, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
 import { ChatTransportError } from "./client";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay } from "./replay";
 import { IdempotencyReceipts } from "./receipts";
 import { applyChatEvent } from "./projection";
 import type { ChatProjection } from "./projection";
-import type { ConversationSnapshot, MessageAttachment, QueuedMessage, ReversibleHistoryResult } from "./types";
+import { steerRefusedNotice, type ConversationSnapshot, type MessageAttachment, type QueuedMessage, type ReversibleHistoryResult } from "./types";
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -41,7 +41,7 @@ function fixture(overrides: Partial<ComposerTransport> = {}) {
   };
   const context: ComposerConversation = {
     selected: () => selected, read: () => projection, write: value => { projection = value; }, epoch: () => epoch,
-    cancelling: () => cancelling, declares: capability => capability !== "steering" || (steering.get(selected) ?? true), commands: () => [], commandsAvailable: () => true,
+    cancelling: () => cancelling, declares: capability => capability !== "immediate-steering" && (capability !== "steering" || (steering.get(selected) ?? true)), commands: () => [], commandsAvailable: () => true,
     reloadCommands: async () => true, agentId: () => "agent", refreshCommands: () => {},
     configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
     imageSupport: () => ({ supported: true }), refresh: (id, pending) => refresh(id, pending),
@@ -688,4 +688,131 @@ test("dispose invalidates uploading intake without manufacturing previews or sen
   const attaching = f.composer.attach([image()]); f.composer.edit("Original"); const sent = f.composer.submit();
   f.composer.dispose(); upload.resolve({ id: "late", mimeType: "image/png", sizeBytes: 5 }); await Promise.all([attaching, sent]);
   expect(f.created).toEqual([]); expect(f.prompts).toEqual([]);
+});
+
+// add-antigravity-chat D9: an agent declaring `immediate-steering` (and not
+// `steering`) gets the same busy deliveries; only the outcome handling of a
+// lost response differs, because an immediate steer is one only while the
+// turn runs.
+function immediateFixture(overrides: Partial<ComposerTransport> = {}) {
+  const f = fixture(overrides);
+  f.context.declares = capability => capability !== "steering";
+  return f;
+}
+
+test("immediate steering: busy ordinary text steers, Alt+Enter and attachments queue", async () => {
+  const f = immediateFixture();
+  expect(steersWhileBusy(f.context.declares)).toBe(true);
+  f.composer.edit("Steer this"); await f.composer.submit();
+  f.composer.edit("Hold this"); await f.composer.submit({ delivery: "queue" });
+  f.composer.edit("With an image"); await f.composer.attach([image()]); await f.composer.submit();
+  expect(f.prompts.map(args => [args[2], args[7]])).toEqual([["Steer this", "steer"], ["Hold this", "queue"], ["With an image", "queue"]]);
+});
+
+test("immediate steering: an accepted steer settles its draft into one timeline row, not a dock entry", async () => {
+  const f = immediateFixture({ prompt: async (...args) => acceptance({ messageId: "steered", delivery: "steer", pending: false }) });
+  let consumed = 0; f.context.consumeConfiguration = () => { consumed++; };
+  f.composer.edit("Steer once"); await f.composer.submit();
+  expect(f.projection().queued).toEqual([]);
+  expect(f.projection().items).toEqual([expect.objectContaining({ id: "message:steered", type: "user_message", text: "Steer once" })]);
+  expect(consumed).toBe(0);
+});
+
+test("immediate steering: a refused steer restores its text", async () => {
+  const f = immediateFixture({ prompt: async () => { throw new ChatTransportError("agy refused it", 409); } });
+  f.composer.edit("Refused steer"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("Refused steer");
+  expect(f.projection().items).toEqual([]);
+  expect(f.projection().acceptedDrafts).toEqual([]);
+});
+
+test("immediate steering: a lost response is unconfirmed while running and restored while idle", async () => {
+  const running = immediateFixture({ prompt: async () => { throw new ChatTransportError("Unknown", 502); } });
+  running.composer.edit("Maybe delivered"); await running.composer.submit();
+  expect(running.texts.get("one")).toBe("");
+  expect(running.projection().acceptedDrafts[0]).toEqual(expect.objectContaining({ text: "Maybe delivered", unconfirmed: true }));
+  const idle = immediateFixture({ prompt: async () => { throw new ChatTransportError("Unavailable", 502); } });
+  idle.setProjection({ status: "idle" });
+  idle.composer.edit("Not a steer"); await idle.composer.submit();
+  expect(idle.texts.get("one")).toBe("Not a steer");
+  expect(idle.projection().acceptedDrafts).toEqual([]);
+});
+
+const refusalEvent = (requestId: string, sequence = 1, conversationId = "one") => ({ type: "item.upsert" as const, conversationId, generation: "g", sequence, item: steerRefusedNotice(requestId, "agy did not take it", sequence) });
+
+test("immediate steering: a refusal that arrives before the steer's receipt still restores the draft", async () => {
+  const receipt = deferred<ReturnType<typeof acceptance>>();
+  const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return receipt.promise; } });
+  f.composer.edit("Refused early"); const sent = f.composer.submit();
+  const refusal = refusalEvent(f.prompts[0]![1]);
+  const refused = applyChatEvent(f.projection(), refusal);
+  f.context.write(refused.projection); f.composer.observe(refusal, refused.outcome === "applied");
+  receipt.resolve(acceptance({ messageId: "sent", delivery: "steer", pending: false, awaitingConfirmation: true }));
+  await sent;
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.composer.acceptedDrafts("one")).toEqual([]);
+  expect(f.texts.get("one")).toBe("Refused early");
+  expect(f.errors.at(-1)).toEqual(["agy did not take it. Draft restored.", "one"]);
+});
+
+test("immediate steering: a refusal that came while another conversation was open restores the draft when it reopens", async () => {
+  const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return acceptance({ messageId: "sent", delivery: "steer", pending: false, awaitingConfirmation: true }); } });
+  f.composer.edit("Refused elsewhere"); await f.composer.submit();
+  const requestId = f.prompts[0]![1];
+  f.select("two");
+  // Back to the first conversation: its history now holds the refusal.
+  const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "running" },
+    generation: "g", cursor: "", configuration: {}, items: [steerRefusedNotice(requestId, "agy did not take it", 3)], queued: [] };
+  f.select("one");
+  f.context.write(f.composer.acceptSnapshot(snapshot, f.composer.acceptedDrafts("one")));
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.composer.acceptedDrafts("one")).toEqual([]);
+  expect(f.texts.get("one")).toBe("Refused elsewhere");
+  expect(f.errors.at(-1)).toEqual(["agy did not take it. Draft restored.", "one"]);
+});
+
+const confirmingRow = (requestId: string, sequence = 1) => ({ type: "item.upsert" as const, conversationId: "one", generation: "g", sequence, item: { id: "message:native-steer", type: "user_message" as const, createdAt: 1, text: "Confirmed", requestId } });
+
+for (const order of ["after the receipt", "before the receipt"] as const) test(`immediate steering: a steer's row settles it for good, arriving ${order}, even when a reopen's newest page lacks the row`, async () => {
+  const receipt = deferred<ReturnType<typeof acceptance>>();
+  const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return receipt.promise; } });
+  f.composer.edit("Confirmed"); const sent = f.composer.submit();
+  const observeRow = () => {
+    const row = confirmingRow(f.prompts[0]![1]);
+    const applied = applyChatEvent(f.projection(), row);
+    f.context.write(applied.projection); f.composer.observe(row, applied.outcome === "applied");
+  };
+  if (order === "before the receipt") observeRow();
+  receipt.resolve(acceptance({ messageId: "provisional", delivery: "steer", pending: false, awaitingConfirmation: true }));
+  await sent;
+  if (order === "after the receipt") observeRow();
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.composer.acceptedDrafts("one")).toEqual([]);
+  // Reopened, with the confirming row only on an older page: nothing awaits confirmation.
+  const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "running" },
+    generation: "g", cursor: "", configuration: {}, items: [{ id: "message:later", type: "assistant_message", createdAt: 5, markdown: "Later reply" }], queued: [] };
+  f.context.write(f.composer.acceptSnapshot(snapshot, f.composer.acceptedDrafts("one")));
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.texts.get("one")).toBe("");
+});
+
+test("immediate steering: a steer awaiting confirmation is kept unconfirmed, settles on its row, and returns on a refusal", async () => {
+  const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return acceptance({ messageId: `sent-${args[1]}`, delivery: "steer", pending: false, awaitingConfirmation: true }); } });
+  f.composer.edit("Confirmed later"); await f.composer.submit();
+  f.composer.edit("Refused later"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("");
+  expect(f.projection().acceptedDrafts.map(draft => [draft.text, draft.unconfirmed, draft.awaiting])).toEqual([["Confirmed later", true, true], ["Refused later", true, true]]);
+  const [first, second] = f.prompts.map(args => args[1]);
+  // The agent's row for the first settles its draft.
+  const row = { type: "item.upsert" as const, conversationId: "one", generation: "g", sequence: 1, item: { id: "message:native-1", type: "user_message" as const, createdAt: 1, text: "Confirmed later", requestId: first } };
+  const applied = applyChatEvent(f.projection(), row);
+  f.context.write(applied.projection); f.composer.observe(row, applied.outcome === "applied");
+  expect(f.projection().acceptedDrafts.map(draft => draft.text)).toEqual(["Refused later"]);
+  // A refusal naming the second returns it to the composer with the reason.
+  const refusal = { type: "item.upsert" as const, conversationId: "one", generation: "g", sequence: 2, item: { id: `notice:steer-refused:${second}`, type: "notice" as const, createdAt: 2, level: "warning" as const, code: "steer-refused", message: "agy did not take it" } };
+  const refused = applyChatEvent(f.projection(), refusal);
+  f.context.write(refused.projection); f.composer.observe(refusal, refused.outcome === "applied");
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.texts.get("one")).toBe("Refused later");
+  expect(f.errors.at(-1)).toEqual(["agy did not take it. Draft restored.", "one"]);
 });

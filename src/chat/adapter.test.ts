@@ -4,7 +4,7 @@ import { realpath, mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerRefusedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
 import type { TranscriptEntry } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
@@ -20,7 +20,7 @@ import type {
   ProviderSession,
   StoredMessageAccounting,
 } from "./provider";
-import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
+import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type SteerConfirmation } from "./provider";
 import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, ConversationSnapshot, MessageDelivery, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
@@ -37,6 +37,8 @@ import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
+import { ChatApiClient } from "./client";
+import { Composer } from "./composer";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
 import { OPENCODE_COMPLETION_ALIAS, OPENCODE_TEXT_START_FALLBACK } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TEXT_SEAL, CHAT_TURN, CHAT_TURN_CONTINUES, executionEvidence, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, provisionalTurn, type ChatStatusLiveness, type ChatTextSeal, type ChatTurnIdentity } from "./turn-liveness";
@@ -16453,5 +16455,371 @@ describe("steering (opencode-v2-steering)", () => {
     watch.stop();
     await adapter.dispose();
     await plain.adapter.dispose();
+  });
+});
+
+describe("immediate steering (add-antigravity-chat D9)", () => {
+  // A fake shaped like Antigravity: it takes a second prompt into the running
+  // turn at once, keeps no inbox, and reports the turn's end once, after the
+  // steered part. It declares `immediate-steering` and `send-now`, never
+  // `steering`.
+  function immediate(options: { steerAdmissionTimeoutMs?: number } = {}) {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now"] };
+    provider.sessions = [fixtureSession("session")];
+    let n = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++n}`, coalesceWindowMs: 1, steerAdmissionTimeoutMs: options.steerAdmissionTimeoutMs });
+    const steer = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "steer");
+    const queue = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "queue");
+    const status = (value: "running" | "completed" | "interrupted") => provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "status", status: value }], outcome: "handled", eventType: `status.${value}` } });
+    // The live timeline: history() rereads the fake's (empty) stored pages.
+    const userRows = async () => adapter.projectionForTests("session").items().filter(item => item.type === "user_message");
+    return { provider, adapter, steer, queue, status, userRows };
+  }
+
+  test("a busy steer goes to the provider at once, with no dock entry and no configuration", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const steered = await steer("r-s", "and also this");
+      expect(steered).toEqual(expect.objectContaining({ pending: false, delivery: "steer", messageId: "id-1" }));
+      expect(provider.prompts).toEqual([expect.objectContaining({ id: "id-1", text: "and also this", delivery: "steer" })]);
+      expect(provider.prompts[0]!.model).toBeUndefined();
+      expect(provider.prompts[0]!.mode).toBeUndefined();
+      const history = await adapter.history("session");
+      expect(history.queued ?? []).toEqual([]);
+      expect(history.conversation.status).toBe("running");
+      expect((await userRows()).map(item => item.id)).toEqual(["message:id-1"]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("the provider's own row for an accepted steer does not duplicate it", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const steered = await steer("r-s", "steer once");
+      provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "upsert", item: { id: `message:${steered.messageId}`, type: "user_message", createdAt: 5, text: "steer once" } }], outcome: "handled", eventType: "user_message_chunk" } });
+      await liveEventsApplied(adapter, provider);
+      expect((await userRows()).map(item => [item.id, item.type === "user_message" && item.text])).toEqual([[`message:${steered.messageId}`, "steer once"]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const order of ["acceptance first", "provider row first"] as const) test(`an accepted steer keeps the provider's timeline position (${order})`, async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const row = { id: "message:native-steer", type: "user_message" as const, createdAt: 5, text: "steer" };
+      const reply = { id: "message:reply", type: "assistant_message" as const, createdAt: 6, markdown: "Reply to the steer" };
+      const publish = (...items: ConversationItem[]) => provider.eventQueue.push({ normalized: { conversationId: "session", updates: items.map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "update" } });
+      provider.prompt = async () => {
+        if (order === "provider row first") { publish(row, reply); await liveEventsApplied(adapter, provider); }
+        return { messageId: "native-steer", ...(order === "acceptance first" ? { createdAt: 5 } : {}) };
+      };
+      await steer("r-s", "steer");
+      if (order === "acceptance first") { publish(row, reply); await liveEventsApplied(adapter, provider); }
+      expect(await userRows()).toEqual([expect.objectContaining({ id: "message:native-steer", createdAt: 5, requestId: "r-s" })]);
+      const ids = adapter.projectionForTests("session").items().map(item => item.id);
+      expect(ids.indexOf("message:native-steer")).toBeLessThan(ids.indexOf("message:reply"));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("held messages wait for the carried turn's end, not for the steer", async () => {
+    const { adapter, provider, steer, queue, status } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-q", "after the turn");
+      expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      await steer("r-s", "into the turn");
+      expect(provider.prompts.map(prompt => [prompt.text, prompt.delivery])).toEqual([["into the turn", "steer"]]);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.delivery])).toEqual([["after the turn", "queue"]]);
+      status("completed");
+      await waitUntil(() => provider.prompts.length === 2);
+      expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "after the turn", delivery: "queue" }));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a refused steer publishes nothing and leaves the turn running", async () => {
+    const { adapter, provider, steer, userRows } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      provider.prompt = async () => { throw new Error("agy refused the prompt"); };
+      const refusal = steer("r-s", "refused");
+      await expect(refusal).rejects.toBeInstanceOf(SteerRefusedError);
+      await expect(refusal).rejects.toThrow("agy refused the prompt");
+      expect(await userRows()).toEqual([]);
+      expect((await adapter.history("session")).conversation.status).toBe("running");
+      expect((await adapter.history("session")).queued ?? []).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a definite refusal crosses the route as a 409 with the agent's reason, and the composer restores the draft", async () => {
+    const { adapter, provider } = immediate();
+    adapter.projectionForTests("session").statusUpdate("running");
+    provider.prompt = async () => { throw new Error("Antigravity finished its turn before the steer was sent"); };
+    const asset = "src/assets/uatu-logo.svg";
+    const routes = buildRoutes({ mode: "prod", assets: { mermaid: asset, logo: asset, icon192: asset, icon512: asset, manifest: asset,
+      fonts: { hackMono: asset, hackLicense: asset, nerdFontsLicense: asset, notices: asset } },
+    getSession: () => { throw new Error("Unexpected document access"); }, chatService: adapter as never,
+    getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
+    const child = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, routes });
+    const statuses: number[] = [];
+    const client = new ChatApiClient(async (input, init) => {
+      const url = new URL(String(input), child.url);
+      url.searchParams.set("t", "fixture-only");
+      const response = await fetch(url, { ...init, headers: { ...init?.headers as Record<string, string>, origin: url.origin } });
+      statuses.push(response.status);
+      return response;
+    });
+    let browser = projectionFromSnapshot(await adapter.history("session"));
+    const texts = new Map<string, string>();
+    const errors: Array<string | null> = [];
+    const composer = new Composer({
+      selected: () => "session", read: () => browser, write: value => { browser = value; }, epoch: () => 0, cancelling: () => false,
+      declares: capability => capability !== "steering", commands: () => [], commandsAvailable: () => true, reloadCommands: async () => true,
+      agentId: () => "fake", refreshCommands: () => {}, configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
+      imageSupport: () => ({ supported: true }), refresh: async () => true,
+    }, client, { read: id => texts.get(id) ?? "", write: (id, text) => { texts.set(id, text); } }, {
+      changed: () => {}, error: message => { errors.push(message); }, note: () => {}, announce: () => {}, accepted: () => {}, heldByHold: () => {},
+    }, { create: () => "blob:preview", release: () => {}, id: () => "request-1" });
+    try {
+      composer.edit("Steer that the agent refuses");
+      await composer.submit();
+      expect(statuses).toEqual([409]);
+      expect(texts.get("session")).toBe("Steer that the agent refuses");
+      expect(browser.acceptedDrafts).toEqual([]);
+      expect(errors.findLast(message => message !== null)).toBe("Antigravity finished its turn before the steer was sent. Draft restored.");
+      expect(adapter.projectionForTests("session").items().filter(item => item.type === "user_message")).toEqual([]);
+    } finally { composer.dispose(); child.stop(true); await adapter.dispose(); }
+  });
+
+  test("an unknown admission is retained by its receipt and never resent", async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let calls = 0;
+      provider.prompt = () => { calls++; return new Promise(() => undefined); };
+      await expect(steer("r-s", "maybe delivered")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      await expect(steer("r-s", "maybe delivered")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      expect(calls).toBe(1);
+      expect(await userRows()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const order of ["acceptance before the provider's row", "provider's row before the acceptance"] as const) test(`a late acceptance ties the request to its message without resending (${order})`, async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let calls = 0;
+      let accept!: (value: { messageId: string; createdAt: number }) => void;
+      provider.prompt = () => { calls++; return new Promise(resolve => { accept = resolve; }); };
+      await expect(steer("r-late", "late steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      // The submitting client holds an unconfirmed draft for the request.
+      let browser = addAcceptedDraft(projectionFromSnapshot(await adapter.history("session")), { requestId: "r-late", messageId: "pending:r-late", text: "late steer", unconfirmed: true });
+      const { events } = await adapter.subscribe("session", { cursor: browser.cursor });
+      const row = { id: "message:native-late", type: "user_message" as const, createdAt: 7, text: "late steer" };
+      const publishRow = async () => {
+        provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "upsert", item: row }], outcome: "handled", eventType: "update" } });
+        await liveEventsApplied(adapter, provider);
+      };
+      if (order === "provider's row before the acceptance") await publishRow();
+      accept({ messageId: "native-late", createdAt: 7 });
+      await waitUntil(() => adapter.projectionForTests("session").get("message:native-late")?.type === "user_message"
+        && (adapter.projectionForTests("session").get("message:native-late") as { requestId?: string }).requestId === "r-late");
+      if (order === "acceptance before the provider's row") await publishRow();
+      expect(await userRows()).toEqual([expect.objectContaining({ id: "message:native-late", createdAt: 7, requestId: "r-late" })]);
+      const iterator = events[Symbol.asyncIterator]();
+      const deadline = Date.now() + 2_000;
+      while (browser.acceptedDrafts.length > 0 && Date.now() < deadline) {
+        const next = await Promise.race([iterator.next(), Bun.sleep(100).then(() => null)]);
+        if (!next || next.done) continue;
+        browser = applyChatEvent(browser, next.value).projection;
+      }
+      expect(browser.acceptedDrafts).toEqual([]);
+      expect(browser.items.filter(item => item.type === "user_message")).toEqual([expect.objectContaining({ id: "message:native-late", requestId: "r-late" })]);
+      expect(calls).toBe(1);
+      events.cancel();
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const late of ["refused confirmation", "rejection"] as const) test(`a late admission settles like a timely one: a ${late} records no row, only the refusal`, async () => {
+    const { adapter, provider, steer, userRows } = immediate({ steerAdmissionTimeoutMs: 20 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let admit!: (value: { messageId: string; createdAt: number; confirmation: Promise<SteerConfirmation> }) => void, fail!: (error: Error) => void;
+      let refuse!: (value: SteerConfirmation) => void;
+      provider.prompt = () => new Promise((resolve, reject) => { admit = resolve; fail = reject; });
+      await expect(steer("r-late", "late steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      if (late === "rejection") fail(new Error("agy did not take it"));
+      else {
+        // Sent late, and refused later still.
+        admit({ messageId: "native-late", createdAt: 7, confirmation: new Promise(resolve => { refuse = resolve; }) });
+        await Bun.sleep(0);
+        expect(await userRows()).toEqual([]);
+        refuse({ outcome: "refused", reason: "agy did not take it" });
+      }
+      await waitUntil(() => adapter.projectionForTests("session").get("notice:steer-refused:r-late") !== undefined);
+      expect(adapter.projectionForTests("session").get("notice:steer-refused:r-late")).toEqual(expect.objectContaining({ code: "steer-refused", message: "agy did not take it" }));
+      expect(await userRows()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a refusal settled while no one watched comes back in the conversation's snapshot", async () => {
+    const { adapter, provider, steer } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let refuse!: (confirmation: SteerConfirmation) => void;
+      provider.prompt = async () => ({ messageId: "provisional", createdAt: 5, confirmation: new Promise<SteerConfirmation>(resolve => { refuse = resolve; }) });
+      expect(await steer("r-away", "refused while away")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      refuse({ outcome: "refused", reason: "agy did not take it" });
+      await Bun.sleep(0);
+      // The browser reopens the conversation from a snapshot, not the live stream.
+      const snapshot = await adapter.history("session");
+      expect(snapshot.items.find(item => item.id === "notice:steer-refused:r-away")).toEqual(expect.objectContaining({ code: "steer-refused", message: "agy did not take it" }));
+    } finally { await adapter.dispose(); }
+  });
+
+  test("commands queue, an idle backlog holds, and an idle conversation dispatches whatever the delivery", async () => {
+    const { adapter, provider, steer } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      expect(await steer("r-c", "/review focus")).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(provider.prompts).toEqual([]);
+      await adapter.abort("session", "stop");
+      // Dormant after Stop: a steer joins the back of the held queue rather
+      // than overtaking it, because there is no running turn to join.
+      expect(await steer("r-d", "after stop")).toEqual(expect.objectContaining({ delivery: "queue" }));
+      expect(provider.prompts.every(prompt => prompt.delivery === "queue")).toBe(true);
+      const idle = immediate();
+      try {
+        expect(await idle.steer("r-i", "go")).toEqual(expect.objectContaining({ pending: false, delivery: "queue" }));
+        expect(idle.provider.prompts).toEqual([expect.objectContaining({ text: "go", delivery: "queue" })]);
+      } finally { await idle.adapter.dispose(); }
+    } finally { await adapter.dispose(); }
+  });
+
+  test("an explicit steer with attachments is held in the queue, not steered", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-immediate-attachment-"));
+    const image = path.join(directory, "pixel.png");
+    await Bun.write(image, new Uint8Array([137, 80, 78, 71]));
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now", "attachments"] };
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1,
+      resolveAttachment: async id => id === "att-1" ? { id, mimeType: "image/png", sizeBytes: 4, absolutePath: image } as never : null });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const accepted = await adapter.prompt("session", "r-image", "Look at this", undefined, undefined, undefined, [{ id: "att-1", name: "pixel.png", mimeType: "image/png" }], "steer");
+      expect(accepted).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(provider.prompts).toEqual([]);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.delivery, entry.attachments?.length])).toEqual([["Look at this", "queue", 1]]);
+    } finally { await adapter.dispose(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("a carried turn sends no completion notification and keeps the workspace working until it ends", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "immediate-steering", "send-now"] };
+    provider.sessions = [fixtureSession("session")];
+    const notifications: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => notifications.push(event) });
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    const turn = (status: "running" | "completed", phase: "started" | "completed") => provider.eventQueue.push({ normalized: {
+      conversationId: "session", updates: [{ kind: "status", status }], outcome: "handled", eventType: `turn.${phase}`,
+      notificationTurns: [{ sourceId: "turn-1", phase, createdAt: Date.now() }],
+    } });
+    const completions = () => notifications.filter(event => event.type === "notification" && event.notification.kind === "turn-completed");
+    try {
+      await adapter.history("session");
+      turn("running", "started");
+      await liveEventsApplied(adapter, provider);
+      expect(adapter.activity().working).toBe(true);
+      const held = await adapter.prompt("session", "r-q", "after the turn", undefined, undefined, undefined, undefined, "queue");
+      await adapter.prompt("session", "r-s", "into the turn", undefined, undefined, undefined, undefined, "steer");
+      // The provider reports nothing for the earlier prompt's end, so the
+      // steered turn is still the same running turn once every event the
+      // provider sent has been applied.
+      await liveEventsApplied(adapter, provider);
+      expect(completions()).toEqual([]);
+      expect(adapter.activity().working).toBe(true);
+      expect(((await adapter.history("session")).queued ?? []).map(entry => entry.id)).toEqual([held.messageId]);
+      turn("completed", "completed");
+      await waitUntil(() => completions().length === 1);
+      await waitUntil(() => provider.prompts.length === 2);
+      expect(provider.prompts.map(prompt => [prompt.text, prompt.delivery])).toEqual([["into the turn", "steer"], ["after the turn", "queue"]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("Stop goes ahead of a steer the agent has not answered, and the steer then settles", async () => {
+    const { adapter, provider, steer, queue } = immediate({ steerAdmissionTimeoutMs: 10_000 });
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      // Both prompts are pending with the agent: the turn's own, and the
+      // steer, which the agent answers only when the turn ends.
+      let settleSteer!: (outcome: "refused" | "unknown") => void;
+      let steerSent!: () => void;
+      const sent = new Promise<void>(resolve => { steerSent = resolve; });
+      provider.prompt = () => new Promise((_, reject) => {
+        settleSteer = outcome => reject(outcome === "unknown" ? new OperationOutcomeUnknownError() : new Error("agy did not take it"));
+        steerSent();
+      });
+      provider.interrupt = async sessionId => { provider.interrupts.push(sessionId); };
+      const held = await queue("r-q", "held");
+      const steering = steer("r-s", "into the turn");
+      void steering.catch(() => undefined);
+      await sent;
+      // Stop answers while the steer is still unanswered: it is not held
+      // behind the steer's admission (which would never settle here).
+      expect(await adapter.abort("session", "stop")).toEqual({ cancelled: true });
+      expect(provider.interrupts).toEqual(["session"]);
+      settleSteer("unknown");
+      await expect(steering).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      // Stop's queue pause still holds the held message.
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.id, entry.paused])).toEqual([[held.messageId, true]]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("a steer the agent confirms later frees the conversation at once: follow-ups queue, a second steer is sent, and each settles", async () => {
+    const { adapter, provider, steer, queue, userRows } = immediate();
+    const pump = adapter.startEventPump(); void pump.catch(() => undefined);
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const confirmations: Array<(confirmation: SteerConfirmation) => void> = [];
+      const accept = provider.prompt.bind(provider);
+      provider.prompt = async (sessionId, input) => {
+        const sent = await accept(sessionId, input);
+        if (input.delivery !== "steer") return sent;
+        return { ...sent, createdAt: 5, confirmation: new Promise<SteerConfirmation>(resolve => confirmations.push(resolve)) };
+      };
+      const first = await steer("r-1", "first steer");
+      expect(first).toEqual(expect.objectContaining({ pending: false, delivery: "steer", awaitingConfirmation: true }));
+      expect(await userRows()).toEqual([]);
+      // The lane is free: a follow-up queues, editable, and a second steer goes out.
+      const held = await queue("r-q", "after the turn");
+      expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+      expect(((await adapter.history("session")).queued ?? []).map(entry => [entry.text, entry.unconfirmed ?? false])).toEqual([["after the turn", false]]);
+      const second = await steer("r-2", "second steer");
+      expect(second).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      expect(provider.prompts.filter(prompt => prompt.delivery === "steer").map(prompt => prompt.text)).toEqual(["first steer", "second steer"]);
+      confirmations[0]!({ outcome: "accepted", messageId: first.messageId, createdAt: 5 });
+      confirmations[1]!({ outcome: "refused", reason: "agy did not take it" });
+      await waitUntil(() => adapter.projectionForTests("session").items().some(item => item.type === "notice"));
+      expect(await userRows()).toEqual([expect.objectContaining({ id: `message:${first.messageId}`, requestId: "r-1", text: "first steer" })]);
+      expect(adapter.projectionForTests("session").items().find(item => item.type === "notice")).toEqual(expect.objectContaining({ id: "notice:steer-refused:r-2", code: "steer-refused", message: "agy did not take it" }));
+      // A retry of the same request is the cached answer, never a resend.
+      expect(await steer("r-1", "first steer")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      expect(provider.prompts.filter(prompt => prompt.delivery === "steer")).toHaveLength(2);
+    } finally { await adapter.dispose(); }
+  });
+
+  test("Send now keeps the rule for agents without steering", async () => {
+    const { adapter, queue } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-q", "held");
+      await expect(adapter.sendNow("session", held.messageId, "send-now")).rejects.toBeInstanceOf(SendNowUnavailableError);
+    } finally { await adapter.dispose(); }
   });
 });

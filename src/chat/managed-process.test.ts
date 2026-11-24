@@ -488,3 +488,21 @@ describe("BoundedTextCapture", () => {
     expect(failing.snapshot()).toBe("before");
   });
 });
+
+test("a capture can keep a stream's first bytes, still reading it to the end", async () => {
+  const encoder = new TextEncoder();
+  let delivered = 0;
+  const output = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (delivered === 0) controller.enqueue(encoder.encode("1.5.13\n"));
+      else if (delivered <= 100) controller.enqueue(encoder.encode("x".repeat(1024)));
+      else { controller.close(); return; }
+      delivered += 1;
+    },
+  });
+  const capture = new BoundedTextCapture(64, undefined, "start");
+  capture.consume(output);
+  await capture.done;
+  expect(delivered).toBe(101);
+  expect(capture.snapshot()).toBe(`1.5.13\n${"x".repeat(57)}`);
+});

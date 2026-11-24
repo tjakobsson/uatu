@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 15 / Workspace 39 - Unreleased (refused immediate steers)
+
+Compatibility: additive
+
+### Changes
+
+- Conversation `notice` items may carry a new `code` value, `steer-refused`. It answers an immediate steer the agent refused after it was sent: `message` is the agent's reason, and the item id is `notice:steer-refused:<requestId>`, naming the refused submission. `code` and `id` were already open strings, so the schema is unchanged.
+
+### Migration
+
+None. A client that sent the named submission can return its text to the composer; any other client keeps showing the notice as a warning.
+
 ## Hub 15 / Workspace 39 - Unreleased (agent-declared login)
 
 Compatibility: breaking (workspace)

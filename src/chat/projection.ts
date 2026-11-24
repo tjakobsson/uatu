@@ -1,7 +1,10 @@
 import { mergeAssistantMessage } from "./usage";
 import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, MessageAttachment, QueuedMessage, ReversibleHistoryState } from "./types";
 
-export type AcceptedDraft = { requestId: string; messageId: string; text: string; attachments?: MessageAttachment[]; unconfirmed?: true };
+// `awaiting`: an immediate steer sent to the agent and not confirmed yet; it
+// is also `unconfirmed`, so it is kept and never resent, and it settles when
+// its row arrives or a refusal notice names its request.
+export type AcceptedDraft = { requestId: string; messageId: string; text: string; attachments?: MessageAttachment[]; unconfirmed?: true; awaiting?: true };
 export type ChatProjection = {
   conversationId: string;
   generation: string;

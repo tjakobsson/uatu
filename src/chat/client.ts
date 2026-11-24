@@ -43,6 +43,8 @@ export class ChatTransportError extends Error {
 }
 
 export const STEER_ALREADY_DELIVERED_CODE = "steer-already-delivered";
+/** The agent refused an operation for its login; its message says how to log in. */
+export const AGENT_LOGIN_REQUIRED_CODE = "agent-login-required";
 export const STEER_WITHDRAWAL_UNCONFIRMED_CODE = "steer-withdrawal-unconfirmed";
 
 // A transport gap the client is already recovering from — distinct from a
@@ -167,6 +169,8 @@ export class ChatApiClient {
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
     operation?: "reload";
+    // An immediate steer sent to the agent, whose confirmation comes later.
+    awaitingConfirmation?: true;
   } & AutomaticBackgroundFeedback> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
@@ -180,6 +184,7 @@ export class ChatApiClient {
           messageId: result.messageId,
           pending: result.pending === true,
           delivery: result.delivery === "steer" ? "steer" as const : "queue" as const,
+          ...((result as { awaitingConfirmation?: unknown }).awaitingConfirmation === true ? { awaitingConfirmation: true as const } : {}),
           ...(result.operation === "reload" ? { operation: "reload" as const } : {}),
           configuration: parseConversationConfiguration(result.configuration),
           ...(result.conversation ? { conversation: parseConversationSummary(result.conversation) } : {}),

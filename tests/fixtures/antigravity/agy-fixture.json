@@ -1,0 +1,135 @@
+{
+  "_comment": "Redacted from a November 2026 trial of agy 1.5.13 over ACP v1. No account, plan, tier, email, token or local path data: {cwd} is replaced by the session's working directory at run time. Scripts are chosen by a prompt's leading `<script>:` word; anything else runs `text`. transcript.jsonl beside it is agy's on-disk transcript of a text, read and denied write conversation, redacted the same way.",
+  "version": "1.5.13",
+  "initialize": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": { "image": true, "audio": false, "embeddedContext": true },
+      "sessionCapabilities": { "resume": {}, "close": {}, "load": {}, "list": {} }
+    },
+    "agentInfo": { "name": "Antigravity ACP Server", "version": "1.5.13" },
+    "authMethods": [{ "id": "oauth-personal", "name": "Log in with Google", "description": "Log in with your Google account" }]
+  },
+  "modes": {
+    "currentModeId": "default",
+    "availableModes": [
+      { "id": "default", "name": "Default", "description": "Ask before edits and commands, per your permission settings." },
+      { "id": "accept-edits", "name": "Accept edits", "description": "Approve file edits in the workspace without asking." },
+      { "id": "plan", "name": "Plan", "description": "Plan carefully before executing a task." }
+    ]
+  },
+  "defaultModel": "gemini-4-neon",
+  "defaultThoughtLevel": "high",
+  "models": [
+    { "value": "gemini-4-neon", "name": "Gemini 4 Neon", "levels": ["low", "medium", "high", "xhigh"] },
+    { "value": "gemini-4-argon", "name": "Gemini 4 Argon", "levels": ["low", "medium", "high"] },
+    { "value": "gemini-pro-orchestrator-neon", "name": "Orchestrator (Neon)", "levels": [] },
+    { "value": "gpt-oss-120b-medium", "name": "GPT-OSS 120B (Medium)", "levels": [] }
+  ],
+  "levelNames": { "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra" },
+  "contextSize": 1048576,
+  "commands": [
+    { "name": "compact", "description": "Compact the conversation now (summarize history to free up the context window).", "input": null },
+    { "name": "goal", "description": "Run until the specified goal is completely finished.", "input": null },
+    { "name": "plan", "description": "Plan carefully before executing a task.", "input": null }
+  ],
+  "scripts": {
+    "text": {
+      "title": "Single Sentence Reply Request",
+      "steps": [
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello, how can I help you today?" } } },
+        { "update": { "sessionUpdate": "usage_update", "used": 8918, "size": 1048576 } }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 8886, "outputTokens": 32, "cachedReadTokens": 0, "cachedWriteTokens": 0, "thoughtTokens": 22, "totalTokens": 8918 }
+    },
+    "read": {
+      "steps": [
+        { "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "I'm thinking through how to approach this.\n\n\n" } } },
+        { "update": { "sessionUpdate": "tool_call", "toolCallId": "call_read_1", "name": "read_file", "status": "in_progress", "kind": "read", "title": "File README.md", "locations": [{ "path": "{cwd}/README.md" }] } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_read_1", "name": "read_file", "status": "completed", "kind": "read", "title": "File README.md", "locations": [{ "path": "{cwd}/README.md" }] } },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "The README describes a small fixture workspace." } } }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 4482, "outputTokens": 236, "cachedReadTokens": 13778, "cachedWriteTokens": 0, "thoughtTokens": 117, "totalTokens": 18496 }
+    },
+    "command": {
+      "steps": [
+        { "update": { "sessionUpdate": "tool_call", "toolCallId": "call_command_1", "name": "run_command", "status": "in_progress", "kind": "execute", "title": "echo hi", "rawInput": { "CommandLine": "echo hi", "WaitMsBeforeAsync": 5000 } } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_command_1", "name": "run_command", "status": "pending", "kind": "execute", "title": "echo hi", "rawInput": { "CommandLine": "echo hi", "WaitMsBeforeAsync": 5000 } } },
+        { "permission": { "toolCallId": "call_command_1", "title": "echo hi", "kind": "execute" } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_command_1", "name": "run_command", "status": "in_progress", "kind": "execute", "title": "echo hi" } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_command_1", "name": "run_command", "status": "completed", "kind": "execute", "title": "echo hi", "rawOutput": { "output": "Command exited with code 0.\n\nCommand output:\nhi\r\n", "exit_code": 0 }, "content": [{ "type": "content", "content": { "type": "text", "text": "Command exited with code 0.\n\nCommand output:\nhi\r\n" } }] } },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "The output of `echo hi` is:\n\n```\nhi\n" } } },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "```" } } },
+        { "update": { "sessionUpdate": "usage_update", "used": 10074, "size": 1048576 } }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 4517, "outputTokens": 93, "cachedReadTokens": 15304, "cachedWriteTokens": 0, "thoughtTokens": 37, "totalTokens": 19914 }
+    },
+    "write": {
+      "steps": [
+        { "update": { "sessionUpdate": "tool_call", "toolCallId": "call_write_1", "name": "write_file", "status": "in_progress", "kind": "edit", "title": "File hello.txt", "locations": [{ "path": "{cwd}/hello.txt" }] } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_write_1", "name": "write_file", "status": "pending", "kind": "edit", "title": "File hello.txt", "locations": [{ "path": "{cwd}/hello.txt" }] } },
+        { "permission": { "toolCallId": "call_write_1", "title": "File hello.txt", "kind": "edit" } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_write_1", "name": "write_file", "status": "in_progress", "kind": "edit", "title": "File hello.txt", "locations": [{ "path": "{cwd}/hello.txt" }] } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_write_1", "name": "write_file", "status": "completed", "kind": "edit", "title": "File hello.txt", "locations": [{ "path": "{cwd}/hello.txt" }], "rawOutput": {}, "content": [{ "type": "diff", "path": "{cwd}/hello.txt", "newText": "hello\n" }] } }
+      ],
+      "onReject": [
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_write_1", "name": "write_file", "status": "in_progress", "kind": "edit", "title": "File hello.txt", "locations": [{ "path": "{cwd}/hello.txt" }] } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_write_1", "name": "write_file", "status": "failed", "kind": "edit", "title": "File hello.txt", "locations": [{ "path": "{cwd}/hello.txt" }] } }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 4467, "outputTokens": 180, "cachedReadTokens": 14602, "cachedWriteTokens": 0, "thoughtTokens": 76, "totalTokens": 19249 }
+    },
+    "cancel": {
+      "steps": [
+        { "update": { "sessionUpdate": "tool_call", "toolCallId": "call_sleep_1", "name": "run_command", "status": "in_progress", "kind": "execute", "title": "sleep 20; echo done", "rawInput": { "CommandLine": "sleep 20; echo done", "WaitMsBeforeAsync": 10000 } } },
+        { "waitForCancel": { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_sleep_1", "name": "run_command", "status": "failed", "kind": "execute", "title": "sleep 20; echo done" } } }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 8899, "outputTokens": 172, "cachedReadTokens": 0, "cachedWriteTokens": 0, "thoughtTokens": 125, "totalTokens": 9071 }
+    },
+    "steer": {
+      "steps": [
+        { "update": { "sessionUpdate": "tool_call", "toolCallId": "call_steer_1", "name": "run_command", "status": "in_progress", "kind": "execute", "title": "sleep 8; echo first", "rawInput": { "CommandLine": "sleep 8; echo first", "WaitMsBeforeAsync": 10000 } } },
+        { "waitForSteer": { "usage": { "inputTokens": 8897, "outputTokens": 130, "cachedReadTokens": 0, "cachedWriteTokens": 0, "thoughtTokens": 84, "totalTokens": 9027 } } },
+        { "update": { "sessionUpdate": "tool_call_update", "toolCallId": "call_steer_1", "name": "run_command", "status": "completed", "kind": "execute", "title": "sleep 8; echo first", "rawOutput": { "output": "Command exited with code 0.\n\nCommand output:\nfirst\n", "exit_code": 0 } } },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "The command printed `first`.\n\nBANANA" } } },
+        { "update": { "sessionUpdate": "usage_update", "used": 9274, "size": 1048576 } }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 2350, "outputTokens": 84, "cachedReadTokens": 6840, "cachedWriteTokens": 0, "thoughtTokens": 51, "totalTokens": 9274 }
+    },
+    "hold": {
+      "steps": [{ "waitForCancel": {} }],
+      "stopReason": "end_turn"
+    },
+    "refuse": { "steps": [], "stopReason": "refusal" },
+    "drift": {
+      "steps": [
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello, " } } },
+        { "waitForPrompt": {} },
+        { "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Finishing the greeting" } } },
+        { "waitForSteer": {} },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Steered" } } }
+      ],
+      "stopReason": "end_turn"
+    },
+    "pause": {
+      "steps": [
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello, " } } },
+        { "waitForPrompt": {} },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "world" } } }
+      ],
+      "stopReason": "end_turn"
+    },
+    "maxtokens": { "steps": [{ "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Partial" } } }], "stopReason": "max_tokens" },
+    "image": {
+      "steps": [{ "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Here is a chart: ![chart](chart.svg)" } } }],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 100, "outputTokens": 10, "thoughtTokens": 0, "totalTokens": 110 }
+    }
+  }
+}

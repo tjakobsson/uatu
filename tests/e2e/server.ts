@@ -29,6 +29,7 @@ import index from "../../src/index.html";
 import { e2ePort, promoteRootReadme, resetE2EWorkspace, workspaceRoot } from "./config";
 import { OPENCODE_AGENT } from "../../src/chat/opencode/descriptor";
 import { CLAUDE_CODE_AGENT } from "../../src/chat/claude/descriptor";
+import { ANTIGRAVITY_AGENT } from "../../src/chat/antigravity/descriptor";
 
 // Per-process workspace root. Captured once at startup from the lazy
 // workspaceRoot() helper (which reads process.env.UATU_E2E_WORKSPACE if
@@ -138,6 +139,16 @@ const fakeSecondAgent = new FakeE2EChatService({
   // (opencode-v2-steering D2): Send now dispatches a dormant queue's message.
   extraCapabilities: ["custom-model-id", "background-tasks", "scheduled-wakeups", "usage", "send-now"],
 });
+// A third stub agent shaped like Antigravity: its own declaration (no
+// questions, subagents or rename; immediate steering, not steering), and a
+// login `agy` owns, which the Hub does not manage.
+const fakeAntigravityAgent = new FakeE2EChatService({
+  restoreFile: async () => undefined,
+  agentName: ANTIGRAVITY_AGENT.name,
+  agentId: "antigravity-fixture",
+  loginCommand: ANTIGRAVITY_AGENT.login.command,
+  capabilities: ["models", "variants", "modes", "commands", "permissions", "context", "immediate-steering", "send-now", "attachments"],
+});
 // Every fake agent, in the order a spec enables them (`{ action: "agents",
 // count }` offers the first `count`). Each is registered under its shared
 // descriptor; the descriptor's id is what the control body's `agent` field
@@ -147,6 +158,8 @@ const E2E_FAKE_AGENTS: readonly { descriptor: ChatAgentDescriptor; service: Fake
   { descriptor: OPENCODE_AGENT, service: fakeChatAgent },
   // `claude-fixture` internally, but registered as Claude Code.
   { descriptor: CLAUDE_CODE_AGENT, service: fakeSecondAgent },
+  // `antigravity-fixture` internally, registered as Antigravity.
+  { descriptor: ANTIGRAVITY_AGENT, service: fakeAntigravityAgent },
 ];
 const E2E_FAKES_BY_ID = new Map(E2E_FAKE_AGENTS.map(fake => [fake.descriptor.id, fake]));
 const E2E_DEFAULT_AGENT_ID = E2E_FAKE_AGENTS[0]!.descriptor.id;
@@ -816,6 +829,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
       return Response.json({ ok: true });
     case "failPrompt":
       targetFake.failPrompt();
+      return Response.json({ ok: true });
+    case "refuseCreationForLogin":
+      targetFake.refuseCreation(body.silent !== true);
       return Response.json({ ok: true });
     case "failUndo":
       targetFake.failReversible("undo");
