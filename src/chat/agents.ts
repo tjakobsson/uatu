@@ -2,9 +2,8 @@ import { createAttachmentStore, type AttachmentStore, type StoredAttachment } fr
 import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-store";
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
-import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
-import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "./opencode/normalization-types";
-import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
+import { CHAT_STATUS_REPEAT, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, type ChatStatusLiveness } from "./turn-liveness";
+import { visualAdmissionIdentity, visualCaptureIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { NotificationFeed } from "./notification-feed";
@@ -88,6 +87,9 @@ export type MultiAgentChatServiceOptions = {
   // the others are served without it (its late arrival ticks the
   // inventory so clients re-fetch). Tests shorten it.
   inventoryContributionTimeoutMs?: number;
+  // How long a listing that arrived after that bound serves every read of
+  // its agent (45 s). Tests shorten it.
+  lateListingTtlMs?: number;
 };
 
 /**
@@ -204,7 +206,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             this.inventoryHub.refresh();
           });
         }
-        return source;
+        return source && this.invalidatingLateList(agent.descriptor.id, source);
       });
     }))).filter((source): source is ConversationInventorySubscription => source !== null));
 
@@ -228,9 +230,24 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
     this.visualStore = options.visualStore ?? new VisualStore(options.workspacePath);
     this.inventoryContributionTimeoutMs = options.inventoryContributionTimeoutMs ?? 4_000;
+    this.lateListingTtlMs = options.lateListingTtlMs ?? 45_000;
   }
 
   private readonly inventoryContributionTimeoutMs: number;
+  // A list that arrived after its read gave up on it, by agent: the next
+  // read takes it rather than starting a listing that would be as slow.
+  // Shared and read-only, never consumed: every read within the TTL gets it,
+  // and a newer completed listing, a conversation created or renamed here,
+  // or an inventory tick from the agent ends it. Bumping an agent's epoch
+  // keeps a listing started before such a change from caching what it missed,
+  // and read order fences the rest: a listing that completes after one
+  // started later has completed caches nothing.
+  private readonly lateLists = new Map<string, { list: AgentConversationSummary[]; at: number }>();
+  private readonly lateListEpochs = new Map<string, number>();
+  // Per agent: the last listing started, and the latest-started one completed.
+  private readonly listingsStarted = new Map<string, number>();
+  private readonly listingsSettled = new Map<string, number>();
+  private readonly lateListingTtlMs: number;
   private readonly activitySubscriptions = new Set<MergedActivitySubscription>();
 
   agents(): ChatAgentDescriptor[] {
@@ -284,15 +301,29 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
    */
   async listConversations(): Promise<AgentConversationSummary[]> {
     const lists = await Promise.all(this.order.map(async agent => {
+      const id = agent.descriptor.id;
+      const late = this.lateLists.get(id);
+      if (late && Date.now() - late.at < this.lateListingTtlMs) return late.list;
+      if (late) this.lateLists.delete(id);
+      const epoch = this.lateListEpochs.get(id) ?? 0;
+      const sequence = (this.listingsStarted.get(id) ?? 0) + 1;
+      this.listingsStarted.set(id, sequence);
+      // True for the latest-started listing to complete so far; an older one
+      // completing after it is superseded.
+      const newest = () => {
+        if (sequence < (this.listingsSettled.get(id) ?? 0)) return false;
+        this.listingsSettled.set(id, sequence);
+        return true;
+      };
       const read = (async () => {
         const conversations = await agent.service.listConversations();
-        return conversations.map(summary => this.qualifySummary(agent.descriptor, summary));
+        return conversations.map(summary => qualifyAgentSummary(agent.descriptor, summary));
       })();
       read.catch(() => undefined);
       // One agent's stalled startup (a cold probe can run to its timeout)
       // must not withhold another agent's already-answered list: the
-      // straggler is bounded, and its late arrival ticks the inventory so
-      // clients re-fetch and see it.
+      // straggler is bounded, and its late arrival is kept for the next read
+      // and ticks the inventory so clients re-fetch and see it.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bounded = await Promise.race([
         read.catch(() => [] as AgentConversationSummary[]),
@@ -302,8 +333,16 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         }),
       ]);
       if (timer !== undefined) clearTimeout(timer);
-      if (bounded !== null) return bounded;
-      void read.then(late => { if (late.length > 0) this.inventoryHub.tick(); }, () => undefined);
+      if (bounded !== null) {
+        // A listing in time is newer than any late one.
+        void read.then(() => { if (newest()) this.lateLists.delete(id); }, () => undefined);
+        return bounded;
+      }
+      void read.then(late => {
+        if (!newest() || (this.lateListEpochs.get(id) ?? 0) !== epoch) return;
+        this.lateLists.set(id, { list: late, at: Date.now() });
+        if (late.length > 0) this.inventoryHub.tick();
+      }, () => undefined);
       return [] as AgentConversationSummary[];
     }));
     return lists.flat().sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
@@ -355,13 +394,39 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async createConversation(agentId?: string): Promise<AgentConversationSnapshot> {
     const agent = this.requireAgent(agentId ?? this.defaultAgentId());
-    return this.qualifySnapshot(agent.descriptor, await agent.service.createConversation());
+    const created = await agent.service.createConversation();
+    this.invalidateLateList(agent.descriptor.id);
+    return qualifyAgentSnapshot(agent.descriptor, created);
+  }
+
+  /** The agent's late listing no longer stands, and none started before now will. */
+  private invalidateLateList(agentId: string): void {
+    this.lateLists.delete(agentId);
+    this.lateListEpochs.set(agentId, (this.lateListEpochs.get(agentId) ?? 0) + 1);
+  }
+
+  // The agent's inventory subscription, ending its late listing on every
+  // tick after the one each subscription opens with.
+  private invalidatingLateList(agentId: string, source: ConversationInventorySubscription): ConversationInventorySubscription {
+    let opened = false;
+    return new Proxy(source, {
+      get: (target, property, receiver) => {
+        if (property === "next") {
+          return () => target.next().then(result => {
+            if (!result.done) { if (opened) this.invalidateLateList(agentId); opened = true; }
+            return result;
+          });
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
   }
 
   async history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot> {
     const { agent, conversationId } = this.resolve(id);
     const page = agent.service.history(conversationId, options).then(snapshot =>
-      this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot), !options?.cursor));
+      this.enrichSnapshot(qualifyAgentSnapshot(agent.descriptor, snapshot), !options?.cursor));
     const read = { id, page };
     this.visualHistoryReads.add(read);
     void page.finally(() => this.visualHistoryReads.delete(read)).catch(() => undefined);
@@ -467,7 +532,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
       const snapshot = native.snapshot;
       boundary = decodeReplayCursor(snapshot.cursor);
-      qualified = await setup(this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot)));
+      qualified = await setup(this.enrichSnapshot(qualifyAgentSnapshot(agent.descriptor, snapshot)));
       if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
     } catch (error) {
       cancel();
@@ -567,7 +632,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const enrich = async (tracked: Tracked, force = false) => {
       if (!force && Date.now() - tracked.enrichedAt < enrichmentCadenceMs) return false;
       const previous = tracked.item;
-      const live = this.visualItemLive(previous, tracked.live, true);
+      // Ordered projection: a queued frame's provisional turn token may
+      // already be closed by its producer, so wait for the ordered status.
+      const live = isReplyLive(previous, tracked.live, true);
       tracked.item = await this.enrichItem(id, previous, live, true) as Assistant;
       tracked.enrichedAt = tracked.item.markdown.length ? Date.now() : -Infinity;
       return JSON.stringify(previous.visuals) !== JSON.stringify(tracked.item.visuals);
@@ -587,7 +654,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       return changed;
     };
     wrapped = new QualifyingEventSubscription(native.events, async raw => {
-        const event = this.qualifyEvent(agent.descriptor, raw);
+        const event = qualifyAgentEvent(agent.descriptor, raw);
         if (event.type === "resync") {
           // Rewrites can replace text without an upsert. Never append a future
           // delta to the pre-rewrite accumulator. A covered history read may
@@ -596,7 +663,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
           historyEpoch++;
           replayNeedsVisualResync = false;
           try {
-            const current = await this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId)));
+            const current = await this.enrichSnapshot(qualifyAgentSnapshot(agent.descriptor, await agent.service.history(conversationId)));
             seed(current);
             boundary = decodeReplayCursor(current.cursor);
           } catch {
@@ -634,10 +701,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         const resync: ChatEvent = { ...base, type: "resync", reason: "conversation-rewritten" };
         if (event.type === "item.remove") items.delete(event.itemId);
         if (event.type === "conversation.status" || event.type === "conversation.updated") {
-          // A source-witnessed V1 idle alias repeats an already ordered end.
-          // Preserve its public status, but neither finalize newer captures nor
-          // change their live state while the other source is catching up.
-          if (event.type === "conversation.status" && (event as typeof event & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]) return [event];
+          // A repeat restates an already ordered end. Preserve its public
+          // status, but neither finalize newer captures nor change their live
+          // state while its source is catching up.
+          if (event.type === "conversation.status" && (event as typeof event & ChatStatusLiveness)[CHAT_STATUS_REPEAT]) return [event];
           streaming = isVisualTurnLive(event.type === "conversation.status" ? event : event.conversation);
           // Status errors, /reload refreshes and label changes are authoritative
           // events, not replaceable invalidations. Visual resync is additional.
@@ -658,8 +725,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             const appended = previous && event.item.markdown.startsWith(previous.item.markdown)
               ? event.item.markdown.slice(previous.item.markdown.length) : undefined;
             const syntaxCompleted = previous && (appended === undefined || completesVisualSyntax(previous.item, appended));
-            const textEnded = this.visualTextEnded(event.item);
-            await enrich(tracked, Boolean(textEnded) || !this.visualItemLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
+            await enrich(tracked, isTextSealed(event.item) || !isReplyLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
             // Normal events are sequence-deduplicated by the client. Enrich
             // this one native upsert, retaining all its text and other fields.
             return [{ ...event, item: tracked.item }];
@@ -686,7 +752,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const { conversation, ...accepted } = await agent.service.prompt(conversationId, requestId, text, model, mode, variant, attachments, delivery, context, operationReceipt);
     return {
       ...accepted,
-      ...(conversation ? { conversation: this.qualifySummary(agent.descriptor, conversation) } : {}),
+      ...(conversation ? { conversation: qualifyAgentSummary(agent.descriptor, conversation) } : {}),
     };
   }
 
@@ -724,12 +790,12 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean, resolvedLiveness = false): Promise<ConversationItem> {
     if (item.type !== "assistant_message") return item;
-    const live = resolvedLiveness ? streaming : this.visualItemLive(item, streaming);
+    const live = resolvedLiveness ? streaming : isReplyLive(item, streaming);
     // Deliberately overinclusive: any image opener or Markdown fence may
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
     // Markdown parse/highlight on every streamed token.
-    const textEnded = this.visualTextEnded(item);
+    const textEnded = isTextSealed(item);
     const inputs = /!\[|<(?:img|image|pre)\b|`{3}|~{3}/i.test(item.markdown) ? getChatVisuals(item.markdown, live && !textEnded) : [];
     if (!inputs.length) {
       const { visuals: _visuals, ...rest } = item;
@@ -737,7 +803,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     }
     const requests = function* () {
       for (const input of inputs) {
-        const identity = claudeVisualIdentity(item, input.key);
+        const identity = visualCaptureIdentity(item, input.key);
         yield { messageId: identity.messageId, input: { ...input, key: identity.key } };
       }
     };
@@ -746,35 +812,12 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     return { ...item, visuals };
   }
 
-  private visualTextEnded(item: Extract<ConversationItem, { type: "assistant_message" }>): boolean {
-    const identity = item as typeof item & ClaudeTextIdentity & OpenCodeTextIdentity;
-    // Claude's native per-block completedAt seals syntax, not the turn. It is
-    // immutable on this frame, unlike the shared turn token. Other agents'
-    // arbitrary completedAt values do not stand in for Claude block identity.
-    return Boolean(identity[OPENCODE_TEXT_END] || item.completedAt !== undefined
-      && (identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:")));
-  }
-
-  private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean, orderedTurnState = false): boolean {
-    // API/text completion is distinct from the execution that may still run
-    // a file-producing tool. Native execution evidence overrides completedAt;
-    // incompatible/unannotated histories retain the historical fallback.
-    const identity = item as typeof item & ClaudeTextIdentity & OpenCodeExecutionIdentity;
-    // Queued Claude frames share a token the provider may already have sealed.
-    // Live projection must instead wait for its ordered status/turn boundary;
-    // history/snapshot reads use the immutable copy captured with native
-    // snapshot text/cursor by the adapter, before the service promise resolves.
-    if (identity[CLAUDE_TURN]) return streaming && (orderedTurnState || !identity[CLAUDE_TURN].completed);
-    if (identity[OPENCODE_EXECUTION_LIVE] !== undefined) return streaming && identity[OPENCODE_EXECUTION_LIVE] === true;
-    const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
-    return streaming && (claudeBlock || item.completedAt === undefined);
-  }
-
   private async enrichSnapshot(snapshot: AgentConversationSnapshot, newestPage = true): Promise<AgentConversationSnapshot> {
-    // Native execution metadata is computed before pagination: an older
-    // page can still belong to the same running turn. Without authoritative
-    // metadata, keep older pages terminal rather than inferring from a user
-    // row or a page-local footer.
+    // A reply's execution evidence is computed before pagination: an older
+    // page can still belong to the same running turn. Without evidence, keep
+    // older pages terminal rather than inferring from a user row or a
+    // page-local footer. Snapshot and history reads adopt the evidence as the
+    // adapter captured it, with the snapshot's text and cursor.
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
     const streaming = isVisualTurnLive(snapshot.conversation);
     // Plan every row synchronously before the first await. In particular,
@@ -784,9 +827,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const liveness = new Map<string, boolean>();
     const planned = snapshot.items.map((item, index) => {
       if (item.type !== "assistant_message") return { item, live: false };
-      const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
-      const execution = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
-      const live = this.visualItemLive(item, streaming && (Boolean(turn) || execution !== undefined || newestPage && index > lastTurn));
+      const live = isReplyLive(item, streaming && (executionLive(item) !== undefined || newestPage && index > lastTurn));
       liveness.set(item.id, live);
       return { item, live };
     });
@@ -804,7 +845,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }> {
     const { agent, conversationId } = this.resolve(id);
     const renamed = await agent.service.renameConversation(conversationId, requestId, title);
-    return { conversation: this.qualifySummary(agent.descriptor, renamed.conversation) };
+    this.invalidateLateList(agent.descriptor.id);
+    return { conversation: qualifyAgentSummary(agent.descriptor, renamed.conversation) };
   }
 
   async cancel(id: string, requestId: string) {
@@ -908,45 +950,74 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     if (!agent) throw new ConversationNotFoundError();
     return { agent, conversationId: parsed.conversationId };
   }
+}
 
-  private qualifySummary(descriptor: ChatAgentDescriptor, summary: ConversationSummary): AgentConversationSummary {
-    return { ...summary, id: qualifyConversationId(descriptor.id, summary.id), agent: descriptor };
-  }
+// The wire form of what an agent's stack returns: summaries, the addressable
+// item fields (a permission or question's conversationId, a tool or
+// background task's childConversationId) and events carry the agent's
+// qualifier. Other nested ids stay as the provider wrote them.
+export function qualifyAgentSummary(descriptor: ChatAgentDescriptor, summary: ConversationSummary): AgentConversationSummary {
+  return { ...summary, id: qualifyConversationId(descriptor.id, summary.id), agent: descriptor };
+}
 
-  private qualifyItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {
-    let next = item;
-    if ((next.type === "permission" || next.type === "question") && next.conversationId) {
-      next = { ...next, conversationId: qualifyConversationId(descriptor.id, next.conversationId) };
-    }
-    if ((next.type === "tool" || next.type === "background_task") && next.childConversationId) {
-      // A subagent child belongs to the same agent as its parent; the
-      // drill-down opens it through the same qualified addressing. A
-      // background task names the same child as its launching tool row —
-      // and names it first, from the start edge, which is what makes a
-      // still-running run openable — so it must be qualified alike.
-      next = { ...next, childConversationId: qualifyConversationId(descriptor.id, next.childConversationId) };
-    }
-    return next;
-  }
+/**
+ * The conversation ids each item kind carries that a client addresses, and
+ * so the only item fields the wire form qualifies. A permission or question
+ * names the conversation it waits in. A subagent child belongs to the same
+ * agent as its parent; the drill-down opens it through the same qualified
+ * addressing. A background task names the same child as its launching tool
+ * row — and names it first, from the start edge, which is what makes a
+ * still-running run openable — so it is qualified alike.
+ */
+type AddressableItemIdFieldTable = {
+  // Each kind may list only fields its own item variant declares.
+  readonly [Kind in ConversationItem["type"]]?: readonly (keyof Extract<ConversationItem, { type: Kind }> & string)[];
+};
+export const ADDRESSABLE_ITEM_ID_FIELDS = {
+  permission: ["conversationId"],
+  question: ["conversationId"],
+  tool: ["childConversationId"],
+  background_task: ["childConversationId"],
+} as const satisfies AddressableItemIdFieldTable;
 
-  private qualifySnapshot(descriptor: ChatAgentDescriptor, snapshot: ConversationSnapshot): AgentConversationSnapshot {
-    return {
-      ...snapshot,
-      conversation: this.qualifySummary(descriptor, snapshot.conversation),
-      items: snapshot.items.map(item => this.qualifyItem(descriptor, item)),
-    };
-  }
+/** The addressable id fields of an item's kind; none for any other kind. */
+export function addressableItemIdFields(type: unknown): readonly string[] {
+  return typeof type === "string" && Object.hasOwn(ADDRESSABLE_ITEM_ID_FIELDS, type)
+    ? ADDRESSABLE_ITEM_ID_FIELDS[type as keyof typeof ADDRESSABLE_ITEM_ID_FIELDS]
+    : [];
+}
 
-  private qualifyEvent(descriptor: ChatAgentDescriptor, event: ChatEvent): ChatEvent {
-    const qualified: ChatEvent = { ...event, conversationId: qualifyConversationId(descriptor.id, event.conversationId) };
-    if (qualified.type === "item.upsert") {
-      return { ...qualified, item: this.qualifyItem(descriptor, qualified.item) };
-    }
-    if (qualified.type === "conversation.updated") {
-      return { ...qualified, conversation: this.qualifySummary(descriptor, qualified.conversation) };
-    }
-    return qualified;
+/** Maps an item's addressable conversation ids, and only those. */
+export function mapAddressableItemIds(item: ConversationItem, map: (id: string) => string): ConversationItem {
+  let next = item as Record<string, unknown>;
+  for (const field of addressableItemIdFields(item.type)) {
+    const id = next[field];
+    if (typeof id === "string" && id) next = { ...next, [field]: map(id) };
   }
+  return next as ConversationItem;
+}
+
+export function qualifyAgentItem(descriptor: ChatAgentDescriptor, item: ConversationItem): ConversationItem {
+  return mapAddressableItemIds(item, id => qualifyConversationId(descriptor.id, id));
+}
+
+export function qualifyAgentSnapshot(descriptor: ChatAgentDescriptor, snapshot: ConversationSnapshot): AgentConversationSnapshot {
+  return {
+    ...snapshot,
+    conversation: qualifyAgentSummary(descriptor, snapshot.conversation),
+    items: snapshot.items.map(item => qualifyAgentItem(descriptor, item)),
+  };
+}
+
+export function qualifyAgentEvent(descriptor: ChatAgentDescriptor, event: ChatEvent): ChatEvent {
+  const qualified: ChatEvent = { ...event, conversationId: qualifyConversationId(descriptor.id, event.conversationId) };
+  if (qualified.type === "item.upsert") {
+    return { ...qualified, item: qualifyAgentItem(descriptor, qualified.item) };
+  }
+  if (qualified.type === "conversation.updated") {
+    return { ...qualified, conversation: qualifyAgentSummary(descriptor, qualified.conversation) };
+  }
+  return qualified;
 }
 
 class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {

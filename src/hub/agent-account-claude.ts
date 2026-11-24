@@ -17,6 +17,7 @@
 
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
+import { CLAUDE_CODE_AGENT } from "../chat/claude/descriptor";
 import { AccountOperationError, agentErrorMessage, type AccountAdapter, type AccountAdapterStatus, type StartedLogin } from "./agent-account-adapter";
 import { claudeAccountState, type ClaudeAccountInfo } from "../chat/claude/account";
 import type { AccountCapabilities, AccountMethod, ClaudeAccountState, ClaudeLoginSource } from "./agent-account-types";
@@ -38,7 +39,6 @@ export type ClaudeCommandRunner = (argv: string[], env: Record<string, string>) 
 
 export const CLAUDE_METHOD_SUBSCRIPTION = "claudeai";
 export const CLAUDE_METHOD_CONSOLE = "console";
-export const CLAUDE_LOGIN_COMMAND = "claude auth login";
 
 const STATUS_CACHE_MS = 3_000;
 const LOGOUT_TIMEOUT_MS = 15_000;
@@ -184,7 +184,7 @@ export class ClaudeAccountAdapter implements AccountAdapter {
     if (typeof authenticate !== "function" || typeof callback !== "function" || typeof wait !== "function") {
       this.close(session);
       this.loginSupported = false;
-      throw new AccountOperationError(`This Claude Code version cannot log in from here. Run \`${CLAUDE_LOGIN_COMMAND}\` on the Hub machine.`);
+      throw new AccountOperationError(`This Claude Code version cannot log in from here. Run \`${CLAUDE_CODE_AGENT.login.command}\` on the Hub machine.`);
     }
     let urls: { manualUrl?: string; automaticUrl?: string };
     try {

@@ -192,7 +192,7 @@ export class TimelineRenderer {
       // load), and the card must fill in when it does.
       const linkedTool = item.type === "permission" ? linkedToolRow(item, toolRows) : undefined;
       const worker = workers.get(item.id);
-      const variant = [JSON.stringify(worker ?? null), todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? "", this.loginAction ? `${this.loginAction.agentName}\u0002${this.loginAction.href ?? ""}` : ""].join("\u0001");
+      const variant = [JSON.stringify(worker ?? null), todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? "", this.loginAction ? `${this.loginAction.agentName}\u0002${this.loginAction.href ?? ""}\u0002${this.loginAction.command}` : ""].join("\u0001");
       if (entry?.shellVariant !== undefined && entry.item === item && entry.active === active && entry.variant === variant
         && entry.shellVariant === this.shellVariant(entry.node, item.id)) {
         nodes.set(item.id, entry.node);
@@ -361,7 +361,9 @@ export class TimelineRenderer {
 
     for (const draft of projection.acceptedDrafts) {
       const entry = this.draftEntries.get(draft.requestId);
-      if (entry && entry.draft.messageId === draft.messageId && entry.draft.text === draft.text) {
+      // Its state is part of what it shows (sending, unconfirmed, awaiting confirmation).
+      if (entry && entry.draft.messageId === draft.messageId && entry.draft.text === draft.text
+        && entry.draft.unconfirmed === draft.unconfirmed && entry.draft.awaiting === draft.awaiting) {
         place(entry.node, renderNow);
         continue;
       }
@@ -1103,7 +1105,7 @@ export function decorateAttachmentImages(root: HTMLElement): void {
 }
 
 function renderDraft(draft: AcceptedDraft): string {
-  const label = draft.unconfirmed ? "Acceptance unconfirmed — do not repeat" : draft.messageId.startsWith("pending:") ? "Sending…" : "Delivered, waiting for agent history";
+  const label = draft.awaiting ? "Sent — waiting for the agent to confirm" : draft.unconfirmed ? "Acceptance unconfirmed — do not repeat" : draft.messageId.startsWith("pending:") ? "Sending…" : "Delivered, waiting for agent history";
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}">${renderMessageAttachments(draft.attachments)}${draft.text ? `<p>${escapeHtml(draft.text)}</p>` : ""}<small>${label}</small></article>`;
 }
 

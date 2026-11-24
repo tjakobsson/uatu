@@ -2237,6 +2237,18 @@ describe("recalled memory rows and coded notices", () => {
     expect(host.querySelector(".chat-login-command code")?.textContent).toBe("claude auth login");
   });
 
+  test("a login failure is repainted when only the declared command changes", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const failure: ConversationItem = { id: "notice:login:1", type: "notice", createdAt: 1, level: "error", code: "login-failed", message: "Not logged in" };
+    renderer.loginAction = { agentName: "Stub Agent", href: null, command: "stub-agent login" };
+    renderer.render(host, projectionWith([failure]), new Set());
+    expect(host.querySelector(".chat-login-command code")?.textContent).toBe("stub-agent login");
+    renderer.loginAction = { agentName: "Stub Agent", href: null, command: "stub-agent login --device" };
+    renderer.render(host, projectionWith([failure]), new Set());
+    expect(host.querySelector(".chat-login-command code")?.textContent).toBe("stub-agent login --device");
+  });
+
   test("a rate-limit standing is data for the composer, never a row", () => {
     const renderer = new TimelineRenderer();
     const host = target();

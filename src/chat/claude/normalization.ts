@@ -1,8 +1,9 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import { claudeWindowAnswer } from "./context-window";
-import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeTextBlockId, type ClaudeTextBlock, type ClaudeTurn } from "./normalization-types";
-import { nativeVisualMessageIdentity } from "../visual-identity";
+import { claudeTextBlockId } from "./normalization-types";
+import { CHAT_TEXT_SEAL, CHAT_TURN, provisionalTurn, type ChatTurnToken } from "../turn-liveness";
+import { CHAT_TEXT_BLOCKS, nativeVisualMessageIdentity, type ChatTextBlock } from "../visual-identity";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
 import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, readsAsWakeupPrompt, scheduledWakeupPrompt, type TranscriptEntry } from "./transcript";
@@ -71,7 +72,7 @@ export type ClaudeEventMemory = {
   currentStream?: string;
   // Text-block completion is not an agent-turn boundary. All rows of the
   // actual turn share this internal token, sealed by result/turn_duration.
-  visualTurn?: ClaudeTurn;
+  visualTurn?: ChatTurnToken;
   // A named working state the turn is in (retrying, compacting); cleared —
   // with a `running` status — by the next message that shows the turn moved.
   transient?: "retrying" | "compacting";
@@ -912,9 +913,15 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
 
 type Envelope = { uuid: string; createdAt: number; reportedAt?: number };
 
+// Shared by the native text rows of one agent turn. Only a native turn end
+// closes it; completing an API text block does not. It is provisional: this
+// normalizer can run ahead of the frames still queued for ordered projection.
 function visualTurnIdentity(memory: ClaudeEventMemory) {
-  return { [CLAUDE_TURN]: memory.visualTurn ??= { completed: false } };
+  return { [CHAT_TURN]: memory.visualTurn ??= provisionalTurn() };
 }
+
+// A native per-block completedAt seals that block's syntax, not the turn.
+const TEXT_BLOCK_COMPLETION = { [CHAT_TEXT_SEAL]: "completion" as const };
 
 function completeVisualTurn(memory: ClaudeEventMemory): void {
   if (memory.visualTurn) memory.visualTurn.completed = true;
@@ -952,13 +959,13 @@ function skippedBlockTypes(blocks: unknown[], known: ReadonlySet<string>): strin
 }
 
 function streamTextIdentity(apiMessageId: string, stream: { textBlocks: number[] }, index: number) {
-  return { [CLAUDE_TEXT_BLOCKS]: [{ id: claudeTextBlockId(apiMessageId, stream.textBlocks.indexOf(index)), offset: 0 }], ...nativeVisualMessageIdentity("claude", apiMessageId) };
+  return { [CHAT_TEXT_BLOCKS]: [{ id: claudeTextBlockId(apiMessageId, stream.textBlocks.indexOf(index)), offset: 0 }], ...nativeVisualMessageIdentity("claude", apiMessageId), ...TEXT_BLOCK_COMPLETION };
 }
 
 function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: ClaudeEventMemory, skipped: string[], identity?: { apiMessageId: string; firstText: number }): NormalizedProviderUpdate[] {
   const updates: NormalizedProviderUpdate[] = [];
   const texts: string[] = [];
-  const textBlocks: ClaudeTextBlock[] = [];
+  const textBlocks: ChatTextBlock[] = [];
   let textOffset = 0;
   let reasoningIndex = 0;
   skipped.push(...skippedBlockTypes(content, ASSISTANT_BLOCKS));
@@ -1024,9 +1031,9 @@ function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: Cla
       createdAt: envelope.createdAt,
       markdown: texts.join("\n\n"),
       completedAt: envelope.createdAt,
-      ...(textBlocks.length ? { [CLAUDE_TEXT_BLOCKS]: textBlocks } : {}),
+      ...(textBlocks.length ? { [CHAT_TEXT_BLOCKS]: textBlocks } : {}),
       ...nativeVisualMessageIdentity("claude", identity?.apiMessageId),
-      ...(identity ? visualTurnIdentity(memory) : {}),
+      ...(identity ? { ...TEXT_BLOCK_COMPLETION, ...visualTurnIdentity(memory) } : {}),
     } });
   }
   return updates;

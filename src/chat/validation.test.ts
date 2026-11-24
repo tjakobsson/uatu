@@ -11,8 +11,11 @@ test("worker session metadata validates nullable effort/cost without replacing u
 });
 
 import {
+  parseAgentChatStatuses,
   parseAgentUsageReport,
   parseBackgroundTaskOutput,
+  parseChatAgent,
+  parseChatAgentDescriptor,
   parseChatAvailability,
   parseChatCommand,
   parseChatEvent,
@@ -101,8 +104,49 @@ const summary = {
   createdAt: 1,
   updatedAt: 2,
   status: "running",
-  agent: { id: "opencode", name: "OpenCode" },
+  agent: { id: "opencode", name: "OpenCode", login: { command: "opencode auth login", hubManaged: true } },
 } as const;
+
+describe("agent descriptor", () => {
+  const descriptor = { id: "stub", name: "Stub Agent", login: { command: "stub login", hubManaged: false } };
+
+  test("carries the agent's declared login in every availability state and on summaries", () => {
+    expect(parseChatAgentDescriptor(descriptor)).toEqual(descriptor);
+    for (const availability of [{ state: "idle" }, { state: "starting" }, { state: "ready", version: "1" }, { state: "unavailable", reason: "not-installed", message: "Stub Agent is not installed." }]) {
+      expect(parseAgentChatStatuses({ agents: [{ agent: descriptor, availability }] })[0]!.agent).toEqual(descriptor);
+    }
+    expect(parseConversationSummary({ ...summary, agent: descriptor }).agent).toEqual(descriptor);
+  });
+
+  test("limits the login command to 512 code points, as the contract does", () => {
+    // A supplementary character is two UTF-16 code units but one code point.
+    const command = "\u{1D7D8}".repeat(512);
+    expect(command.length).toBe(1024);
+    expect(parseChatAgentDescriptor({ ...descriptor, login: { command, hubManaged: false } }).login.command).toBe(command);
+  });
+
+  test("requires a well-formed login", () => {
+    const { login: _login, ...withoutLogin } = descriptor;
+    for (const malformed of [
+      withoutLogin,
+      { ...descriptor, login: null },
+      { ...descriptor, login: "stub login" },
+      { ...descriptor, login: { command: "stub login" } },
+      { ...descriptor, login: { hubManaged: true } },
+      { ...descriptor, login: { command: "", hubManaged: false } },
+      { ...descriptor, login: { command: "x".repeat(513), hubManaged: false } },
+      { ...descriptor, login: { command: "\u{1D7D8}".repeat(513), hubManaged: false } },
+      { ...descriptor, login: { command: 1, hubManaged: false } },
+      { ...descriptor, login: { command: "stub login", hubManaged: "yes" } },
+      { ...descriptor, login: { command: "stub login", hubManaged: false, url: "https://example.test" } },
+      { ...descriptor, login: { command: "stub login", hubManaged: false, "": 0 } },
+    ]) {
+      expect(() => parseChatAgentDescriptor(malformed), JSON.stringify(malformed)).toThrow();
+      expect(() => parseAgentChatStatuses({ agents: [{ agent: malformed, availability: { state: "idle" } }] })).toThrow();
+      expect(() => parseConversationSummary({ ...summary, agent: malformed })).toThrow();
+    }
+  });
+});
 
 const items = [
   { id: "user-1", type: "user_message", createdAt: 1, text: "Build it", requestId: "request-1" },
@@ -317,6 +361,9 @@ describe("chat domain validation", () => {
     });
     expect(() => parseConversationInventoryEvent({ type: "conversation.created" })).toThrow(/type/);
     expect(() => parseConversationInventoryEvent({ type: "conversation.inventory", conversationId: "c1" })).toThrow(/unknown/);
+    // A closed object refuses an unknown key by its presence: the empty key too.
+    expect(() => parseConversationInventoryEvent({ type: "conversation.inventory", "": "c1" })).toThrow(/unknown/);
+    expect(() => parseChatCommand({ name: "review", description: "", argumentHint: "", kind: "command", "": undefined })).toThrow(/unknown/);
     expect(() => parseConversationInventoryEvent(null)).toThrow(/object/);
   });
 
@@ -593,4 +640,9 @@ describe("chat domain validation", () => {
       providerPayload: {},
     })).toThrow(/unknown/);
   });
+});
+
+test("an agent declaration accepts immediate-steering and a name this client does not know", () => {
+  const agent = { id: "antigravity", name: "Antigravity", capabilities: ["immediate-steering", "send-now", "a-future-capability"] };
+  expect(parseChatAgent(agent) as unknown).toEqual(agent);
 });

@@ -1,43 +1,36 @@
 /**
  * Where the chat sends someone whose agent has no usable login.
  *
- * In a Hub-served session (base path `/s/<id>/`) that is the Hub's Settings,
- * opened at the agent's Agent accounts card. The Hub answers `/settings` at
+ * Each agent declares its login on its descriptor: its own login command,
+ * and whether the Hub's Settings manages that login. On a Hub-served page
+ * (the `uatu-hub` marker the Hub proxy injects) a Hub-managed login is fixed
+ * in the Hub's Settings, opened at the agent's Agent accounts card. The Hub answers `/settings` at
  * the origin root, outside the session's base path, which is why this is an
- * origin-rooted URL and not an `appUrl()`. Anywhere else there is no Settings
- * page, so the action names the agent's own login command to run where
- * UatuCode runs.
+ * origin-rooted URL and not an `appUrl()`. Anywhere else, and for an agent the
+ * Hub does not manage, the action names the agent's own login command to run
+ * where UatuCode runs.
  */
 
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
-import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
+import { isHubPage } from "../shared/app-url";
+import type { ChatAgentDescriptor } from "./types";
 
 export type LoginAction = {
   agentName: string;
-  /** The Hub's Settings, at this agent's card; null outside a Hub. */
+  /** The Hub's Settings, at this agent's card; null outside a Hub or for a login the Hub does not manage. */
   href: string | null;
   /** The agent's own login command. */
   command: string;
 };
 
-const LOGIN_COMMANDS: Record<string, string> = {
-  opencode: "opencode auth login",
-  claude: "claude auth login",
-};
-
-export function agentLoginCommand(agentId: string): string {
-  return LOGIN_COMMANDS[agentId] ?? `${agentId} login`;
-}
-
-export function hubServed(basePath = appBasePath()): boolean {
-  return workspaceIdFromBasePath(basePath) !== null;
-}
-
-export function loginActionFor(agentId: string, agentName: string, basePath = appBasePath()): LoginAction {
+// `hubPage` is the Hub's own marker on the page (`isHubPage()`), not the base
+// path's shape: a standalone run under a Hub-shaped `--base-path` has no
+// Settings to link to.
+export function loginActionFor(agent: ChatAgentDescriptor, hubPage = isHubPage()): LoginAction {
   return {
-    agentName,
-    href: hubServed(basePath) ? `/settings#agent-accounts/${encodeURIComponent(agentId)}` : null,
-    command: agentLoginCommand(agentId),
+    agentName: agent.name,
+    href: agent.login.hubManaged && hubPage ? `/settings#agent-accounts/${encodeURIComponent(agent.id)}` : null,
+    command: agent.login.command,
   };
 }
 

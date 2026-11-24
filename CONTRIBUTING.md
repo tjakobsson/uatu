@@ -145,13 +145,14 @@ bunx @fission-ai/openspec validate --all --strict
 
 The [Agent SDK coverage dashboard](https://github.com/tjakobsson/uatu/issues/480)
 records, for every message type, content-block or part type, and tool the
-installed agent SDKs declare, what uatu does with it: dedicated, generic,
+installed agent SDKs declare (for Antigravity, the Agent Client Protocol's
+session updates, methods and tool kinds), what uatu does with it: dedicated, generic,
 ignored, unhandled, or behavior-missing. It is not committed. The `Agent SDK
 coverage` workflow (`.github/workflows/agent-coverage.yml`) regenerates it after
 every push to `main`, and when a merge adds or removes SDK vocabulary it posts a
 comment on the issue naming what changed. An agent SDK bump
 (`@anthropic-ai/claude-agent-sdk`, `@anthropic-ai/sdk`, `@opencode-ai/sdk`,
-`@opencode/client`) has nothing to regenerate.
+`@opencode/client`, `@agentclientprotocol/sdk`) has nothing to regenerate.
 
 To preview what your branch would publish:
 
@@ -164,12 +165,29 @@ bun run coverage:agents --previous /tmp/published.md > /dev/null
 
 `bun test` fails a bump only when uatu itself has to change, never because a
 version moved or coverage is incomplete. Only two things are written by hand,
-in `src/chat/claude/sdk-coverage.ts` and `src/chat/opencode/sdk-coverage.ts`:
+in `src/chat/claude/sdk-coverage.ts`, `src/chat/opencode/sdk-coverage.ts` and
+`src/chat/antigravity/sdk-coverage.ts`:
 why an ignored type is dropped (every one needs a reason; a key ending in `*`
 covers a family), and which entries render without working (and what fixes
 them, by name). The generator, and with it `bun test`, rejects an annotation
 naming anything the installed SDK does not declare, and an ignored type nobody
 has explained — state why, or stop ignoring it so it reports as unhandled.
+
+### Antigravity prices
+
+Antigravity reports tokens but no price, so Chat prices its turns from a
+table built into the binary, `src/chat/antigravity/prices.ts`. It is
+generated, never edited by hand, and records its source and snapshot date.
+To refresh it:
+
+```bash
+bun run scripts/update-antigravity-prices.ts                # fetches models.dev
+bun run scripts/update-antigravity-prices.ts --input api.json  # a saved copy
+```
+
+The first form makes a network request, so it is a deliberate step, never part
+of a build or test. A run that cannot find a model's entry fails and names it;
+correct `MODELS_DEV_SOURCES` in the script rather than editing the table.
 
 The full Playwright suite takes longer than unit tests. Focused Playwright
 files are appropriate while iterating, but CI remains the final full-suite

@@ -10,16 +10,16 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting, ProviderHistoryPage, WorkerSourceGuard, WorkerResultFallback, WorkerRecoverySource, WorkerAssociationWatch } from "./provider";
 import { describeToolDetail } from "./tool-detail";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { CLAUDE_TURN, type ClaudeTextIdentity, type ClaudeTurn } from "./claude/normalization-types";
-import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type SteerConfirmation, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
-import { isLiveConversationStatus } from "./types";
-import { OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_START_FALLBACK, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextStart } from "./opencode/normalization-types";
-import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
+import { isLiveConversationStatus, steerRefusedNotice } from "./types";
+import { OPENCODE_TEXT_START_FALLBACK, type OpenCodeTextStart } from "./opencode/normalization-types";
+import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TURN, CHAT_TURN_CONTINUES, isTerminalStatus, withRetainedReplyFacts, type ChatStatusLiveness, type ChatTurnIdentity, type ChatTurnToken } from "./turn-liveness";
+import type { ChatActionContext, NoticeItem, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
 import { unverifyWorkerTask, workerExecutionClockRuns, workerState } from "./worker-state";
@@ -584,6 +584,16 @@ export class SteerWithdrawalUnconfirmedError extends Error {
   }
 }
 
+// add-antigravity-chat D9: an immediate-steering agent definitely did not
+// take the steer. Nothing was delivered or published, so the submitting
+// client restores the draft with the agent's own reason.
+export class SteerRefusedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "SteerRefusedError";
+  }
+}
+
 export class SteeringUnsupportedError extends Error {
   constructor() {
     super("this agent does not support steering");
@@ -914,6 +924,13 @@ export class ChatAdapter {
   private readonly nativeAccountingReads = new Map<string, { controller: AbortController; promise: Promise<void>; callers: number; sources: WorkerSourceRead }>();
   private readonly automaticBackgroundTimeoutMs: number;
   private readonly steerAdmissionTimeoutMs: number;
+  // Immediate steers awaiting the agent's answer, per conversation: Stop
+  // does not queue behind them.
+  private readonly immediateSteers = new Map<string, number>();
+  // The steer-refused notices this adapter published, by conversation (the
+  // latest few): the provider's history never holds them, so a snapshot
+  // carries them, and a client that missed one live still restores its draft.
+  private readonly steerRefusals = new Map<string, NoticeItem[]>();
   private inboxClock = 0;
   // Internal held-submission order survives delivery switches and uncertain
   // admissions. Retained only on bounded pending owners/admission fences, not
@@ -1752,6 +1769,11 @@ export class ChatAdapter {
         // No paused list: the conversation reads as it would without one.
       }
     }
+    // The latest page carries the steer refusals published here, which the
+    // provider's history does not hold.
+    if (!cursor) for (const notice of this.steerRefusals.get(id) ?? []) {
+      if (!items.some(item => item.id === notice.id)) items.push(notice);
+    }
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
     // would show costs that simply vanished. The child's stored messages do
@@ -2342,21 +2364,16 @@ export class ChatAdapter {
         const vetoOnlyRows = new Set<string>();
         for (const item of items) {
           const current = projection.get(item.id);
-          // Equal JSON can carry newer native execution evidence. Stage that
-          // replacement in the same validated recovery batch; recover's public
-          // equality suppresses a symbol-only frame while retaining the row.
-          const execution = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
-          const executionChanged = execution !== undefined
-            && execution !== (current as (ConversationItem & OpenCodeExecutionIdentity) | undefined)?.[OPENCODE_EXECUTION_LIVE];
-          const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
-          const turnChanged = turn !== undefined
-            && turn.completed !== (current as (ConversationItem & ClaudeTextIdentity) | undefined)?.[CLAUDE_TURN]?.completed;
+          // Equal JSON can carry newer turn evidence. Stage that replacement
+          // in the same validated recovery batch; recover's public equality
+          // suppresses a symbol-only frame while retaining the row.
+          const evidenceChanged = turnEvidenceChanged(current, item);
           const veto = item.type === "background_task" ? (item as WorkerWithOutcomeVeto)[workerOutcomeVeto] : undefined;
           const vetoChanged = veto !== undefined && current?.type === "background_task"
             && JSON.stringify(veto) !== JSON.stringify((current as WorkerWithOutcomeVeto)[workerOutcomeVeto]);
           const publiclyEqual = !!current && sameConversationItems([current], [item]);
-          if (vetoChanged && publiclyEqual && !executionChanged && !turnChanged && !revokedRows.has(item.id) && !resetReports.has(item.id)) vetoOnlyRows.add(item.id);
-          if (!publiclyEqual || executionChanged || turnChanged || vetoChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
+          if (vetoChanged && publiclyEqual && !evidenceChanged && !revokedRows.has(item.id) && !resetReports.has(item.id)) vetoOnlyRows.add(item.id);
+          if (!publiclyEqual || evidenceChanged || vetoChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
           else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
             this.refreshEquivalentDescendantBindings(projection, current, item);
           }
@@ -2397,7 +2414,7 @@ export class ChatAdapter {
       // A separately normalized transcript may still hold a live token for a
       // row whose ordered result we already saw. Return the same terminal
       // evidence as the projection, without restoring unrelated sparse fields.
-      else items[index] = preserveClaudeTurn(projection.get(item.id), item);
+      else items[index] = preserveClosedTurn(projection.get(item.id), item);
     }
     if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(id);
     // A reopened conversation whose agent still holds live work is in the
@@ -2419,7 +2436,7 @@ export class ChatAdapter {
       // before those publications can force another full read on every event.
       // Legacy reads have no change fence and still need the earlier cursor.
       cursor: coverage ? projection.replay.latestCursor() : replayCursor,
-      items: snapshotClaudeTurns(items),
+      items: snapshotTurns(items),
       // A client joining or reloading mid-run gets the same held queue a
       // client that watched it build presents.
       queued: this.queuedMessages(id),
@@ -2444,7 +2461,7 @@ export class ChatAdapter {
         configuration,
         generation: this.generation,
         cursor,
-        items: snapshotClaudeTurns(projection.items()),
+        items: snapshotTurns(projection.items()),
         queued: this.queuedMessages(id),
         ...(currentReversibleHistory ? { reversibleHistory: currentReversibleHistory } : {}),
       };
@@ -2602,6 +2619,9 @@ export class ChatAdapter {
     // What the provider actually ran, when it was not an ordinary turn.
     operation?: "reload";
     automaticBackground?: AutomaticBackgroundOutcome;
+    // An immediate steer the agent was sent and has not confirmed yet: its
+    // row, or a refusal notice naming this request, follows (D9).
+    awaitingConfirmation?: true;
   }> {
     if (sideQuestionOperation(text)) throw new SideGenerationUnsupportedError("Use the separate side-answer action for /btw; it is never sent to conversation history");
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
@@ -2641,6 +2661,12 @@ export class ChatAdapter {
         const steerable = this.agent().capabilities.includes("steering")
           && (reversible?.staged || delivery === "steer")
           && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
+        // add-antigravity-chat D9: an agent declaring `immediate-steering`
+        // takes a busy steer into its running turn at once. Commands and
+        // drafts with attachments stay the workspace queue's.
+        const immediate = !reversible?.staged && delivery === "steer" && attachmentRefs.length === 0
+          && this.agent().capabilities.includes("immediate-steering") && !this.agent().capabilities.includes("steering")
+          && !(text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined);
         if (reversible?.staged) {
           if (steerable) {
             // A replacement is another pending inbox entry, not an escape
@@ -2673,6 +2699,13 @@ export class ChatAdapter {
           return { ...dispatched, pending: false, delivery: "queue" };
         }
         const busy = this.turnActive(conversationId, projection);
+        if (busy && immediate) {
+          // Never a dock entry and never a configuration change: the steer
+          // joins the turn being run, and held messages keep waiting for that
+          // turn's end, which the provider reports once, after the steer.
+          const steered = await this.dispatchImmediateSteer(conversationId, projection, { messageId: this.id(), text, requestId, attachments: attachmentRefs });
+          return { messageId: steered.messageId, pending: false, delivery: "steer" as const, configuration: this.configurations.get(conversationId) ?? currentConfiguration, ...(steered.awaitingConfirmation ? { awaitingConfirmation: true as const } : {}) };
+        }
         const queue: HeldQueue = this.heldQueues.get(conversationId) ?? [];
         // Order is absolute: while anything is held, a new submission joins the
         // back of the queue even when the conversation is momentarily idle —
@@ -3630,6 +3663,86 @@ export class ChatAdapter {
     }
   }
 
+  /**
+   * Hand a busy message to an `immediate-steering` agent's running turn
+   * (add-antigravity-chat D9). A provider rejection other than an unknown
+   * outcome is a definite refusal: nothing is published and the client
+   * restores the draft with the agent's reason. An admission that neither
+   * answers in time nor fails is an unknown outcome the receipt retains and
+   * never resends; a later acceptance still records its row.
+   * The accepted message's row goes in under the same id dispatchPrompt
+   * uses, which the provider's own row and replay share.
+   */
+  private async dispatchImmediateSteer(conversationId: string, projection: ConversationProjection, input: { messageId: string; text: string; requestId: string; attachments: MessageAttachment[] }): Promise<{ messageId: string; awaitingConfirmation?: true }> {
+    const providerAttachments = await this.locateAttachments(input.attachments);
+    const admission = Promise.resolve().then(() => this.provider.prompt(conversationId, {
+      id: input.messageId, text: input.text, delivery: "steer",
+      ...(providerAttachments.length ? { attachments: providerAttachments } : {}),
+    }));
+    let accepted: { messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> };
+    this.immediateSteers.set(conversationId, (this.immediateSteers.get(conversationId) ?? 0) + 1);
+    try {
+      accepted = await this.boundedSteerAdmission(admission, input.messageId).finally(() => {
+        const left = (this.immediateSteers.get(conversationId) ?? 1) - 1;
+        if (left > 0) this.immediateSteers.set(conversationId, left); else this.immediateSteers.delete(conversationId);
+      });
+    } catch (error) {
+      if (error instanceof OperationOutcomeUnknownError) {
+        // Late evidence, never a resend: an admission that answers after the
+        // bound settles like a timely one, so the client's unconfirmed draft
+        // settles against the delivered row, or returns on a refusal.
+        void admission.then(
+          late => this.settleImmediateSteer(conversationId, late, input),
+          late => { if (!(late instanceof OperationOutcomeUnknownError)) this.settleImmediateSteer(conversationId, { outcome: "refused", reason: errorMessage(late) }, input); },
+        );
+        throw error;
+      }
+      throw new SteerRefusedError(errorMessage(error));
+    }
+    if (accepted.confirmation) {
+      // Sent, not yet confirmed: the conversation is free again at once, and
+      // the agent's answer settles the steer later. An unknown outcome stays
+      // unconfirmed with the submitting client and is never resent.
+      this.settleImmediateSteer(conversationId, accepted, input);
+      return { messageId: accepted.messageId, awaitingConfirmation: true };
+    }
+    this.recordImmediateSteer(projection, accepted, input);
+    return accepted;
+  }
+
+  // The one settlement for a steer's outcome, timely or late: a row for an
+  // acceptance, a `steer-refused` notice naming the request for a refusal,
+  // and a confirmation still to come is awaited first, so a "sent" never
+  // records a row that the agent later refuses.
+  private settleImmediateSteer(conversationId: string, outcome: { messageId: string; createdAt?: number; confirmation?: Promise<SteerConfirmation> } | SteerConfirmation, input: { text: string; requestId: string; attachments: MessageAttachment[] }): void {
+    if (this.disposed) return;
+    if ("confirmation" in outcome && outcome.confirmation) {
+      void outcome.confirmation.then(confirmation => this.settleImmediateSteer(conversationId, confirmation, input));
+      return;
+    }
+    if ("outcome" in outcome && outcome.outcome === "refused") {
+      const notice = steerRefusedNotice(input.requestId, outcome.reason, Date.now());
+      this.steerRefusals.set(conversationId, [...(this.steerRefusals.get(conversationId) ?? []).filter(known => known.id !== notice.id), notice].slice(-20));
+      this.projection(conversationId).upsert(notice);
+      return;
+    }
+    if ("outcome" in outcome && outcome.outcome !== "accepted") return;
+    this.recordImmediateSteer(this.projection(conversationId), outcome, input);
+  }
+
+  // The accepted steer's row, at the provider's position: a row the provider
+  // already published keeps its own place and only gains the request id;
+  // otherwise the provider's acceptance names the position.
+  private recordImmediateSteer(projection: ConversationProjection, accepted: { messageId: string; createdAt?: number }, input: { text: string; requestId: string; attachments: MessageAttachment[] }): void {
+    const id = `message:${accepted.messageId}`;
+    const existing = projection.get(id);
+    if (existing?.type === "user_message") {
+      if (existing.requestId !== input.requestId) projection.upsert({ ...existing, requestId: input.requestId });
+      return;
+    }
+    projection.upsert({ id, type: "user_message", createdAt: accepted.createdAt ?? Date.now(), text: input.text, requestId: input.requestId, ...(input.attachments.length ? { attachments: input.attachments } : {}) });
+  }
+
   // Provider events can update the cache while prompt admission awaits.
   // Merge onto the latest value synchronously so omitted fields preserve
   // that newer state rather than restoring the pre-admission snapshot.
@@ -3859,7 +3972,10 @@ export class ChatAdapter {
     // dormant flag alone, so cancellation waits for it to finish admitting
     // and then interrupts the turn it just started — while deliveries that
     // have not started find the queue paused.
-    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
+    // An immediate steer holds the lane until the agent answers it, which
+    // may be the end of the turn being stopped: Stop goes ahead of it, and
+    // the steer then settles as refused or unknown (add-antigravity-chat D9).
+    const stopNow = async (): Promise<{ cancelled: true }> => {
       await this.requireSession(conversationId);
       // Cancel means stop: held messages stay queued and removable, and none
       // of them rides the idle transition this interrupt causes. Paused
@@ -3893,7 +4009,10 @@ export class ChatAdapter {
         if (stop.resumed) this.projection(conversationId);
         this.stoppingTurns.delete(conversationId);
       }
-    }));
+    };
+    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => (this.immediateSteers.get(conversationId) ?? 0) > 0
+      ? stopNow()
+      : this.enqueuePromptAdmission(conversationId, stopNow));
   }
 
   undo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
@@ -7386,7 +7505,7 @@ export class ConversationProjection {
 
   seed(items: ConversationItem[]): void {
     this.mutationRevision++;
-    for (const item of snapshotClaudeTurns(items)) {
+    for (const item of snapshotTurns(items)) {
       const current = this.timeline.get(item.id);
       const interaction = mergeInteraction(current, item);
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
@@ -7420,7 +7539,7 @@ export class ConversationProjection {
         staged.delete(update.itemId); touched.add(update.itemId); settled.add(update.itemId);
         continue;
       }
-      const incoming = preserveClaudeTurn(prior.get(update.item.id), snapshotClaudeItem(update.item)), current = staged.get(incoming.id);
+      const incoming = preserveClosedTurn(prior.get(update.item.id), snapshotTurn(update.item)), current = staged.get(incoming.id);
       const interaction = mergeInteraction(current, incoming, coveredLaunchFor?.(incoming.id));
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") settled.add(merged.id);
@@ -7486,8 +7605,8 @@ export class ConversationProjection {
     const revision = this.mutationRevision, cursor = this.replay.latestCursor(), prior = this.timeline;
     const staged = new Map<string, ConversationItem>(), text = new ProviderTextReconciler();
     const notifications: ConversationItem[] = [], prunedFallbacks = new Set<string>();
-    for (const item of snapshotClaudeTurns(items)) {
-      const current = staged.get(item.id), interaction = mergeInteraction(current, preserveClaudeTurn(prior.get(item.id), item));
+    for (const item of snapshotTurns(items)) {
+      const current = staged.get(item.id), interaction = mergeInteraction(current, preserveClosedTurn(prior.get(item.id), item));
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       const fallback = this.workerFallbacks.get(merged.id);
       if (fallback && !sameConversationItems([merged], [fallback.fallback])) prunedFallbacks.add(merged.id);
@@ -7522,7 +7641,7 @@ export class ConversationProjection {
   }
 
   apply(update: NormalizedProviderUpdate): ChatEvent | undefined {
-    if (update.kind === "upsert") return this.upsert(orderedClaudeItem(this.timeline.get(update.item.id), update.item));
+    if (update.kind === "upsert") return this.upsert(orderedTurn(this.timeline.get(update.item.id), update.item));
     if (update.kind === "remove") {
       this.workerOrigins.delete(update.itemId);
       this.workerFallbacks.delete(update.itemId);
@@ -7547,12 +7666,12 @@ export class ConversationProjection {
     // provider's own queue semantics and OpenCode holds it until the active
     // turn actually ends; only removability is lost early. Without turn
     // identity on status events the two cases cannot be told apart here.
-    if (update.kind === "status") return this.statusUpdate(update.status, update.message, true, update as typeof update & OpenCodeStepStatus & OpenCodeCompletionAlias);
+    if (update.kind === "status") return this.statusUpdate(update.status, update.message, true, update as typeof update & ChatStatusLiveness);
     // An inbox delta is the adapter's, applied to its pending-steer map
     // before updates reach a projection; one that arrives here is a no-op.
     if (update.kind === "inbox") return undefined;
     const wasNew = update.item !== undefined && !this.timeline.has(update.itemId);
-    if (wasNew && update.item) this.timeline.set(update.itemId, orderedClaudeItem(undefined, update.item));
+    if (wasNew && update.item) this.timeline.set(update.itemId, orderedTurn(undefined, update.item));
     const before = this.text.value(update.identity);
     const delta = update.mode === "cumulative"
       ? this.text.cumulative(update.identity, update.text)
@@ -7567,6 +7686,8 @@ export class ConversationProjection {
       const durationMs = textItem.durationMs ?? (finishedNow ? Math.max(0, update.item!.createdAt - textItem.createdAt) : undefined);
       return this.upsert({ ...textItem, text: currentText, status, ...(durationMs === undefined ? {} : { durationMs }) });
     }
+    // Reply liveness facts travel with whole items: a text update supplies
+    // them only when it creates the row, never for an existing one.
     if (wasNew && textItem?.type === "assistant_message") return this.upsert({ ...textItem, markdown: currentText });
     if (update.mode === "cumulative" && before !== currentText && !currentText.startsWith(before)) {
       const item = this.timeline.get(update.itemId);
@@ -7582,7 +7703,7 @@ export class ConversationProjection {
   }
 
   upsert(item: ConversationItem): ChatEvent | undefined {
-    item = snapshotClaudeItem(item);
+    item = snapshotTurn(item);
     const current = this.timeline.get(item.id);
     let interaction: ConversationItem;
     const worker = item.type === "background_task" ? item as BufferedWorker : undefined;
@@ -7647,49 +7768,46 @@ export class ConversationProjection {
     this.historyChanged(expected.id);
   }
 
-  private stepVisualLive = false;
-  private aliasVisualLive = false;
+  // Ordered continuation of the current turn: a failed status that is not its
+  // end, and a completed status that only repeated one already ordered while
+  // the turn was live.
+  private turnContinues = false;
+  private repeatContinues = false;
 
   /** Copy the current primitive hint into this snapshot, never a shared token. */
-  withVisualStatus(summary: ConversationSummary): ConversationSummary & OpenCodeStepStatus & OpenCodeCompletionAlias {
-    const { [OPENCODE_STEP_LIVE]: _previous, [OPENCODE_ALIAS_LIVE]: _alias, ...current } = summary as typeof summary & OpenCodeStepStatus & OpenCodeCompletionAlias;
-    if (this.aliasVisualLive && this.status === "completed" && summary.status === "completed") return { ...current, [OPENCODE_ALIAS_LIVE]: true };
-    return this.stepVisualLive && this.status === "failed" && summary.status === "failed"
-      ? { ...current, [OPENCODE_STEP_LIVE]: true }
+  withVisualStatus(summary: ConversationSummary): ConversationSummary & ChatStatusLiveness {
+    const { [CHAT_TURN_CONTINUES]: _previous, [CHAT_REPEAT_CONTINUES]: _repeat, ...current } = summary as typeof summary & ChatStatusLiveness;
+    if (this.repeatContinues && this.status === "completed" && summary.status === "completed") return { ...current, [CHAT_REPEAT_CONTINUES]: true };
+    return this.turnContinues && this.status === "failed" && summary.status === "failed"
+      ? { ...current, [CHAT_TURN_CONTINUES]: true }
       : current;
   }
 
-  statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true, native?: OpenCodeStepStatus & OpenCodeCompletionAlias): ChatEvent {
-    const alias = native?.[OPENCODE_COMPLETION_ALIAS] === true;
-    this.aliasVisualLive = alias && (isLiveConversationStatus(this.status) || this.stepVisualLive || this.aliasVisualLive);
+  statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true, liveness?: ChatStatusLiveness): ChatEvent {
+    // Only a completed status can be a repeat; on any other the marker is
+    // ignored, and the status is processed (and published) as usual.
+    const repeat = status === "completed" && liveness?.[CHAT_STATUS_REPEAT] === true;
+    this.repeatContinues = repeat && (isLiveConversationStatus(this.status) || this.turnContinues || this.repeatContinues);
     this.status = status;
-    this.stepVisualLive = status === "failed" && native?.[OPENCODE_STEP_LIVE] === true;
-    // A known step failure is nonterminal. Actual ordered terminal statuses
-    // seal retained native history before a later execution can reuse it.
-    // Replace rows, not shared tokens: queued earlier frames/snapshots keep
-    // their original text and execution boundary, with no extra wire events.
-    if (sourceTransition && !alias && (status === "completed" || status === "interrupted" || status === "failed" && !this.stepVisualLive)) {
-      const closedTurns = new Map<ClaudeTurn, ClaudeTurn>();
-      for (const [id, item] of this.timeline) {
-        if (item.type !== "assistant_message") continue;
-        const executionLive = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true;
-        const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
-        if (!executionLive && (!turn || turn.completed)) continue;
-        let closed: ClaudeTurn | undefined;
-        if (turn && !turn.completed) {
-          closed = closedTurns.get(turn);
-          if (!closed) { closed = Object.freeze({ completed: true }); closedTurns.set(turn, closed); }
-        }
-        const sealed = { ...item, ...(executionLive ? { [OPENCODE_EXECUTION_LIVE]: false } : {}), ...(closed ? { [CLAUDE_TURN]: closed } : {}) };
+    // A status is a repeat or a continuation, never both: a repeat may keep
+    // the turn's liveness (above) but never restore it.
+    // "Turn continues" means something only on a failed status that is not a
+    // repeat; on completed or interrupted it is ignored.
+    this.turnContinues = !repeat && status === "failed" && liveness?.[CHAT_TURN_CONTINUES] === true;
+    // A terminal status whose turn continues is not its end, and a repeat is
+    // not a boundary. Actual ordered terminal statuses seal retained replies
+    // before a later execution can reuse them, with no extra wire events.
+    if (sourceTransition && !repeat && isTerminalStatus(status) && !this.turnContinues) {
+      for (const [id, sealed] of sealOpenTurns(this.timeline.values())) {
         this.timeline.set(id, sealed);
         this.historyChanged(id);
       }
     }
     this.onStatus?.(status, sourceTransition);
     return this.replay.publish({ type: "conversation.status", status, message,
-      ...(this.stepVisualLive ? { [OPENCODE_STEP_LIVE]: true as const } : {}),
-      ...(alias ? { [OPENCODE_COMPLETION_ALIAS]: true as const } : {}),
-      ...(this.aliasVisualLive ? { [OPENCODE_ALIAS_LIVE]: true as const } : {}) });
+      ...(this.turnContinues ? { [CHAT_TURN_CONTINUES]: true as const } : {}),
+      ...(repeat ? { [CHAT_STATUS_REPEAT]: true as const } : {}),
+      ...(this.repeatContinues ? { [CHAT_REPEAT_CONTINUES]: true as const } : {}) });
   }
 
   conversationUpdate(conversation: ConversationSummary): ChatEvent {
@@ -8007,46 +8125,84 @@ function latestModel(byMessage: Map<string, MessageModel> | undefined): string |
   return latest?.value.model;
 }
 
+// Turn tokens (see turn-liveness.ts). These functions are the only place a
+// token is frozen, copied, sealed, preserved or compared: normalizers write
+// tokens, and the router only reads the ones a projection publishes.
+
+function turnOf(item: ConversationItem | undefined): ChatTurnToken | undefined {
+  return (item as (ConversationItem & ChatTurnIdentity) | undefined)?.[CHAT_TURN];
+}
+
+function withTurn(item: ConversationItem, turn: ChatTurnToken): ConversationItem {
+  const replaced: ConversationItem & ChatTurnIdentity = { ...item, [CHAT_TURN]: turn };
+  return replaced;
+}
+
 /** Capture turn evidence with the snapshot's text/cursor, before returning its
- * promise. Native result normalization may seal a shared token before any
- * awaiting service/router resumes. Never freeze or mutate that native token:
- * queued frames still need it, and ordered status sealing replaces retained
- * rows independently. Copies belong only to this bounded snapshot. */
-function snapshotClaudeItem(item: ConversationItem, turns?: Map<ClaudeTurn, ClaudeTurn>): ConversationItem {
-  const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+ * promise. Normalization may close a shared provisional token before any
+ * awaiting service/router resumes. Never freeze or mutate the producer's own
+ * token: queued frames still need it, and ordered status sealing replaces
+ * retained rows independently. Copies belong only to this bounded snapshot. */
+function snapshotTurn(item: ConversationItem, turns?: Map<ChatTurnToken, ChatTurnToken>): ConversationItem {
+  const turn = turnOf(item);
   if (!turn || Object.isFrozen(turn)) return item;
   let captured = turns?.get(turn);
-  if (!captured) { captured = Object.freeze({ completed: turn.completed }); turns?.set(turn, captured); }
-  const snapshot: ConversationItem & ClaudeTextIdentity = { ...item, [CLAUDE_TURN]: captured };
-  return snapshot;
+  if (!captured) { captured = Object.freeze({ completed: turn.completed, authority: turn.authority }); turns?.set(turn, captured); }
+  return withTurn(item, captured);
 }
 
-function snapshotClaudeTurns(items: ConversationItem[]): ConversationItem[] {
-  const turns = new Map<ClaudeTurn, ClaudeTurn>();
-  return items.map(item => snapshotClaudeItem(item, turns));
+function snapshotTurns(items: ConversationItem[]): ConversationItem[] {
+  const turns = new Map<ChatTurnToken, ChatTurnToken>();
+  return items.map(item => snapshotTurn(item, turns));
 }
 
-/** Native apply is ordered; producer normalization is not. A result may already
- * have mutated its native token while this earlier row awaited requireSession.
- * Enroll immutable projection-owned evidence, never that producer's future
- * completion. Historical seed/recover/replace retain their snapshot authority;
- * an already-closed native row id cannot be reopened by a late alias. */
-function orderedClaudeItem(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
-  if (incoming.type !== "assistant_message" || !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]) return incoming;
-  const retained = (current as (ConversationItem & ClaudeTextIdentity) | undefined)?.[CLAUDE_TURN];
-  const ordered: typeof incoming & ClaudeTextIdentity = { ...incoming, [CLAUDE_TURN]: retained && Object.isFrozen(retained) ? retained : Object.freeze({ completed: false }) };
-  return ordered;
-}
-
-/** Native row ids do not move between turns. Once closed, stale history cannot reopen one. */
-function preserveClaudeTurn(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
-  if (current?.type !== "assistant_message" || incoming.type !== "assistant_message") return incoming;
-  const turn = (current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN];
-  if (turn?.completed && !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]?.completed) {
-    const preserved: typeof incoming & ClaudeTextIdentity = { ...incoming, [CLAUDE_TURN]: turn };
-    return preserved;
+/** Apply is ordered; producer normalization is not. A producer may already
+ * have closed its provisional token while this earlier row awaited
+ * requireSession. Enroll immutable projection-owned evidence, never that
+ * producer's future completion: an already-closed row id cannot be reopened by
+ * a late frame. Authoritative evidence comes only from stored rows
+ * (seed/recover/replace and direct upserts), so ordered provider input that
+ * carries it is treated as carrying no token. */
+function orderedTurn(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+  const turn = incoming.type === "assistant_message" ? turnOf(incoming) : undefined;
+  if (!turn) return incoming;
+  if (turn.authority === "authoritative") {
+    const { [CHAT_TURN]: _ignored, ...unannotated } = incoming as ConversationItem & ChatTurnIdentity;
+    return unannotated as ConversationItem;
   }
-  return incoming;
+  const retained = turnOf(current);
+  return withTurn(incoming, retained && Object.isFrozen(retained) ? retained : Object.freeze({ completed: false, authority: "provisional" }));
+}
+
+/** Row ids do not move between turns. A closed provisional token is never
+ * reopened by an open provisional or unannotated row. Authoritative evidence
+ * is taken as the row carries it (a reply never carries both kinds). */
+function preserveClosedTurn(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+  if (current?.type !== "assistant_message" || incoming.type !== "assistant_message") return incoming;
+  const turn = turnOf(current);
+  return turn?.authority === "provisional" && turn.completed && !turnOf(incoming)?.completed ? withTurn(incoming, turn) : incoming;
+}
+
+/** The replacement row for every reply whose turn is still open. Replace rows,
+ * not shared tokens: queued earlier frames and snapshots keep their original
+ * text and execution boundary. Replies of one turn share their closed token. */
+function sealOpenTurns(items: Iterable<ConversationItem>): Array<[string, ConversationItem]> {
+  const closedTurns = new Map<ChatTurnToken, ChatTurnToken>();
+  const sealed: Array<[string, ConversationItem]> = [];
+  for (const item of items) {
+    const turn = item.type === "assistant_message" ? turnOf(item) : undefined;
+    if (!turn || turn.completed) continue;
+    let closed = closedTurns.get(turn);
+    if (!closed) { closed = Object.freeze({ completed: true, authority: turn.authority }); closedTurns.set(turn, closed); }
+    sealed.push([item.id, withTurn(item, closed)]);
+  }
+  return sealed;
+}
+
+/** Whether a recovered row carries turn evidence its projected row lacks. */
+function turnEvidenceChanged(current: ConversationItem | undefined, incoming: ConversationItem): boolean {
+  const turn = turnOf(incoming);
+  return turn !== undefined && turn.completed !== turnOf(current)?.completed;
 }
 
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem, coveredLaunch?: BackgroundTaskItem): ConversationItem {
@@ -8065,11 +8221,12 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     return { ...incoming, ...preserved };
   }
   if (current.type === "assistant_message" && incoming.type === "assistant_message") {
-    const merged = mergeAssistantMessage(current, incoming);
+    // Facts the incoming row omits, or carries as explicit undefined, are kept.
+    const merged = mergeAssistantMessage(current, withRetainedReplyFacts(current, incoming));
     // A reconnect's first observed delta is not this retained part's birth.
     // Preserve only against explicitly weak text-start evidence, not against
     // real native starts or general message/model/usage corrections.
-    return preserveClaudeTurn(current, (incoming as typeof incoming & OpenCodeTextStart)[OPENCODE_TEXT_START_FALLBACK] === true
+    return preserveClosedTurn(current, (incoming as typeof incoming & OpenCodeTextStart)[OPENCODE_TEXT_START_FALLBACK] === true
       ? { ...merged, createdAt: current.createdAt } : merged);
   }
   // Resolved interactions are terminal. The merged provider streams preserve

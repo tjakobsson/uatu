@@ -2,10 +2,11 @@
 
 Chat is a workspace-scoped web client for coding agents you have already
 installed and authenticated yourself. It bundles no agent, configures no
-model provider, and holds no provider credentials. Two agents are offered
-today — **OpenCode** and **Claude Code** — and every conversation belongs
-to exactly one of them, chosen when the conversation is created and fixed
-for its life. One agent being missing or broken never blocks the other.
+model provider, and holds no provider credentials. Three agents are offered
+today — **OpenCode**, **Claude Code** and **Antigravity**, in that order —
+and every conversation belongs to exactly one of them, chosen when the
+conversation is created and fixed for its life. One agent being missing or
+broken never blocks the others.
 
 ## Personal Hub chat preferences
 
@@ -102,6 +103,28 @@ region rather than displacing the message field or primary actions.
 3. Ensure `claude --version` succeeds in the environment that starts the
    uatu hub or direct server.
 
+### Antigravity
+
+1. Install Google Antigravity's command-line tool, `agy`, by following
+   [Antigravity's documentation](https://antigravity.google/docs/ide/extensions/acp/).
+2. Run `agy` once as the same operating-system user that runs `uatu` and
+   sign in. Chat uses the login `agy` holds; the Hub's Agent accounts has
+   no Antigravity entry.
+3. Ensure `agy --version` succeeds in the environment that starts the uatu
+   hub or direct server.
+
+**Google's terms for consumer plans.** Antigravity's
+[FAQ](https://antigravity.google/docs/faq.md) says that using `agy` inside
+third-party coding agents or applications is not supported under consumer
+plans, and recommends Gemini Enterprise or Google AI Studio API keys for
+third-party agents. Section 6 of the
+[Antigravity Additional Terms](https://antigravity.google/terms/) treats
+third-party access using Antigravity's OAuth login as a breach. Its
+[ACP page](https://antigravity.google/docs/ide/extensions/acp/) says any ACP
+client can launch the Antigravity CLI. UatuCode only launches your installed
+`agy`, which signs in by itself, and never handles Antigravity credentials.
+Whether to use it with a personal plan is your decision.
+
 Each agent owns its configuration, authentication, and durable session
 history. uatu never asks for, copies, transmits, or stores provider API
 keys. UatuCode Desktop's Keychain contains only hub login credentials and
@@ -109,10 +132,12 @@ hub session identifiers, not agent or model-provider secrets.
 
 ## Lifecycle And Workspace
 
-The two agents run differently. Opening Chat reports availability and
+The agents run differently. Opening Chat reports availability and
 lists every agent's existing conversations merged into one chooser — for
 OpenCode that enumeration needs its service, which is started then; for
-Claude Code it is a read of native session storage that starts nothing.
+Claude Code it is a read of native session storage that starts nothing;
+for Antigravity it is one short-lived `agy acp` process that lists its
+sessions and exits.
 Beyond what enumeration itself needs, no agent runs until a conversation
 actually needs it.
 
@@ -128,6 +153,21 @@ Agent SDK session against your installed `claude`, and an idle
 conversation holds no process. Conversations resume from Claude Code's
 own session storage (`~/.claude/projects/...`), which uatu reads but
 never writes.
+
+**Antigravity** has no long-lived service either. Availability is a bounded
+`agy --version` probe. Each conversation with a turn running, a permission
+waiting or its history being read runs its own `agy acp` process, speaking
+the Agent Client Protocol (ACP) through the official SDK, and gives it back
+after five idle minutes. Opening a conversation reads its history from
+`agy`'s session replay, then adds what replay leaves out — file-read output,
+denied permissions, and each turn's tokens, model and cost — from `agy`'s
+own transcript (`~/.gemini/antigravity-cli/brain/<id>/...`), which uatu
+reads but never writes. A missing or unrecognized transcript leaves the
+replayed history as it is. When `agy`'s login has expired, a conversation
+already listed is read from that transcript alone; without one, opening it
+shows the sign-in notice until you sign in through `agy`. uatu keeps no copy
+of Antigravity conversations of its own. Workspace shutdown ends
+every `agy` process uatu started, together with anything it left running.
 
 ### Sending, steering and queued messages
 
@@ -175,6 +215,20 @@ Send's accessible description names the shortcuts. Idle messages send immediatel
 and OpenCode V1 queue busy follow-ups without offering steering. Pending images
 and native commands queue rather than being labelled as a text steer; replacement
 submission retains the native staged-revert semantics.
+
+Some agents take a steer into the running turn as soon as it is sent and
+cannot withdraw it afterwards. They declare **immediate steering** instead of
+steering. The composer works the same way: a Send tap, desktop Enter or touch
+Ctrl/Command+Enter steers ordinary text while the agent works, and
+Alt/Option+Enter or the 2.5-second Send hold queues. The steer goes to the agent
+at once and appears once in the timeline, as an ordinary message where the
+agent took it, so the pending messages panel never shows a Steer entry, a
+switch back to the queue, or a withdrawal action. A steer the agent refuses
+returns to the composer with its reason; one whose delivery cannot be confirmed
+is kept as unconfirmed and never resent. Queued messages wait until the turn
+that carries the steer ends. **Send now** follows the rule for agents without
+steering: it is offered only while the queue is paused or the conversation is
+idle.
 
 While native steering is available, the configuration pill identifies **Next
 turn** choices. Changed model, mode and reasoning settings apply to queued or
@@ -895,7 +949,7 @@ session-only when the session runs through the SDK. Chat never sees a
 durable cron.
 
 The canonical first watched root is the immutable working directory for
-both agents. For a direct multi-root command, later roots remain available
+every agent. For a direct multi-root command, later roots remain available
 to Preview but Chat uses only the first root. Browser requests cannot
 select another working directory, and conversations belonging to another
 canonical directory are not listed or accepted.
@@ -906,6 +960,62 @@ held. Completed history remains in
 each agent's own storage and is available when the workspace starts
 again. Closing a browser, PWA, or UatuCode Desktop window does not stop a
 hub workspace.
+
+### Antigravity conversations
+
+An Antigravity conversation streams `agy`'s replies, thoughts and tool
+activity into the same timeline as the other agents. A command shows its
+output and exit code, an edit adds its file changes, and a tool waiting for
+your permission shows as waiting. A permission card offers exactly what
+`agy` offers: **Allow once** and **Reject**, with nothing that approves
+future requests.
+
+- **Models and thinking levels.** The model picker lists the models `agy`
+  advertises, with their thinking levels (`low` to `xhigh`, as `agy`
+  names them) as variants, and the modes default, accept edits and plan. `agy` starts a
+  reopened conversation on its own default, so the conversation's chosen
+  model, level and mode are applied again before its next prompt.
+- **Commands.** `agy`'s slash commands are offered with their
+  descriptions and sent to `agy` as the prompt text.
+- **Images.** Image attachments are offered only when `agy` says it
+  accepts image prompts.
+- **Steering.** Antigravity takes a message sent during a turn into that
+  turn at once (immediate steering, above). `agy` has no acknowledgement
+  for a prompt, so the steer is confirmed only by `agy`'s answer to it,
+  which usually comes when the turn carrying it ends. Until then it shows
+  as "Sent — waiting for the agent to confirm", and nothing waits for it:
+  you can queue follow-ups, edit them in the pending messages panel, and
+  send another steer. Once confirmed, the steer appears in the timeline
+  where you sent it. If `agy` answers the steer with an error, its text
+  returns to the composer with `agy`'s reason. If the turn is stopped or
+  `agy`'s process ends first, the steer stays unconfirmed and is never
+  resent.
+- **Context and tokens.** The context indicator follows the used and size
+  figures `agy` reports, and each turn carries its token usage.
+- **Cost.** `agy` reports tokens but no price, so Chat prices each turn
+  from a table built into UatuCode: a snapshot of [models.dev](https://models.dev)'s
+  Vertex AI rates (Standard tier, Global endpoint), including the Claude and
+  GPT-OSS models `agy` offers, taken on the date recorded in
+  `src/chat/antigravity/prices.ts` and regenerated with
+  `bun run scripts/update-antigravity-prices.ts`. Chat makes no network
+  request for prices. Thinking is inside `agy`'s output count and is priced
+  at the output rate, cached reads at the cache-read rate, and cache writes
+  are not priced. Base rates only: long-context tiers are not applied,
+  because a turn's usage is not broken down per request. Thinking levels
+  share their model's rate, a model id naming one level (such as
+  `gemini-4-neon-low`) is priced as its model, and the orchestrator models borrow their
+  family's price. A model the table cannot price leaves the turn without a
+  cost rather than a zero. The figure is shown like other agents' costs,
+  with no "estimated" marker; it is only as current as the snapshot, and a
+  provider's price change after that date is not reflected until the table
+  is regenerated.
+
+Not supported for Antigravity: rename, undo and redo, background workers,
+questions, subagents, scheduled wakeups, `/btw` side questions, plan usage,
+and typed model ids. Tested against a fake `agy` only, not against `agy`
+itself: cancelling while a permission card is open, plan updates, quota
+errors and image prompts. A quota error appears as "Antigravity could not
+answer" with `agy`'s message.
 
 ## Images And SVG In Replies
 
@@ -970,7 +1080,7 @@ per image and eight visuals per message**; user-upload formats are unchanged.
 The first eight observed occurrences keep their slots, including unavailable
 ones. Removing an occurrence, resolving an earlier reference, or changing
 rendered order does not make room for a ninth capture. Text parts belonging to
-the same native assistant message share that budget for both agents.
+the same native assistant message share that budget for every agent.
 Small metadata and raw-byte sidecars avoid parsing large base64 records on
 subsequent history and image reads. Existing canonical records stay untouched;
 their first access may still read the legacy record to derive those sidecars.
@@ -1051,6 +1161,9 @@ OpenCode hints are best-effort: an unmergeable inline configuration or unwritabl
 guidance state logs a sanitized warning and leaves native startup/configuration
 validation to OpenCode. Startup also performs bounded cleanup of guidance owned
 by processes proven absent; live and unknown owners are retained.
+Antigravity gets no such guidance: ACP has no channel for system
+instructions, and adding it to your prompts would change the conversation
+`agy` records. Images it writes in Markdown still render under the same rules.
 
 ## Access And Authority
 
@@ -1075,19 +1188,24 @@ complete trust model and network guidance.
 
 - **An agent is not installed:** its executable was not found on the
   server process's `PATH`. Verify it from the service account and restart
-  the workspace after correcting `PATH`. The other agent keeps working.
+  the workspace after correcting `PATH`. The other agents keep working.
 - **OpenCode could not start:** run `opencode serve --hostname 127.0.0.1
   --port 0` as the daemon user and inspect its diagnostic. Check
   executable permissions, configuration syntax, and service-manager
   environment.
 - **Claude Code could not start:** run `claude --version` as the daemon
   user; the Chat diagnostics panel carries the probe's captured output.
+- **Antigravity could not start:** run `agy --version` as the daemon user;
+  the Chat diagnostics panel carries the probe's captured output.
+- **Antigravity is not logged in:** run `agy` where UatuCode runs and sign
+  in. The notice clears at the next conversation listing, retry or prompt,
+  without a restart.
 - **Installed version is not compatible:** upgrade the agent, then use
   Retry on its unavailable panel — a retry restarts only that agent.
 - **A prompt fails or no model is available:** run the agent directly and
   verify its provider authentication (`/connect` and `/models` in
   OpenCode; sign in again in Claude Code). Provider failures do not
-  disable Preview, Files, Search, Terminal, or the other agent.
+  disable Preview, Files, Search, Terminal, or the other agents.
 - **A conversation is missing:** sessions are filtered to the canonical
   first root. Confirm the agent created the session in exactly that
   workspace directory.
@@ -1117,12 +1235,14 @@ complete trust model and network guidance.
 Three words, three meanings. They are used this way in the UI, in the
 specs, and in the route table.
 
-- **agent** — a program Chat talks to: OpenCode or Claude Code. Every
+- **agent** — a program Chat talks to: OpenCode, Claude Code or
+  Antigravity. Every
   conversation names its owning agent, and conversation ids are
   agent-qualified on the wire.
 - **mode** — how an agent is asked to work: OpenCode's Build and Plan,
   Claude Code's permission modes (`auto`, `default`, `acceptEdits`,
-  `plan`; `auto` is the declared default a fresh conversation starts in).
+  `plan`; `auto` is the declared default a fresh conversation starts in),
+  Antigravity's `default`, `accept-edits` and `plan`.
   Listed per agent at `/api/chat/modes?agent=...`. OpenCode calls these
   agents on its own wire; uatu does not, because the word is taken.
 - **subagent** — an agent the agent spawned inside a turn. What the
@@ -1136,14 +1256,17 @@ that thing — not that it failed, and not that it is empty.
 
 ## Scope
 
-OpenCode and Claude Code are the agents currently declared. This
-integration does not implement ACP, Codex, session sharing, or a native
-SwiftUI chat renderer, and it does not import Claude Code sessions
-recorded under other working directories. Another agent may be added
-behind uatu's normalized API; each agent's own provider support remains
-configured and authenticated through that agent.
+OpenCode, Claude Code and Antigravity are the agents currently declared.
+Antigravity is reached through the Agent Client Protocol (ACP), as a client
+of `agy acp`; Chat is not a general ACP client for other agents. This
+integration does not implement Codex, session sharing, or a native SwiftUI
+chat renderer, and it does not import Claude Code sessions recorded under
+other working directories. Another agent may be added behind uatu's
+normalized API; each agent's own provider support remains configured and
+authenticated through that agent.
 
 Chat surfaces the models each agent has available — OpenCode's configured
-providers, Claude Code's model catalog with per-model effort levels — and
+providers, Claude Code's model catalog with per-model effort levels,
+Antigravity's models with their thinking levels — and
 offers each agent's own slash commands. Neither adds a provider or
 credential of its own: authentication stays with the agent.
