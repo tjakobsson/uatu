@@ -90,6 +90,24 @@ describe.skipIf(process.platform === "win32")("PathAgentRuntime", () => {
     });
   }, 10_000);
 
+  test("the bound is the answer's deadline even while a descendant holds the probe's output open", async () => {
+    // The child is killed on the bound, but a background descendant keeps
+    // its pipes for 3 s more; the answer must not wait for it.
+    const fake = await fakeExecutable("(sleep 3) &\nexec sleep 3");
+    const started = Date.now();
+    const availability = await runtime({ PATH: fake.directory }, { probeTimeoutMs: 300 }).ensure();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(availability).toEqual(expect.objectContaining({ state: "unavailable", reason: "startup-failed", diagnostics: expect.objectContaining({ lastProbe: { kind: "abandoned" } }) }));
+  }, 10_000);
+
+  test("a probe that exited answers with its version at the bound when a descendant keeps its output open", async () => {
+    const fake = await fakeExecutable("echo 'fake-agent 2.0.0'\n(sleep 3) &\nexit 0");
+    const started = Date.now();
+    const availability = await runtime({ PATH: fake.directory }, { probeTimeoutMs: 300 }).ensure();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(availability).toEqual({ state: "ready", version: "2.0.0" });
+  }, 10_000);
+
   test("what a timed-out probe printed before the bound is kept as evidence", async () => {
     // Through the probe seam: a real child cannot be made to print before a
     // deadline that starts at its spawn.

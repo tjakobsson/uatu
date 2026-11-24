@@ -4,9 +4,9 @@ import type { ChatAvailability, ChatStartupDiagnostics } from "./types";
 import { discoverExecutableCandidates } from "./executable";
 
 // A version probe is one short-lived process, killed this long after it
-// starts so a hung mount or a wedged install cannot run on. The probe then
-// still waits for the child's output pipes to close, so a descendant that
-// keeps one open can delay the answer past this deadline.
+// starts so a hung mount or a wedged install cannot run on. The deadline is
+// also the answer's: output pipes a descendant still holds open are released
+// then, keeping what was read so far.
 const PROBE_TIMEOUT_MS = 10_000;
 const OUTPUT_LIMIT_BYTES = 16 * 1024;
 
@@ -239,26 +239,57 @@ export function pathAgentRuntime(runtime: PathAgentRuntime, createProvider: (exe
   };
 }
 
-async function runProbe(argv: string[], timeoutMs: number): Promise<VersionProbeResult> {
+/** Run one version probe. It answers by `timeoutMs` whatever its child or a
+ * descendant holding its pipes does: a child still running then is killed and
+ * reported as timed out; one that exited keeps its exit code. Either way the
+ * output read so far is the evidence. Exported for its own tests. */
+export async function runProbe(argv: string[], timeoutMs: number): Promise<VersionProbeResult> {
   const child = Bun.spawn(argv, {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
   });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
+  const stdout = collectText(child.stdout);
+  const stderr = collectText(child.stderr);
+  let exitCode: number | null = null;
+  let exited = false;
+  const childExited = child.exited.then(code => { exitCode = code; exited = true; });
+  let expire!: () => void;
+  const deadline = new Promise<void>(resolve => { expire = resolve; });
+  const timer = setTimeout(expire, timeoutMs);
   (timer as unknown as { unref?: () => void }).unref?.();
   try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { exitCode: timedOut ? null : exitCode, stdout, stderr, timedOut };
+    await Promise.race([Promise.all([stdout.done, stderr.done, childExited]), deadline]);
   } finally {
     clearTimeout(timer);
   }
+  const timedOut = !exited;
+  if (timedOut) child.kill("SIGKILL");
+  stdout.release();
+  stderr.release();
+  return { exitCode: timedOut ? null : exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut };
+}
+
+// A stream read to its end, or until released, keeping what it delivered.
+function collectText(stream: ReadableStream<Uint8Array>): { done: Promise<void>; text: () => string; release: () => void } {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let released = false;
+  const done = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done || released) break;
+        chunks.push(value);
+      }
+    } catch { /* what was read before the failure stays */ }
+  })();
+  return {
+    done,
+    text: () => new TextDecoder().decode(Buffer.concat(chunks)),
+    release: () => {
+      released = true;
+      void reader.cancel().catch(() => undefined);
+    },
+  };
 }
