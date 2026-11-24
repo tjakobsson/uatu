@@ -62,6 +62,8 @@ type SteerState = {
   // The row it was taken in after, if any: its own row goes there once accepted.
   after?: string;
   sentAt: number;
+  // When agy took it in: its row's time, after every row before it.
+  takenAt?: number;
   text: string;
   attachments?: MessageAttachment[];
   decided?: SteerConfirmation["outcome"];
@@ -75,6 +77,10 @@ type HistorySource = { readonly items: ConversationItem[]; readonly accounting: 
 type Conversation = {
   readonly sessionId: string;
   readonly memory: AcpMemory;
+  // No row streamed from now on is stamped earlier than this: a steer taken
+  // in is stamped just before it, so ordering by time puts every row where
+  // the store and replay have it.
+  clockFloor?: number;
   readonly items: ConversationItem[];
   readonly accounting: StoredMessageAccounting[];
   // Replay has filled the store (or the conversation started here).
@@ -440,11 +446,19 @@ export class AntigravityProvider implements ChatProvider {
   // position as replay numbers it.
   private placeSteer(conversation: Conversation, steer: SteerState): void {
     const memory = conversation.memory;
-    this.emit(conversation, { updates: sealOpenBlock(memory, this.now()), outcome: "handled", eventType: "session/prompt" });
+    const takenAt = conversation.items.reduce((latest, item) => Math.max(latest, item.createdAt), this.stamp(conversation));
+    this.emit(conversation, { updates: sealOpenBlock(memory, takenAt), outcome: "handled", eventType: "session/prompt" });
     memory.userCount += 1;
     memory.blockCount = 0;
     steer.position = memory.userCount;
     steer.after = conversation.items.at(-1)?.id;
+    steer.takenAt = takenAt;
+    conversation.clockFloor = takenAt + 1;
+  }
+
+  /** Now, but never before the conversation's clock floor. */
+  private stamp(conversation: Conversation): number {
+    return Math.max(this.now(), conversation.clockFloor ?? 0);
   }
 
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
@@ -514,14 +528,15 @@ export class AntigravityProvider implements ChatProvider {
       steer.decided = "accepted";
       if (steer.position === undefined) this.placeSteer(conversation, steer);
       const position = steer.position!;
-      const user: ConversationItem = { id: `message:${userMessageId(memory, position)}`, type: "user_message", createdAt: steer.sentAt, text: steer.text, ...(steer.attachments?.length ? { attachments: steer.attachments } : {}) };
+      const createdAt = steer.takenAt ?? steer.sentAt;
+      const user: ConversationItem = { id: `message:${userMessageId(memory, position)}`, type: "user_message", createdAt, text: steer.text, ...(steer.attachments?.length ? { attachments: steer.attachments } : {}) };
       // After the row it was taken in after, and after steers taken in before it there.
       let at = steer.after === undefined ? 0 : conversation.items.findIndex(item => item.id === steer.after) + 1;
       const earlier = (item: ConversationItem | undefined) => item?.type === "user_message" && Number(item.id.match(/\.u(\d+)$/)?.[1] ?? Infinity) < position;
       while (at > 0 && at < conversation.items.length && earlier(conversation.items[at])) at += 1;
       conversation.items.splice(at > 0 ? at : conversation.items.length, 0, user);
       this.publish({ conversationId: conversation.sessionId, updates: [{ kind: "upsert", item: user }], outcome: "handled", eventType: "session/prompt" });
-      steer.confirm({ outcome: "accepted", messageId: userMessageId(memory, position), createdAt: steer.sentAt });
+      steer.confirm({ outcome: "accepted", messageId: userMessageId(memory, position), createdAt });
     } else if (error !== undefined && rpcErrorCode(error) !== undefined) {
       steer.decided = "refused";
       // Taken in with nothing numbered after it: give its position back.
@@ -638,12 +653,12 @@ export class AntigravityProvider implements ChatProvider {
     const toolCallId = request.toolCall.toolCallId;
     const memory = conversation.memory;
     memory.awaitingPermission.add(toolCallId);
-    const merged = { ...(memory.tools.get(toolCallId) ?? { createdAt: this.now() }) } as Record<string, unknown>;
+    const merged = { ...(memory.tools.get(toolCallId) ?? { createdAt: this.stamp(conversation) }) } as Record<string, unknown>;
     for (const [key, value] of Object.entries(request.toolCall)) if (value !== undefined && value !== null && key !== "sessionUpdate") merged[key] = value;
     memory.tools.set(toolCallId, merged);
-    this.emit(conversation, { updates: toolItems(memory, toolCallId, this.now()).map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "session/request_permission" });
+    this.emit(conversation, { updates: toolItems(memory, toolCallId, this.stamp(conversation)).map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "session/request_permission" });
     const item: PermissionRequest = {
-      id: `permission:${requestId}`, type: "permission", createdAt: this.now(), requestId,
+      id: `permission:${requestId}`, type: "permission", createdAt: this.stamp(conversation), requestId,
       action: request.toolCall.title ?? "Antigravity wants to use a tool",
       // What the tool touches: its file locations, or the call itself (a
       // command line) when agy names none. A card with no resource cannot be
@@ -671,7 +686,7 @@ export class AntigravityProvider implements ChatProvider {
     return settled.finally(() => {
       conversation.permissions -= 1;
       memory.awaitingPermission.delete(toolCallId);
-      if (memory.tools.has(toolCallId)) this.emit(conversation, { updates: toolItems(memory, toolCallId, this.now()).map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "session/request_permission.settled" });
+      if (memory.tools.has(toolCallId)) this.emit(conversation, { updates: toolItems(memory, toolCallId, this.stamp(conversation)).map(item => ({ kind: "upsert" as const, item })), outcome: "handled", eventType: "session/request_permission.settled" });
       this.scheduleIdle(conversation);
     });
   }
@@ -999,7 +1014,7 @@ export class AntigravityProvider implements ChatProvider {
       if (normalized.sessionLifecycle) this.retitle(conversation, normalized.sessionLifecycle.title);
       return;
     }
-    const normalized = normalizeAcpUpdate(params, conversation.memory, this.now());
+    const normalized = normalizeAcpUpdate(params, conversation.memory, this.stamp(conversation));
     if (normalized.sessionLifecycle) this.retitle(conversation, normalized.sessionLifecycle.title);
     if (normalized.configuration) conversation.applied = { ...conversation.applied ?? {}, ...normalized.configuration };
     this.emit(conversation, normalized);

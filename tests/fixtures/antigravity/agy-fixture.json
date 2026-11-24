@@ -107,6 +107,16 @@
       "stopReason": "end_turn"
     },
     "refuse": { "steps": [], "stopReason": "refusal" },
+    "drift": {
+      "steps": [
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello, " } } },
+        { "waitForPrompt": {} },
+        { "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Finishing the greeting" } } },
+        { "waitForSteer": {} },
+        { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Steered" } } }
+      ],
+      "stopReason": "end_turn"
+    },
     "pause": {
       "steps": [
         { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello, " } } },

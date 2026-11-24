@@ -11,6 +11,7 @@ import { pathAgentRuntime } from "../path-agent-runtime";
 import { LazyChatService } from "../service";
 import type { AntigravityPriceTable } from "./pricing";
 import { ChatAdapter } from "../adapter";
+import { applyChatEvent, type ChatProjection } from "../projection";
 import { SIGTERM_GRACE_MS } from "../../session-contract/spawn";
 import { STDIN_CLOSE_GRACE_MS, TERM_GRACE_MS } from "./connection";
 import { AntigravityProvider, type AntigravityProviderOptions } from "./provider";
@@ -23,9 +24,9 @@ import { AntigravityRuntime } from "./runtime";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(options: { idleReleaseMs?: number; idleTimer?: AntigravityProviderOptions["idleTimer"]; prices?: AntigravityPriceTable; setupDeadlineMs?: number } = {}) {
+async function setup(options: { idleReleaseMs?: number; idleTimer?: AntigravityProviderOptions["idleTimer"]; prices?: AntigravityPriceTable; setupDeadlineMs?: number; now?: () => number } = {}) {
   const fake = await installFakeAgy();
-  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, idleTimer: options.idleTimer, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs, homeDirectory: path.join(fake.stateDirectory, "home") });
+  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, idleTimer: options.idleTimer, now: options.now, stdinCloseGraceMs: 500, termGraceMs: 500, prices: options.prices, setupDeadlineMs: options.setupDeadlineMs, homeDirectory: path.join(fake.stateDirectory, "home") });
   const events: NormalizedProviderEvent[] = [];
   const controller = new AbortController();
   void (async () => { for await (const event of provider.events(controller.signal)) events.push(event); })();
@@ -577,7 +578,9 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       // Sent, not confirmed: no row yet.
       expect(await users()).toEqual(before);
       const confirmation = await sent.confirmation;
-      expect(confirmation).toEqual({ outcome: "accepted", messageId: expect.stringMatching(/\.u2$/), createdAt: sent.createdAt });
+      // Its time is when agy took it in, no earlier than the send.
+      expect(confirmation).toEqual({ outcome: "accepted", messageId: expect.stringMatching(/\.u2$/), createdAt: expect.any(Number) });
+      expect((confirmation as { createdAt: number }).createdAt).toBeGreaterThanOrEqual(sent.createdAt);
       expect(await users()).toEqual([...before, `message:${(confirmation as { messageId: string }).messageId}`]);
       await ended(session.id);
     });
@@ -611,6 +614,35 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await provider.interrupt(session.id);
       await ended(session.id);
       expect(statuses(session.id)).toEqual(["interrupted"]);
+    });
+
+    test("a steer taken in after more of the reply streamed sits, in the browser's projection, where history has it", async () => {
+      // Every reading of the clock is later than the one before.
+      let clock = 1_000;
+      const { fake, provider, waitFor, upserts, ended, events } = await setup({ now: () => clock++ });
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "drift: go", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.type === "assistant_message" && item.markdown === "Hello, "), "the reply's start");
+      // agy holds the steer back while it finishes the sentence it was writing.
+      await fake.setFlag("hold-take-in", true);
+      const sent = await provider.prompt(session.id, { id: "s", text: "Steer", delivery: "steer" }) as { confirmation: Promise<SteerConfirmation> };
+      await waitFor(() => upserts(session.id).some(item => item.type === "reasoning"), "the thought after the send");
+      await fake.setFlag("hold-take-in", false);
+      expect((await sent.confirmation).outcome).toBe("accepted");
+      await ended(session.id);
+      const order = (items: readonly ConversationItem[]) => items.filter(item => item.type === "user_message" || item.type === "reasoning" || item.type === "assistant_message" && item.markdown !== "").map(item => item.id);
+      let browser: ChatProjection = { conversationId: session.id, generation: "g", sequence: 0, cursor: "", status: "running", items: [], queued: [], acceptedDrafts: [], queueRevision: 0, configurationRevision: 0 };
+      let sequence = 0;
+      for (const event of events) for (const update of event.updates) {
+        if (update.kind === "upsert") browser = applyChatEvent(browser, { type: "item.upsert", conversationId: session.id, generation: "g", sequence: ++sequence, item: update.item }).projection;
+      }
+      const history = order((await provider.listMessages(session.id, { limit: 100 })).items);
+      expect(history.map(id => id.replace(/^\w+:[^.]*\./, ""))).toEqual(["u1", "a1.1", "r1.2", "u2", "a2.1"]);
+      // The opening prompt's row is the adapter's to publish; every other row is the provider's.
+      expect(order(browser.items)).toEqual(history.slice(1));
+      const reread = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reread.dispose());
+      expect(order((await reread.listMessages(session.id, { limit: 100 })).items)).toEqual(history);
     });
 
     test("a steer refused after a second was sent leaves the second's ids as replay numbers them", async () => {

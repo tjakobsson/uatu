@@ -21,6 +21,7 @@
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
 //   fail-thought-level   present: setting `thought_level` fails
+//   hold-take-in         present: a steer is taken into the run only once it is removed
 //   refuse-next-steer    present: the next steer is refused, and the flag removed
 //   hold-config          present: `session/set_config_option` and `session/set_mode`
 //                        wait to answer until it is removed
@@ -135,6 +136,8 @@ type Run = {
   cancelled: boolean;
   cancelWaiters: Array<() => void>;
   steerWaiters: Array<() => void>;
+  // Steers taken in that no `waitForSteer` step has consumed yet.
+  steersTaken: number;
   promptWaiters: Array<() => void>;
   pendingSteerUsage?: Record<string, number>;
 };
@@ -254,26 +257,34 @@ app.onRequest(methods.agent.session.prompt, ({ params, client }) => {
     throw new RequestError(-32603, "Antigravity is busy and did not take the message");
   }
   if (running && flag("crash-on-steer")) process.exit(1);
-  // Replay keeps the prompt's blocks: its text, then each image.
-  updateSession(params.sessionId, session => {
+  // Replay keeps the prompt's blocks, its text then each image, where agy
+  // took the prompt in.
+  const record = () => updateSession(params.sessionId, session => {
     for (const block of params.prompt) {
       if (block.type === "text" && block.text) session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text: block.text } });
       else if (block.type === "image") session.replay.push({ sessionUpdate: "user_message_chunk", content: { type: "image", mimeType: block.mimeType, data: "" } });
     }
   });
+  if (!running) record();
   if (running) {
     // A steer: the earlier prompt ends now, and this one carries the run.
     return new Promise<PromptResult>(resolve => {
-      const previous = running.resolve;
-      running.resolve = resolve;
-      previous({ stopReason: "end_turn", ...(running.pendingSteerUsage ? { usage: running.pendingSteerUsage } : {}) });
-      for (const waiter of running.steerWaiters.splice(0)) waiter();
+      const takeIn = () => {
+        record();
+        const previous = running.resolve;
+        running.resolve = resolve;
+        previous({ stopReason: "end_turn", ...(running.pendingSteerUsage ? { usage: running.pendingSteerUsage } : {}) });
+        running.steersTaken += 1;
+        for (const waiter of running.steerWaiters.splice(0)) waiter();
+      };
+      if (!flag("hold-take-in")) { takeIn(); return; }
+      const poll = setInterval(() => { if (!flag("hold-take-in")) { clearInterval(poll); takeIn(); } }, 5);
     }) as never;
   }
   const name = text.match(/^(\w+):/)?.[1];
   const script = fixture.scripts[name && fixture.scripts[name] ? name : "text"]!;
   return new Promise<PromptResult>(resolve => {
-    const run: Run = { resolve, cancelled: false, cancelWaiters: [], steerWaiters: [], promptWaiters: [] };
+    const run: Run = { resolve, cancelled: false, cancelWaiters: [], steerWaiters: [], steersTaken: 0, promptWaiters: [] };
     runs.set(params.sessionId, run);
     void perform(params.sessionId, script, run, client).then(result => {
       runs.delete(params.sessionId);
@@ -327,7 +338,8 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       if (answer.outcome.optionId === "deny") { steps = [...steps.slice(0, index + 1), ...(script.onReject ?? [])]; continue; }
     } else if ("waitForSteer" in step) {
       run.pendingSteerUsage = flag("no-usage") ? undefined : step.waitForSteer.usage;
-      await new Promise<void>(resolve => { run.steerWaiters.push(resolve); run.cancelWaiters.push(resolve); });
+      if (run.steersTaken === 0) await new Promise<void>(resolve => { run.steerWaiters.push(resolve); run.cancelWaiters.push(resolve); });
+      run.steersTaken = Math.max(0, run.steersTaken - 1);
       run.pendingSteerUsage = undefined;
     } else if ("waitForPrompt" in step) {
       await new Promise<void>(resolve => { run.promptWaiters.push(resolve); run.cancelWaiters.push(resolve); });
