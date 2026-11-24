@@ -556,6 +556,11 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // Bound the actual Markdown parse and store work, not just highlighting.
     // Deltas remain lossless and ordered; turn/message completion always flushes.
     const enrichmentCadenceMs = 100;
+    // A definition that resolves as the text stands: an angle or bare
+    // destination (escapes, one level of balanced parentheses), an optional
+    // title, and nothing else before the end. A candidate trigger like
+    // closesImageCandidate; the parser still decides what resolves.
+    const resolvingDefinition = /(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[ \t]*(?:\r?\n[ \t]*)?(?:<[^<>\n]*>|(?!<)(?:[^\s()\\]|\\(?:\S|(?!\S))|\((?:[^\s()\\]|\\(?:\S|(?!\S)))*\))+)(?:[ \t]+(?:"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|\((?:[^()\\]|\\[\s\S])*\)))?[ \t]*\r?$/;
     const completesVisualSyntax = (previous: Assistant, delta: string) => {
       // Inspect only a bounded suffix plus the new content. A delimiter must
       // actually finish in the new content, not merely remain in the suffix.
@@ -622,10 +627,12 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         || closesImageCandidate()
         // A definition can turn an earlier label into an image, shifting the
         // document index the client binds every later snapshot by. Re-enrich
-        // when its first destination character resolves the label, not when
-        // its line ends: a destination at EOF stays provisional in the capture
-        // itself. Later chunks of that destination stay on the cadence.
-        || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[ \t]*(?:\r?\n[ \t]*)?\S/g)
+        // when a delta changes whether the definition at the end resolves, not
+        // when its line ends: a bare destination's first character, an angle
+        // destination's '>', or an opening or closing title. Chunks that only
+        // extend a destination or title stay on the cadence, and a destination
+        // at EOF stays provisional in the capture itself.
+        || resolvingDefinition.test(suffix) !== resolvingDefinition.test(added)
         || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*\r?\n/g)
         || completes(/<(?:img|image)\b[^>]*>/gi);
     };
