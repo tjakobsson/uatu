@@ -41,7 +41,9 @@ src/
 │                   the agent's own command outside a Hub; keyboard submission
 │                   steers by default, with Alt/Option+Enter queuing while a
 │                   steering conversation is busy — the dock is one list, steers in
-│                   OpenCode's inbox first, then the Uatu-held queue;
+│                   OpenCode's inbox first, then the Uatu-held queue; an
+│                   immediate-steering agent gets the same keys, but its steer
+│                   goes to the running turn at once and never enters the dock;
 │                   turn-liveness holds the agent-neutral facts each
 │                   normalizer writes so image capture knows when a reply's
 │                   text is final and its turn has ended; path-agent-runtime

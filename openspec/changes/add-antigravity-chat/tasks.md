@@ -29,8 +29,8 @@ commit that passes `bun run test:ci` on its own.
 - [x] 2.2 Composer: give an `immediate-steering` conversation the same busy deliveries, guidance, accessible names and hold-to-queue gesture as a `steering` one, with commands and attachment drafts still queued. Verify with `composer.test.ts` and `hold-to-queue.test.ts` cases for a stub immediate-steering agent, and that the existing steering and no-steering cases pass unchanged.
 - [x] 2.3 Adapter and dock: deliver a steer to the provider at once with no pending, paused or withdrawable entry; return a refused steer's draft and attachments to the composer; keep an unknown admission as an unconfirmed entry without resending; and keep Send now on the dormant-or-idle rule. Verify with `adapter.test.ts` and `ui.test.ts` stub-agent cases for each.
 - [x] 2.4 Keep the turn running across a steer: an earlier prompt's end, which the provider does not publish as a status, sends no completion notification, does not drain the held queue, and does not finish workspace activity. Verify with adapter and notification tests, and with a test that a steered accepted message appears in the timeline once.
-- [ ] 2.5 Add an e2e case with a stub immediate-steering fake: tap Send steers with no Steer entry, Alt/Option+Enter queues, and the message appears once. Verify that it passes in `bun run test:e2e` for that file and that `bun run test:ci` passes.
-- [ ] 2.6 Document `immediate-steering` in `docs/CHAT.md` ("Sending, steering and queued messages") and in the `CLAUDE.md` chat folder-map note on keyboard submission. Verify that the documented shortcuts match the composer tests.
+- [x] 2.5 Add an e2e case with a stub immediate-steering fake: tap Send steers with no Steer entry, Alt/Option+Enter queues, and the message appears once. Verify that it passes in `bun run test:e2e` for that file and that `bun run test:ci` passes.
+- [x] 2.6 Document `immediate-steering` in `docs/CHAT.md` ("Sending, steering and queued messages") and in the `CLAUDE.md` chat folder-map note on keyboard submission. Verify that the documented shortcuts match the composer tests.
 
 ## 3. Antigravity provider and runtime (commit 3)
 

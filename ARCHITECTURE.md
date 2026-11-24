@@ -1121,6 +1121,14 @@ updates and replaces them from `inbox.list` on attach/reconnect. Only native
 delivery puts a steer in the transcript. One bound covers both owners:
 20 messages / 256 KiB, with steers listed before the held queue.
 
+An agent declaring `immediate-steering` instead of `steering`
+(`add-antigravity-chat` D9) has no inbox and no Steer entries. A busy steer goes
+straight to `provider.prompt` with `delivery: "steer"` and no configuration,
+under the steer admission bound; its user row goes in at acceptance, a refusal
+publishes nothing, and an unknown outcome stays in the receipt and is never
+resent. The provider reports the turn's end once, after the steered part, so
+held messages still wait for the carried turn.
+
 Paused held messages reflect dormancy/revert. Pending steers stay paused after
 an idle/interrupted/completed transition until a later wake supersedes it.
 Settlement identity, not wall time, fences delayed wake acknowledgements.

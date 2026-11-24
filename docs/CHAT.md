@@ -176,6 +176,20 @@ and OpenCode V1 queue busy follow-ups without offering steering. Pending images
 and native commands queue rather than being labelled as a text steer; replacement
 submission retains the native staged-revert semantics.
 
+Some agents take a steer into the running turn as soon as it is sent and
+cannot withdraw it afterwards. They declare **immediate steering** instead of
+steering. The composer works the same way: a Send tap, desktop Enter or touch
+Ctrl/Command+Enter steers ordinary text while the agent works, and
+Alt/Option+Enter or the 2.5-second Send hold queues. The steer goes to the agent
+at once and appears once in the timeline, as an ordinary message where the
+agent took it, so the pending messages panel never shows a Steer entry, a
+switch back to the queue, or a withdrawal action. A steer the agent refuses
+returns to the composer with its reason; one whose delivery cannot be confirmed
+is kept as unconfirmed and never resent. Queued messages wait until the turn
+that carries the steer ends. **Send now** follows the rule for agents without
+steering: it is offered only while the queue is paused or the conversation is
+idle.
+
 While native steering is available, the configuration pill identifies **Next
 turn** choices. Changed model, mode and reasoning settings apply to queued or
 new turns; steers retain the active turn's settings. Differing staged choices
