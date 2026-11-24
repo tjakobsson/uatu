@@ -558,6 +558,18 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(provider.loginState()).toBe("ok");
     });
 
+    test("a resumed prompt whose load agy refuses for its login shows the login notice", async () => {
+      const { fake, provider, run, upserts, waitFor } = await setup({ idleReleaseMs: 50 });
+      const session = await provider.createSession("a");
+      await run(session.id, "Say hello");
+      await waitFor(() => (provider as unknown as { conversations: Map<string, { process?: unknown }> }).conversations.get(session.id)!.process === undefined, "idle release");
+      await fake.setFlag("auth-missing", true);
+      await expect(provider.prompt(session.id, { id: "p2", text: "Again", delivery: "queue" })).rejects.toThrow("Authentication required");
+      await waitFor(() => upserts(session.id).some(item => item.type === "notice"), "the login notice");
+      expect(upserts(session.id).find(item => item.type === "notice")).toEqual(expect.objectContaining({ level: "error", code: "login-failed", message: "Authentication required" }));
+      expect(provider.loginState()).toBe("missing");
+    });
+
     test("a turn rejected for its login fails as a login failure, and the next prompt rechecks the login", async () => {
       const { fake, provider, ended, upserts, events, run } = await setup();
       const session = await provider.createSession("a");

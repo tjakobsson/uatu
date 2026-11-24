@@ -138,6 +138,7 @@ export class AntigravityProvider implements ChatProvider {
   private imageInput: boolean | undefined;
   private login: ChatLoginState | undefined;
   private permissionClock = 0;
+  private loginNotices = 0;
   private disposed = false;
 
   constructor(options: AntigravityProviderOptions) {
@@ -312,6 +313,15 @@ export class AntigravityProvider implements ChatProvider {
     conversation.holds += 1;
     try {
       return await this.startTurn(conversation, input);
+    } catch (error) {
+      // agy refusing the load or a setting for its login is the same login
+      // failure as a turn's, and shows the same notice (spec: login failed).
+      if (rpcErrorCode(error) === AUTH_REQUIRED_CODE) {
+        this.setLogin("missing");
+        const message = error instanceof Error ? error.message : String(error);
+        this.emit(conversation, { updates: [{ kind: "upsert", item: { id: `notice:login:${sessionId}.p${++this.loginNotices}`, type: "notice", createdAt: this.now(), level: "error", code: LOGIN_FAILED_NOTICE_CODE, message } }], outcome: "handled", eventType: "session/load" });
+      }
+      throw error;
     } finally {
       conversation.holds -= 1;
       this.scheduleIdle(conversation);
