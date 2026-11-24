@@ -307,6 +307,18 @@ export class BackgroundTaskUnavailableError extends Error {
   }
 }
 
+/**
+ * The agent refused the operation because it has no usable login (Antigravity:
+ * agy's -32000). Its message says how to log in; the route answers it as a
+ * conflict the client recognizes, and the agent's login state reads missing.
+ */
+export class AgentLoginRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentLoginRequiredError";
+  }
+}
+
 /** A dispatched mutation may have applied. Retain this outcome in receipts;
  * rejecting it through the ordinary receipt helper would permit a replay.
  */

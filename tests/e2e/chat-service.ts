@@ -7,7 +7,7 @@ import { NotificationFeed } from "../../src/chat/notification-feed";
 import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteeringUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
-import { ReversibleHistoryTargetError } from "../../src/chat/provider";
+import { AgentLoginRequiredError, ReversibleHistoryTargetError } from "../../src/chat/provider";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import { isLiveConversationStatus, type AgentUsageReport, type ChatAccountChange, type ChatLoginState, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult } from "../../src/chat/types";
@@ -48,6 +48,8 @@ type FakeE2EChatServiceOptions = {
   // The persistent-approval sentence this fake's permission cards carry —
   // per agent, exactly as the real descriptors declare their own.
   permissionScopeNote?: string;
+  // The agent's own login command, for its login-required refusals.
+  loginCommand?: string;
   // Capabilities this fake declares beyond the shared default set (a
   // Claude-shaped fixture declares typed model ids; the OpenCode one does not).
   extraCapabilities?: ChatCapability[];
@@ -121,6 +123,11 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  private refuseCreationForLogin = false;
+
+  refuseCreation(refuse: boolean): void {
+    this.refuseCreationForLogin = refuse;
+  }
   private failNextReversible: "undo" | "redo" | null = null;
   private failNextHistory = false;
   private failNextOlderHistory = false;
@@ -353,6 +360,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
+    // An agent that owns its login refuses creation while it has none.
+    if (this.refuseCreationForLogin) throw new AgentLoginRequiredError(`${this.agentName} is not logged in. Run ${this.options.loginCommand ?? "its login command"} where UatuCode runs and sign in.`);
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
@@ -822,6 +831,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   reset(): void {
     this.awaitingSteers.clear();
+    this.refuseCreationForLogin = false;
     this.login = undefined;
     this.accountsRevision = 0;
     this.catalogRevision = 0;

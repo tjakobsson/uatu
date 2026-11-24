@@ -43,6 +43,8 @@ export class ChatTransportError extends Error {
 }
 
 export const STEER_ALREADY_DELIVERED_CODE = "steer-already-delivered";
+/** The agent refused an operation for its login; its message says how to log in. */
+export const AGENT_LOGIN_REQUIRED_CODE = "agent-login-required";
 export const STEER_WITHDRAWAL_UNCONFIRMED_CODE = "steer-withdrawal-unconfirmed";
 
 // A transport gap the client is already recovering from — distinct from a

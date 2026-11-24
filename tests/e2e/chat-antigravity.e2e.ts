@@ -81,3 +81,20 @@ test("without a login, Antigravity's notice says to run agy, with no Agent accou
   await expect(notice.locator("a")).toHaveCount(0);
   await captureScreenshot(page, testInfo, "antigravity-login-notice-desktop");
 });
+
+test("creating an Antigravity conversation without a login says to run agy and shows the login notice", async ({ page, request }) => {
+  await boot(page, request);
+  await control(request, { action: "login", agent: "antigravity", login: "missing", silent: true });
+  await control(request, { action: "refuseCreationForLogin", agent: "antigravity" });
+  const created = page.waitForResponse(response => response.url().endsWith("/api/chat/conversations") && response.request().method() === "POST");
+  await page.locator("#chat-new-conversation").click();
+  await page.locator("#chat-agent-menu .chat-agent-menu__item", { hasText: "Antigravity" }).click();
+  const response = await created;
+  expect(response.status()).toBe(409);
+  expect(await response.json()).toEqual(expect.objectContaining({ code: "agent-login-required" }));
+  await expect(page.locator("#chat-state")).toContainText("Antigravity is not logged in. Run agy where UatuCode runs and sign in.");
+  // The picker stays usable: another agent's conversation can still be created.
+  await page.locator("#chat-new-conversation").click();
+  await page.locator("#chat-agent-menu .chat-agent-menu__item", { hasText: "OpenCode" }).click();
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(/^opencode:/);
+});

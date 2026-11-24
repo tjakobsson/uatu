@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { installFakeAgy } from "../../../tests/fixtures/antigravity/fake-agy-path";
-import type { NormalizedProviderEvent, SteerConfirmation } from "../provider";
+import { AgentLoginRequiredError, type NormalizedProviderEvent, type SteerConfirmation } from "../provider";
 import { CHAT_TURN } from "../turn-liveness";
 import type { ConversationItem } from "../types";
 import { ConversationNotFoundError } from "../workspace";
@@ -623,7 +623,10 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       await fake.setFlag("auth-missing", true);
       expect(await provider.listSessions()).toEqual([]);
       expect(provider.loginState()).toBe("missing");
-      await expect(provider.createSession("a")).rejects.toThrow("Authentication required");
+      // Creation is refused with a typed login error that says how to log in.
+      const creation = provider.createSession("a");
+      await expect(creation).rejects.toBeInstanceOf(AgentLoginRequiredError);
+      await expect(creation).rejects.toThrow("Antigravity is not logged in. Run agy where UatuCode runs and sign in.");
       await fake.setFlag("auth-missing", false);
       await provider.listSessions();
       expect(provider.loginState()).toBe("ok");

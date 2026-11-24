@@ -7,7 +7,7 @@ import type { ContentBlock, RequestPermissionRequest, RequestPermissionResponse 
 import { historyPageCursor, historyPageEnd } from "../history-reuse";
 import { settlesWithin } from "../managed-process";
 import { PendingInteractions, INTERRUPTED_REASON } from "../pending-interactions";
-import { UnsupportedVariantSelectionError, type ChatProvider, type SteerConfirmation, type NormalizedProviderEvent, type PendingPermission, type ProviderAttachment, type ProviderHistoryPage, type ProviderPermissionReply, type ProviderSession, type StoredMessageAccounting } from "../provider";
+import { AgentLoginRequiredError, UnsupportedVariantSelectionError, type ChatProvider, type SteerConfirmation, type NormalizedProviderEvent, type PendingPermission, type ProviderAttachment, type ProviderHistoryPage, type ProviderPermissionReply, type ProviderSession, type StoredMessageAccounting } from "../provider";
 import { PushQueue } from "../push-queue";
 import { provisionalTurn, type ChatTurnToken } from "../turn-liveness";
 import { LOGIN_FAILED_NOTICE_CODE, type ChatAgent, type ChatCapability, type ChatCommand, type ChatLoginState, type ChatMode, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionRequest, type TokenUsage } from "../types";
@@ -24,6 +24,7 @@ import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nex
 // progress gives its process back after this long (design D2).
 const IDLE_RELEASE_MS = 5 * 60_000;
 const DEFAULT_TITLE = "New conversation";
+const LOGIN_REQUIRED_MESSAGE = "Antigravity is not logged in. Run agy where UatuCode runs and sign in.";
 const LIST_PAGE_LIMIT = 20;
 // How long agy may take to answer `initialize` or a listing before its
 // process is ended, so a hung agy cannot pile up children.
@@ -249,7 +250,10 @@ export class AntigravityProvider implements ChatProvider {
       this.setLogin("ok");
     } catch (error) {
       await this.closeProcess(process);
-      if (rpcErrorCode(error) === AUTH_REQUIRED_CODE) this.setLogin("missing");
+      if (rpcErrorCode(error) === AUTH_REQUIRED_CODE) {
+        this.setLogin("missing");
+        throw new AgentLoginRequiredError(LOGIN_REQUIRED_MESSAGE);
+      }
       throw error;
     }
     this.learnCatalog(answer);
@@ -292,7 +296,7 @@ export class AntigravityProvider implements ChatProvider {
       // read: never a replay seeded earlier, and nothing once the file is gone.
       if (!await this.seedFromTranscript(conversation)) {
         this.forgetHistory(conversation);
-        throw new Error("Antigravity is not logged in, and agy keeps no transcript of this conversation to read. Run agy and sign in.");
+        throw new AgentLoginRequiredError(`${LOGIN_REQUIRED_MESSAGE} agy keeps no transcript of this conversation to read meanwhile.`);
       }
     } else if (!conversation.seeded) {
       conversation.holds += 1;

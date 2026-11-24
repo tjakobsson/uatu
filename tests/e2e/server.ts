@@ -146,6 +146,7 @@ const fakeAntigravityAgent = new FakeE2EChatService({
   restoreFile: async () => undefined,
   agentName: ANTIGRAVITY_AGENT.name,
   agentId: "antigravity-fixture",
+  loginCommand: ANTIGRAVITY_AGENT.login.command,
   capabilities: ["models", "variants", "modes", "commands", "permissions", "context", "immediate-steering", "send-now", "attachments"],
 });
 // Every fake agent, in the order a spec enables them (`{ action: "agents",
@@ -828,6 +829,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
       return Response.json({ ok: true });
     case "failPrompt":
       targetFake.failPrompt();
+      return Response.json({ ok: true });
+    case "refuseCreationForLogin":
+      targetFake.refuseCreation(body.silent !== true);
       return Response.json({ ok: true });
     case "failUndo":
       targetFake.failReversible("undo");

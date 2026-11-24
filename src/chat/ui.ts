@@ -9,7 +9,7 @@ import { registerBackInterceptor } from "../shell/history";
 import { liveChannel, onManualRecovery, registerLiveTeardown, registerRecoveryWork, requestManualRecovery } from "../shell/live";
 import { isHubPage } from "../shared/app-url";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
-import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
+import { AGENT_LOGIN_REQUIRED_CODE, ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type TimelinePosition } from "./anchor";
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
 import { reducedMotion, scrollFollowMotion } from "./scroll-motion";
@@ -3572,7 +3572,12 @@ export function initChat(api = new ChatApiClient()): void {
         input.focus();
         announce(newConversationAnnouncement(projection?.configuration ?? snapshot.configuration));
       }
-    } catch (error) { announce(messageOf(error), true); }
+    } catch (error) {
+      announce(messageOf(error), true);
+      // The agent has no usable login: reread its status so its login
+      // notice, with how to log in, replaces the failed creation.
+      if (error instanceof ChatTransportError && error.code === AGENT_LOGIN_REQUIRED_CODE) rereadStatuses();
+    }
     finally { newButton.disabled = false; }
   });
 
