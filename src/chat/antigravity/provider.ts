@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 
 import type { ContentBlock, RequestPermissionRequest, RequestPermissionResponse } from "@agentclientprotocol/sdk";
 
@@ -15,7 +16,8 @@ import { catalogFromSession, variantFor, type AcpCatalog } from "./catalog";
 import { AcpProcess, AUTH_REQUIRED_CODE, rpcErrorCode, type AcpSpawn } from "./connection";
 import { ANTIGRAVITY_AGENT } from "./descriptor";
 import { ANTIGRAVITY_PRICES } from "./prices";
-import { priceTurn, type AntigravityPriceTable } from "./pricing";
+import { priceTurn, ratesFor, type AntigravityPriceTable } from "./pricing";
+import { enrichReplay, readTranscript, transcriptModelFamily, transcriptPath, transcriptTurns } from "./transcript";
 import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nextUserMessage, normalizeAcpUpdate, sealOpenBlock, toolItems, userMessageId, type AcpMemory } from "./normalization";
 
 // A conversation with no turn, no open permission and no history read in
@@ -74,6 +76,9 @@ export type AntigravityProviderOptions = {
   termGraceMs?: number;
   // The built-in price table unless a test supplies its own.
   prices?: AntigravityPriceTable;
+  // Where agy keeps its transcripts (`~/.gemini/...`): the home directory of
+  // the workspace process unless a test supplies its own.
+  homeDirectory?: string;
 };
 
 const STOP_FAILURES: Record<string, string> = {
@@ -98,6 +103,7 @@ export class AntigravityProvider implements ChatProvider {
   private readonly stdinCloseGraceMs?: number;
   private readonly termGraceMs?: number;
   private readonly prices: AntigravityPriceTable;
+  private readonly homeDirectory: string;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly interactions = new PendingInteractions<PermissionDetail>((conversationId, event) => this.publish({ ...event, conversationId }));
   private readonly conversations = new Map<string, Conversation>();
@@ -121,6 +127,7 @@ export class AntigravityProvider implements ChatProvider {
     this.stdinCloseGraceMs = options.stdinCloseGraceMs;
     this.termGraceMs = options.termGraceMs;
     this.prices = options.prices ?? ANTIGRAVITY_PRICES;
+    this.homeDirectory = options.homeDirectory ?? os.homedir();
   }
 
   describe(): ChatAgent {
@@ -521,8 +528,9 @@ export class AntigravityProvider implements ChatProvider {
         conversation.loading = false;
       }
       if (!conversation.seeded) {
-        conversation.seeded = true;
         sealOpenBlock(conversation.memory, this.now()).forEach(update => this.store(conversation, [update]));
+        await this.enrichFromTranscript(conversation);
+        conversation.seeded = true;
       }
       conversation.process = process;
       this.watch(conversation, process);
@@ -530,6 +538,22 @@ export class AntigravityProvider implements ChatProvider {
       return process;
     })().finally(() => { conversation.starting = undefined; });
     return conversation.starting;
+  }
+
+  /** Add what replay omits from agy's transcript, or leave replay as it is (design D10). */
+  private async enrichFromTranscript(conversation: Conversation): Promise<void> {
+    const read = await readTranscript(transcriptPath(this.homeDirectory, conversation.sessionId));
+    const known = (id: string) => this.catalog?.models.some(model => model.selection.modelId === id) === true || ratesFor(id, this.prices) !== undefined;
+    const enriched = "steps" in read ? enrichReplay(conversation.items, conversation.sessionId, transcriptTurns(read.steps), {
+      family: model => transcriptModelFamily(model, known),
+      price: (usage, modelId) => priceTurn(usage, modelId, this.prices),
+    }) : null;
+    if (!enriched) {
+      if (process.env.UATU_DEBUG) console.debug("[antigravity transcript]", conversation.sessionId, "skipped" in read ? read.skipped : "foreign");
+      return;
+    }
+    conversation.items.splice(0, conversation.items.length, ...enriched.items);
+    conversation.accounting.push(...enriched.accounting);
   }
 
   private watch(conversation: Conversation, process: AcpProcess): void {

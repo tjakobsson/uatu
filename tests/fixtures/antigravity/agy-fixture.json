@@ -1,5 +1,5 @@
 {
-  "_comment": "Redacted from a November 2026 trial of agy 1.5.13 over ACP v1. No account, plan, tier, email, token or local path data: {cwd} is replaced by the session's working directory at run time. Scripts are chosen by a prompt's leading `<script>:` word; anything else runs `text`.",
+  "_comment": "Redacted from a November 2026 trial of agy 1.5.13 over ACP v1. No account, plan, tier, email, token or local path data: {cwd} is replaced by the session's working directory at run time. Scripts are chosen by a prompt's leading `<script>:` word; anything else runs `text`. transcript.jsonl beside it is agy's on-disk transcript of a text, read and denied write conversation, redacted the same way.",
   "version": "1.5.13",
   "initialize": {
     "protocolVersion": 1,

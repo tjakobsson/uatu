@@ -56,7 +56,7 @@ commit that passes `bun run test:ci` on its own.
 
 ## 5. Transcript enrichment (commit 5)
 
-- [ ] 5.1 Implement the read-only, size-bounded transcript reader and its matching to replayed rows. Verify with fixture tests that permission outcomes, file-read output and per-turn tokens and model are added, that reopened conversations show earlier cost, and that missing, truncated, foreign and unrecognized files fall back to replay-only history without an error.
+- [x] 5.1 Implement the read-only, size-bounded transcript reader and its matching to replayed rows. Verify with fixture tests that permission outcomes, file-read output and per-turn tokens and model are added, that reopened conversations show earlier cost, and that missing, truncated, foreign and unrecognized files fall back to replay-only history without an error.
 - [ ] 5.2 Verify with a test that the transcript file is byte-identical after a read, and that `bun run test:ci` passes.
 
 ## 6. Registration polish, docs and coverage (commit 6)
