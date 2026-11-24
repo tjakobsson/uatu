@@ -1044,7 +1044,7 @@ export class ChatAdapter {
     for (let session of sessions) {
       const metadata = await this.classifyInventorySession(session);
       if (!metadata.inWorkspace) continue;
-      this.bumpPresenceSequence(session.id, started);
+      this.refreshConfirmedPresence(session, started);
       inWorkspaceIds.add(session.id);
       // Subagent children stay out of the picker: they are reached from the
       // parent's subagent rows, and listing them as peers buries the real
@@ -2615,7 +2615,23 @@ export class ChatAdapter {
     return false;
   }
 
-  private forgetMissingSession(id: string, tick?: number): void {
+  private refreshConfirmedPresence(session: ProviderSession, tick: number): void {
+    this.bumpPresenceSequence(session.id, tick);
+    const parentId = session.parentId ?? null;
+    boundedSet(this.sessionParents, session.id, parentId, INVENTORY_SESSION_LIMIT);
+    const cached = this.inventorySessions.get(session.id);
+    if (cached && (!cached.inWorkspace || cached.deleted)) {
+      boundedSet(this.inventorySessions, session.id, {
+        inWorkspace: true,
+        parentId,
+        title: session.title || cached.title,
+        deleted: false,
+      }, INVENTORY_SESSION_LIMIT);
+    }
+  }
+
+  private forgetMissingSession(id: string, tick?: number): Array<readonly [string, number]> {
+    const priorWorkerChildren = [...(this.backgroundWork.get(id)?.workerChildren?.entries() ?? [])];
     const absenceTick = tick ?? ++this.presenceClock;
     this.bumpAbsenceSequence(id, absenceTick);
     this.forgetActivity(id, absenceTick);
@@ -2626,9 +2642,15 @@ export class ChatAdapter {
       boundedSet(this.inventorySessions, id, { ...cached, inWorkspace: false }, INVENTORY_SESSION_LIMIT);
     }
     if (wasListed || wasVisible) this.inventory.invalidate();
+    return priorWorkerChildren;
   }
 
-  private async verifyTrackedSessions(ids: readonly string[], signal?: AbortSignal): Promise<void> {
+  private async verifyTrackedSessions(
+    ids: readonly string[],
+    signal?: AbortSignal,
+    presentIds?: ReadonlySet<string>,
+    visited?: Set<string>,
+  ): Promise<void> {
     for (const id of ids) {
       if (this.disposed || signal?.aborted) return;
       const started = ++this.presenceClock;
@@ -2638,9 +2660,14 @@ export class ChatAdapter {
         const missingOrForeign = !session || !await this.isInWorkspace(session, false);
         if (this.disposed || signal?.aborted) return;
         if (missingOrForeign) {
-          if (this.presenceSequence(id) <= started) this.forgetMissingSession(id, started);
+          if (this.presenceSequence(id) <= started) {
+            const priorWorkerChildren = this.forgetMissingSession(id, started);
+            if (priorWorkerChildren.length > 0) {
+              await this.reconcileRecoveredWorkerChildren(id, priorWorkerChildren, signal, presentIds, visited);
+            }
+          }
         } else {
-          this.bumpPresenceSequence(id, started);
+          this.refreshConfirmedPresence(session, started);
         }
       } catch {
         // Keep tracked activity when a transient provider error prevents verification.
@@ -2650,19 +2677,30 @@ export class ChatAdapter {
 
   private async reconcileTrackedActivity(presentIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
     const missing = this.trackedActivityIds().filter(id => !presentIds.has(id));
-    await this.verifyTrackedSessions(missing, signal);
+    await this.verifyTrackedSessions(missing, signal, presentIds);
   }
 
-  private async reconcileMovedChildren(parentId: string, signal?: AbortSignal, recoveredWorkerChildren: ReadonlyArray<readonly [string, number]> = []): Promise<void> {
-    const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
-    await this.verifyTrackedSessions(descendants, signal);
-    const verifiedDescendants = new Set(descendants);
+  private async reconcileRecoveredWorkerChildren(
+    parentId: string,
+    recoveredWorkerChildren: ReadonlyArray<readonly [string, number]>,
+    signal?: AbortSignal,
+    presentIds?: ReadonlySet<string>,
+    visited = new Set<string>(),
+  ): Promise<void> {
+    visited.add(parentId);
     for (const [childId, statusBaseline] of recoveredWorkerChildren) {
       if (this.disposed || signal?.aborted) return;
-      if (childId === parentId || verifiedDescendants.has(childId)) continue;
+      if (visited.has(childId)) continue;
+      visited.add(childId);
       const existingStatus = this.projections.get(childId)?.status;
       if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
         || existingStatus === "completed" || existingStatus === "failed" || existingStatus === "interrupted") continue;
+      if (presentIds?.has(childId)) {
+        const stop = this.stoppingTurns.get(childId);
+        if (stop) stop.activeProbeBaseline = statusBaseline;
+        else this.seedProbedRunning(childId, statusBaseline, true);
+        continue;
+      }
       const started = ++this.presenceClock;
       try {
         const session = await this.provider.getSession(childId);
@@ -2671,13 +2709,13 @@ export class ChatAdapter {
         if (this.disposed || signal?.aborted) return;
         if (inWorkspace && session) {
           if (this.absenceSequence(childId) > started || this.settledTurns.has(childId)) continue;
-          this.bumpPresenceSequence(childId, started);
-          boundedSet(this.sessionParents, childId, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
+          this.refreshConfirmedPresence(session, started);
           const stop = this.stoppingTurns.get(childId);
           if (stop) stop.activeProbeBaseline = statusBaseline;
-          else this.seedProbedRunning(childId, statusBaseline);
+          else this.seedProbedRunning(childId, statusBaseline, true);
         } else if (this.presenceSequence(childId) <= started) {
-          this.forgetMissingSession(childId, started);
+          const nested = this.forgetMissingSession(childId, started);
+          if (nested.length > 0) await this.reconcileRecoveredWorkerChildren(childId, nested, signal, presentIds, visited);
         }
       } catch {
         // Keep tracked activity when a transient provider error prevents verification.
@@ -2685,11 +2723,20 @@ export class ChatAdapter {
     }
   }
 
-  private seedProbedRunning(id: string, baseline: number): void {
+  private async reconcileMovedChildren(parentId: string, signal?: AbortSignal, recoveredWorkerChildren: ReadonlyArray<readonly [string, number]> = []): Promise<void> {
+    const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
+    const visited = new Set<string>([parentId, ...descendants]);
+    await this.verifyTrackedSessions(descendants, signal, undefined, visited);
+    if (recoveredWorkerChildren.length > 0) {
+      await this.reconcileRecoveredWorkerChildren(parentId, recoveredWorkerChildren, signal, undefined, visited);
+    }
+  }
+
+  private seedProbedRunning(id: string, baseline: number, verifiedInWorkspace = false): void {
     if (this.disposed) return;
     if (this.statusSequence(id) !== baseline) return;
     const metadata = this.inventorySessions.get(id);
-    if (metadata && (!metadata.inWorkspace || metadata.deleted)) return;
+    if (!verifiedInWorkspace && metadata && (!metadata.inWorkspace || metadata.deleted)) return;
     const projection = this.projection(id);
     if (!isLiveConversationStatus(projection.status)) {
       projection.statusUpdate("running", undefined, false);
@@ -6196,9 +6243,8 @@ export class ChatAdapter {
               for (const session of sessions) {
                 if (signal.aborted || this.disposed) break;
                 if (await this.isInWorkspace(session)) {
-                  this.bumpPresenceSequence(session.id, discoveryStarted);
+                  this.refreshConfirmedPresence(session, discoveryStarted);
                   inWorkspaceIds.add(session.id);
-                  boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
                   if (!session.parentId) this.scheduleBackgroundRecovery(session.id);
                 }
               }
@@ -7234,11 +7280,15 @@ export class ChatAdapter {
     const started = ++this.presenceClock;
     const session = await this.provider.getSession(id);
     if (!session || !await this.isInWorkspace(session, false)) {
-      if (this.presenceSequence(id) <= started) this.forgetMissingSession(id, started);
+      if (this.presenceSequence(id) <= started) {
+        const priorWorkerChildren = this.forgetMissingSession(id, started);
+        if (priorWorkerChildren.length > 0) {
+          await this.reconcileRecoveredWorkerChildren(id, priorWorkerChildren, this.pumpController?.signal);
+        }
+      }
       throw new ConversationNotFoundError();
     }
-    this.bumpPresenceSequence(session.id, started);
-    boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
+    this.refreshConfirmedPresence(session, started);
     return session;
   }
 

@@ -14647,6 +14647,129 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("missing parent cleanup via getConversation, listConversations, and reconnect preserves still-local recovered worker children (even after an earlier foreign cache entry)", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+
+    // 1. Missing parent discovered via getConversation() and listConversations() preserves still-local recovered worker child.
+    for (const mode of ["getConversation", "listConversations", "reconnect"] as const) {
+      tasks.clear();
+      const { adapter, provider } = activityAdapter({ taskScheduler });
+      provider.waitForEventStream = async () => {};
+      const parent = fixtureSession(`p-${mode}`);
+      const child = { ...fixtureSession(`c-${mode}`), parentId: parent.id };
+      provider.sessions = [parent, child];
+      provider.reconcileBackgroundTasks = async id => id === parent.id ? [{
+        id: `task:${child.id}`,
+        type: "background_task",
+        taskId: child.id,
+        taskType: "agent",
+        childConversationId: child.id,
+        description: "Recovered local child",
+        status: "running",
+        createdAt: 1,
+        activity: { kind: "working", observedAt: 1 },
+      }] : [];
+      const pump = adapter.startEventPump();
+      provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+      await waitUntil(() => tasks.has(`background.recovery:${parent.id}`));
+      await tasks.get(`background.recovery:${parent.id}`);
+      expect(adapter.activity().working).toBe(true);
+      expect(adapter.projectionForTests(child.id).status).toBe("idle");
+
+      // Parent silently leaves without a move-out frame; child remains in workspace.
+      provider.sessions = [child];
+      if (mode === "getConversation") {
+        await adapter.getConversation(parent.id).catch(() => undefined);
+      } else if (mode === "listConversations") {
+        await adapter.listConversations();
+      } else {
+        tasks.delete("stream.discovery");
+        provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+        await waitUntil(() => tasks.has("stream.discovery"));
+        await tasks.get("stream.discovery");
+      }
+      expect(adapter.projectionForTests(parent.id).status).toBe("idle");
+      expect(adapter.projectionForTests(child.id).status).toBe("running");
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+      await adapter.dispose();
+      await pump;
+    }
+
+    // 2. A child previously cached as foreign (`inventorySessions.inWorkspace === false`) returns without a move-in frame;
+    // when its parent moves out, fresh local confirmation still seeds the child as running.
+    tasks.clear();
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-cached-foreign");
+    const child = { ...fixtureSession("c-cached-foreign"), parentId: parent.id };
+    provider.sessions = [parent, child];
+    await adapter.listConversations();
+    // Mark child cached as inWorkspace: false via a prior session.moved out.
+    const pump = adapter.startEventPump();
+    const childOut = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: child.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: child.id, directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await childOut;
+
+    // Child returns without a move-in frame and is recovered as a verified working child on parent.
+    provider.reconcileBackgroundTasks = async id => id === parent.id ? [{
+      id: `task:${child.id}`,
+      type: "background_task",
+      taskId: child.id,
+      taskType: "agent",
+      childConversationId: child.id,
+      description: "Returned local child",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has(`background.recovery:${parent.id}`));
+    await tasks.get(`background.recovery:${parent.id}`);
+    expect(adapter.activity().working).toBe(true);
+
+    // Parent moves out while child is confirmed local; stale negative inventorySessions entry must not veto seeding.
+    const parentOut = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: parent.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: parent.id, directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await parentOut;
+    expect(adapter.projectionForTests(child.id).status).toBe("running");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    await adapter.dispose();
+    await pump;
+  });
 });
 
 describe("plan usage on demand", () => {
