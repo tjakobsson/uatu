@@ -14770,6 +14770,122 @@ describe("workspace activity summary", () => {
     await adapter.dispose();
     await pump;
   });
+
+  test("moving a parent out preserves recovered worker activity for interaction-tracked children and across transient child verification errors", async () => {
+    const tasks = new Map<string, Promise<unknown>>();
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const taskScheduler: ChatTaskScheduler = {
+      run: async (name, work) => {
+        const result = Promise.resolve().then(work);
+        tasks.set(name, result);
+        try { return await result; }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            eventWaiters.get(name.slice("stream.event:".length))?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (_name, work, delay) => setTimeout(work, delay),
+      clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
+    };
+
+    // 1. Child tracked via pendingInteractions (no observed execution-start) keeps BOTH working and awaiting when only parent moves out.
+    const { adapter, provider } = activityAdapter({ taskScheduler });
+    const parent = fixtureSession("p-interact");
+    const child = { ...fixtureSession("c-interact"), parentId: parent.id };
+    provider.sessions = [parent, child];
+    provider.reconcileBackgroundTasks = async id => id === parent.id ? [{
+      id: "task:c-interact",
+      type: "background_task",
+      taskId: "c-interact",
+      taskType: "agent",
+      childConversationId: child.id,
+      description: "Awaiting worker",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has(`background.recovery:${parent.id}`));
+    await tasks.get(`background.recovery:${parent.id}`);
+    // Child holds a pending interaction without its own live execution-start event.
+    adapter.projectionForTests(child.id).apply({ kind: "upsert", item: permission("p-child") });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+
+    const parentOut = waitForEvent("session.moved");
+    provider.eventQueue.push({ normalized: {
+      conversationId: parent.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: parent.id, directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await parentOut;
+    expect(adapter.projectionForTests(child.id).status).toBe("running");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+    await adapter.dispose();
+    await pump;
+
+    // 2. A transient getSession error while re-verifying a recovered worker child retains working activity,
+    // which a subsequent healthy listConversations() can either keep (if local) or clear (if gone).
+    tasks.clear();
+    const { adapter: errAdapter, provider: errProvider } = activityAdapter({ taskScheduler });
+    const errParent = fixtureSession("p-err");
+    const errChild = { ...fixtureSession("c-err"), parentId: errParent.id };
+    errProvider.sessions = [errParent, errChild];
+    errProvider.reconcileBackgroundTasks = async id => id === errParent.id ? [{
+      id: "task:c-err",
+      type: "background_task",
+      taskId: "c-err",
+      taskType: "agent",
+      childConversationId: errChild.id,
+      description: "Worker hit by transient error",
+      status: "running",
+      createdAt: 1,
+      activity: { kind: "working", observedAt: 1 },
+    }] : [];
+    const errPump = errAdapter.startEventPump();
+    errProvider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => tasks.has(`background.recovery:${errParent.id}`));
+    await tasks.get(`background.recovery:${errParent.id}`);
+    expect(errAdapter.activity().working).toBe(true);
+
+    errProvider.getSession = async id => {
+      if (id === errChild.id) throw new Error("transient lookup failure");
+      return null;
+    };
+    const errParentOut = waitForEvent("session.moved");
+    errProvider.eventQueue.push({ normalized: {
+      conversationId: errParent.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: errParent.id, directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await errParentOut;
+    expect(errAdapter.projectionForTests(errChild.id).status).toBe("running");
+    expect(errAdapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    // Once healthy again, listConversations() keeps working if local, and clears if later gone.
+    errProvider.sessions = [errChild];
+    errProvider.getSession = async id => (id === errChild.id ? errChild : null);
+    await errAdapter.listConversations();
+    expect(errAdapter.activity().working).toBe(true);
+
+    errProvider.sessions = [];
+    errProvider.getSession = async () => null;
+    await errAdapter.listConversations();
+    expect(errAdapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+
+    await errAdapter.dispose();
+    await errPump;
+  });
 });
 
 describe("plan usage on demand", () => {

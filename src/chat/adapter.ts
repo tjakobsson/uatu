@@ -2650,16 +2650,19 @@ export class ChatAdapter {
     signal?: AbortSignal,
     presentIds?: ReadonlySet<string>,
     visited?: Set<string>,
-  ): Promise<void> {
+  ): Promise<{ retained: Set<string>; forgotten: Set<string> }> {
+    const retained = new Set<string>();
+    const forgotten = new Set<string>();
     for (const id of ids) {
-      if (this.disposed || signal?.aborted) return;
+      if (this.disposed || signal?.aborted) return { retained, forgotten };
       const started = ++this.presenceClock;
       try {
         const session = await this.provider.getSession(id);
-        if (this.disposed || signal?.aborted) return;
+        if (this.disposed || signal?.aborted) return { retained, forgotten };
         const missingOrForeign = !session || !await this.isInWorkspace(session, false);
-        if (this.disposed || signal?.aborted) return;
+        if (this.disposed || signal?.aborted) return { retained, forgotten };
         if (missingOrForeign) {
+          forgotten.add(id);
           if (this.presenceSequence(id) <= started) {
             const priorWorkerChildren = this.forgetMissingSession(id, started);
             if (priorWorkerChildren.length > 0) {
@@ -2667,12 +2670,15 @@ export class ChatAdapter {
             }
           }
         } else {
+          retained.add(id);
           this.refreshConfirmedPresence(session, started);
         }
       } catch {
         // Keep tracked activity when a transient provider error prevents verification.
+        retained.add(id);
       }
     }
+    return { retained, forgotten };
   }
 
   private async reconcileTrackedActivity(presentIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
@@ -2718,17 +2724,24 @@ export class ChatAdapter {
           if (nested.length > 0) await this.reconcileRecoveredWorkerChildren(childId, nested, signal, presentIds, visited);
         }
       } catch {
-        // Keep tracked activity when a transient provider error prevents verification.
+        // Keep recovered worker activity when a transient provider error prevents
+        // verification so subsequent healthy refreshes/reconnects can reconcile it.
+        if (!this.disposed && !signal?.aborted && this.absenceSequence(childId) <= started && !this.settledTurns.has(childId)) {
+          const stop = this.stoppingTurns.get(childId);
+          if (stop) stop.activeProbeBaseline = statusBaseline;
+          else this.seedProbedRunning(childId, statusBaseline, true);
+        }
       }
     }
   }
 
   private async reconcileMovedChildren(parentId: string, signal?: AbortSignal, recoveredWorkerChildren: ReadonlyArray<readonly [string, number]> = []): Promise<void> {
     const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
-    const visited = new Set<string>([parentId, ...descendants]);
-    await this.verifyTrackedSessions(descendants, signal, undefined, visited);
+    const visited = new Set<string>([parentId]);
+    const { retained, forgotten } = await this.verifyTrackedSessions(descendants, signal, undefined, visited);
+    for (const id of forgotten) visited.add(id);
     if (recoveredWorkerChildren.length > 0) {
-      await this.reconcileRecoveredWorkerChildren(parentId, recoveredWorkerChildren, signal, undefined, visited);
+      await this.reconcileRecoveredWorkerChildren(parentId, recoveredWorkerChildren, signal, retained, visited);
     }
   }
 
