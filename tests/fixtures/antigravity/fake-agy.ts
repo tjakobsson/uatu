@@ -26,6 +26,7 @@
 //                        id through `session/set_model`
 //   no-legacy-models     present: session answers carry no legacy model list
 //   hang-list            present: `session/list` never answers
+//   hang-new, hang-load  present: `session/new` or `session/load` never answers
 //   orphan-child         present: each process starts a `sleep 30` worker in its
 //                        group, its pid in `orphans`
 //
@@ -167,6 +168,7 @@ app.onRequest(methods.agent.session.list, async ({ params }) => {
 
 app.onRequest(methods.agent.session.new, async ({ params, client }) => {
   log({ method: "session/new", params });
+  if (flag("hang-new")) await new Promise(() => undefined);
   requireLogin();
   const session: StoredSession = { sessionId: crypto.randomUUID(), cwd: params.cwd, title: null, updatedAt: new Date().toISOString(), model: fixture.defaultModel, thoughtLevel: fixture.defaultThoughtLevel, mode: fixture.modes.currentModeId, replay: [] };
   writeSessions([...readSessions(), session]);
@@ -176,6 +178,7 @@ app.onRequest(methods.agent.session.new, async ({ params, client }) => {
 
 app.onRequest(methods.agent.session.load, async ({ params, client }) => {
   log({ method: "session/load", params });
+  if (flag("hang-load")) await new Promise(() => undefined);
   requireLogin();
   const session = readSessions().find(candidate => candidate.sessionId === params.sessionId);
   if (!session) {

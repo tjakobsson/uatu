@@ -25,8 +25,9 @@ import { ANTIGRAVITY_PROVIDER_ID, configurationFromOptions, createAcpMemory, nex
 const IDLE_RELEASE_MS = 5 * 60_000;
 const DEFAULT_TITLE = "New conversation";
 const LOGIN_REQUIRED_MESSAGE = "Antigravity is not logged in. Run agy where UatuCode runs and sign in.";
-// How long agy may take to answer `initialize` or a listing before its
-// process is ended, so a hung agy cannot pile up children.
+// How long agy may take to answer `initialize`, a listing, `session/new` or
+// `session/load` before its process is ended, so a hung agy can neither pile
+// up children nor leave a conversation waiting on a stuck start.
 const SETUP_DEADLINE_MS = 30_000;
 // How long a prompt whose connection closed waits to learn whether its
 // process exited, which names the failure.
@@ -244,7 +245,7 @@ export class AntigravityProvider implements ChatProvider {
     const process = await this.startProcess();
     let answer: Awaited<ReturnType<AcpProcess["agent"]["request"]>> & { sessionId: string };
     try {
-      answer = await process.agent.request("session/new", { cwd: this.workspacePath, mcpServers: [] }) as typeof answer;
+      answer = await withDeadline(process.agent.request("session/new", { cwd: this.workspacePath, mcpServers: [] }), this.setupDeadlineMs, "session/new") as typeof answer;
       this.setLogin("ok");
     } catch (error) {
       await this.closeProcess(process);
@@ -709,7 +710,7 @@ export class AntigravityProvider implements ChatProvider {
       conversation.loading = true;
       if (!conversation.seeded || conversation.fromTranscript) conversation.replay = { memory: createAcpMemory(conversation.sessionId, this.workspacePath), items: [] };
       try {
-        const answer = await process.agent.request("session/load", { sessionId: conversation.sessionId, cwd: this.workspacePath, mcpServers: [] });
+        const answer = await withDeadline(process.agent.request("session/load", { sessionId: conversation.sessionId, cwd: this.workspacePath, mcpServers: [] }), this.setupDeadlineMs, "session/load");
         this.setLogin("ok");
         this.learnCatalog(answer);
         // agy starts a loaded session on its own defaults (design D7).

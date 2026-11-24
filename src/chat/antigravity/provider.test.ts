@@ -132,6 +132,23 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       }
     });
 
+    test("a stalled session/new or session/load is ended at its deadline, leaves nothing running, and a retry starts afresh", async () => {
+      const { fake, provider, run } = await setup({ setupDeadlineMs: 600 });
+      const existing = await provider.createSession("a");
+      await run(existing.id, "Say hello");
+      await fake.setFlag("hang-new", true);
+      await expect(provider.createSession("b")).rejects.toThrow("did not answer session/new");
+      await fake.setFlag("hang-new", false);
+      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, setupDeadlineMs: 600 });
+      cleanups.push(() => reader.dispose());
+      await fake.setFlag("hang-load", true);
+      await expect(reader.listMessages(existing.id, { limit: 50 })).rejects.toThrow("did not answer session/load");
+      await expect(reader.listMessages(existing.id, { limit: 50 })).rejects.toThrow("did not answer session/load");
+      expect((await fake.log()).filter(entry => entry.method === "session/load")).toHaveLength(2);
+      await provider.dispose();
+      expect(await fake.running()).toBe(0);
+    });
+
     test("a crashed leader's process group is reaped", async () => {
       const { fake, provider, ended } = await setup();
       await fake.setFlag("orphan-child", true);
