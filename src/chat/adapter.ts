@@ -19,7 +19,7 @@ import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands
 import { isLiveConversationStatus, steerRefusedNotice } from "./types";
 import { OPENCODE_TEXT_START_FALLBACK, type OpenCodeTextStart } from "./opencode/normalization-types";
 import { CHAT_REPEAT_CONTINUES, CHAT_STATUS_REPEAT, CHAT_TURN, CHAT_TURN_CONTINUES, isTerminalStatus, withRetainedReplyFacts, type ChatStatusLiveness, type ChatTurnIdentity, type ChatTurnToken } from "./turn-liveness";
-import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
+import type { ChatActionContext, NoticeItem, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
 import { unverifyWorkerTask, workerExecutionClockRuns, workerState } from "./worker-state";
@@ -927,6 +927,10 @@ export class ChatAdapter {
   // Immediate steers awaiting the agent's answer, per conversation: Stop
   // does not queue behind them.
   private readonly immediateSteers = new Map<string, number>();
+  // The steer-refused notices this adapter published, by conversation (the
+  // latest few): the provider's history never holds them, so a snapshot
+  // carries them, and a client that missed one live still restores its draft.
+  private readonly steerRefusals = new Map<string, NoticeItem[]>();
   private inboxClock = 0;
   // Internal held-submission order survives delivery switches and uncertain
   // admissions. Retained only on bounded pending owners/admission fences, not
@@ -1764,6 +1768,11 @@ export class ChatAdapter {
       } catch {
         // No paused list: the conversation reads as it would without one.
       }
+    }
+    // The latest page carries the steer refusals published here, which the
+    // provider's history does not hold.
+    if (!cursor) for (const notice of this.steerRefusals.get(id) ?? []) {
+      if (!items.some(item => item.id === notice.id)) items.push(notice);
     }
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
@@ -3712,7 +3721,9 @@ export class ChatAdapter {
       return;
     }
     if ("outcome" in outcome && outcome.outcome === "refused") {
-      this.projection(conversationId).upsert(steerRefusedNotice(input.requestId, outcome.reason, Date.now()));
+      const notice = steerRefusedNotice(input.requestId, outcome.reason, Date.now());
+      this.steerRefusals.set(conversationId, [...(this.steerRefusals.get(conversationId) ?? []).filter(known => known.id !== notice.id), notice].slice(-20));
+      this.projection(conversationId).upsert(notice);
       return;
     }
     if ("outcome" in outcome && outcome.outcome !== "accepted") return;

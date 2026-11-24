@@ -16667,6 +16667,21 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
     } finally { await adapter.dispose(); }
   });
 
+  test("a refusal settled while no one watched comes back in the conversation's snapshot", async () => {
+    const { adapter, provider, steer } = immediate();
+    try {
+      adapter.projectionForTests("session").statusUpdate("running");
+      let refuse!: (confirmation: SteerConfirmation) => void;
+      provider.prompt = async () => ({ messageId: "provisional", createdAt: 5, confirmation: new Promise<SteerConfirmation>(resolve => { refuse = resolve; }) });
+      expect(await steer("r-away", "refused while away")).toEqual(expect.objectContaining({ awaitingConfirmation: true }));
+      refuse({ outcome: "refused", reason: "agy did not take it" });
+      await Bun.sleep(0);
+      // The browser reopens the conversation from a snapshot, not the live stream.
+      const snapshot = await adapter.history("session");
+      expect(snapshot.items.find(item => item.id === "notice:steer-refused:r-away")).toEqual(expect.objectContaining({ code: "steer-refused", message: "agy did not take it" }));
+    } finally { await adapter.dispose(); }
+  });
+
   test("commands queue, an idle backlog holds, and an idle conversation dispatches whatever the delivery", async () => {
     const { adapter, provider, steer } = immediate();
     try {
