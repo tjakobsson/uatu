@@ -2635,6 +2635,30 @@ describe("inventory", () => {
     subscription.cancel();
   });
 
+  test("a listing that is always slower than the bound still reaches the next read once it arrives", async () => {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    a.conversations = [summary("ready", 5)];
+    let reads = 0;
+    // Healthy but slow: every listing takes longer than the bound.
+    b.listConversations = () => { reads += 1; return Bun.sleep(80).then(() => [summary("slow", 9)]); };
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      inventoryContributionTimeoutMs: 25,
+      agents: [
+        { descriptor: OPENCODE_AGENT, service: a },
+        { descriptor: CLAUDE_CODE_AGENT, service: b },
+      ],
+    });
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    expect((await service.listConversations()).map(conversation => conversation.id)).toEqual(["opencode:ready"]);
+    expect(await subscription.next()).toEqual({ value: undefined, done: false });
+    expect((await service.listConversations()).map(conversation => conversation.id)).toEqual(["claude:slow", "opencode:ready"]);
+    expect(reads).toBe(1);
+    subscription.cancel();
+  });
+
   test("a stalled subscription does not hold the merged SSE fan-in; the late agent re-enters", async () => {
     const a = new StubAgentService();
     const b = new StubAgentService();

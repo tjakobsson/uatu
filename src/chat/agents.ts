@@ -230,6 +230,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   }
 
   private readonly inventoryContributionTimeoutMs: number;
+  // A list that arrived after its read gave up on it, by agent: the next
+  // read takes it rather than starting a listing that would be as slow.
+  private readonly lateLists = new Map<string, AgentConversationSummary[]>();
   private readonly activitySubscriptions = new Set<MergedActivitySubscription>();
 
   agents(): ChatAgentDescriptor[] {
@@ -283,6 +286,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
    */
   async listConversations(): Promise<AgentConversationSummary[]> {
     const lists = await Promise.all(this.order.map(async agent => {
+      const late = this.lateLists.get(agent.descriptor.id);
+      if (late) { this.lateLists.delete(agent.descriptor.id); return late; }
       const read = (async () => {
         const conversations = await agent.service.listConversations();
         return conversations.map(summary => qualifyAgentSummary(agent.descriptor, summary));
@@ -290,8 +295,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       read.catch(() => undefined);
       // One agent's stalled startup (a cold probe can run to its timeout)
       // must not withhold another agent's already-answered list: the
-      // straggler is bounded, and its late arrival ticks the inventory so
-      // clients re-fetch and see it.
+      // straggler is bounded, and its late arrival is kept for the next read
+      // and ticks the inventory so clients re-fetch and see it.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bounded = await Promise.race([
         read.catch(() => [] as AgentConversationSummary[]),
@@ -302,7 +307,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       ]);
       if (timer !== undefined) clearTimeout(timer);
       if (bounded !== null) return bounded;
-      void read.then(late => { if (late.length > 0) this.inventoryHub.tick(); }, () => undefined);
+      void read.then(late => {
+        this.lateLists.set(agent.descriptor.id, late);
+        if (late.length > 0) this.inventoryHub.tick();
+      }, () => undefined);
       return [] as AgentConversationSummary[];
     }));
     return lists.flat().sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
