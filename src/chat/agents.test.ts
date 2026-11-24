@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId, UnknownAgentError, type RegisteredChatAgent } from "./agents";
 import { ConversationProjection } from "./adapter";
+import { createAcpMemory, normalizeAcpUpdate } from "./antigravity/normalization";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
@@ -2291,6 +2292,17 @@ describe("persisted capture and admission identities", () => {
     try {
       expect(ids("message:row")).toEqual([sha("claude:c", "claude:text:api:0", "offset:0"), sha("claude:c", "claude:text:api:1", "offset:5")]);
       expect(await ledgers()).toEqual(new Set([sha("claude:c", "claude:message:api")]));
+    } finally { await h.cleanup(); }
+  });
+
+  test("Antigravity: a reply's captures are admitted under antigravity:message:<id>", async () => {
+    const memory = createAcpMemory("c", "/workspace");
+    const items = [{ sessionUpdate: "user_message_chunk", content: { type: "text", text: "Draw" } }, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "![one](one.png)" } }]
+      .flatMap(update => normalizeAcpUpdate({ sessionId: "c", update }, memory, 1).updates.flatMap(change => change.kind === "upsert" ? [change.item] : []));
+    const { h, ids, ledgers } = await fixture("antigravity", items);
+    try {
+      expect(ids("message:c.a1.1")).toHaveLength(1);
+      expect(await ledgers()).toEqual(new Set([sha("antigravity:c", "antigravity:message:c.a1.1")]));
     } finally { await h.cleanup(); }
   });
 

@@ -1,0 +1,368 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+
+import { installFakeAgy } from "../../../tests/fixtures/antigravity/fake-agy-path";
+import type { NormalizedProviderEvent } from "../provider";
+import { CHAT_TURN } from "../turn-liveness";
+import type { ConversationItem } from "../types";
+import { ConversationNotFoundError } from "../workspace";
+import { pathAgentRuntime } from "../path-agent-runtime";
+import { LazyChatService } from "../service";
+import { AntigravityProvider } from "./provider";
+import { AntigravityRuntime } from "./runtime";
+
+// Every test drives the real provider against the fake `agy` (fake-agy.ts),
+// a Bun ACP agent answering from redacted trial fixtures. No real agy, no
+// network, no login.
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+async function setup(options: { idleReleaseMs?: number } = {}) {
+  const fake = await installFakeAgy();
+  const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, idleReleaseMs: options.idleReleaseMs, stdinCloseGraceMs: 500, termGraceMs: 500 });
+  const events: NormalizedProviderEvent[] = [];
+  const controller = new AbortController();
+  void (async () => { for await (const event of provider.events(controller.signal)) events.push(event); })();
+  cleanups.push(async () => { controller.abort(); await provider.dispose(); await fake.remove(); });
+  const waitFor = async (predicate: () => boolean, what = "condition", timeoutMs = 8_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(5);
+    }
+  };
+  const statuses = (sessionId: string) => events.filter(event => event.conversationId === sessionId).flatMap(event => event.updates.flatMap(update => update.kind === "status" ? [update.status] : []));
+  const upserts = (sessionId: string) => events.filter(event => event.conversationId === sessionId).flatMap(event => event.updates.flatMap(update => update.kind === "upsert" ? [update.item] : []));
+  const latest = (sessionId: string, id: string) => upserts(sessionId).findLast(item => item.id === id);
+  const ended = (sessionId: string, count = 1) => waitFor(() => statuses(sessionId).length >= count, `${count} turn end(s)`);
+  const run = async (sessionId: string, text: string, extra: Partial<Parameters<AntigravityProvider["prompt"]>[1]> = {}) => {
+    const before = statuses(sessionId).length;
+    const accepted = await provider.prompt(sessionId, { id: crypto.randomUUID(), text, delivery: "queue", ...extra });
+    await ended(sessionId, before + 1);
+    return accepted;
+  };
+  const pendingPermission = async (sessionId: string) => {
+    await waitFor(() => upserts(sessionId).some(item => item.type === "permission" && item.status === "pending"), "a permission card");
+    return upserts(sessionId).findLast(item => item.type === "permission")! as Extract<ConversationItem, { type: "permission" }>;
+  };
+  const prompts = async () => (await fake.log()).filter(entry => entry.method === "session/prompt");
+  return { fake, provider, events, waitFor, statuses, upserts, latest, ended, run, pendingPermission, prompts };
+}
+
+describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
+  describe("processes (D2)", () => {
+    test("a conversation's process starts on first need, serves its prompt, and is released after the idle bound", async () => {
+      const { fake, provider, run, waitFor } = await setup({ idleReleaseMs: 150 });
+      const session = await provider.createSession("ignored");
+      expect((await fake.log()).map(entry => entry.method)).toEqual(["initialize", "session/new"]);
+      await run(session.id, "Say hello");
+      expect((await fake.log()).filter(entry => entry.method === "initialize")).toHaveLength(1);
+      await waitFor(() => (provider as unknown as { conversations: Map<string, { process?: unknown }> }).conversations.get(session.id)!.process === undefined, "idle release");
+      // The next prompt resumes it in a new process that loads the session.
+      await run(session.id, "Again");
+      const methods = (await fake.log()).map(entry => entry.method);
+      expect(methods.filter(method => method === "initialize")).toHaveLength(2);
+      expect(methods.indexOf("session/load")).toBeGreaterThan(methods.indexOf("session/new"));
+    });
+
+    test("dispose ends every process it started", async () => {
+      const { fake, provider } = await setup();
+      await provider.createSession("a");
+      await provider.createSession("b");
+      expect(await fake.running()).toBeGreaterThanOrEqual(2);
+      await provider.dispose();
+      expect(await fake.running()).toBe(0);
+    });
+
+    test("a crashed process fails its own turn only", async () => {
+      const { fake, provider, statuses, ended, run, events } = await setup();
+      const healthy = await provider.createSession("healthy");
+      const crashing = await provider.createSession("crashing");
+      await fake.setFlag("crash-on-prompt", true);
+      await provider.prompt(crashing.id, { id: "x", text: "Go", delivery: "queue" });
+      await ended(crashing.id);
+      expect(statuses(crashing.id)).toEqual(["failed"]);
+      const failure = events.flatMap(event => event.updates).findLast(update => update.kind === "status");
+      expect(failure).toEqual(expect.objectContaining({ status: "failed", message: expect.stringContaining("Antigravity stopped unexpectedly") }));
+      await fake.setFlag("crash-on-prompt", false);
+      await run(healthy.id, "Still here");
+      expect(statuses(healthy.id)).toEqual(["completed"]);
+    });
+  });
+
+  describe("listing and history (D10)", () => {
+    test("the chooser lists agy's sessions for the workspace with their titles, using a process that exits", async () => {
+      const { fake, provider, run } = await setup();
+      const session = await provider.createSession("a");
+      await run(session.id, "Say hello");
+      const listed = await provider.listSessions();
+      expect(listed).toEqual([expect.objectContaining({ id: session.id, title: "Single Sentence Reply Request", directory: fake.workspace })]);
+      expect(provider.loginState()).toBe("ok");
+    });
+
+    test("an unknown id is refused as not found, and no prompt is sent", async () => {
+      const { fake, provider, prompts } = await setup();
+      await expect(provider.listMessages("00000000-0000-0000-0000-000000000000", { limit: 50 })).rejects.toBeInstanceOf(ConversationNotFoundError);
+      await expect(provider.prompt("00000000-0000-0000-0000-000000000000", { id: "x", text: "hi", delivery: "queue" })).rejects.toBeInstanceOf(ConversationNotFoundError);
+      expect(await prompts()).toEqual([]);
+      // The listing that decided it leaves nothing running.
+      expect(await fake.running()).toBe(0);
+    });
+
+    test("reopened history comes from replay, without starting a turn, with the same user message ids", async () => {
+      const first = await setup();
+      const session = await first.provider.createSession("a");
+      const accepted = await first.provider.prompt(session.id, { id: "p", text: "command: run it", delivery: "queue" });
+      const permission = await first.pendingPermission(session.id);
+      await first.provider.replyPermission(session.id, permission.requestId, "once", "allow");
+      await first.ended(session.id);
+      const live = await first.provider.listMessages(session.id, { limit: 100 });
+      // A second provider, as after a workspace restart, shares agy's state.
+      const second = new AntigravityProvider({ workspacePath: first.fake.workspace, executable: first.fake.executable, env: first.fake.env });
+      cleanups.push(() => second.dispose());
+      const before = (await first.prompts()).length;
+      const page = await second.listMessages(session.id, { limit: 100 });
+      expect((await first.prompts()).length).toBe(before);
+      const users = page.items.filter(item => item.type === "user_message");
+      expect(users.map(item => item.id)).toEqual([`message:${accepted.messageId}`]);
+      expect(live.items.some(item => item.id === `message:${accepted.messageId}`)).toBe(true);
+      expect(page.items.some(item => item.type === "assistant_message" && item.markdown.includes("echo hi"))).toBe(true);
+      expect(page.items.find(item => item.type === "command")).toEqual(expect.objectContaining({ command: "echo hi", status: "completed", exitCode: 0 }));
+    }, 20_000);
+  });
+  describe("timeline and turns (D5)", () => {
+    test("a turn streams its reply under one token, closed at the end, with its token usage and context", async () => {
+      const { provider, run, upserts, statuses } = await setup();
+      const session = await provider.createSession("a");
+      await run(session.id, "Say hello");
+      const reply = upserts(session.id).findLast(item => item.type === "assistant_message" && item.markdown !== "")!;
+      expect(reply).toEqual(expect.objectContaining({ markdown: "Hello, how can I help you today?" }));
+      expect((reply as Record<symbol, unknown>)[CHAT_TURN]).toEqual({ completed: true, authority: "provisional" });
+      expect(upserts(session.id).find(item => item.id.startsWith("usage:"))).toEqual(expect.objectContaining({
+        type: "assistant_message", markdown: "", usage: { input: 8886, output: 32, reasoning: 22, cacheRead: 0, cacheWrite: 0 },
+        model: { providerId: "antigravity", modelId: "gemini-4-neon" },
+      }));
+      expect(upserts(session.id).findLast(item => item.type === "context_report")).toEqual(expect.objectContaining({ total: 8918, max: 1048576 }));
+      expect(statuses(session.id)).toEqual(["completed"]);
+    });
+
+    for (const [script, status, message] of [["refuse", "failed", "Antigravity refused to continue."], ["maxtokens", "failed", "Antigravity stopped: the reply reached its token limit."]] as const) {
+      test(`a ${script} stop reason fails the turn with a message naming it`, async () => {
+        const { provider, run, events } = await setup();
+        const session = await provider.createSession("a");
+        await run(session.id, `${script}: go`);
+        expect(events.flatMap(event => event.updates).findLast(update => update.kind === "status")).toEqual({ kind: "status", status, message });
+      });
+    }
+  });
+
+  describe("permissions (D6)", () => {
+    test("allow once runs the tool, with only agy's choices on the card", async () => {
+      const { fake, provider, pendingPermission, ended, latest, statuses } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "command: run", delivery: "queue" });
+      const card = await pendingPermission(session.id);
+      expect(card).toEqual(expect.objectContaining({ action: "echo hi", choices: [{ id: "allow", label: "Allow once" }], sourceToolId: "tool:call_command_1" }));
+      expect(latest(session.id, "tool:call_command_1")).toEqual(expect.objectContaining({ status: "pending" }));
+      expect(await provider.listPermissions()).toEqual([expect.objectContaining({ requestId: card.requestId, conversationId: session.id })]);
+      await provider.replyPermission(session.id, card.requestId, "once", "allow");
+      await ended(session.id);
+      expect((await fake.log()).find(entry => entry.method === "permission-outcome")?.outcome).toEqual({ outcome: "selected", optionId: "allow" });
+      expect(latest(session.id, "tool:call_command_1")).toEqual(expect.objectContaining({ status: "completed", output: expect.stringContaining("hi"), exitCode: 0 }));
+      expect(statuses(session.id)).toEqual(["completed"]);
+    });
+
+    test("deny fails the tool and completes the turn without a reply", async () => {
+      const { fake, provider, pendingPermission, ended, latest, statuses } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "write: a file", delivery: "queue" });
+      const card = await pendingPermission(session.id);
+      await provider.replyPermission(session.id, card.requestId, "reject");
+      await ended(session.id);
+      expect((await fake.log()).find(entry => entry.method === "permission-outcome")?.outcome).toEqual({ outcome: "selected", optionId: "deny" });
+      expect(latest(session.id, "tool:call_write_1")).toEqual(expect.objectContaining({ status: "failed" }));
+      expect(statuses(session.id)).toEqual(["completed"]);
+    });
+
+    test("cancelling while a permission is pending abandons it and interrupts the turn", async () => {
+      const { fake, provider, pendingPermission, ended, statuses, upserts, run } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "command: run", delivery: "queue" });
+      const card = await pendingPermission(session.id);
+      await provider.interrupt(session.id);
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["interrupted"]);
+      expect(upserts(session.id).findLast(item => item.id === card.id)).toEqual(expect.objectContaining({ status: "resolved", outcome: "rejected" }));
+      expect((await fake.log()).find(entry => entry.method === "permission-outcome")?.outcome).toEqual({ outcome: "cancelled" });
+      expect(await provider.listPermissions()).toEqual([]);
+      await run(session.id, "Accepts a new prompt");
+      expect(statuses(session.id)).toEqual(["interrupted", "completed"]);
+    });
+
+    test("a permission left open when the process ends is abandoned, and the turn fails in that conversation", async () => {
+      const { fake, provider, pendingPermission, ended, statuses, upserts } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "command: run", delivery: "queue" });
+      const card = await pendingPermission(session.id);
+      const pids = (await Bun.file(path.join(fake.stateDirectory, "pids")).text()).split("\n").filter(Boolean).map(Number);
+      for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["failed"]);
+      expect(upserts(session.id).findLast(item => item.id === card.id)).toEqual(expect.objectContaining({ status: "resolved", outcome: "rejected" }));
+      expect(await provider.listPermissions()).toEqual([]);
+    });
+
+    test("cancel stops a running command and ends the turn as interrupted", async () => {
+      const { provider, waitFor, upserts, ended, statuses, latest } = await setup();
+      const session = await provider.createSession("a");
+      await provider.prompt(session.id, { id: "p", text: "cancel: run long", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_sleep_1"), "the running command");
+      await provider.interrupt(session.id);
+      await ended(session.id);
+      expect(statuses(session.id)).toEqual(["interrupted"]);
+      expect(latest(session.id, "tool:call_sleep_1")).toEqual(expect.objectContaining({ status: "failed" }));
+    });
+  });
+
+  describe("models, modes and commands (D7, D8)", () => {
+    test("models carry thinking levels as variants, and modes and commands follow agy", async () => {
+      const { provider } = await setup();
+      await provider.createSession("a");
+      expect(await provider.listModels()).toEqual([
+        expect.objectContaining({ selection: { providerId: "antigravity", modelId: "gemini-4-neon" }, name: "Gemini 4 Neon", variants: ["low", "medium", "high", "xhigh"], default: true, imageInput: true }),
+        expect.objectContaining({ selection: { providerId: "antigravity", modelId: "gemini-4-argon" }, variants: ["low", "medium", "high"] }),
+        expect.not.objectContaining({ variants: expect.anything() }),
+        expect.not.objectContaining({ variants: expect.anything() }),
+      ]);
+      expect((await provider.listModes()).map(mode => mode.name)).toEqual(["default", "accept-edits", "plan"]);
+      await Bun.sleep(50);
+      expect((await provider.listCommands()).map(command => command.name)).toEqual(["compact", "goal", "plan"]);
+    });
+
+    test("a resumed conversation's prompt runs on its chosen model, thinking level and mode", async () => {
+      const { fake, provider, run, waitFor } = await setup({ idleReleaseMs: 100 });
+      const session = await provider.createSession("a");
+      await provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-4-argon" }, "low");
+      await run(session.id, "First", { mode: "plan" });
+      await waitFor(() => (provider as unknown as { conversations: Map<string, { process?: unknown }> }).conversations.get(session.id)!.process === undefined, "idle release");
+      await run(session.id, "After the release");
+      const log = await fake.log();
+      const afterLoad = log.slice(log.findIndex(entry => entry.method === "session/load"));
+      expect(afterLoad.filter(entry => entry.method === "session/set_config_option").map(entry => [entry.params!.configId, entry.params!.value])).toEqual([["model", "gemini-4-argon"], ["thought_level", "low"]]);
+      expect(afterLoad.find(entry => entry.method === "session/set_mode")?.params).toEqual(expect.objectContaining({ modeId: "plan" }));
+      expect((await fake.sessions())[0]).toEqual(expect.objectContaining({ model: "gemini-4-argon", thoughtLevel: "low", mode: "plan" }));
+      expect(await provider.getConversationConfiguration(session.id)).toEqual({ model: { providerId: "antigravity", modelId: "gemini-4-argon" }, variant: "low", mode: "plan" });
+    });
+
+    test("a variant the model does not offer is refused", async () => {
+      const { provider } = await setup();
+      const session = await provider.createSession("a");
+      await expect(provider.switchModel(session.id, { providerId: "antigravity", modelId: "gemini-pro-orchestrator-neon" }, "high")).rejects.toThrow("does not offer");
+    });
+
+    test("a command is sent to agy as the prompt text", async () => {
+      const { provider, ended, prompts } = await setup();
+      const session = await provider.createSession("a");
+      await provider.command(session.id, { id: "c", name: "compact", arguments: "keep the plan" });
+      await ended(session.id);
+      expect((await prompts())[0]!.params!.prompt).toEqual([{ type: "text", text: "/compact keep the plan" }]);
+    });
+  });
+
+  describe("immediate steering (D9)", () => {
+    test("a steer joins the running turn: one turn end, the earlier prompt's end is silent, and reload shows each message once", async () => {
+      const { fake, provider, waitFor, upserts, statuses, ended, events, prompts } = await setup();
+      const session = await provider.createSession("a");
+      const first = await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      const steer = await provider.prompt(session.id, { id: "s", text: "Also write BANANA", delivery: "steer" });
+      await ended(session.id);
+      await Bun.sleep(50);
+      expect(statuses(session.id)).toEqual(["completed"]);
+      expect(events.flatMap(event => event.notificationTurns ?? []).map(turn => turn.phase)).toEqual(["started", "completed"]);
+      expect(upserts(session.id).filter(item => item.id === `message:${steer.messageId}`)).toHaveLength(1);
+      // Both prompts' tokens are the one turn's.
+      expect(upserts(session.id).find(item => item.id.startsWith("usage:"))).toEqual(expect.objectContaining({ usage: expect.objectContaining({ input: 8897 + 2350, output: 130 + 84 }) }));
+      expect((await prompts()).map(entry => (entry.params!.prompt as Array<{ text: string }>)[0]!.text)).toEqual(["steer: run it", "Also write BANANA"]);
+      const reread = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      cleanups.push(() => reread.dispose());
+      const users = (await reread.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
+      expect(users.map(item => item.id)).toEqual([`message:${first.messageId}`, `message:${steer.messageId}`]);
+    });
+
+    test("a steer with no running turn is refused", async () => {
+      const { provider } = await setup();
+      const session = await provider.createSession("a");
+      await expect(provider.prompt(session.id, { id: "s", text: "steer", delivery: "steer" })).rejects.toThrow("nothing to steer");
+    });
+  });
+
+  describe("attachments (D8)", () => {
+    test("images are declared and sent as image blocks when agy advertises them", async () => {
+      const { fake, provider, ended, prompts } = await setup();
+      const session = await provider.createSession("a");
+      expect(provider.describe().capabilities).toContain("attachments");
+      const image = path.join(fake.workspace, "pixel.png");
+      await writeFile(image, new Uint8Array([137, 80, 78, 71]));
+      await provider.prompt(session.id, { id: "p", text: "Look", delivery: "queue", attachments: [{ id: "att-1", name: "pixel.png", mimeType: "image/png", absolutePath: image }] });
+      await ended(session.id);
+      expect((await prompts())[0]!.params!.prompt).toEqual([{ type: "text", text: "Look" }, { type: "image", mimeType: "image/png", data: Buffer.from([137, 80, 78, 71]).toString("base64") }]);
+    });
+
+    test("attachments are not declared when agy does not advertise image prompts", async () => {
+      const { fake, provider } = await setup();
+      await fake.setFlag("no-image", true);
+      await provider.createSession("a");
+      expect(provider.describe().capabilities).not.toContain("attachments");
+      expect((await provider.listModels())[0]).not.toHaveProperty("imageInput");
+    });
+  });
+
+  describe("login (D3)", () => {
+    test("an authentication error is the login-missing state; a later listing clears it", async () => {
+      const { fake, provider } = await setup();
+      expect(provider.loginState()).toBe("unknown");
+      await fake.setFlag("auth-missing", true);
+      expect(await provider.listSessions()).toEqual([]);
+      expect(provider.loginState()).toBe("missing");
+      await expect(provider.createSession("a")).rejects.toThrow("Authentication required");
+      await fake.setFlag("auth-missing", false);
+      await provider.listSessions();
+      expect(provider.loginState()).toBe("ok");
+    });
+
+    test("a turn rejected for its login fails as a login failure, and the next prompt rechecks the login", async () => {
+      const { fake, provider, ended, upserts, events, run } = await setup();
+      const session = await provider.createSession("a");
+      await fake.setFlag("auth-missing", true);
+      await provider.prompt(session.id, { id: "p", text: "Hello", delivery: "queue" });
+      await ended(session.id);
+      expect(upserts(session.id).find(item => item.type === "notice")).toEqual(expect.objectContaining({ level: "error", code: "login-failed", message: "Authentication required" }));
+      expect(events.flatMap(event => event.updates).findLast(update => update.kind === "status")).toEqual(expect.objectContaining({ status: "failed" }));
+      expect(provider.loginState()).toBe("missing");
+      await fake.setFlag("auth-missing", false);
+      await run(session.id, "Signed in now");
+      expect(provider.loginState()).toBe("ok");
+    });
+  });
+  describe("the chat service", () => {
+    test("reports agy's login state and picks up a login made outside UatuCode", async () => {
+      const fake = await installFakeAgy();
+      const service = new LazyChatService({
+        workspacePath: fake.workspace, agentName: "Antigravity",
+        attachmentStore: { directory: fake.stateDirectory, save: async () => { throw new Error("unused"); }, resolve: async () => null } as never,
+        runtime: pathAgentRuntime(new AntigravityRuntime({ workspacePath: fake.workspace, env: fake.env }), executable => new AntigravityProvider({ workspacePath: fake.workspace, executable, env: fake.env })),
+      });
+      cleanups.push(async () => { await service.dispose(); await fake.remove(); });
+      expect(await service.retry()).toEqual(expect.objectContaining({ state: "ready", version: "1.5.13" }));
+      await fake.setFlag("auth-missing", true);
+      expect(await service.listConversations()).toEqual([]);
+      expect(await service.status()).toEqual(expect.objectContaining({ state: "ready", login: "missing" }));
+      await fake.setFlag("auth-missing", false);
+      await service.listConversations();
+      expect(await service.status()).toEqual(expect.objectContaining({ state: "ready", login: "ok" }));
+    });
+  });
+});
