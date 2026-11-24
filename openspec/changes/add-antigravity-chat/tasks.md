@@ -34,7 +34,7 @@ commit that passes `bun run test:ci` on its own.
 
 ## 3. Antigravity provider and runtime (commit 3)
 
-- [ ] 3.1 Add `src/chat/antigravity/descriptor.ts` (`antigravity`, "Antigravity", login `agy`, not Hub-managed) and the `PathAgentRuntime` configuration for `agy`. Verify with runtime tests for not installed, probe timeout, an unrecognized version, shadowed executables, and ready.
+- [x] 3.1 Add `src/chat/antigravity/descriptor.ts` (`antigravity`, "Antigravity", login `agy`, not Hub-managed) and the `PathAgentRuntime` configuration for `agy`. Verify with runtime tests for not installed, probe timeout, an unrecognized version, shadowed executables, and ready.
 - [ ] 3.2 Add the fake `agy` executable and redacted trial fixtures under `tests/fixtures/antigravity/`, including a second prompt sent mid-turn. Verify with a search that the fixtures contain no emails, account or plan identifiers, or user home paths.
 - [ ] 3.3 Implement the ACP connection: one process per live conversation, release after 5 idle minutes, the short-lived listing process, no file-system or terminal client capability, and shutdown through the shared process helpers. Verify with provider tests that a process is started on first need, released after idle, ended at dispose, and isolated when it crashes.
 - [ ] 3.4 Implement listing, the unknown-id guard and `session/load` history. Verify with tests that the chooser lists fixture sessions as `antigravity:<id>`, that an unknown id is refused without a prompt, and that replayed history appears without starting a turn.
