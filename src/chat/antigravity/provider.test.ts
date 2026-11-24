@@ -199,6 +199,28 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await reader.getSession(session.id)).toBeNull();
     });
 
+    test("a listing cut short at its page cap evicts nothing and refuses no id", async () => {
+      const { fake, provider, run } = await setup();
+      const first = await provider.createSession("a");
+      await run(first.id, "Say hello");
+      const second = await provider.createSession("b");
+      await run(second.id, "Say hello");
+      const reader = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, listPageLimit: 1 });
+      cleanups.push(() => reader.dispose());
+      // A complete listing first, then only capped ones.
+      expect(await reader.listSessions()).toHaveLength(2);
+      await fake.setFlag("paged-list", true);
+      // A capped listing keeps the ids it did not reach.
+      expect((await reader.listSessions()).map(session => session.id).sort()).toEqual([first.id, second.id].sort());
+      const fresh = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env, listPageLimit: 1 });
+      cleanups.push(() => fresh.dispose());
+      const shown = (await fresh.listSessions()).map(session => session.id);
+      expect(shown).toHaveLength(1);
+      const unseen = shown[0] === first.id ? second.id : first.id;
+      // Not on the page the cap reached, but the listing did not end: it is loaded, not refused.
+      expect((await fresh.listMessages(unseen, { limit: 50 })).items.filter(item => item.type === "user_message")).toHaveLength(1);
+    });
+
     test("a load that fails after part of its replay leaves no partial history behind", async () => {
       const { fake, provider, run } = await setup();
       const session = await provider.createSession("a");

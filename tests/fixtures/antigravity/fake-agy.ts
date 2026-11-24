@@ -16,6 +16,7 @@
 //   refuse-steer         present: a prompt sent during a run is refused (-32603)
 //   crash-on-steer       present: the process exits 1 on a prompt sent during a run
 //   no-usage             present: prompt results carry no usage
+//   paged-list           present: `session/list` answers one session per page
 //   end-then-refuse-steer present: a prompt sent during a run ends the earlier
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
@@ -157,7 +158,11 @@ app.onRequest(methods.agent.session.list, async ({ params }) => {
   log({ method: "session/list", params });
   if (flag("hang-list")) await new Promise(() => undefined);
   requireLogin();
-  return { sessions: readSessions().filter(session => !params.cwd || session.cwd === params.cwd).map(session => ({ sessionId: session.sessionId, cwd: session.cwd, ...(session.title ? { title: session.title } : {}), updatedAt: session.updatedAt })) };
+  const sessions = readSessions().filter(session => !params.cwd || session.cwd === params.cwd).map(session => ({ sessionId: session.sessionId, cwd: session.cwd, ...(session.title ? { title: session.title } : {}), updatedAt: session.updatedAt }));
+  if (!flag("paged-list")) return { sessions };
+  // One session per page, the cursor naming the next one.
+  const start = Number(params.cursor ?? 0);
+  return { sessions: sessions.slice(start, start + 1), ...(start + 1 < sessions.length ? { nextCursor: String(start + 1) } : {}) };
 });
 
 app.onRequest(methods.agent.session.new, async ({ params, client }) => {

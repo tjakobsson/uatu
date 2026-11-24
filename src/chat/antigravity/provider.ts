@@ -96,6 +96,7 @@ export type AntigravityProviderOptions = {
   // The built-in price table unless a test supplies its own.
   prices?: AntigravityPriceTable;
   setupDeadlineMs?: number;
+  listPageLimit?: number;
   // Where agy keeps its transcripts (`~/.gemini/...`): the home directory of
   // the workspace process unless a test supplies its own.
   homeDirectory?: string;
@@ -125,6 +126,7 @@ export class AntigravityProvider implements ChatProvider {
   private readonly prices: AntigravityPriceTable;
   private readonly homeDirectory: string;
   private readonly setupDeadlineMs: number;
+  private readonly listPageLimit: number;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly interactions = new PendingInteractions<PermissionDetail>((conversationId, event) => this.publish({ ...event, conversationId }));
   private readonly conversations = new Map<string, Conversation>();
@@ -153,6 +155,7 @@ export class AntigravityProvider implements ChatProvider {
     this.prices = options.prices ?? ANTIGRAVITY_PRICES;
     this.homeDirectory = options.homeDirectory ?? os.homedir();
     this.setupDeadlineMs = options.setupDeadlineMs ?? SETUP_DEADLINE_MS;
+    this.listPageLimit = options.listPageLimit ?? LIST_PAGE_LIMIT;
   }
 
   describe(): ChatAgent {
@@ -185,10 +188,20 @@ export class AntigravityProvider implements ChatProvider {
 
   /** agy's sessions for the workspace, from a short-lived listing process. */
   async listSessions(): Promise<ProviderSession[]> {
+    return (await this.inventory()).sessions;
+  }
+
+  /**
+   * agy's sessions for the workspace, and whether that is all of them. A
+   * listing that stops at the page cap with a cursor left is not the whole
+   * inventory: it evicts nothing and refuses no id. While the login is
+   * missing, the sessions already known stand in.
+   */
+  private async inventory(): Promise<{ sessions: ProviderSession[]; complete: boolean }> {
     const listed = await this.withListingProcess(async process => {
       const sessions: ProviderSession[] = [];
       let cursor: string | undefined;
-      for (let page = 0; page < LIST_PAGE_LIMIT; page++) {
+      for (let page = 0; page < this.listPageLimit; page++) {
         const answer = await process.agent.request("session/list", { cwd: this.workspacePath, ...(cursor ? { cursor } : {}) });
         for (const session of answer.sessions) {
           const updatedAt = Date.parse(session.updatedAt ?? "") || this.now();
@@ -197,19 +210,20 @@ export class AntigravityProvider implements ChatProvider {
         cursor = answer.nextCursor ?? undefined;
         if (!cursor) break;
       }
-      return sessions;
+      return { sessions, complete: cursor === undefined };
     });
-    if (listed === "login-missing") return [...this.sessions.values()];
-    for (const session of listed) {
+    if (listed === "login-missing") return { sessions: [...this.sessions.values()], complete: true };
+    for (const session of listed.sessions) {
       const known = this.sessions.get(session.id);
       this.sessions.set(session.id, known ? { ...session, createdAt: Math.min(known.createdAt, session.createdAt) } : session);
     }
-    const ids = new Set(listed.map(session => session.id));
+    const ids = new Set(listed.sessions.map(session => session.id));
     for (const id of ids) this.created.delete(id);
-    // A fresh listing is the inventory: what it no longer holds is gone,
+    // A complete listing is the inventory: what it no longer holds is gone,
     // except sessions created here that agy does not list yet.
-    for (const id of [...this.sessions.keys()]) if (!ids.has(id) && !this.created.has(id)) this.sessions.delete(id);
-    return [...[...this.created].flatMap(id => this.sessions.get(id) ?? []), ...listed];
+    if (listed.complete) for (const id of [...this.sessions.keys()]) if (!ids.has(id) && !this.created.has(id)) this.sessions.delete(id);
+    const rest = listed.complete ? [...this.created] : [...this.sessions.keys()].filter(id => !ids.has(id));
+    return { sessions: [...rest.flatMap(id => this.sessions.get(id) ?? []), ...listed.sessions], complete: listed.complete };
   }
 
   async getSession(id: string): Promise<ProviderSession | null> {
@@ -643,7 +657,8 @@ export class AntigravityProvider implements ChatProvider {
       // id must be one agy lists (design D10).
       // Checked against a fresh listing, not the cache: a cached id agy has
       // since dropped would load "successfully" and break the next prompt.
-      if (!(await this.listSessions()).some(session => session.id === conversation.sessionId)) {
+      const inventory = await this.inventory();
+      if (inventory.complete && !inventory.sessions.some(session => session.id === conversation.sessionId)) {
         throw new ConversationNotFoundError();
       }
       const process = await this.startProcess();
