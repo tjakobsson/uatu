@@ -1,0 +1,82 @@
+{
+  "kind": "static-ui-concept-browser-captures",
+  "date": "2026-11-09",
+  "source": "prototype.html",
+  "sourceSha256": "91a0e03312faec0637fccf5f761855297fb1a636d21b5991d37c76315afb236a",
+  "captureMethod": "Native Playwright browser; temporary loopback-only HTTP; full viewport with internal pane scrolling; animations disabled; bundled font explicitly loaded before capture",
+  "browser": "Chromium 154.0.0.0 on macOS",
+  "deviceScaleFactor": 1,
+  "imageScale": "css",
+  "captureQuery": "capture=1",
+  "provenance": "Screenshots of isolated static concept HTML. All data and artwork are illustrative. Not production Uatu screenshots, live-provider acceptance, or physical-device captures. No AI image generation was used. Origin is also embedded in each PNG.",
+  "assets": [
+    "../../../src/assets/uatu-logo.svg",
+    "../../../src/assets/fonts/HackNerdFontMono-Regular.woff2"
+  ],
+  "checks": {
+    "pageErrors": [],
+    "documentHorizontalOverflow": false,
+    "conceptLabelVisible": true,
+    "logoLoaded": true,
+    "bundledMonoFontLoaded": true,
+    "inventedJobProgressBars": false
+  },
+  "screenshots": [
+    {
+      "file": "01-schedules-desktop-light.png",
+      "view": "schedules",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "5847195f7826ce415129d6bbd5d75600a0b70f27ed6dbe9ed8034acaa2db2831"
+    },
+    {
+      "file": "02-schedule-detail-desktop-light.png",
+      "view": "schedule-detail",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1200 },
+      "sha256": "37d412b0ad204f584323dff815dbcd6e2a3f5a11182f768ad74261daf49656e9"
+    },
+    {
+      "file": "03-background-jobs-desktop-dark.png",
+      "view": "jobs",
+      "theme": "dark",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "d7e6f0583e2930f7ed0f0e40a9c52e4d8de2f4f3f1b150ece567ca495fe0bc82"
+    },
+    {
+      "file": "04-shells-desktop-dark.png",
+      "view": "shells",
+      "theme": "dark",
+      "viewport": { "width": 1440, "height": 1200 },
+      "sha256": "16616d6306a81b838168e882ee2e05425fcc1683579b769d3a51709f468059e3"
+    },
+    {
+      "file": "05-agent-terminals-desktop-dark.png",
+      "view": "terminals",
+      "theme": "dark",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "67d8663fd2fda3268548a8e51e6bea667ab2b6928ccd8f06b8fdba41a0b20ef0"
+    },
+    {
+      "file": "06-image-jobs-desktop-light.png",
+      "view": "images",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1200 },
+      "sha256": "309e9f0e4af944da272e38d1ebfcf227f886c224249037bd1ababa1a05cc200d"
+    },
+    {
+      "file": "07-schedules-mobile-light.png",
+      "view": "schedules",
+      "theme": "light",
+      "viewport": { "width": 430, "height": 932 },
+      "sha256": "051e58d02a2e774cb3d3a9e238e5771577e86922693b2582baccb039be8b454e"
+    },
+    {
+      "file": "08-background-jobs-mobile-dark.png",
+      "view": "jobs",
+      "theme": "dark",
+      "viewport": { "width": 430, "height": 932 },
+      "sha256": "267ed29960100f497edbad2d470d36cea27c72ca6e9e8059ee377e71bb33c646"
+    }
+  ]
+}
