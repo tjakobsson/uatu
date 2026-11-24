@@ -10,6 +10,7 @@ import { ConversationNotFoundError } from "../workspace";
 import { pathAgentRuntime } from "../path-agent-runtime";
 import { LazyChatService } from "../service";
 import type { AntigravityPriceTable } from "./pricing";
+import { ChatAdapter } from "../adapter";
 import { AntigravityProvider } from "./provider";
 import { AntigravityRuntime } from "./runtime";
 
@@ -174,6 +175,22 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(latest(session.id, "tool:call_command_1")).toEqual(expect.objectContaining({ status: "completed", output: expect.stringContaining("hi"), exitCode: 0 }));
       expect(statuses(session.id)).toEqual(["completed"]);
     });
+
+    test("a permission without file locations reaches the timeline and can be answered", async () => {
+      // The adapter is the only consumer of the provider's events here.
+      const fake = await installFakeAgy();
+      const provider = new AntigravityProvider({ workspacePath: fake.workspace, executable: fake.executable, env: fake.env });
+      const adapter = new ChatAdapter({ provider, workspacePath: fake.workspace });
+      cleanups.push(async () => { await adapter.dispose(); await provider.dispose(); await fake.remove(); });
+      void adapter.startEventPump().catch(() => undefined);
+      const { conversation } = await adapter.createConversation();
+      await adapter.prompt(conversation.id, "r1", "command: run");
+      const pending = () => adapter.projectionForTests(conversation.id).items().find(item => item.type === "permission" && item.status === "pending") as Extract<ConversationItem, { type: "permission" }> | undefined;
+      for (let i = 0; i < 1_000 && !pending(); i++) await Bun.sleep(5);
+      const card = pending()!;
+      expect(card).toEqual(expect.objectContaining({ action: "echo hi", resources: ["echo hi"] }));
+      expect(await adapter.respondPermission(conversation.id, card.requestId, "answer-1", "approved-once", "allow")).toEqual({ outcome: "approved-once" });
+    }, 15_000);
 
     test("deny fails the tool and completes the turn without a reply", async () => {
       const { fake, provider, pendingPermission, ended, latest, statuses } = await setup();

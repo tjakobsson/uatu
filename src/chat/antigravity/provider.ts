@@ -440,7 +440,10 @@ export class AntigravityProvider implements ChatProvider {
     const item: PermissionRequest = {
       id: `permission:${requestId}`, type: "permission", createdAt: this.now(), requestId,
       action: request.toolCall.title ?? "Antigravity wants to use a tool",
-      resources: (request.toolCall.locations ?? []).map(location => location.path),
+      // What the tool touches: its file locations, or the call itself (a
+      // command line) when agy names none. A card with no resource cannot be
+      // shown or answered.
+      resources: permissionResources(request.toolCall, merged),
       status: "pending",
       // Only the choices agy offers, and none that approves future requests.
       choices: request.options.filter(option => option.kind === "allow_once").map(option => ({ id: option.optionId, label: "Allow once" })),
@@ -750,6 +753,14 @@ export class AntigravityProvider implements ChatProvider {
     await Promise.all([...this.processes].map(process => this.closeProcess(process)));
     this.events_.close();
   }
+}
+
+function permissionResources(toolCall: RequestPermissionRequest["toolCall"], merged: Record<string, unknown>): string[] {
+  const paths = (toolCall.locations ?? []).map(location => location.path);
+  if (paths.length) return paths;
+  const rawInput = merged.rawInput as Record<string, unknown> | undefined;
+  const command = typeof rawInput?.CommandLine === "string" ? rawInput.CommandLine : undefined;
+  return [command ?? toolCall.title ?? (typeof merged.title === "string" ? merged.title : undefined) ?? toolCall.kind ?? "tool"];
 }
 
 function attachmentRefs(attachments: ProviderAttachment[] | undefined): MessageAttachment[] | undefined {
