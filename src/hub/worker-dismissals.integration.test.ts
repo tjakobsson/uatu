@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { BackgroundTaskItem } from "../chat/types";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import { HubSessionStore, hubCookieName } from "./auth";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { PersonalWorkspaceStateStore } from "./personal-state";
@@ -159,7 +160,7 @@ async function fixture() {
     return response;
   } });
   cleanups.push(async () => { await child.stop(true); });
-  const sessions = new SessionManager(registry, { local: { start: async () => ({ workspaceId: "project", instanceId: "synthetic", policyTrust: "unavailable", basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: child.port! }, token: "synthetic-token", exited: new Promise<number | null>(() => {}), stop: async () => {} }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+  const sessions = new SessionManager(registry, { local: { start: async () => testRunningSession({ workspaceId: "project", basePath: "/s/project/", port: child.port!, token: "synthetic-token" }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   await sessions.start("project");
   const hub = startHubServer({ config: { host: "127.0.0.1", port: 0, tls: null, users: ["alice", "bob"].map(name => ({ name, passwordHash: "unused" })) }, registry, sessions, sessionStore, personalState, workerDismissals });
   cleanups.push(async () => { await hub.stop(true); });

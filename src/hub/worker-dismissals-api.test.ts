@@ -7,6 +7,7 @@ import { WorkerDismissalClient, visibleWorkers, workerExecutionIds } from "../ch
 import { createClaudeEventMemory, normalizeClaudeMessage } from "../chat/claude/normalization";
 import { normalizeProviderMessage } from "../chat/opencode/v1/normalization";
 import type { BackgroundTaskItem, ConversationItem, ToolItem } from "../chat/types";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession } from "./backend";
 import { handleWorkerDismissals, readAuthoritativeWorkerEvidence } from "./worker-dismissals-api";
 import { WorkerDismissalsStore } from "./worker-dismissals";
@@ -19,7 +20,7 @@ import { OPENCODE_AGENT } from "../chat/opencode/descriptor";
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const conversationId = "opencode:parent";
-const running: RunningSession = { workspaceId: "project", instanceId: "fixture", policyTrust: "unavailable", basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: 12345 }, token: "fixture", exited: new Promise(() => {}), stop: async () => {} };
+const running: RunningSession = testRunningSession({ workspaceId: "project", basePath: "/s/project/", port: 12345, token: "fixture" });
 
 function childPages(pages: ConversationItem[][]) {
   const requests: string[] = [];

@@ -14,10 +14,10 @@
 // the handler. Responses are `no-store`: the inventory is a live view, and a
 // cached 401/200 would confuse the picker after a token rotation.
 
+import { SESSION_TERMINAL_SESSIONS_PATH as SESSIONS_PATH } from "../session-contract/paths";
 import { effectiveRequestOrigin, hasValidTerminalCredentials, isAllowedOrigin } from "./auth";
 import { isValidSessionId, type TerminalServer } from "./server";
 
-const SESSIONS_PATH = "/api/terminal/sessions";
 const SESSION_PATH_PREFIX = `${SESSIONS_PATH}/`;
 
 // Returns null when the request is not for this route family, so callers can

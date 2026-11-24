@@ -29,7 +29,6 @@ import { runHashPassword, runHub } from "./hub/main";
 import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
 import { runSshAgentSupervisor } from "./hub/credential-ssh-supervisor";
 import {
-  formatSessionUrl,
   printIndexingStatus,
   printStartupBanner,
   startSupervisedStartupHeartbeat,
@@ -58,8 +57,10 @@ import {
 } from "./debug/metrics";
 import { setGitMetricsSink } from "./document/git-base-ref";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
-import { consumeChildPolicyDescriptor } from "./hub/child-policy-bootstrap";
-import type { readChildPolicyBootstrap } from "./hub/child-policy";
+import { consumeChildPolicyDescriptor } from "./session-contract/bootstrap";
+import type { readChildPolicyBootstrap } from "./session-contract/policy";
+import { formatReadyLine, resolveUatuArgv, takePolicyBootstrapFlag } from "./session-contract/spawn";
+import { mintSessionToken } from "./session-contract/token";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -68,8 +69,7 @@ async function main() {
   // on malformed input, which we surface to stderr.
   const argv = Bun.argv.slice(2);
   let childPolicy: ReturnType<typeof readChildPolicyBootstrap> | null = null;
-  if (argv[0] === "serve" && argv.includes("--hub-policy-bootstrap")) {
-    argv.splice(argv.indexOf("--hub-policy-bootstrap"), 1);
+  if (takePolicyBootstrapFlag(argv)) {
     childPolicy = await consumeChildPolicyDescriptor();
   }
   if (argv[0] === "--ssh-agent-supervisor") {
@@ -185,6 +185,9 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
   // can tell slow from hung.
   const stopStartupHeartbeat = startSupervisedStartupHeartbeat(rootEntries, options, process.stdout);
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
+  // Minted here, in the serve assembly, through the session contract: the one
+  // credential the routes check and the ready line carries.
+  const sessionToken = mintSessionToken();
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
   let chatService: MultiAgentChatService | null = null;
@@ -265,7 +268,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
 
     const fetchFallback = buildFetchFallback({
       getTerminalServer: () => terminalServer,
-      getTerminalToken: () => watchSession!.getTerminalToken(),
+      getTerminalToken: () => sessionToken,
       navigationFetch,
       basePath: options.basePath,
     });
@@ -313,7 +316,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
           },
           getSession: () => watchSession!,
           chatService: chatService!,
-          getWorkspaceCredential: () => watchSession!.getTerminalToken(),
+          getWorkspaceCredential: () => sessionToken,
           basePath: options.basePath,
           childPolicy: childPolicy?.basePath === options.basePath ? childPolicy : undefined,
           manifestScope: options.manifestScope,
@@ -445,8 +448,8 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
   process.on("SIGTERM", shutdown);
   process.on("SIGHUP", shutdown);
 
-  // --exit-on-stdin-close: a supervising wrapper (e.g. the desktop app) holds
-  // our stdin pipe for its whole lifetime. EOF means the supervisor is gone —
+  // --exit-on-stdin-close: the Hub holds this session's stdin pipe for its
+  // whole lifetime (session contract). EOF means the Hub is gone —
   // including by crash, where no signal is ever sent — so shut down instead of
   // running orphaned. Without the flag stdin's lifetime is deliberately
   // ignored (a source run piped through `tee` must not couple).
@@ -467,13 +470,14 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     process.stdin.on("close", onStdinGone);
   }
 
-  // The child credential gates terminal and chat controls. The browser strips
+  // The session token gates terminal and chat controls. The browser strips
   // it from location on first load and promotes it to the existing HttpOnly
-  // cookie; the hub captures and brokers the same value without exposing it.
-  const url = formatSessionUrl(
+  // cookie; the hub reads it off this ready line and brokers the same value
+  // without exposing it.
+  const url = formatReadyLine(
     server.port!,
     options.basePath,
-    watchSession.getTerminalToken(),
+    sessionToken,
   );
   printStartupBanner(process.stdout);
   console.log(url);
@@ -535,12 +539,8 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
       // Bun.argv[1] is the script path and we must pass it. In a compiled
       // binary, Bun.argv[1] is the first user-supplied argument and the
       // process.execPath alone is the entry point.
-      const scriptArg = typeof Bun.argv[1] === "string" && /\.(ts|js)$/.test(Bun.argv[1])
-        ? [Bun.argv[1]]
-        : [];
       const watchdogArgv = [
-        process.execPath,
-        ...scriptArg,
+        ...resolveUatuArgv(),
         "--watchdog",
         String(process.pid),
         heartbeatPath,

@@ -11,6 +11,7 @@ import {
   PROXY_TRANSPORT_CLASSES,
   type ProxyStreamDiagnostic,
 } from "./proxy";
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession } from "./backend";
 
 describe("isCompressibleType", () => {
@@ -67,7 +68,7 @@ describe("chat SSE proxying", () => {
     await registry.load();
     await registry.register(join(root, "alpha"));
     await registry.register(join(root, "beta"));
-    const sessions = new SessionManager(registry, { local: { start: async (workspace, basePath) => ({ workspaceId: workspace.id, basePath, instanceId: crypto.randomUUID(), policyTrust: "unavailable", endpoint: { hostname: "127.0.0.1", port: child.port! }, token: `synthetic-${workspace.id}`, exited: new Promise(() => {}), stop: async () => {} }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    const sessions = new SessionManager(registry, { local: { start: async (workspace, basePath) => testRunningSession({ workspaceId: workspace.id, basePath, port: child.port!, token: `synthetic-${workspace.id}` }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
     const sessionStore = new HubSessionStore(join(root, "synthetic-sessions.json"));
     const alice = await sessionStore.issue("alice", "synthetic test device"), bob = await sessionStore.issue("bob", "synthetic test device");
     const aliceSibling = await sessionStore.issue("alice", "second synthetic test device");
@@ -125,9 +126,9 @@ describe("chat SSE proxying", () => {
       seen.push({ pathname: new URL(request.url).pathname, body: await request.json(), headers: request.headers });
       return Response.json({ discarded: true, outcomeUnconfirmed: true });
     } });
-    const session: RunningSession = { workspaceId: "alpha", endpoint: { hostname: "127.0.0.1", port: child.port! }, token: "synthetic-child-token", basePath: "/s/alpha/", instanceId: crypto.randomUUID(), policyTrust: "unavailable", exited: new Promise(() => {}), stop: async () => {} };
+    const session: RunningSession = testRunningSession({ workspaceId: "alpha", port: child.port!, token: "synthetic-child-token", basePath: "/s/alpha/" });
     const send = async (principal: string, workspace = session, requestId: unknown = "same-client-request") => {
-      const response = await proxyHttp(new Request(`http://hub${workspace.basePath}api/chat/conversations/opencode:one/queue/unknown/discard-unconfirmed`, {
+      const response = await proxyHttp(new Request(`http://hub${workspace.link.basePath}api/chat/conversations/opencode:one/queue/unknown/discard-unconfirmed`, {
         method: "POST", headers: { "content-type": "application/json", "x-uatu-hub-principal": "forged-account", "x-uatu-hub-chat-policy": "forged-policy", "x-uatu-hub-operation-receipt": "opr_forged" },
         body: JSON.stringify({ requestId, uncertaintyId: "opaque-uncertainty" }),
       }), workspace, { principal, revision: 1, autoBackgroundOnSteer: true });
@@ -139,7 +140,7 @@ describe("chat SSE proxying", () => {
       expect(alice.body.requestId).not.toBe("same-client-request");
       expect(retry.body.requestId).toBe(alice.body.requestId);
       expect(bob.body.requestId).not.toBe(alice.body.requestId);
-      const other: RunningSession = { ...session, workspaceId: "beta", basePath: "/s/beta/", instanceId: crypto.randomUUID() };
+      const other: RunningSession = testRunningSession({ workspaceId: "beta", port: child.port!, token: "synthetic-child-token", basePath: "/s/beta/" });
       expect((await send("alice", other)).body.requestId).not.toBe(alice.body.requestId);
       for (const entry of seen) {
         expect(entry.body.uncertaintyId).toBe("opaque-uncertainty");
@@ -156,7 +157,7 @@ describe("chat SSE proxying", () => {
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
       return Response.json({ delivery: "steer", headers: Object.fromEntries(request.headers), body: await request.json() });
     } });
-    const session: RunningSession = { workspaceId: "project", endpoint: { hostname: "127.0.0.1", port: server.port! }, token: "workspace-credential", basePath: "/s/project/", instanceId: crypto.randomUUID(), policyTrust: "unavailable", exited: new Promise(() => {}), stop: async () => {} };
+    const session: RunningSession = testRunningSession({ workspaceId: "project", port: server.port!, token: "workspace-credential", basePath: "/s/project/" });
     const send = async (principal: string, enabled = true) => await (await proxyHttp(new Request("http://hub/s/project/api/chat/conversations/opencode:parent/prompts", {
       method: "POST", headers: { "content-type": "application/json", "x-uatu-hub-operation-receipt": "opr_forged" }, body: JSON.stringify({ requestId: "shared-client-id", text: "Fixture", delivery: "steer" }),
     }), session, { principal, revision: enabled ? 0 : 1, autoBackgroundOnSteer: enabled })).json();
@@ -171,18 +172,20 @@ describe("chat SSE proxying", () => {
       expect((await send("off-first", true)).automaticBackground).toBeUndefined();
       expect(a.headers["x-uatu-hub-chat-policy"]).toBeUndefined();
       expect(JSON.stringify(a)).not.toMatch(/alice|principal|receiptScope/);
-      const replacement = { ...session, instanceId: crypto.randomUUID() };
+      // A replacement session has its own link, so its own receipt namespace.
+      const replacement = testRunningSession({ workspaceId: "project", port: server.port!, token: "workspace-credential", basePath: "/s/project/" });
       const response = await proxyHttp(new Request("http://hub/s/project/api/chat/conversations/opencode:parent/prompts", { method: "POST", body: '{"requestId":"shared-client-id","text":"Fixture","delivery":"steer"}' }), replacement, { principal: "alice", revision: 0, autoBackgroundOnSteer: false });
       expect((await response.json()).headers[key]).not.toBe(a.headers[key]);
     } finally { server.stop(true); }
   });
   test("reserved Hub policy metadata is stripped from ordinary and unrelated requests", async () => {
     const child = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) { return Response.json(Object.fromEntries(request.headers)); } });
-    const session: RunningSession = {
-      workspaceId: "project", instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-      basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: child.port! }, token: null,
-      exited: new Promise(() => undefined), async stop() {},
-    };
+    const session: RunningSession = testRunningSession({
+      workspaceId: "project",
+      basePath: "/s/project/",
+      port: child.port!,
+      token: null,
+    });
     try {
       const response = await proxyHttp(new Request("http://hub.example/s/project/api/state", { headers: {
         "x-uatu-hub-chat-policy": "forged-policy", "x-uatu-hub-principal": "foreign-account", "x-uatu-hub-operation-receipt": `opr_${"a".repeat(43)}`, "x-normal": "preserved",
@@ -215,15 +218,12 @@ describe("chat SSE proxying", () => {
         });
       },
     });
-    const session: RunningSession = {
+    const session: RunningSession = testRunningSession({
       workspaceId: "project",
-      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath: "/s/project/",
-      endpoint: { hostname: "127.0.0.1", port: child.port! },
+      port: child.port!,
       token: "child-secret",
-      exited: new Promise(() => undefined),
-      async stop() {},
-    };
+    });
     try {
       const response = await proxyHttp(new Request(
         "http://hub.example/s/project/api/chat/conversations/local/events?t=browser-value",
@@ -243,11 +243,12 @@ describe("chat SSE proxying", () => {
 
 describe("proxied stream cancellation", () => {
   test("media and no-transform responses bypass buffering and rewriting regardless of MIME", async () => {
-    const session: RunningSession = {
-      workspaceId: "project", instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-      basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: 1 }, token: "private-child-token",
-      exited: new Promise(() => {}), async stop() {},
-    };
+    const session: RunningSession = testRunningSession({
+      workspaceId: "project",
+      basePath: "/s/project/",
+      port: 1,
+      token: "private-child-token",
+    });
     for (const [route, contentType, cacheControl] of [
       ["api/media", "text/html", "no-store"],
       ["api/media", "application/json", "no-store"],
@@ -371,16 +372,13 @@ describe("proxied stream cancellation", () => {
   });
 
   test("an unreachable child answers 502 without leaving the request listener attached", async () => {
-    const session: RunningSession = {
+    const session: RunningSession = testRunningSession({
       workspaceId: "project",
-      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath: "/s/project/",
       // Nothing is listening here; the fetch fails immediately.
-      endpoint: { hostname: "127.0.0.1", port: 1 },
+      port: 1,
       token: "child-secret",
-      exited: new Promise(() => undefined),
-      async stop() {},
-    };
+    });
     const controller = new AbortController();
     const response = await proxyHttp(
       new Request("http://hub.example/s/project/api/search", { signal: controller.signal }),
@@ -494,15 +492,12 @@ describe("proxied stream diagnostics", () => {
     const records: ProxyStreamDiagnostic[] = [];
     setProxyStreamDiagnostics(record => records.push(record));
     try {
-      const session: RunningSession = {
+      const session: RunningSession = testRunningSession({
         workspaceId: "project",
-        instanceId: crypto.randomUUID(), policyTrust: "unavailable",
         basePath: "/s/project/",
-        endpoint: { hostname: "127.0.0.1", port: 1 },
+        port: 1,
         token: "child-secret",
-        exited: new Promise(() => undefined),
-        async stop() {},
-      };
+      });
       const response = await proxyHttp(new Request("http://hub.example/s/project/api/search"), session);
       expect(response.status).toBe(502);
       expect(records).toEqual([{ transport: "search", outcome: "failed", status: "unreachable" }]);
@@ -540,15 +535,12 @@ describe("proxied stream diagnostics", () => {
       fetch: () => new Response("body", { headers: { "content-type": "application/octet-stream" } }),
     });
     try {
-      const session: RunningSession = {
+      const session: RunningSession = testRunningSession({
         workspaceId: "project",
-        instanceId: crypto.randomUUID(), policyTrust: "unavailable",
         basePath: "/s/project/",
-        endpoint: { hostname: "127.0.0.1", port: child.port! },
+        port: child.port!,
         token: "child-secret",
-        exited: new Promise(() => undefined),
-        async stop() {},
-      };
+      });
       const response = await proxyHttp(new Request("http://hub.example/s/project/assets/chunk.js"), session);
       await response.arrayBuffer();
       await Bun.sleep(20);
@@ -599,14 +591,11 @@ function streamingChild() {
       return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8" } });
     },
   });
-  const session: RunningSession = {
+  const session: RunningSession = testRunningSession({
     workspaceId: "project",
-    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
     basePath: "/s/project/",
-    endpoint: { hostname: "127.0.0.1", port: server.port! },
+    port: server.port!,
     token: "child-secret",
-    exited: new Promise(() => undefined),
-    async stop() {},
-  };
+  });
   return { server, session, state };
 }

@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_PORT,
-  isSourceRun,
   normalizeBasePath,
   parseCommand,
   serveRemovedText,
@@ -129,15 +128,6 @@ describe("the source-run harness", () => {
     const options = serve("/repo/testdata/watch-docs", "--no-open", "--no-watchdog", "--port", "0");
     expect(options.rootPaths).toEqual(["/repo/testdata/watch-docs"]);
     expect(options.exitOnStdinClose).toBe(false);
-  });
-
-  test("isSourceRun tells a script path from a compiled binary's entry", () => {
-    expect(isSourceRun("/repo/src/cli.ts")).toBe(true);
-    expect(isSourceRun("/repo/dist/cli.js")).toBe(true);
-    // A compiled binary's Bun.argv[1] is its extensionless virtual entry.
-    expect(isSourceRun("/$bunfs/root/uatu")).toBe(false);
-    expect(isSourceRun("serve")).toBe(false);
-    expect(isSourceRun(null)).toBe(false);
   });
 });
 

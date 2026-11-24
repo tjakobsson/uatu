@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { testRunningSession } from "../../tests/contracts/session-link";
 import type { RunningSession, SessionBackend } from "./backend";
 import {
   EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
@@ -25,15 +26,12 @@ afterEach(async () => {
 });
 
 function fakeSession(workspaceId: string, onStop?: () => void): RunningSession {
-  return {
+  return testRunningSession({
     workspaceId,
-    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
-    basePath: `/s/${workspaceId}/`,
-    endpoint: { hostname: "127.0.0.1", port: 1 },
+    port: 1,
     token: null,
-    exited: new Promise<number | null>(() => undefined),
     stop: async () => onStop?.(),
-  };
+  });
 }
 
 describe("SessionManager.isStarting", () => {
@@ -568,20 +566,18 @@ describe("SessionManager start during an in-flight stop", () => {
       start: async (_workspace, _basePath, _credentials) => {
         startCalls += 1;
         const id = startCalls;
-        return {
+        return testRunningSession({
           workspaceId: "contended",
-          instanceId: crypto.randomUUID(), policyTrust: "unavailable" as const,
           basePath: "/s/contended/",
-          endpoint: { hostname: "127.0.0.1", port: id },
+          port: id,
           token: null,
-          exited: new Promise<number | null>(() => undefined),
           stop: () =>
             id === 1
               ? new Promise<void>(resolve => {
                   releaseStop = resolve;
                 })
               : Promise.resolve(),
-        };
+        });
       },
     };
     const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
@@ -600,7 +596,7 @@ describe("SessionManager start during an in-flight stop", () => {
     const [stopped, restarted] = await Promise.all([stopPromise, startPromise]);
     expect(stopped).toBe(true);
     expect(startCalls).toBe(2);
-    expect(restarted.endpoint.port).toBe(2);
+    expect(restarted.link.endpoint.port).toBe(2);
     expect(sessions.isRunning("contended")).toBe(true);
   });
 });
@@ -623,13 +619,11 @@ describe("SessionManager serialized lifecycle", () => {
       start: async (_workspace, _basePath, _credentials) => {
         startCalls += 1;
         const id = startCalls;
-        return {
+        return testRunningSession({
           workspaceId: "chained",
-          instanceId: crypto.randomUUID(), policyTrust: "unavailable" as const,
           basePath: "/s/chained/",
-          endpoint: { hostname: "127.0.0.1", port: id },
+          port: id,
           token: null,
-          exited: new Promise<number | null>(() => undefined),
           stop: () => {
             stops.push(id);
             return id === 1
@@ -638,7 +632,7 @@ describe("SessionManager serialized lifecycle", () => {
                 })
               : Promise.resolve();
           },
-        };
+        });
       },
     };
     const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
@@ -655,7 +649,7 @@ describe("SessionManager serialized lifecycle", () => {
     releaseFirstStop();
     const [stopped1, restarted, stopped2] = await Promise.all([firstStop, queuedStart, secondStop]);
     expect(stopped1).toBe(true);
-    expect(restarted.endpoint.port).toBe(2);
+    expect(restarted.link.endpoint.port).toBe(2);
     // The second stop found and terminated the queued start's child.
     expect(stopped2).toBe(true);
     expect(stops).toEqual([1, 2]);

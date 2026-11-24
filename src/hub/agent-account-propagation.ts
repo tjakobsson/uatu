@@ -8,7 +8,7 @@
 
 import type { ChatAccountChange } from "../chat/types";
 import type { AccountAgentId } from "./agent-account-types";
-import { childRequestHeaders, childUrlFor } from "./proxy";
+import { SESSION_ACCOUNTS_CHANGED_PATH } from "../session-contract/paths";
 import type { SessionManager } from "./sessions";
 
 const NOTIFY_TIMEOUT_MS = 10_000;
@@ -26,9 +26,8 @@ export function createAccountChangeNotifier(options: {
     await Promise.allSettled(options.sessions.runningIds().map(async workspaceId => {
       const running = options.sessions.get(workspaceId);
       if (!running) return;
-      const url = childUrlFor(running, new URL(`http://hub.invalid/s/${encodeURIComponent(workspaceId)}/api/chat/accounts-changed`));
-      const headers = childRequestHeaders(running);
-      headers.set("accept", "application/json");
+      const url = running.link.url(SESSION_ACCOUNTS_CHANGED_PATH);
+      const headers = running.link.requestHeaders("application/json");
       headers.set("content-type", "application/json");
       const response = await fetch(url, {
         method: "POST",
