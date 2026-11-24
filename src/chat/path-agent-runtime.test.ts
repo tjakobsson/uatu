@@ -100,6 +100,19 @@ describe.skipIf(process.platform === "win32")("PathAgentRuntime", () => {
     expect(availability).toEqual(expect.objectContaining({ state: "unavailable", reason: "startup-failed", diagnostics: expect.objectContaining({ lastProbe: { kind: "abandoned" } }) }));
   }, 10_000);
 
+  test("a probe's leftover helpers are reaped after it answers, without delaying the answer", async () => {
+    const home = await directory();
+    const pidFile = path.join(home, "helper.pid");
+    const fake = await fakeExecutable(`echo 'fake-agent 2.0.0'\nsleep 30 >/dev/null 2>&1 &\necho $! > '${pidFile}'\nexit 0`, home);
+    const started = Date.now();
+    expect(await runtime({ PATH: fake.directory }, { probeTimeoutMs: 2_000 }).ensure()).toEqual({ state: "ready", version: "2.0.0" });
+    expect(Date.now() - started).toBeLessThan(1_500);
+    const pid = Number((await readFile(pidFile, "utf8")).trim());
+    const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    for (let i = 0; i < 400 && alive(); i++) await Bun.sleep(5);
+    expect(alive()).toBe(false);
+  }, 10_000);
+
   test("a probe that exited answers with its version at the bound when a descendant keeps its output open", async () => {
     const fake = await fakeExecutable("echo 'fake-agent 2.0.0'\n(sleep 3) &\nexit 0");
     const started = Date.now();

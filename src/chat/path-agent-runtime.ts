@@ -2,7 +2,7 @@ import type { ChatProvider } from "./provider";
 import type { AgentRuntime } from "./service";
 import type { ChatAvailability, ChatStartupDiagnostics } from "./types";
 import { discoverExecutableCandidates } from "./executable";
-import { BoundedTextCapture } from "./managed-process";
+import { BoundedTextCapture, ManagedProcess } from "./managed-process";
 
 // A version probe is one short-lived process, killed this long after it
 // starts so a hung mount or a wedged install cannot run on. The deadline is
@@ -10,6 +10,8 @@ import { BoundedTextCapture } from "./managed-process";
 // then, keeping what was read so far.
 const PROBE_TIMEOUT_MS = 10_000;
 const OUTPUT_LIMIT_BYTES = 16 * 1024;
+// How long a probe's leftover helpers get to leave after SIGTERM.
+const PROBE_REAP_GRACE_MS = 500;
 
 export type VersionProbeResult = {
   // The probe's exit code, or null when it was killed on timeout.
@@ -249,7 +251,9 @@ export async function runProbe(argv: string[], timeoutMs: number): Promise<Versi
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-  });
+    // A group leader, so whatever the probe starts can be reaped with it.
+    detached: process.platform !== "win32",
+  } as Parameters<typeof Bun.spawn>[1]) as unknown as ReturnType<typeof Bun.spawn> & { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array> };
   // Bounded from the start: the version leads the output, and nothing a
   // probe prints can grow this process's memory past the limit.
   const stdout = new BoundedTextCapture(OUTPUT_LIMIT_BYTES, undefined, "start");
@@ -272,5 +276,8 @@ export async function runProbe(argv: string[], timeoutMs: number): Promise<Versi
   if (timedOut) child.kill("SIGKILL");
   stdout.release();
   stderr.release();
+  // The answer does not wait, but nothing the probe started outlives it: its
+  // process group is ended in the background (SIGTERM, a grace, SIGKILL).
+  void new ManagedProcess(child, { termGraceMs: PROBE_REAP_GRACE_MS, escalation: "group" }).terminate().catch(() => undefined);
   return { exitCode: timedOut ? null : exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut };
 }
