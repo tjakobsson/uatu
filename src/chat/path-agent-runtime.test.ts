@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ChatProvider } from "./provider";
-import { PathAgentRuntime, pathAgentMessages, pathAgentRuntime, type PathAgentConfiguration } from "./path-agent-runtime";
+import { PathAgentRuntime, pathAgentMessages, pathAgentRuntime, runProbe, type PathAgentConfiguration } from "./path-agent-runtime";
 
 // A made-up agent, so nothing here leans on Claude Code's configuration.
 const FAKE_AGENT: PathAgentConfiguration = {
@@ -106,6 +106,14 @@ describe.skipIf(process.platform === "win32")("PathAgentRuntime", () => {
     const availability = await runtime({ PATH: fake.directory }, { probeTimeoutMs: 300 }).ensure();
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(availability).toEqual({ state: "ready", version: "2.0.0" });
+  }, 10_000);
+
+  test("a probe's output is bounded from its start, so a long answer keeps its version line", async () => {
+    const fake = await fakeExecutable("echo 'fake-agent 3.0.0'\nhead -c 1048576 /dev/zero | tr '\\0' 'x'");
+    const result = await runProbe([fake.executable, "version", "--plain"], 5_000);
+    expect(result.stdout.length).toBeLessThanOrEqual(16 * 1024);
+    expect(result.stdout.startsWith("fake-agent 3.0.0\n")).toBe(true);
+    expect(await runtime({ PATH: fake.directory }).ensure()).toEqual({ state: "ready", version: "3.0.0" });
   }, 10_000);
 
   test("what a timed-out probe printed before the bound is kept as evidence", async () => {

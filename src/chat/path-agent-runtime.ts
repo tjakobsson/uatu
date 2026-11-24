@@ -2,6 +2,7 @@ import type { ChatProvider } from "./provider";
 import type { AgentRuntime } from "./service";
 import type { ChatAvailability, ChatStartupDiagnostics } from "./types";
 import { discoverExecutableCandidates } from "./executable";
+import { BoundedTextCapture } from "./managed-process";
 
 // A version probe is one short-lived process, killed this long after it
 // starts so a hung mount or a wedged install cannot run on. The deadline is
@@ -249,8 +250,12 @@ export async function runProbe(argv: string[], timeoutMs: number): Promise<Versi
     stderr: "pipe",
     stdin: "ignore",
   });
-  const stdout = collectText(child.stdout);
-  const stderr = collectText(child.stderr);
+  // Bounded from the start: the version leads the output, and nothing a
+  // probe prints can grow this process's memory past the limit.
+  const stdout = new BoundedTextCapture(OUTPUT_LIMIT_BYTES, undefined, "start");
+  const stderr = new BoundedTextCapture(OUTPUT_LIMIT_BYTES, undefined, "start");
+  stdout.consume(child.stdout);
+  stderr.consume(child.stderr);
   let exitCode: number | null = null;
   let exited = false;
   const childExited = child.exited.then(code => { exitCode = code; exited = true; });
@@ -268,28 +273,4 @@ export async function runProbe(argv: string[], timeoutMs: number): Promise<Versi
   stdout.release();
   stderr.release();
   return { exitCode: timedOut ? null : exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut };
-}
-
-// A stream read to its end, or until released, keeping what it delivered.
-function collectText(stream: ReadableStream<Uint8Array>): { done: Promise<void>; text: () => string; release: () => void } {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let released = false;
-  const done = (async () => {
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done || released) break;
-        chunks.push(value);
-      }
-    } catch { /* what was read before the failure stays */ }
-  })();
-  return {
-    done,
-    text: () => new TextDecoder().decode(Buffer.concat(chunks)),
-    release: () => {
-      released = true;
-      void reader.cancel().catch(() => undefined);
-    },
-  };
 }
