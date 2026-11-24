@@ -555,7 +555,11 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         || (Boolean(previous.visuals?.some(visual => visual.status === "pending"))
           && (completes(/`{3}|~{3}/g) || completes(/(?:`{3,}|~{3,})[ \t]*(?:\r\n|\r|\n)/g)))
         || closesImageCandidate()
-        || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*\r?\n/g)
+        // A definition can turn an earlier label into an image, shifting the
+        // document index the client binds every later snapshot by. Re-enrich
+        // as soon as it appears, not when its line ends: a destination at EOF
+        // stays provisional in the capture itself.
+        || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*(?:\r?\n|$)/g)
         || completes(/<(?:img|image)\b[^>]*>/gi);
     };
     const enrich = async (tracked: Tracked, force = false) => {
