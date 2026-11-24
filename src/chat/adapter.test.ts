@@ -16702,8 +16702,9 @@ describe("immediate steering (add-antigravity-chat D9)", () => {
       const held = await adapter.prompt("session", "r-q", "after the turn", undefined, undefined, undefined, undefined, "queue");
       await adapter.prompt("session", "r-s", "into the turn", undefined, undefined, undefined, undefined, "steer");
       // The provider reports nothing for the earlier prompt's end, so the
-      // steered turn is still the same running turn.
-      await Bun.sleep(30);
+      // steered turn is still the same running turn once every event the
+      // provider sent has been applied.
+      await liveEventsApplied(adapter, provider);
       expect(completions()).toEqual([]);
       expect(adapter.activity().working).toBe(true);
       expect(((await adapter.history("session")).queued ?? []).map(entry => entry.id)).toEqual([held.messageId]);
