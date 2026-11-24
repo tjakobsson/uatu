@@ -771,6 +771,31 @@ test("immediate steering: a refusal that came while another conversation was ope
   expect(f.errors.at(-1)).toEqual(["agy did not take it. Draft restored.", "one"]);
 });
 
+const confirmingRow = (requestId: string, sequence = 1) => ({ type: "item.upsert" as const, conversationId: "one", generation: "g", sequence, item: { id: "message:native-steer", type: "user_message" as const, createdAt: 1, text: "Confirmed", requestId } });
+
+for (const order of ["after the receipt", "before the receipt"] as const) test(`immediate steering: a steer's row settles it for good, arriving ${order}, even when a reopen's newest page lacks the row`, async () => {
+  const receipt = deferred<ReturnType<typeof acceptance>>();
+  const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return receipt.promise; } });
+  f.composer.edit("Confirmed"); const sent = f.composer.submit();
+  const observeRow = () => {
+    const row = confirmingRow(f.prompts[0]![1]);
+    const applied = applyChatEvent(f.projection(), row);
+    f.context.write(applied.projection); f.composer.observe(row, applied.outcome === "applied");
+  };
+  if (order === "before the receipt") observeRow();
+  receipt.resolve(acceptance({ messageId: "provisional", delivery: "steer", pending: false, awaitingConfirmation: true }));
+  await sent;
+  if (order === "after the receipt") observeRow();
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.composer.acceptedDrafts("one")).toEqual([]);
+  // Reopened, with the confirming row only on an older page: nothing awaits confirmation.
+  const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "running" },
+    generation: "g", cursor: "", configuration: {}, items: [{ id: "message:later", type: "assistant_message", createdAt: 5, markdown: "Later reply" }], queued: [] };
+  f.context.write(f.composer.acceptSnapshot(snapshot, f.composer.acceptedDrafts("one")));
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.texts.get("one")).toBe("");
+});
+
 test("immediate steering: a steer awaiting confirmation is kept unconfirmed, settles on its row, and returns on a refusal", async () => {
   const f = immediateFixture({ prompt: async (...args) => { f.prompts.push(args); return acceptance({ messageId: `sent-${args[1]}`, delivery: "steer", pending: false, awaitingConfirmation: true }); } });
   f.composer.edit("Confirmed later"); await f.composer.submit();

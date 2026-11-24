@@ -1140,8 +1140,10 @@ to the composer; an unknown outcome leaves the draft unconfirmed. An admission
 that answers after the steer admission bound goes through the same
 settlement. The composer keeps refusals it has seen until the draft they name
 is settled, so a refusal before the receipt, or one read from history when
-the conversation is shown again, still restores the draft. Nothing is ever
-resent. The provider reports the turn's end once, after the steered
+the conversation is shown again, still restores the draft. It also remembers
+each request whose row it has seen, so a confirmed steer stays settled
+whether its row comes before or after the receipt, and when a reopen's newest
+page no longer holds that row. Nothing is ever resent. The provider reports the turn's end once, after the steered
 part, so held messages still wait for the carried turn.
 
 Paused held messages reflect dormancy/revert. Pending steers stay paused after

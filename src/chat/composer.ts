@@ -87,6 +87,10 @@ export class Composer {
   // request, with the agent's reason: a refusal can arrive before the
   // submission's receipt, or while another conversation is open.
   private readonly refusedSteers = new Map<string, Map<string, string>>();
+  // Requests whose own user row has been seen, by conversation (the latest
+  // few): the row settles the draft for good, so neither a receipt that
+  // comes after it nor a reopen whose newest page lacks it brings it back.
+  private readonly confirmedRequests = new Map<string, Set<string>>();
   private readonly notices = new AutomaticBackgroundNotices();
   private readonly answers = new Map<string, { question: string; text: string; failed?: boolean }>();
   private readonly generating = new Set<string>();
@@ -135,6 +139,8 @@ export class Composer {
       if (refused && drafts.has(refused) && item.type === "notice") this.noteSteerRefusal(current.conversationId, refused, item.message);
     }
     current = this.settleRefusedSteers(current.conversationId, current);
+    for (const item of snapshot.items) if (item.type === "user_message" && item.requestId) this.noteConfirmed(current.conversationId, item.requestId);
+    current = this.dropConfirmed(current.conversationId, current);
     this.historyRefresh.delete(current.conversationId);
     return current;
   }
@@ -147,6 +153,10 @@ export class Composer {
     if (refused && event.type === "item.upsert" && event.item.type === "notice") {
       this.noteSteerRefusal(event.conversationId, refused, event.item.message);
       this.settleRefusedSteers(event.conversationId);
+    }
+    if (event.type === "item.upsert" && event.item.type === "user_message" && event.item.requestId) {
+      this.noteConfirmed(event.conversationId, event.item.requestId);
+      this.dropConfirmed(event.conversationId);
     }
     if (!applied) return;
     if (event.type === "conversation.queue" && (event.change.kind === "removed" || event.change.kind === "delivered")) this.terminal(event.conversationId, event.change.messageId);
@@ -240,6 +250,28 @@ export class Composer {
     this.staging.set(id, task); this.changed();
     try { await task; } finally { if (this.staging.get(id) === task) this.staging.delete(id); }
     this.changed("attachments");
+  }
+  private noteConfirmed(id: string, requestId: string): void {
+    const known = new Set(this.confirmedRequests.get(id));
+    known.delete(requestId); known.add(requestId);
+    for (const oldest of known) { if (known.size <= 50) break; known.delete(oldest); }
+    boundedSet(this.confirmedRequests, id, known, 100);
+  }
+  /** Drafts whose own row was seen are settled: dropped from the retained
+   * copies and from the open projection, or from `current` when given. */
+  private dropConfirmed(id: string): void;
+  private dropConfirmed(id: string, current: ChatProjection): ChatProjection;
+  private dropConfirmed(id: string, current?: ChatProjection): ChatProjection | void {
+    const confirmed = this.confirmedRequests.get(id);
+    if (!confirmed?.size) return current;
+    const pending = this.unknown.get(id) ?? [];
+    const rest = pending.filter(draft => !confirmed.has(draft.requestId));
+    if (rest.length !== pending.length) { if (rest.length) boundedSet(this.unknown, id, rest, 100); else this.unknown.delete(id); }
+    const settle = (projection: ChatProjection) => projection.acceptedDrafts.some(draft => confirmed.has(draft.requestId))
+      ? { ...projection, acceptedDrafts: projection.acceptedDrafts.filter(draft => !confirmed.has(draft.requestId)) }
+      : projection;
+    if (current) return settle(current);
+    this.update(id, settle);
   }
   private noteSteerRefusal(id: string, requestId: string, reason: string): void {
     const known = this.refusedSteers.get(id) ?? new Map<string, string>();
@@ -375,8 +407,9 @@ export class Composer {
         this.changed("accepted", id);
         this.presentation.note(null); this.presentation.error(null, id);
         for (const entry of staged) this.release(entry.previewUrl);
-        // Its refusal may have come before this receipt.
+        // Its refusal, or its row, may have come before this receipt.
         this.settleRefusedSteers(id);
+        this.dropConfirmed(id);
         return;
       }
       if (reload) { reload.messageId = accepted.messageId; if (!accepted.pending && accepted.operation !== "reload") retireReload(); }
@@ -415,6 +448,7 @@ export class Composer {
         this.changed("projection", id);
         for (const entry of staged) this.release(entry.previewUrl);
         this.settleRefusedSteers(id);
+        this.dropConfirmed(id);
         void this.checkUnknown(id, requestId, `Steer (${requestId})`, text);
       } else {
         const message = messageOf(error); this.presentation.announce(message, true);
