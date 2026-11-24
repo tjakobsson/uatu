@@ -7,7 +7,7 @@ export const AUTH_REQUIRED_CODE = -32000;
 
 const STDERR_LIMIT_BYTES = 16 * 1024;
 // Shutdown fits inside the Hub's kill deadline (SIGTERM_GRACE_MS in
-// hub/backend.ts, which a test holds these to): closing stdin ends agy
+// session-contract/spawn.ts, which a test holds these to): closing stdin ends agy
 // within about 200 ms (design D2); after that the shared helper sends
 // SIGTERM to the group and escalates to SIGKILL, waiting at most three
 // TERM_GRACE_MS in all.

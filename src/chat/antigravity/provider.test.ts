@@ -11,7 +11,7 @@ import { pathAgentRuntime } from "../path-agent-runtime";
 import { LazyChatService } from "../service";
 import type { AntigravityPriceTable } from "./pricing";
 import { ChatAdapter } from "../adapter";
-import { SIGTERM_GRACE_MS } from "../../hub/backend";
+import { SIGTERM_GRACE_MS } from "../../session-contract/spawn";
 import { STDIN_CLOSE_GRACE_MS, TERM_GRACE_MS } from "./connection";
 import { AntigravityProvider, type AntigravityProviderOptions } from "./provider";
 import { AntigravityRuntime } from "./runtime";
