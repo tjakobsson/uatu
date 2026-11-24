@@ -402,6 +402,11 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       cleanups.push(() => reread.dispose());
       const users = (await reread.listMessages(session.id, { limit: 100 })).items.filter(item => item.type === "user_message");
       expect(users.map(item => item.id)).toEqual([`message:${first.messageId}`, `message:${steer.messageId}`]);
+      // The steer sits at the same position among messages and tools as it did live.
+      const order = (items: ConversationItem[]) => items.filter(item => item.type === "user_message" || item.type === "command" || item.type === "assistant_message" && item.markdown !== "").map(item => item.id);
+      const live = order((await provider.listMessages(session.id, { limit: 100 })).items);
+      expect(live).toEqual([`message:${first.messageId}`, "tool:call_steer_1", `message:${steer.messageId}`, expect.stringMatching(/\.a2\.1$/)]);
+      expect(order((await reread.listMessages(session.id, { limit: 100 })).items)).toEqual(live);
     });
 
     test("a steer is accepted only once agy takes it, and its row appears only then", async () => {

@@ -263,8 +263,15 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
     const concrete = substitute(update, cwd);
     await client.notify(methods.client.session.update, { sessionId, update: concrete } as never);
     if (["agent_message_chunk", "agent_thought_chunk"].includes(concrete.sessionUpdate)) updateSession(sessionId, session => { session.replay.push(concrete); });
-    if (concrete.sessionUpdate === "tool_call_update" && (concrete.status === "completed" || concrete.status === "failed")) {
-      updateSession(sessionId, session => { session.replay.push({ ...concrete, sessionUpdate: "tool_call" }); });
+    // A tool call replays where it started, in its final state, so a steer
+    // taken while it ran replays after it, where the live run showed it.
+    if (concrete.sessionUpdate === "tool_call" || concrete.sessionUpdate === "tool_call_update") {
+      updateSession(sessionId, session => {
+        const index = session.replay.findIndex(entry => entry.sessionUpdate === "tool_call" && entry.toolCallId === concrete.toolCallId);
+        const merged = { ...(index >= 0 ? session.replay[index] : {}), ...concrete, sessionUpdate: "tool_call" };
+        if (index >= 0) session.replay[index] = merged;
+        else session.replay.push(merged);
+      });
     }
   };
   const cancelled = () => ({ stopReason: "cancelled", ...(script.usage ? { usage: script.usage } : {}) });
