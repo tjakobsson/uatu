@@ -21,6 +21,7 @@
 //                        prompt (max_tokens), then is refused
 //   hang-initialize      present: `initialize` never answers
 //   fail-thought-level   present: setting `thought_level` fails
+//   no-final-usage       present: a run's last prompt answers without `usage`
 //   hold-take-in         present: a steer is taken into the run only once it is removed
 //   refuse-next-steer    present: the next steer is refused, and the flag removed
 //   hold-config          present: `session/set_config_option` and `session/set_mode`
@@ -317,7 +318,7 @@ async function perform(sessionId: string, script: Script, run: Run, client: Agen
       });
     }
   };
-  const usage = script.usage && !flag("no-usage") ? { usage: script.usage } : {};
+  const usage = script.usage && !flag("no-usage") && !flag("no-final-usage") ? { usage: script.usage } : {};
   const cancelled = () => ({ stopReason: "cancelled", ...usage });
   const title = readSessions().find(session => session.sessionId === sessionId)?.title;
   if (!title) {

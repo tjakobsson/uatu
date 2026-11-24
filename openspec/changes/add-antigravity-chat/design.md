@@ -323,8 +323,9 @@ them: without a readable
 transcript, opening the conversation shows the sign-in notice, and UatuCode
 keeps no copy of Antigravity conversations of its own, so a conversation's
 in-memory history goes with its released process. Live turns take tokens from
-`PromptResponse.usage` when present, and from the transcript after the turn
-otherwise.
+`PromptResponse.usage` prompt by prompt: an input whose own prompt reported
+none (the opening prompt or an accepted steer) takes the transcript's tokens
+for that request after the turn, never both.
 
 ### D11. Cost from a built-in price snapshot
 

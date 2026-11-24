@@ -936,6 +936,26 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(carriers(upserts, session.id)[0]!.usage).toEqual(expect.objectContaining({ input: 1500, output: 150, cacheRead: 200 }));
     });
 
+    test("a steer whose prompt reports no ACP usage takes its transcript tokens beside the opening prompt's ACP usage", async () => {
+      const { fake, provider, upserts, waitFor, ended } = await setup({ prices });
+      const session = await provider.createSession("a");
+      await fake.setFlag("no-final-usage", true);
+      await Bun.write(path.join(fake.stateDirectory, "home", ".gemini", "antigravity-cli", "brain", session.id, ".system_generated", "logs", "transcript.jsonl"), [
+        { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nsteer: run it\n</USER_REQUEST>" },
+        { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", input_tokens: 99999, output_tokens: 9999 },
+        { step_index: 2, type: "USER_INPUT", content: "<USER_REQUEST>\nAlso this\n</USER_REQUEST>" },
+        { step_index: 3, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", input_tokens: 500, output_tokens: 50 },
+      ].map(step => JSON.stringify(step)).join("\n"));
+      await provider.prompt(session.id, { id: "p", text: "steer: run it", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.id === "tool:call_steer_1"), "the running command");
+      const sent = await provider.prompt(session.id, { id: "s", text: "Also this", delivery: "steer" });
+      expect((await sent.confirmation)?.outcome).toBe("accepted");
+      await ended(session.id);
+      await waitFor(() => carriers(upserts, session.id).length > 0, "the turn's usage");
+      // The opening prompt's own ACP usage (8,897 in, 130 out), and the steer's from the transcript, once each.
+      expect(carriers(upserts, session.id).map(carrier => carrier.usage)).toEqual([expect.objectContaining({ input: 8897 + 500, output: 130 + 50 })]);
+    });
+
     test("a turn on an unpriced model has no cost", async () => {
       const { provider, run, upserts } = await setup({ prices });
       const session = await provider.createSession("a");

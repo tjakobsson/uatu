@@ -587,7 +587,12 @@ export class AntigravityProvider implements ChatProvider {
     const updates = sealOpenBlock(memory, now);
     const carrierId = `${conversation.sessionId}.t${turn.userIndex}`;
     const model = memory.model;
-    const hasUsage = Object.keys(turn.usage).length > 0;
+    // ACP's per-prompt usage is unstable: each input agy took (the opening
+    // prompt and every accepted steer) whose own prompt reported none takes
+    // its transcript tokens instead (D10), never both, so nothing is counted
+    // twice. The carrier then waits for that read.
+    const missing = inputsWithoutUsage(turn);
+    const hasUsage = missing.length === 0 && Object.keys(turn.usage).length > 0;
     if (hasUsage) updates.push(...this.usageCarrier(conversation, carrierId, turn.usage, model, now));
     if (notice) updates.push({ kind: "upsert", item: notice });
     updates.push({ kind: "status", status, ...(message ? { message } : {}) });
@@ -600,10 +605,7 @@ export class AntigravityProvider implements ChatProvider {
       notificationTurns: [{ sourceId: turn.id, phase, createdAt: now }],
       ...(hasUsage ? { assistantUsage: { messageId: carrierId, usage: { ...turn.usage } } } : {}),
     });
-    // ACP's per-prompt usage is unstable; when agy reported none for the
-    // turn, its transcript's tokens for the same request stand in (D10).
-    // Never both, so nothing is counted twice.
-    if (!hasUsage) void this.usageFromTranscript(conversation, turn, carrierId, model);
+    if (missing.length > 0) void this.usageFromTranscript(conversation, turn, carrierId, model, missing);
     this.scheduleIdle(conversation);
   }
 
@@ -626,26 +628,33 @@ export class AntigravityProvider implements ChatProvider {
     ];
   }
 
-  private async usageFromTranscript(conversation: Conversation, turn: Turn, carrierId: string, model: ModelSelection | undefined): Promise<void> {
+  /**
+   * The turn's carrier from ACP's usage for the prompts that reported it
+   * and the transcript's for the inputs that did not, each its own turn in
+   * the transcript, matched by its words. A transcript that cannot vouch for
+   * them leaves ACP's part alone.
+   */
+  private async usageFromTranscript(conversation: Conversation, turn: Turn, carrierId: string, model: ModelSelection | undefined, inputs: Array<{ position: number; text: string }>): Promise<void> {
     const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
-    if (!("steps" in read) || this.disposed) return;
-    // Every input the turn carried: its opening prompt and each steer agy
-    // took, each a turn of its own in the transcript, matched by its words.
-    const inputs = [{ position: turn.userIndex, text: turn.request }, ...[...turn.prompts.values()]
-      .flatMap(state => state.steer?.decided === "accepted" && state.steer.position !== undefined ? [{ position: state.steer.position, text: state.steer.text }] : [])];
-    const recordedTurns = transcriptTurns(read.steps);
-    const tokens: TokenUsage = {};
+    if (this.disposed) return;
+    const recordedTurns = "steps" in read ? transcriptTurns(read.steps) : [];
+    const reported = Object.keys(turn.usage).length > 0;
+    const tokens: TokenUsage = { ...turn.usage };
     let recordedModelId: string | undefined;
-    for (const input of inputs) {
+    const matched = inputs.every(input => {
       const recorded = recordedTurns[input.position - 1];
-      if (!recorded || recorded.request !== input.text.trim()) return;
+      return recorded !== undefined && recorded.request === input.text.trim();
+    });
+    if (matched) for (const input of inputs) {
+      const recorded = recordedTurns[input.position - 1]!;
       for (const key of ["input", "output", "cacheRead"] as const) {
         if (recorded.usage?.[key] !== undefined) tokens[key] = (tokens[key] ?? 0) + recorded.usage[key]!;
       }
       recordedModelId = recorded.model ?? recordedModelId;
     }
     if (Object.keys(tokens).length === 0) return;
-    const recordedModel = recordedModelId ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: transcriptModelFamily(recordedModelId, id => this.knownModel(id)) } : model;
+    // The model recorded with the tokens, when they are all the transcript's.
+    const recordedModel = recordedModelId && !reported ? { providerId: ANTIGRAVITY_PROVIDER_ID, modelId: transcriptModelFamily(recordedModelId, id => this.knownModel(id)) } : model;
     const updates = this.usageCarrier(conversation, carrierId, tokens, recordedModel, this.now());
     this.emit(conversation, { updates, outcome: "handled", eventType: "transcript.usage", assistantUsage: { messageId: carrierId, usage: (updates[0] as { item: { usage: TokenUsage } }).item.usage } });
   }
@@ -1139,6 +1148,18 @@ function attachmentRefs(attachments: ProviderAttachment[] | undefined): MessageA
 }
 
 /** ACP's per-prompt usage (unstable schema), added into a turn's tokens. */
+/** The inputs agy took into the turn whose own prompt reported no ACP usage. */
+function inputsWithoutUsage(turn: Turn): Array<{ position: number; text: string }> {
+  return [...turn.prompts.values()].flatMap(state => {
+    const input = !state.steer ? { position: turn.userIndex, text: turn.request }
+      : state.steer.decided === "accepted" && state.steer.position !== undefined ? { position: state.steer.position, text: state.steer.text } : undefined;
+    if (!input) return [];
+    const reported: TokenUsage = {};
+    addUsage(reported, state.outcome?.result?.usage);
+    return Object.keys(reported).length > 0 ? [] : [input];
+  });
+}
+
 function addUsage(total: TokenUsage, usage: unknown): void {
   if (!usage || typeof usage !== "object") return;
   const value = usage as Record<string, unknown>;
