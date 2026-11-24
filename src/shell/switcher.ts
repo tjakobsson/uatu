@@ -811,6 +811,7 @@ function showReady(notice: ReadyNotice): void {
       const ready = state.ready;
       if (target.closest("[data-ready-go]") && ready) {
         dismissReady();
+        if (state.open) closeSwitcher({ restoreFocus: false });
         hub?.goTo(ready.workspaceId);
       } else if (target.closest("[data-ready-dismiss]")) {
         dismissReady();

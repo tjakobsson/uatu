@@ -49,6 +49,7 @@ import { createWatchSession } from "../../src/server/watch-session";
 import { startMediaHttpBoundary, type MediaHttpBoundary } from "../../src/server/media-http-boundary";
 import { classifyFile } from "../../src/document/classify";
 import { collectRepositorySnapshots } from "../../src/document/git-data";
+import { githubServiceFromEnvironment } from "../../src/github/service";
 import {
   buildFetchFallback,
   buildRoutes,
@@ -808,6 +809,9 @@ const inner = Bun.serve({
       },
       getSession: () => watchSession,
       chatService,
+      // The opt-in mocked GitHub backend (UATU_GITHUB_FAKE=1), as a real
+      // child has it; hub-fixtures.ts sets it for `hubGithubFake` specs.
+      github: githubServiceFromEnvironment(),
       getWorkspaceCredential: () => watchSession.getTerminalToken(),
       basePath: E2E_BASE_PATH,
       childPolicy: childPolicy?.basePath === E2E_BASE_PATH ? childPolicy : undefined,
