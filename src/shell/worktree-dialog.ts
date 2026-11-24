@@ -611,7 +611,10 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
    *  picker and the dashboard, to the checkouts Git lists that Uatu has not
    *  registered. */
   function openWorktreeFork(
-    options: { api: string; source: WorktreeDialogSource },
+    // `extraItems` are caller-owned entries inserted after "Existing branch"
+    // (the workspace picker adds "From a pull request…" for its own repository).
+    // They arrive as closures so this serialized factory needs no imports.
+    options: { api: string; source: WorktreeDialogSource; extraItems?: { label: string; run: (returnFocus: HTMLElement) => void }[] },
     anchor: HTMLElement,
     returnFocus: HTMLElement = anchor,
   ): void {
@@ -627,19 +630,29 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
       { label: "Existing branch", view: "create", mode: "existing" },
       { label: "Register worktree…", view: "discover" },
     ];
-    for (const item of items) {
+    const extras = options.extraItems ?? [];
+    const addItem = (label: string, run: () => void) => {
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("role", "menuitem");
-      button.textContent = item.label;
+      button.textContent = label;
       button.style.cssText = "display:block;text-align:left;width:100%;min-height:44px;padding:10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer";
       button.addEventListener("focus", () => button.style.background = "var(--surface-hover,#8882)");
       button.addEventListener("blur", () => button.style.background = "transparent");
       button.onclick = () => {
         close();
-        openWorktreeDialog({ api: options.api, source: options.source, view: item.view, mode: item.mode }, returnFocus);
+        run();
       };
       menu.append(button);
+    };
+    for (const item of items) {
+      if (item.view === "discover" && extras.length > 0) {
+        for (const extra of extras) addItem(extra.label, () => extra.run(returnFocus));
+        const divider = document.createElement("hr");
+        divider.style.cssText = "margin:4px 6px;border:0;border-top:1px solid var(--border-soft,#8884)";
+        menu.append(divider);
+      }
+      addItem(item.label, () => openWorktreeDialog({ api: options.api, source: options.source, view: item.view, mode: item.mode }, returnFocus));
     }
     document.body.append(menu);
     const rect = anchor.getBoundingClientRect();

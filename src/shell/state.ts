@@ -48,10 +48,21 @@ export const ACTIVE_TAB_KEY = "uatu:active-tab";
 export type PreviewMode =
   | { kind: "document" }
   | { kind: "commit"; repositoryId: string; sha: string }
+  | { kind: "pull-request"; repositoryId: string; number: number }
   | { kind: "empty" };
+
+// Non-document preview targets addressed by URL parameters (`?commit=`,
+// `?pr=`). Follow never replaces them, and file events re-render them in
+// place instead of choosing a document.
+export type SurfacePreviewMode = Extract<PreviewMode, { kind: "commit" | "pull-request" }>;
+
+export function isSurfacePreview(mode: PreviewMode): mode is SurfacePreviewMode {
+  return mode.kind === "commit" || mode.kind === "pull-request";
+}
 
 // Sidebar pane registry. Single mode-independent catalog.
 export const ALL_PANE_DEFS = [
+  { id: "pull-request", label: "Pull request" },
   { id: "change-overview", label: "Change Overview" },
   { id: "search", label: "Search" },
   { id: "files", label: "Files" },
@@ -64,6 +75,9 @@ export type PaneState = Record<PaneId, { visible: boolean; collapsed: boolean; h
 
 function defaultPaneState(): PaneState {
   return {
+    // Shown only where the session serves GitHub data (src/github/); the
+    // pane marks itself unavailable otherwise and leaves the stack.
+    "pull-request": { visible: true, collapsed: false, height: 340 },
     "change-overview": { visible: true, collapsed: false, height: 210 },
     // Hidden by default: search is opened on demand by ⇧⌘F, and a pane that
     // is empty until you ask it something should not take room from the tree.

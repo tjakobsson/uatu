@@ -522,6 +522,21 @@ describe("the fork menu", () => {
     expect(h.main().querySelector("[name=branch]")).toBeNull();
   });
 
+  // The workspace picker adds the pull request entry for its own repository:
+  // it sits beside the other two ways to start a worktree, and choosing it
+  // runs the caller's action with the fork control to return focus to.
+  test("a caller's extra item, such as From a pull request…, sits after Existing branch and runs its action", () => {
+    const h = harness({ "/": () => inventory([mainCheckout()]) });
+    const ran: unknown[] = [];
+    openWorktreeFork({ api: API, source: { id: "atlas", name: "Atlas" }, extraItems: [{ label: "From a pull request…", run: returnFocus => ran.push(returnFocus) }] }, h.anchor);
+    const menu = h.document.querySelector('[role="menu"]')!;
+    expect([...menu.querySelectorAll('[role="menuitem"]')].map(item => item.textContent))
+      .toEqual(["New branch / worktree", "Existing branch", "From a pull request…", "Register worktree…"]);
+    h.click(menu.querySelectorAll('[role="menuitem"]')[2]);
+    expect(h.document.querySelector('[role="menu"]')).toBeNull();
+    expect(ran).toEqual([h.anchor]);
+  });
+
   test("Register worktree… opens straight into the register list, with no occupancy detour", async () => {
     const external = checkout({ checkoutId: "c-ext", workspaceId: undefined, registered: false, ownership: "external", branch: "agent/r6", sourceRef: undefined });
     const h = harness({ "/": () => inventory([mainCheckout(), external]) });

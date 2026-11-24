@@ -65,8 +65,11 @@ test("device enrollment uses a user gesture and survives workspace navigation an
   await dialog.getByRole("button", { name: "Enable notifications", exact: true }).click();
   await expect(dialog.getByRole("status")).toContainText("saved");
   expect(await page.evaluate(() => localStorage.getItem("test:gesture"))).toBe("true");
+  // A workspace page has no enrollment control; Settings does.
   await page.goto(hub.workspaces[0]!.sessionUrl);
   await expect(page.locator('meta[name="uatu-hub"]')).toHaveAttribute("content", "true");
+  await expect(page.getByRole("button", { name: "Notifications", exact: true })).toHaveCount(0);
+  await page.goto(`${hub.origin}/settings`);
   await page.getByRole("button", { name: "Notifications", exact: true }).first().click();
   await expect(dialog.getByRole("button", { name: "Save preferences" })).toBeEnabled();
   await expect(dialog.getByRole("checkbox", { name: "alpha", exact: true })).toBeChecked();
@@ -165,7 +168,7 @@ test("all workspaces is a standing rule that outlives reload and a later-registe
     PushManager.prototype.subscribe = async () => { localStorage.setItem("test:subscription", "yes"); return existing()!; };
   }, subscription);
   const page = await hubContext.newPage();
-  await page.goto(hub.workspaces[0]!.sessionUrl);
+  await page.goto(`${hub.origin}/settings`);
   const openDialog = async () => {
     await page.getByRole("button", { name: "Notifications", exact: true }).first().click();
     await expect(dialog.getByRole("button", { name: /Enable notifications|Save preferences/ })).toBeEnabled();
@@ -175,10 +178,11 @@ test("all workspaces is a standing rule that outlives reload and a later-registe
   const alpha = dialog.getByRole("checkbox", { name: "alpha", exact: true });
   const beta = dialog.getByRole("checkbox", { name: "beta", exact: true });
   await openDialog();
-  // Off by default; the current workspace is still the preselection.
+  // Off by default, and Settings preselects no workspace.
   await expect(all).not.toBeChecked();
-  await expect(alpha).toBeChecked();
+  await expect(alpha).not.toBeChecked();
   await expect(beta).not.toBeChecked();
+  await alpha.check();
   await captureScreenshot(page, testInfo, "notifications-selected-mode");
   // The rule stands in for the list without discarding the ticks.
   await all.check();

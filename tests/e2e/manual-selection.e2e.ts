@@ -278,9 +278,11 @@ for (const touch of [false, true]) {
         const selected = state.roots.flatMap(r => r.docs).find(d => d.relativePath === path)!;
         const missing = structuredClone(state);
         missing.roots.forEach(r => { r.docs = r.docs.filter(d => d.id !== selected.id); });
-        // Keep focus on another control and the Files tab throughout background work.
+        // Keep focus on another control and the Files tab throughout background
+        // work (touch mode: the sidebar menu button; the chip is inside its menu).
+        const other = page.locator(touch ? "#sidebar-menu-toggle" : "#follow-toggle");
         await files(page, touch);
-        await page.locator("#follow-toggle").focus();
+        await other.focus();
         const unrelated = structuredClone(state);
         unrelated.changedId = state.roots.flatMap(r => r.docs).find(d => d.relativePath === "README.md")!.id;
         await deliver(page, unrelated);
@@ -289,7 +291,7 @@ for (const touch of [false, true]) {
         await identity(page, path, url);
         await expect(page.locator("#preview")).toContainText("unavailable");
         await expect(treeRow(page, path)).toHaveCount(0);
-        await expect(page.locator("#follow-toggle")).toBeFocused();
+        await expect(other).toBeFocused();
         if (touch) await expect(page.locator("#touch-tab-files")).toHaveAttribute("aria-selected", "true");
         // Unchanged mtime and no changedId must still restore the preview.
         await deliver(page, state);
@@ -298,7 +300,7 @@ for (const touch of [false, true]) {
         if (path === "a-selected.txt") await expect(page.locator("#preview")).toContainText("Selected text contents");
         if (path === "hero.svg") await expect(page.locator("#preview img")).toHaveAttribute("alt", "hero.svg");
         await expect(treeRow(page, path)).toHaveAttribute("aria-selected", "true");
-        await expect(page.locator("#follow-toggle")).toBeFocused();
+        await expect(other).toBeFocused();
         await openTreeFile(page, "README.md");
         await expect(page.locator("#preview-path")).toHaveText("README.md");
       });

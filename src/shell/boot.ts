@@ -5,6 +5,7 @@
 // resolution.
 
 import { appDocumentRelativePath, appUrl } from "../shared/app-url";
+import { showToast } from "../preview/review-dialogs";
 import { findDocumentById, findDocumentByRelativePath, syncStateGeneration } from "./storage";
 import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
@@ -33,11 +34,13 @@ import {
 import { applyWatchContext } from "../shared/watch-context";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId, setPendingDocumentPath } from "./selection";
 import { readSelectionCleared } from "./selection-storage";
+import { pullRequestStore } from "../github/pull-request-store";
 import { setShowIgnored } from "./ignored-visibility";
 import { resolveIgnoredVisibility } from "./ignored-default";
 import {
   commitPreviewParamsFromUrl,
-  renderCommitPreview,
+  pullRequestPreviewParamsFromUrl,
+  renderSurfacePreview,
 } from "./url";
 
 export async function loadInitialState(onWorkspaceReady?: () => void) {
@@ -93,14 +96,29 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   let directLinkMessage: { title: string; body: string } | null = null;
   let explicitDocumentPath: string | null = null;
   const initialCommitPreview = commitPreviewParamsFromUrl();
+  const initialPullRequestPreview = initialCommitPreview ? null : pullRequestPreviewParamsFromUrl();
+  // `?pr=` that names nothing showable says so, over the default document
+  // it falls back to.
+  const unresolvedPullRequest = initialCommitPreview || initialPullRequestPreview || urlRelativePath
+    ? null : new URL(window.location.href).searchParams.get("pr");
+  if (unresolvedPullRequest !== null) {
+    showToast(/^\d{1,9}$/.test(unresolvedPullRequest) && Number(unresolvedPullRequest) > 0
+      ? `Pull request #${unresolvedPullRequest} can't be shown: this workspace has no Git repository to read it from.`
+      : `“${unresolvedPullRequest}” isn't a pull request number, so the workspace's default view is shown.`, "alert");
+  }
   // A commit surface is not document resumption. Preserve browser-local
   // close intent so a later root arrival remains empty.
-  if (hasExplicitRoute && !initialCommitPreview) resumeDocumentSelection();
+  if (hasExplicitRoute && !initialCommitPreview && !initialPullRequestPreview) resumeDocumentSelection();
 
   if (initialCommitPreview) {
     setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "commit", ...initialCommitPreview });
+  } else if (initialPullRequestPreview) {
+    setFollowEnabled(false);
+    setSelectedId(null);
+    setPreviewMode({ kind: "pull-request", repositoryId: initialPullRequestPreview.repositoryId, number: initialPullRequestPreview.number });
+    pullRequestStore.select(initialPullRequestPreview.number);
   } else if (!hasExplicitRoute && readSelectionCleared()) {
     clearDocumentSelection();
     setFollowEnabled(false);
@@ -170,7 +188,7 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   // while the initial preview request is pending: never drop those writes or
   // overwrite them later with the initial route's intent.
   enablePersonalStatePersistence();
-  if (initialCommitPreview || hasExplicitRoute) {
+  if (initialCommitPreview || initialPullRequestPreview || hasExplicitRoute) {
     persistPersonalWorkspaceState({
       follow: false,
       ...(explicitDocumentPath ? { documentPath: explicitDocumentPath } : {}),
@@ -194,8 +212,8 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   // Local snapshot so the discriminant narrowing survives into the closures
   // below (narrowing on a mutable property does not).
   const previewMode = appState.previewMode;
-  if (previewMode.kind === "commit") {
-    renderCommitPreview(previewMode);
+  if (previewMode.kind === "commit" || previewMode.kind === "pull-request") {
+    renderSurfacePreview(previewMode);
   } else if (directLinkMessage) {
     renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
   } else if (appState.selectedId) {

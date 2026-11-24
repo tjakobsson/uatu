@@ -40,8 +40,8 @@ import { documentContextKey } from "../shared/live-protocol";
 import { applyWatchContext } from "../shared/watch-context";
 import { replaceSelection } from "./history";
 import { setSelectedId, getPendingDocumentPath, getSelectionActivation, getSelectionGeneration } from "./selection";
-import { appState } from "./state";
-import { renderCommitPreview } from "./url";
+import { appState, isSurfacePreview } from "./state";
+import { renderSurfacePreview } from "./url";
 import { contextualAppUrl, currentWatchContext, setClientScope } from "./watch-context";
 import { mediaKind } from "../shared/media";
 import { mediaPlayer } from "../media/controller";
@@ -139,7 +139,7 @@ const deferredImageFollow = createDeferredImageFollow({
     getSelectionGeneration(), getSelectionActivation(), getFollowSwitches(),
     appState.selectedId === documentId, documentRevisionKey(documentId),
   ].join("\n"),
-  canFollow: () => appState.followEnabled && appState.previewMode.kind !== "commit",
+  canFollow: () => appState.followEnabled && !isSurfacePreview(appState.previewMode),
   lookup: learnEmbeddedImages,
   membership: shownDocumentImages,
   follow: imageId => {
@@ -333,9 +333,9 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   for (const doc of contentUpserts) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
   for (const doc of patch.removals) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
   noteSearchCorpusChange();
-  if (mode.kind === "commit") {
+  if (isSurfacePreview(mode)) {
     renderSidebarPatch(patch);
-    if (patch.repositories) renderCommitPreview(mode);
+    if (patch.repositories) renderSurfacePreview(mode);
     return;
   }
 
@@ -434,9 +434,9 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
 
   // Local snapshot so the discriminant narrowing survives into the closure.
   const previewMode = appState.previewMode;
-  if (previewMode.kind === "commit") {
+  if (isSurfacePreview(previewMode)) {
     renderSidebar();
-    renderCommitPreview(previewMode);
+    renderSurfacePreview(previewMode);
     return;
   }
 
@@ -559,7 +559,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
     const catchUp = preserveVisibilitySelection ? null : finishFollowDiscovery(payload.defaultDocumentId, changedId);
     const pendingPath = getPendingDocumentPath();
     const pendingDocument = pendingPath ? findDocumentByRelativePath(pendingPath) : null;
-    const reconcileFollow = !preserveVisibilitySelection && appState.followEnabled && appState.discovery.status === "ready" && appState.previewMode.kind !== "commit";
+    const reconcileFollow = !preserveVisibilitySelection && appState.followEnabled && appState.discovery.status === "ready" && !isSurfacePreview(appState.previewMode);
     const followTarget = pendingDocument?.id ?? catchUp ?? (reconcileFollow ? chooseSelectionForFileEvent(payload.roots, selectedId, followableChange(selectedId, changedId), true) : null);
     if (reconcileFollow || followTarget) {
       setSelectedId(followTarget);
@@ -569,8 +569,8 @@ const stateReconciler = createStateReconciler<StatePayload>({
     syncStateGeneration(payload.generatedAt);
     renderBuildBadge(payload.build);
     renderSidebar();
-    if (appState.previewMode.kind === "commit") {
-      renderCommitPreview(appState.previewMode);
+    if (isSurfacePreview(appState.previewMode)) {
+      renderSurfacePreview(appState.previewMode);
       return;
     }
     const activeId = appState.selectedId;

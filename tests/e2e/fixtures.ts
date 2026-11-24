@@ -173,10 +173,24 @@ export async function normalizeFollowOff(page: Page): Promise<void> {
   const chip = page.locator("#follow-toggle");
   await expect(async () => {
     if ((await chip.getAttribute("aria-pressed")) === "true") {
-      await chip.click();
+      await clickFollowChip(page);
     }
     await expect(chip).toHaveAttribute("aria-pressed", "false", { timeout: 1_000 });
   }, "follow normalized to off").toPass({ timeout: 10_000 });
+}
+
+// Clicks the Follow chip. Touch mode keeps it in the sidebar header's menu
+// (follow-mode spec): open the menu around the click, then close it again.
+export async function clickFollowChip(page: Page): Promise<void> {
+  const chip = page.locator("#follow-toggle");
+  const menu = page.locator("#sidebar-menu-toggle");
+  const inMenu = !(await chip.isVisible()) && (await menu.isVisible());
+  if (inMenu) await menu.click();
+  await chip.click();
+  if (inMenu) {
+    await menu.click();
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+  }
 }
 
 // Git Log defaults to hidden (declutter-sidebar-defaults change); tests

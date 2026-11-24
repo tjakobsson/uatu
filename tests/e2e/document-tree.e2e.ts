@@ -4,7 +4,7 @@
 // (role="treeitem", aria-expanded, aria-selected, data-item-path) which
 // Playwright reaches through the shadow DOM via standard CSS selectors.
 
-import { expect, test as baseTest, type Page } from "./fixtures";
+import { clickFollowChip, expect, test as baseTest, type Page } from "./fixtures";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { promises as fs } from "node:fs";
 
@@ -166,7 +166,7 @@ test("follow-mode auto-switch expands the new file's folder, selects it, and des
   // then click the Follow chip to flip back to Follow=true (Rule B).
   await treeRow(page, "README.md").click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-  await page.locator("#follow-toggle").click();
+  await clickFollowChip(page);
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
   await expect(treeRow(page, "guides/")).toHaveAttribute("aria-expanded", "false");
 
@@ -369,7 +369,7 @@ test("a user-collapsed active folder turns Follow off and stays empty when the s
   await bootSession(page, request);
   await treeRow(page, "README.md").click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-  await page.locator("#follow-toggle").click();
+  await clickFollowChip(page);
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
   await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nFollow setup.\n", "utf8");
   await expect(page.locator("#preview")).toContainText("Follow setup.");
@@ -387,7 +387,7 @@ for (const input of ["pointer", "touch", "Enter", "Space", "ArrowLeft"] as const
       if (input === "touch") await page.locator("#touch-tab-files").click();
       await treeRow(page, "README.md").click();
       if (input === "touch") await page.locator("#touch-tab-files").click();
-      await page.locator("#follow-toggle").click();
+      await clickFollowChip(page);
       await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
       await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nNative collapse fixture.\n", "utf8");
       await expect(page.locator("#preview")).toContainText("Native collapse fixture.");
@@ -422,7 +422,7 @@ for (const input of ["pointer", "touch", "Enter", "Space", "ArrowLeft"] as const
 test("opening, unrelated prefix-folder collapse, and ArrowLeft focus-only preserve selection and Follow", async ({ page, request }) => {
   await bootSession(page, request, { extras: { "guides-extra/control.md": "# Control\n" } });
   await treeRow(page, "README.md").click();
-  await page.locator("#follow-toggle").click();
+  await clickFollowChip(page);
   await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nControl document.\n", "utf8");
   await expect(page.locator("#preview")).toContainText("Control document.");
   const unrelated = treeRow(page, "guides-extra/");
@@ -488,7 +488,7 @@ for (const changed of [false, true]) {
 test("programmatic filter transitions and rebuilds preserve an active document and Follow", async ({ page, request }) => {
   await bootSession(page, request, { git: true });
   await treeRow(page, "README.md").click();
-  await page.locator("#follow-toggle").click();
+  await clickFollowChip(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   for (const filter of ["changed", "all"]) {
     await page.locator(`#files-pane-filter-${filter}`).click();
@@ -583,7 +583,7 @@ for (const resume of ["file", "Follow", "history", "deep-link"] as const) {
     } else if (resume === "Follow") {
       await refreshClosedContent(page);
       await expectClosedDocument(page);
-      await page.locator("#follow-toggle").click();
+      await clickFollowChip(page);
     } else if (resume === "deep-link") await page.goto(selectedUrl);
     else {
       // Closing may replace or push a history entry. Put an explicit document
@@ -613,7 +613,7 @@ for (const activation of ["pointer", "Enter", "Space", "touch"] as const) {
       if (activation === "touch") await page.locator("#touch-tab-files").click();
       await treeRow(page, "README.md").click();
       if (activation === "touch") await page.locator("#touch-tab-files").click();
-      await page.locator("#follow-toggle").click();
+      await clickFollowChip(page);
       await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nActivation fixture.\n", "utf8");
       await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
       if (activation === "touch") await page.locator("#touch-tab-files").click();
@@ -646,7 +646,7 @@ for (const activation of ["pointer", "Enter", "Space", "touch"] as const) {
 test("pointer and keyboard navigation retain folder focus after a collapsed active leaf refresh", async ({ page, request }) => {
   await bootSession(page, request);
   await treeRow(page, "README.md").click();
-  await page.locator("#follow-toggle").click();
+  await clickFollowChip(page);
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
   await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nNavigation before refresh.\n", "utf8");
   await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
@@ -716,7 +716,7 @@ test("clicking a non-binary tree row loads its preview and disables follow mode"
   // we toggle the chip iff it's currently off.
   const pressed = await page.locator("#follow-toggle").getAttribute("aria-pressed");
   if (pressed !== "true") {
-    await page.locator("#follow-toggle").click();
+    await clickFollowChip(page);
   }
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
 

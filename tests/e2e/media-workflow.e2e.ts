@@ -4,6 +4,7 @@ import { test as base, expect } from "./fixtures";
 import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagnostics";
 import { workspacePath } from "./config";
 import { wavFixture, mp4Fixture } from "./media-fixtures";
+import { fillFilesQuery } from "./tree-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 import { afterAnimationFrames } from "./sync-helpers";
 
@@ -70,7 +71,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       await page.evaluate(() => { document.documentElement.dataset.uiMode = "touch"; });
       await page.locator('[data-tab="files"]').click();
       await page.locator("#files-pane-filter-recent").click();
-      await page.locator("#files-query").fill("render-");
+      await fillFilesQuery(page, "render-");
       const beforeListing = requests.length;
       await fs.mkdir(workspacePath("build", "renders"), { recursive: true });
       const written = Date.now() + 3000;

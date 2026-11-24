@@ -7,6 +7,7 @@
 // loads exclusively through the dynamic import below.
 import type { SupportedLanguages } from "@pierre/diffs";
 import type { DiffStyle, FileFacts } from "../shared/types";
+import { attachReviewLineKeys, type ReviewLine } from "./diff-review-lines";
 
 // The server's diff route attaches `fileFacts` on top of the diff variants
 // so a diff-first load can populate the facts strip without a separate
@@ -230,14 +231,159 @@ export async function renderDocumentDiff(
   await renderWithPierre(body, payload, plainText ? null : languageHint, diffStyle, options.wrap ?? false, plainText);
 }
 
-async function renderWithPierre(
+// Inline review on top of a Pierre diff (design D10): threads and pending
+// comments render as Pierre line annotations below their line, and the
+// gutter's hover "+" (or a tap on a line number, for touch) asks the caller
+// to open a composer there. The caller owns what the annotations contain.
+export type DiffAnnotationSide = "deletions" | "additions";
+export type DiffReviewAnnotation<T> = { side: DiffAnnotationSide; lineNumber: number; metadata: T };
+export type DiffReviewOptions<T> = {
+  annotations: DiffReviewAnnotation<T>[];
+  renderAnnotation: (annotation: DiffReviewAnnotation<T>) => HTMLElement;
+  onStartComment: (position: { side: DiffAnnotationSide; lineNumber: number }) => void;
+  // A tap on a line's code opens its composer too (touch).
+  rowTap?: () => boolean;
+};
+// Replaces the annotations on the rendered diff in place (no new FileDiff),
+// so posting a comment keeps the reader's scroll position.
+export type DiffReviewHandle<T> = {
+  setAnnotations: (annotations: DiffReviewAnnotation<T>[]) => void;
+  // Drops the line highlight Pierre leaves on the line the "+" was used on.
+  clearSelection: () => void;
+  // The keyboard path (src/preview/diff-review-lines.ts): the diff's lines,
+  // and focus on one line's number.
+  lines: () => (ReviewLine & { text: string; changed: boolean })[];
+  focusLine: (line: ReviewLine) => boolean;
+  focusedLine: () => ReviewLine | null;
+  // Scrolls every code column back to its start (a thread revealed in Split
+  // must not leave the new side scrolled sideways).
+  resetHorizontalScroll: () => void;
+};
+
+// Inside Pierre's shadow root, every diff: the line-number column and the
+// change bar read their sizes from custom properties, which inherit through
+// the shadow boundary. styles.css sets them where horizontal space is scarce
+// (touch mode, phone widths): a smaller number font, less padding and a
+// slimmer bar, with Pierre's own --diffs-min-number-column-width letting the
+// column be as wide as its digits. Unset, Pierre's sizes stand. Touch mode
+// also drops the gutter "+": a tap reveals it over the narrow number it was
+// meant to sit beside, and the tap's click would land on it instead of the
+// line number (which opens the same composer).
+const COMPACT_NUMBERS_CSS = `
+[data-column-number], [data-gutter-buffer] {
+  padding-left: var(--uatu-diff-number-pad-start, 2ch);
+  padding-right: var(--uatu-diff-number-pad-end, 1ch);
+}
+[data-column-number] { font-size: var(--uatu-diff-number-size, inherit); }
+[data-line] { padding-inline: var(--uatu-diff-line-pad, 1ch); }
+[data-indicators=bars] [data-line-type][data-column-number]::before { width: var(--uatu-diff-bar-width, 4px); }
+[data-gutter-utility-slot] { display: var(--uatu-diff-gutter-utility, flex); }
+[data-separator=line-info], [data-separator=line-info-basic], [data-separator=metadata] { height: var(--uatu-diff-separator-height, 32px); }
+/* Wrapped lines (Wrap on): the code's own indentation stays on the first
+   row with the text after it (an indented line breaks inside its text
+   rather than after its leading whitespace, which used to leave an empty
+   first row), and continuation rows hang 2ch past that indentation.
+   --uatu-indent is the line's leading whitespace, set per line by
+   markIndentedLines after every render. */
+[data-overflow=wrap] [data-line] {
+  padding-left: calc(var(--uatu-diff-line-pad, 1ch) + var(--uatu-indent, 0ch) + 2ch);
+  text-indent: calc(-1 * (var(--uatu-indent, 0ch) + 2ch));
+}
+[data-overflow=wrap] [data-line][data-uatu-indented] { word-break: break-all; }`;
+
+// The leading whitespace of one line, in columns (a tab is `tabSize`).
+export function leadingColumns(text: string, tabSize = 4): number {
+  let columns = 0;
+  for (const character of text) {
+    if (character === " ") columns += 1;
+    else if (character === "\t") columns += tabSize - (columns % tabSize);
+    else break;
+  }
+  return columns;
+}
+
+// Marks every rendered line with its indentation (see the wrap rules above).
+// Runs after each Pierre render: a re-render replaces the lines.
+function markIndentedLines(host: HTMLElement): void {
+  const root = host.querySelector("diffs-container")?.shadowRoot;
+  if (!root) return;
+  let tabSize: number | null = null;
+  for (const line of root.querySelectorAll<HTMLElement>("[data-line]")) {
+    const text = line.textContent ?? "";
+    if (text === "" || (text[0] !== " " && text[0] !== "\t")) {
+      if (line.hasAttribute("data-uatu-indented")) {
+        line.removeAttribute("data-uatu-indented");
+        line.style.removeProperty("--uatu-indent");
+      }
+      continue;
+    }
+    tabSize ??= Number.parseInt(getComputedStyle(line).tabSize, 10) || 4;
+    line.setAttribute("data-uatu-indented", "");
+    line.style.setProperty("--uatu-indent", `${leadingColumns(text, tabSize)}ch`);
+  }
+}
+
+// Inside Pierre's shadow root: the line-number buttons' focus ring. Custom
+// properties inherit through the shadow boundary.
+const REVIEW_CSS = `
+[data-column-number][role="button"] { cursor: pointer; }
+[data-column-number][role="button"]:focus-visible,
+[data-expand-button]:focus-visible {
+  outline: 2px solid var(--accent, #0969da);
+  outline-offset: -2px;
+  border-radius: 3px;
+}`;
+
+// One pull request file, both sides supplied by the caller. Always Pierre
+// (the review UI needs annotations), highlighted unless it is large.
+export async function renderReviewDiff<T>(
+  host: HTMLElement,
+  file: { path: string; oldContents: string; newContents: string; languageHint: string | null },
+  options: { diffStyle: DiffStyle; wrap: boolean; review: DiffReviewOptions<T> },
+): Promise<DiffReviewHandle<T> | null> {
+  clearHost(host);
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(file.oldContents).length + encoder.encode(file.newContents).length;
+  const plainText = bytes >= DIFF_MAX_HIGHLIGHT_BYTES;
+  const payload: Extract<DocumentDiffPayload, { kind: "text" }> = {
+    kind: "text",
+    baseRef: "",
+    patch: `--- a/${file.path}\n+++ b/${file.path}\n`,
+    bytes,
+    addedLines: 0,
+    deletedLines: 0,
+    oldContents: file.oldContents,
+    newContents: file.newContents,
+  };
+  const body = document.createElement("div");
+  body.className = "uatu-diff-body";
+  host.appendChild(body);
+  const keys = attachReviewLineKeys(body, () => options.diffStyle === "split", file.path, options.review.rowTap);
+  const handle = await renderWithPierre(body, payload, plainText ? null : file.languageHint, options.diffStyle, options.wrap, plainText, options.review, keys.decorate);
+  if (!handle) return null;
+  keys.decorate();
+  return {
+    ...handle,
+    lines: keys.lines,
+    focusLine: keys.focus,
+    focusedLine: keys.focused,
+    resetHorizontalScroll: () => {
+      const root = body.querySelector("diffs-container")?.shadowRoot;
+      for (const element of root?.querySelectorAll<HTMLElement>("pre, code, [data-code]") ?? []) element.scrollLeft = 0;
+    },
+  };
+}
+
+async function renderWithPierre<T = undefined>(
   host: HTMLElement,
   payload: Extract<DocumentDiffPayload, { kind: "text" }>,
   languageHint: string | null,
   diffStyle: DiffStyle,
   wrap: boolean,
   plainText = false,
-): Promise<void> {
+  review?: DiffReviewOptions<T>,
+  afterRender?: () => void,
+): Promise<Pick<DiffReviewHandle<T>, "setAnnotations" | "clearSelection"> | null> {
   // Anything thrown by Pierre or its Shiki peer is caught here and surfaced
   // as a state card so the user sees an explanation instead of an empty
   // pane. Without this guard, a render-time error in the dynamically loaded
@@ -249,7 +395,20 @@ async function renderWithPierre(
       await loadLanguage(languageHint);
     }
 
-    const diff = new pierre.FileDiff({
+    const diff = new pierre.FileDiff<T>({
+      ...(review ? {
+        // The review surface draws its own per-file header.
+        disableFileHeader: true,
+        renderAnnotation: annotation => review.renderAnnotation(annotation as DiffReviewAnnotation<T>),
+        enableGutterUtility: true,
+        onGutterUtilityClick: range => review.onStartComment({ side: range.endSide ?? range.side ?? "additions", lineNumber: range.end }),
+        onLineNumberClick: props => review.onStartComment({ side: props.annotationSide, lineNumber: props.lineNumber }),
+      } : {}),
+      onPostRender: () => {
+        if (wrap) markIndentedLines(host);
+        afterRender?.();
+      },
+      unsafeCSS: review ? COMPACT_NUMBERS_CSS + REVIEW_CSS : COMPACT_NUMBERS_CSS,
       // Dual theme + system themeType: Pierre emits both palettes and
       // switches on `prefers-color-scheme` itself, so an OS scheme flip
       // restyles an already-rendered diff without a re-render.
@@ -295,22 +454,35 @@ async function renderWithPierre(
         oldFile: { name: oldName, contents: payload.oldContents, ...(forcedLang ? { lang: forcedLang } : {}) },
         newFile: { name: newName, contents: payload.newContents, ...(forcedLang ? { lang: forcedLang } : {}) },
         containerWrapper: host,
+        ...(review ? { lineAnnotations: review.annotations as unknown as Parameters<typeof diff.setLineAnnotations>[0] } : {}),
       });
     } else {
       const parsed = pierre.parsePatchFiles(payload.patch);
       const fileDiff = parsed[0]?.files[0];
       if (!fileDiff) {
         host.appendChild(stateCard("Diff could not be parsed."));
-        return;
+        return null;
       }
       if (forcedLang) {
         fileDiff.lang = forcedLang;
       }
       diff.render({ fileDiff, containerWrapper: host });
     }
+    if (wrap) markIndentedLines(host);
+    return review
+      ? {
+          // setLineAnnotations only stages the data; rerender() applies it.
+          setAnnotations: annotations => {
+            diff.setLineAnnotations(annotations as unknown as Parameters<typeof diff.setLineAnnotations>[0]);
+            diff.rerender();
+          },
+          clearSelection: () => diff.setSelectedLines(null),
+        }
+      : null;
   } catch (error) {
     const message = error instanceof Error ? error.message : "render error";
     host.appendChild(stateCard(`Diff render failed: ${message}`));
+    return null;
   }
 }
 

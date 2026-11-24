@@ -56,6 +56,7 @@ import { setGitMetricsSink } from "./document/git-base-ref";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
 import { consumeChildPolicyDescriptor } from "./hub/child-policy-bootstrap";
 import type { readChildPolicyBootstrap } from "./hub/child-policy";
+import { githubServiceFromEnvironment } from "./github/service";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -270,6 +271,9 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
 
     let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
     let workspaceRoutes!: ReturnType<typeof buildRoutes>;
+    // Null unless the process opted in to the mocked GitHub backend
+    // (UATU_GITHUB_FAKE=1); then every /api/github/* route answers 404.
+    const github = githubServiceFromEnvironment();
     const mediaPath = `${options.basePath}api/media`;
     const inner = Bun.serve({
       hostname: "127.0.0.1",
@@ -312,6 +316,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
           getSession: () => watchSession!,
           chatService: chatService!,
           getWorkspaceCredential: () => watchSession!.getTerminalToken(),
+          github,
           basePath: options.basePath,
           childPolicy: childPolicy?.basePath === options.basePath ? childPolicy : undefined,
           manifestScope: options.manifestScope,

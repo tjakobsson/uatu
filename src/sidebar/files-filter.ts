@@ -76,4 +76,21 @@ export function initFilesPaneFilterControls(): void {
   document.querySelector("#files-query-clear")!.addEventListener("click", () => {
     query.value = ""; filesQuery = ""; renderSidebar(); query.focus();
   });
+  // Touch mode shows the field only while it is open: the search button
+  // opens it, and leaving it empty folds it again. CSS ignores the state on
+  // desktop, where the field is always shown.
+  const control = query.closest<HTMLElement>(".files-query-control")!;
+  const toggle = document.querySelector<HTMLButtonElement>("#files-query-toggle")!;
+  const setOpen = (open: boolean) => {
+    control.classList.toggle("is-open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  toggle.addEventListener("click", () => { setOpen(true); query.focus(); });
+  query.addEventListener("blur", () => {
+    // A tap on the clear button blurs first; it refocuses the field itself.
+    setTimeout(() => { if (!query.value && document.activeElement !== query) setOpen(false); }, 0);
+  });
+  query.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !query.value) { setOpen(false); toggle.focus(); }
+  });
 }

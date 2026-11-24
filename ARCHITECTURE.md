@@ -218,7 +218,10 @@ with no fetch handler or offline content cache. `notification-client.js` is a
 shared browser module, bundled into the SPA and served directly to hub pages;
 its declaration file supplies the TypeScript interface. Hosts inject URLs, and
 workspace boot requires the proxy's explicit `uatu-hub` marker before using
-`hubUrl()`. Legacy cleanup preserves active, waiting, and installing push workers.
+`hubUrl()`. Enrollment (the dialog and its trigger) lives in the Hub pages'
+navigation, Settings included; a workspace page offers no trigger and only
+reconciles an existing enrollment's worker registration
+(`reconcileNotifications`). Legacy cleanup preserves active, waiting, and installing push workers.
 
 The 192px and 512px Home Screen icons have opaque white backgrounds and keep
 the complete mark inside the maskable safe circle. Regenerate them from the
@@ -251,7 +254,10 @@ is occluded, without changing its persisted size. Xterm refits through its
 existing host ResizeObserver.
 
 The narrow desktop layout remains a scrolling stack with a safe-area-aware
-sticky preview header. Native macOS hosting retains its existing titlebar and
+sticky preview header. A desktop-layout window resized to phone width while a preview
+is open keeps the preview's top in view and offers touch layout with one small,
+non-blocking bar (`src/shell/narrow-layout-offer.ts`); a stored desktop choice
+suppresses it. Native macOS hosting retains its existing titlebar and
 frost stacking contract. During pinch zoom, the desktop controller retains the
 last normal-scale layout and lets the browser pan it. Switching to touch clears
 the desktop measurements and hands sizing back to the touch chat/terminal
@@ -861,7 +867,7 @@ sequenceDiagram
 The four authoritative rules of the `follow-mode` capability — defined in `openspec/specs/follow-mode/spec.md` — are the only paths that change `appState.followEnabled` or `appState.selectedId`:
 
 - **Rule A** (user clicks a tree row): selection moves to that file; follow turns off. Guarded by `TreeView.duringProgrammaticUpdate` so library-fired callbacks during mount or `resetPaths` are not mistaken for user input.
-- **Rule B** (user clicks the Follow toggle): `followEnabled` flips. Turning on jumps to the newest-mtime document in the current session (images are not candidates).
+- **Rule B** (user clicks the Follow toggle — in touch mode it sits in the sidebar header's menu, `#sidebar-menu-toggle` in `src/shell/follow.ts`, whose dot marks Follow on): `followEnabled` flips. Turning on jumps to the newest-mtime document in the current session (images are not candidates).
 - **Rule C** (file event + follow on): selection moves to the changed file when the preview can show it — a document, or an image it renders inline (`isFollowableFile` in `src/shared/types.ts`, used by the server's `changedId` nomination in `src/server/file-index.ts` and by the client). Other binaries are ignored. The exception is an image embedded in the document on screen: its change keeps the selection and the embedded image refreshes in place. The embedded images come from the document's rendered payload (`src/preview/embedded-images.ts`), never from the live preview DOM, so the exception holds in Rendered, Source, Diff, and split views; a document shown only as Source or Diff has its rendered payload looked up once per revision for this. What a document embeds is known only for its current revision; until then an image change is held, not guessed (`imageChangeOutcome` in `src/shell/follow-rules.ts` answers select, stay, or defer). `src/shell/image-follow.ts` holds that one decision and settles it when the lookup answers — embedded stays, otherwise, or if the lookup fails or goes unanswered for 10 s, the image is followed — but only while Follow is on and the selection, user activation, Follow switches, and the document's revision are unchanged; any newer file change cancels it. All three selection paths in `events.ts` (incremental patch, full frame, reconcile) apply it through one helper, `followableChange`.
 - **Rule D** (file event + follow off): selection unchanged; if the changed file equals the current selection, the preview reloads in place; otherwise just the tree refreshes.
 
@@ -1906,9 +1912,43 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | File changes on disk + follow on | selection moves to the changed file (Rule C) |
 | File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
 | Single-file root (a source run such as `bun run src/cli.ts serve some-file.md`; hub workspaces are folders) | Follow switch disabled — nothing else to follow |
-| Sidebar panes available | Change Overview, Search, Files, Git Log, Usage — all always available; toggle via the per-pane visibility menu. Fresh clients start with Change Overview and Files visible (Git Log, Search, and Usage hidden); stored arrangements always win. Usage is chat-fed (`src/chat/usage-pane.ts` paints it; the sidebar owns the chrome) |
+| Sidebar panes available | Pull request (only where the session serves GitHub data), Change Overview, Search, Files, Git Log, Usage — the rest always available; toggle via the per-pane visibility menu. Fresh clients start with Change Overview and Files visible (Git Log, Search, and Usage hidden); stored arrangements always win. Usage is chat-fed (`src/chat/usage-pane.ts` paints it; the sidebar owns the chrome) |
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
+
+## Pull request review (mocked GitHub backend)
+
+The GitHub pull request surfaces follow `openspec/changes/add-github-pr-review/` (option Q1a: a sidebar pane plus its own preview target). Today they run only against an in-memory fake; the real `gh api` transport is a later implementation of the same seam.
+
+| Piece | Where |
+|---|---|
+| Wire types shared by child and browser | `src/shared/github-contract.ts` |
+| Service seam + opt-in factory (`UATU_GITHUB_FAKE=1`; otherwise null) | `src/github/service.ts` |
+| In-memory fake and its fictional seed (`octo-org/uatu`, PR #642, viewer `octo-reviewer`) | `src/github/fake.ts`, `src/github/fake-data.ts` |
+| HTTP adapter for `/api/github/*` (keys live in `src/server/routes.ts`) | `src/github/http.ts` |
+| Browser client and the page's one summary/detail store (event-driven refresh, Retry, pending reviews elsewhere) | `src/github/client.ts`, `src/github/pull-request-store.ts` |
+| Read-only merge readiness: the words for ready / blocked, merge methods, head branch fate, pending comments | `src/github/readiness.ts` |
+| Pull request pane (pinned top row with Details, under a picked PR's note and its Back; summary and actions: the one review button, Review / Finish review (n), which opens the review dialog, and Merge on GitHub ↗ when ready, else View on GitHub ↗, which the pane allocator keeps in view via `[data-pane-essential-end]`; details: readiness, checks, reviewers, floating beside the pane on desktop; scenario switch). Its rows are `[data-pane-rows]` children, so the allocator ends the pane on a whole row (`wholeRowTrim` in `src/sidebar/pane-stack.ts`) | `src/sidebar/pull-request-pane.ts` |
+| PR preview (`?pr=<n>[&tab=files[&file=<path>|&thread=<id>]]`, with `repository=<id>` only for a repository other than the workspace's first Git one; older URLs that name it keep working): Conversation / Files changed | `src/preview/pull-request-view.ts` |
+| Files changed with inline review on Pierre line annotations and the gutter `+` (several line drafts may be open at once); files in tree order (`src/shared/tree-order.ts`, as the Files pane's PR scope), each under a one-row header pinned within its own file, with a Comment on a line button; Jump to file is one button in the pinned tabs row (`#pr-view-jump`, its list filtered by path, `filterJumpPaths`); the one Review / Finish review (n) button sits in the preview header's tabs row on touch and desktop alike (`#pr-view-review`, pinned with it, `reviewBarShownOn`); on desktop the review bar it shares with Conversation holds the how-to, the pending count and Discard review (one paused-write rule for Discard / Finish). A thread just resolved offers Undo in its folded footer for a few seconds; on touch the bottom tab bar steps aside while a composer has focus (styles.css); the review dialog's Add line comments opens a composer on the first non-blank changed line; the how-to is a one-line hint in the files toolbar that folds to an icon (`uatu:pr-review-hint-dismissed`); a tap on a line's row opens its composer. Everything pinned over the view is measured into `--pr-pinned`, the page's scroll inset (`pull-request-view.ts`) | `src/preview/diff-review.ts` over `renderReviewDiff` in `src/preview/diff-view.ts` |
+| Keyboard path into inline review: line numbers as buttons ("Comment on line N"), one Tab stop per file, arrow keys; on touch a tap on a line's code clicks its number (`rowTapNumberCell`) | `src/preview/diff-review-lines.ts` |
+| A document Diff of a file the current pull request changes links to it: "Review this file in #n" opens Files changed at that file | `src/preview/pr-file-link.ts` (the rule), `src/preview/diff.ts` (the link) |
+| Composer (Write / Preview, ⌘/Ctrl+Enter, confirm before discarding text) and its page-local drafts | `src/preview/pr-composer.ts`, `src/preview/pr-drafts.ts` |
+| Whether GitHub takes writes now, and the stale-data wording every surface shares | `src/github/availability.ts` |
+| Submit review and discard dialogs (focus returns to the opener, found again after a re-render; footer pinned, and the review dialog's head too, its verdicts first on a short screen; the summary's required / optional guidance follows `summaryGuidance`, the same rule as `reviewSubmitReason`; a dialog closes when its PR leaves the screen; Finish review asks about line comments typed but not added) | `src/preview/review-dialogs.ts` |
+| "Browse pull requests…" (pane header, the no-PR state) and the worktree menu's "From a pull request…" (titled "Create a worktree from a pull request"): the open-PR picker (Show in workspace; Create worktree…, simulated, is primary from the worktree menu; a number or URL of this repository selects its row or looks it up, another repository's URL is refused; without a credential only the connect guidance) | `src/shell/pull-request-picker.ts` |
+| The "connect GitHub" guidance the preview, the pane and the picker share | `src/github/connect.ts` |
+| Files pane's PR scope: a picked PR's changed files as a tree, each opening its diff | `src/sidebar/pull-request-scope.ts`, `src/sidebar/pull-request-scope-model.ts` |
+| Touch mode's pane stack as an accordion: one expanded pane (a per-device preference, `uatu:touch-expanded-pane`, kept apart from the desktop stack's collapsed flags and heights) takes the stack (the Pull request pane at most, sized to its content); each title is a toggle button over its header row; `revealPane` expands a pane in either mode; a folded Pull request header shows `#n · review state` | `src/sidebar/panes.ts` |
+| Compact diff line numbers in touch mode and at phone widths: custom properties set on `diffs-container` (`src/styles.css`), read inside Pierre's shadow root | `COMPACT_NUMBERS_CSS` in `src/preview/diff-view.ts` |
+
+Without the opt-in, every `/api/github/*` route answers 404, the pane stays `data-pane-unavailable` (out of the stack and the panels menu), and the worktree menu has no "From a pull request…" item. The routes fall under the existing internal `workspace-api` / `direct-child-api` exclusions. Two import-order rules keep the PR modules out of the shell's import cycle: `shell/url.ts` reaches the PR view through `registerPullRequestPreviewRenderer`, and the picker (imported early by `hub-nav.ts`) asks for navigation with the `uatu:open-pull-request` DOM event that the pane handles. `bun run dev --github-fake` starts the dev hub with the fake; see `dev/README.md`.
+
+The workspace's *current* pull request is the checked-out branch's own unless one was picked with **Show in workspace**. The pick is page-local state in the store (`select`, `scopedNumber`, `currentNumber`); opening any `?pr=` preview sets it, so the URL restores it on reload and Back/Forward, and picking the branch's own PR (or **← branch**) clears it. While a pick is current, the Pull request pane shows that PR under a note with the way back, and the Files pane swaps its toolbar and workspace tree for the PR scope: a second `@pierre/trees` instance holding the PR's paths (not workspace documents, so it stays out of `TreeView`'s selection and Follow rules), whose rows open `?pr=<n>&tab=files&file=<path>`. **← branch** returns to the branch's PR preview, or to the default document when the branch has none.
+
+uatu never merges (design D11): the pane and the end of Conversation show GitHub's merge readiness read-only, and "Merge on GitHub ↗" links to the pull request. Refresh is event-driven with no timer (design D6): a branch or HEAD change, a PR view opening, returning to the page (focus or visibility, at most every 15 s), the user's own writes, manual refresh and Retry.
+
+Unsent text is never lost: every composer saves its text per pull request and location (conversation, inline line, thread reply, a pending comment's edit, Finish review's summary; the verdict is chosen afresh each time) in the page's session storage (`presentationSessionStorage`), restores it after a re-render or reload, and asks before discarding it. The draft is dropped the moment GitHub takes the text (`sendThenClearDraft`). A send first marks the draft with the matching comments already there (`markSending`), so a restored draft is dropped as sent (`draftAlreadySent`) only when a matching comment appeared after its send began; the same words typed again after an earlier comment stay a draft. GitHub's pending review stays the only server-side draft. Whether sending is possible comes from one rule (`sendBlockedReason`): while the summary is `rate-limited`, `unavailable` or `no-credential`, or the PR is merged or closed, composers stay open for drafting and every sending control is disabled with the reason (inline in composers; a pause the preview's banner explains is said once per screen), for the branch's PR and a picked one alike; `no-credential` replaces an open PR preview with the connect card on both tabs. Switching Conversation / Files changed pushes a history entry.
 
 ## Find and the active surface
 

@@ -20,7 +20,21 @@ default 4700.
 ```bash
 bun run dev             # start the dev hub and open the session
 bun run dev --no-open   # start it without opening a browser
+bun run dev --github-fake  # also serve MOCKED GitHub pull request data
 ```
+
+`--github-fake` sets `UATU_GITHUB_FAKE=1` for the hub, which its sessions
+inherit. The Pull request pane, the PR preview and the worktree menu's
+"From a pull request…" then work against an in-memory fake
+([`src/github/fake.ts`](../src/github/fake.ts)) seeded with fictional data
+(`octo-org/uatu`, PR #642, viewer `octo-reviewer`). Comments and reviews
+change only that memory; nothing reaches GitHub, and every surface says the
+data is mocked. uatu never merges: the pane shows merge readiness and links
+to GitHub. The pane's "Mock scenario" control switches between
+`ready`, `no-pull-request`, `no-credential`, `rate-limited` and
+`unavailable`, and resets the data after asking. `UATU_GITHUB_FAKE_SCENARIO=<name>` picks
+the starting scenario. Without the flag, every `/api/github/*` route answers
+404.
 
 Ctrl+C stops the hub, and the hub stops its session children. Add more
 folders from the dashboard. To start over, stop the hub and delete

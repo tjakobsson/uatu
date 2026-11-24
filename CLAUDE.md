@@ -68,7 +68,8 @@ src/
 │                   history, url, connection, pwa, follow,
 │                   follow-rules, state, storage, freshness (client/server
 │                   build-identity handshake), ui-mode (per-device
-│                   touch/desktop mode on <html>), desktop-viewport (desktop
+│                   touch/desktop mode on <html>; narrow-layout-offer offers touch
+│                   layout to a desktop window narrowed over a preview), desktop-viewport (desktop
 │                   visible rectangle and device safe areas), tab-bar (touch mode's
 │                   bottom Files/Preview/Terminal tabs), worktree-dialog
 │                   (the one client worktree dialog, embedded in both

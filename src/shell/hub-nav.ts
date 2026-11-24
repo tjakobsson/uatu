@@ -33,6 +33,8 @@ import { AttentionNotices, renderAttentionNotices } from "./attention-notice";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
 import { openWorktreeFork, workspaceIsCheckout, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
+import { openPullRequestPicker, setPullRequestPickerWorktrees } from "./pull-request-picker";
+import { pullRequestStore } from "../github/pull-request-store";
 import { watchWorktreeInventory, WORKTREES_CHANGED_EVENT } from "./worktree-live";
 
 export type HubWorkspaceSummary = {
@@ -631,6 +633,27 @@ export function initHubNav(): void {
   });
   const attention = new AttentionNotices(currentId, renderNotices);
 
+  // The main checkout this session belongs to (itself, or its parent).
+  const mainCheckout = (): HubWorkspaceSummary | undefined => {
+    const current = latest.find(entry => entry.id === currentId);
+    return current?.parentId ? latest.find(entry => entry.id === current.parentId) ?? current : current;
+  };
+  const isCurrentRepository = (workspace: HubWorkspaceSummary) => workspace.id === mainCheckout()?.id;
+  // The pull request picker matches PR branches against this repository's
+  // checked-out worktrees, to offer "Go to worktree" instead of a duplicate.
+  setPullRequestPickerWorktrees({
+    workspaceName: () => {
+      const main = mainCheckout();
+      return main ? main.displayName || main.id : "this repository";
+    },
+    findWorktree: branch => {
+      const main = mainCheckout();
+      if (!main) return null;
+      const match = latest.find(entry => (entry.id === main.id || entry.parentId === main.id) && entry.branch === branch && !entry.detached);
+      return match ? { label: workspaceMenuLabel(match), href: `/s/${encodeURIComponent(match.id)}/`, current: match.id === currentId } : null;
+    },
+  });
+
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
   const chipBadge = toggle.querySelector<HTMLSpanElement>("#hub-activity-badge");
   const baseToggleLabel = toggle.getAttribute("aria-label") ?? "Switch workspace or open the hub dashboard";
@@ -719,6 +742,11 @@ export function initHubNav(): void {
       fork.setAttribute("aria-haspopup", "menu");
       fork.addEventListener("click", () => openWorktreeFork(
         {
+          // "From a pull request…" opens the pull request picker (titled
+          // for this task) over this session's repository's open PRs, so it
+          // appears only on the fork control of the repository shown here,
+          // and only while the session serves GitHub data.
+          ...(isCurrentRepository(workspace) && pullRequestStore.state.enabled === true ? { extraItems: [{ label: "From a pull request…", run: (returnFocus: HTMLElement) => openPullRequestPicker({ returnFocus, intent: "worktree" }) }] } : {}),
           // The published family's base path, straight from Hub state —
           // never a literal, and never relocated under the session's base
           // path, because the Hub API lives outside it. Read when clicked,

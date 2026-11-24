@@ -96,6 +96,9 @@ export function setSelectedId(next: string | null, origin: "reconcile" | "naviga
 }
 
 export function setPreviewMode(next: PreviewMode): void {
-  if (next.kind === "commit") pendingDocumentPath = null;
+  if (next.kind === "commit" || next.kind === "pull-request") pendingDocumentPath = null;
   appState.previewMode = next;
+  // Preview chrome that differs per target (the eyebrow and the pull
+  // request's own toolbar) keys on this attribute in styles.css.
+  if (typeof document !== "undefined") document.documentElement.dataset.previewKind = next.kind;
 }

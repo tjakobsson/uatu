@@ -4,6 +4,7 @@ import { test as base, expect } from "./fixtures";
 import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagnostics";
 import { workspacePath } from "./config";
 import { mp4Fixture, wavFixture } from "./media-fixtures";
+import { fillFilesQuery } from "./tree-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 import { treeRow } from "./tree-helpers";
 
@@ -27,7 +28,7 @@ async function boot(page: Page, request: APIRequestContext, mode: "touch" | "des
   if (mode === "touch") await page.locator("#touch-tab-files").click();
   await expect(treeRow(page, filename)).toBeVisible();
   await page.locator("#files-pane-filter-recent").click();
-  await page.locator("#files-query").fill(filename);
+  await fillFilesQuery(page, filename);
   await page.locator(`#recent-files button[data-path="${filename}"]`).click();
   await expect(page.locator(".media-preview")).toBeVisible();
   await expect(page.locator("audio, video")).toHaveCount(1);

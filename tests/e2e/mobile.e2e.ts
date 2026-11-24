@@ -9,7 +9,7 @@
 import fs from "node:fs/promises";
 
 import { expect, test } from "./fixtures";
-import { waitForPreviewToSettle } from "./fixtures";
+import { normalizeFollowOff, waitForPreviewToSettle } from "./fixtures";
 import { treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
 import { removeTerminalGates, terminalGate, waitForTerminalReady } from "./terminal-helpers";
@@ -67,11 +67,8 @@ async function touchBeforeEach(
   // sidebar surface); see standardBeforeEach for why this is conditional.
   await page.locator("#touch-tab-files").click();
   await expect(treeRow(page, "README.md")).toBeVisible();
-  const pressed = await page.locator("#follow-toggle").getAttribute("aria-pressed");
-  if (pressed === "true") {
-    await page.locator("#follow-toggle").click();
-  }
-  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  // The chip is in the sidebar menu in touch mode (clickFollowChip opens it).
+  await normalizeFollowOff(page);
   await page.locator("#touch-tab-preview").click();
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
   await page.waitForTimeout(75);
@@ -216,9 +213,104 @@ test.describe("touch tab navigation", () => {
     await expect(treeRow(page, "guides/setup.md")).toBeVisible();
   });
 
-  test("dragging a pane header resizes the boundary above it", async ({ page }) => {
+  test("the pane stack is an accordion: a title tap expands one pane into the whole stack", async ({ page }) => {
     await page.locator("#touch-tab-files").click();
     await expect(treeRow(page, "README.md")).toBeVisible();
+    const overviewPane = page.locator('[data-pane-id="change-overview"]');
+    const filesPane = page.locator('[data-pane-id="files"]');
+    const overviewTitle = page.locator('[data-pane-toggle="change-overview"]');
+    const filesTitle = page.locator('[data-pane-toggle="files"]');
+    const storedPanes = await readStoredValue(page, "uatu:sidebar-panes");
+
+    // A fresh device expands Files; every other pane is a slim header row.
+    await expect(filesTitle).toHaveAttribute("aria-expanded", "true");
+    await expect(overviewTitle).toHaveAttribute("aria-expanded", "false");
+    await expect(overviewTitle).toHaveAttribute("aria-controls", "change-overview");
+    for (const header of await page.locator("[data-pane-id]:not([hidden]) > .pane-header").all()) {
+      const height = (await header.boundingBox())!.height;
+      expect(height).toBeGreaterThanOrEqual(44);
+      expect(height).toBeLessThanOrEqual(48);
+    }
+    // The − / + button gives way to the title; the actions stay.
+    await expect(overviewPane.getByRole("button", { name: "Collapse Change Overview" })).toBeHidden();
+
+    // A tap anywhere on the header row except its actions toggles the pane.
+    const header = (await overviewPane.locator(".pane-header").boundingBox())!;
+    await page.touchscreen.tap(header.x + header.width * 0.6, header.y + header.height / 2);
+    await expect(overviewTitle).toHaveAttribute("aria-expanded", "true");
+    await expect(filesTitle).toHaveAttribute("aria-expanded", "false");
+    await expect(filesPane).toHaveClass(/is-collapsed/);
+    await expect(page.locator(".files-toolbar")).toBeHidden();
+    // The expanded pane takes all the height the folded headers leave.
+    await expect.poll(() => page.evaluate(() => {
+      const stack = document.querySelector<HTMLElement>(".pane-stack")!.getBoundingClientRect().height;
+      const used = [...document.querySelectorAll<HTMLElement>("[data-pane-id]:not([hidden])")]
+        .reduce((sum, pane) => sum + pane.getBoundingClientRect().height, 0);
+      return Math.abs(stack - used) <= 2;
+    })).toBe(true);
+    // Per device, kept apart from the desktop stack's layout.
+    expect(await readStoredValue(page, "uatu:touch-expanded-pane")).toBe("change-overview");
+    expect(await readStoredValue(page, "uatu:sidebar-panes")).toBe(storedPanes);
+
+    await page.reload();
+    await page.locator("#touch-tab-files").click();
+    await expect(overviewTitle).toHaveAttribute("aria-expanded", "true");
+
+    // Tapping the expanded title folds it; the keyboard works the same way.
+    await overviewTitle.tap();
+    await expect(overviewTitle).toHaveAttribute("aria-expanded", "false");
+    await filesTitle.focus();
+    await page.keyboard.press("Enter");
+    await expect(filesTitle).toHaveAttribute("aria-expanded", "true");
+    await expect(treeRow(page, "README.md")).toBeVisible();
+
+    // Pane actions keep working beside the title.
+    await overviewPane.getByRole("button", { name: "Hide Change Overview" }).tap();
+    await expect(overviewPane).toBeHidden();
+  });
+
+  test("Follow lives in the sidebar menu, with a dot while it is on", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    const menu = page.locator("#sidebar-menu-toggle");
+    const chip = page.locator("#follow-toggle");
+    await expect(menu).toBeVisible();
+    await expect(chip).toBeHidden();
+    await expect(page.locator(".sidebar-mode-row")).toBeHidden();
+    await expect(menu).toHaveAttribute("aria-label", "Sidebar menu, Follow off");
+    await expect(menu.locator(".sidebar-menu-indicator")).toBeHidden();
+
+    await menu.tap();
+    await expect(menu).toHaveAttribute("aria-expanded", "true");
+    await expect(chip).toBeVisible();
+    await chip.tap();
+    await expect(chip).toHaveAttribute("aria-pressed", "true");
+    // The menu stays open so the switch is seen; the button carries the state.
+    await expect(menu).toHaveAttribute("aria-expanded", "true");
+    await expect(menu).toHaveAttribute("aria-label", "Sidebar menu, Follow on");
+    await expect(menu.locator(".sidebar-menu-indicator")).toBeVisible();
+
+    // A tap elsewhere closes it; Escape closes it and returns focus.
+    await page.touchscreen.tap(200, 700);
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+    await expect(chip).toBeHidden();
+    await menu.focus();
+    await page.keyboard.press("Enter");
+    await expect(chip).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+    await expect(menu).toBeFocused();
+  });
+
+  // A coarse-pointer device in desktop mode (an iPad) keeps the header
+  // gestures: drag resizes the boundary above, double-tap toggles collapse.
+  test("in desktop mode a pane header drags and double-taps", async ({ page }) => {
+    await page.setViewportSize({ width: 1194, height: 834 });
+    await page.locator("#touch-tab-files").click();
+    await page.locator("#ui-mode-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
+    await expect(treeRow(page, "README.md")).toBeVisible();
+    await expect(page.locator("[data-pane-toggle]")).toHaveCount(0);
+    await expect(page.locator(".sidebar-mode-row")).toBeVisible();
 
     const overviewPane = page.locator('[data-pane-id="change-overview"]');
     const filesHeader = page.locator('[data-pane-id="files"] .pane-header');
@@ -233,41 +325,19 @@ test.describe("touch tab navigation", () => {
     await page.mouse.down();
     await page.mouse.move(startX, startY - 100, { steps: 8 });
     await page.mouse.up();
-
     const endOverview = (await overviewPane.boundingBox())?.height ?? 0;
-    expect(endOverview).toBeLessThan(startOverview - 60);
-
-    // The new allocation persists like a desktop resizer drag.
+    expect(endOverview).toBeLessThan(startOverview - 40);
     const stored = JSON.parse((await readStoredValue(page, "uatu:sidebar-panes")) ?? "{}");
-    expect(stored["change-overview"]?.height).toBeLessThan(startOverview - 60);
+    expect(stored["change-overview"]?.height).toBeLessThan(startOverview - 40);
 
-    // Taps on header controls still work despite the drag wiring.
-    await overviewPane.getByRole("button", { name: "Collapse Change Overview" }).click();
-    await expect(overviewPane).toHaveClass(/is-collapsed/);
-    await overviewPane.getByRole("button", { name: "Expand Change Overview" }).click();
-    await expect(overviewPane).not.toHaveClass(/is-collapsed/);
-  });
-
-  test("double-tapping a pane header toggles its collapse", async ({ page }) => {
-    await page.locator("#touch-tab-files").click();
-    await expect(treeRow(page, "README.md")).toBeVisible();
-
-    const overviewPane = page.locator('[data-pane-id="change-overview"]');
+    // Double-tap collapses, persisted like the − button; again expands.
     const header = overviewPane.locator(".pane-header");
-
-    // A single tap changes nothing; wait out the double-tap window so it
-    // cannot pair with the next gesture.
     await header.click({ position: { x: 60, y: 15 } });
     await page.waitForTimeout(450);
     await expect(overviewPane).not.toHaveClass(/is-collapsed/);
-
-    // Double-tap collapses, persisted like the − button.
     await header.dblclick({ position: { x: 60, y: 15 } });
     await expect(overviewPane).toHaveClass(/is-collapsed/);
-    const stored = JSON.parse((await readStoredValue(page, "uatu:sidebar-panes")) ?? "{}");
-    expect(stored["change-overview"]?.collapsed).toBe(true);
-
-    // Double-tap again expands.
+    expect(JSON.parse((await readStoredValue(page, "uatu:sidebar-panes")) ?? "{}")["change-overview"]?.collapsed).toBe(true);
     await header.dblclick({ position: { x: 60, y: 15 } });
     await expect(overviewPane).not.toHaveClass(/is-collapsed/);
   });

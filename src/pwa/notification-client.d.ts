@@ -1,6 +1,5 @@
-export function mountNotifications(options: {
-  apiUrl: string; stateUrl: string; workerUrl: string; hosts: string;
-  workspaceId?: string | null; beforeRegister?: () => Promise<void>;
-}): void;
+type NotificationOptions = { apiUrl: string; workerUrl: string; beforeRegister?: () => Promise<void> };
+export function mountNotifications(options: NotificationOptions & { stateUrl: string; hosts: string }): void;
+export function reconcileNotifications(options: NotificationOptions): void;
 declare const assetPath: string;
 export default assetPath;

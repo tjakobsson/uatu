@@ -15,7 +15,7 @@
 import fs from "node:fs/promises";
 
 import { expect, test } from "./fixtures";
-import { waitForPreviewToSettle } from "./fixtures";
+import { clickFollowChip, waitForPreviewToSettle } from "./fixtures";
 import { openTreeFile, treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
 
@@ -566,7 +566,7 @@ test.describe("crossing the threshold", () => {
     await page.locator("#touch-tab-files").click();
     const follow = page.locator("#follow-toggle");
     if ((await follow.getAttribute("aria-pressed")) !== "true") {
-      await follow.click();
+      await clickFollowChip(page);
     }
     await expect(follow).toHaveAttribute("aria-pressed", "true");
 

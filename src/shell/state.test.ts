@@ -17,7 +17,7 @@ describe("readPaneState defaults", () => {
   });
 
   test("the Usage pane is in the catalog after Git Log", () => {
-    expect(ALL_PANE_DEFS.map(pane => pane.id)).toEqual(["change-overview", "search", "files", "git-log", "usage"]);
+    expect(ALL_PANE_DEFS.map(pane => pane.id)).toEqual(["pull-request", "change-overview", "search", "files", "git-log", "usage"]);
   });
 
   test("the retired selection-inspector pane is gone from the catalog", () => {

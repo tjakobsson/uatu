@@ -3,7 +3,7 @@ import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagn
 import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { wavFixture, mp4Fixture, truncatedMediaFixture } from "./media-fixtures";
-import { treeRow } from "./tree-helpers";
+import { fillFilesQuery, treeRow } from "./tree-helpers";
 import { captureScreenshot, evidencePath, recordEvidence, saveEvidence } from "./evidence";
 
 const test = withEngineBrowsers(base);
@@ -329,7 +329,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       if (url.pathname.endsWith("/api/media")) requested.push(url.searchParams.get("path")!);
     });
     await open(page); await ready(page);
-    await page.locator("#files-pane-filter-recent").click(); await page.locator("#files-query").fill("tone-");
+    await page.locator("#files-pane-filter-recent").click(); await fillFilesQuery(page, "tone-");
     await expect.poll(() => page.locator("#recent-files .recent-file-open").evaluateAll(rows => rows.map(row => row.getAttribute("data-path"))))
       .toEqual(audioOrder);
     await page.getByRole("button", { name: "Play tone-a.wav", exact: true }).click(); await playing(page, "tone-a.wav");
@@ -338,7 +338,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     await expect(page.getByRole("button", { name: "Play tone-b.wav", exact: true })).toHaveCount(0);
     await publishCompletedMedia("tone-new.wav", wavFixture());
     await expect(page.getByRole("button", { name: "Play tone-new.wav", exact: true })).toBeVisible();
-    await page.locator("#files-query").fill("README");
+    await fillFilesQuery(page, "README");
     await dock(page).getByRole("button", { name: "Next clip" }).click();
     await expect(dock(page)).toContainText("tone-c.wav"); await playing(page, "tone-c.wav");
     await expect(dock(page).getByRole("button", { name: "Next clip" })).toBeDisabled();

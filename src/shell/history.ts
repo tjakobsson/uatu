@@ -19,9 +19,12 @@ import { appState } from "./state";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId } from "./selection";
 import {
   activateCommitPreview,
+  activatePullRequestPreview,
   commitPreviewParamsFromUrl,
+  pullRequestPreviewParamsFromUrl,
 } from "./url";
 import { previewScrollRoot } from "./preview-scroll-root";
+import { pullRequestRepository } from "../github/pull-request-store";
 
 // Local query for the preview body. We can't import this from `../app`
 // without widening the type to `HTMLElement | null` for consumers — the
@@ -50,6 +53,28 @@ export function pushSelection(documentId: string, relativePath: string) {
   window.history.pushState({ documentId }, "", carryNotificationTarget(url, window.location.search));
 }
 
+// The workspace's default view: the default document, or the empty preview
+// when there is none. Used by Back with no document in the URL, and by a
+// surface preview (a picked pull request) closing back to the workspace.
+export function showDefaultDocument(options: { pushHistory: boolean }): void {
+  resumeDocumentSelection();
+  const fallbackId = defaultDocumentId(appState.roots);
+  const fallback = fallbackId ? findDocumentById(fallbackId) : null;
+  if (fallbackId && fallback) {
+    setSelectedId(fallbackId);
+    setPreviewMode({ kind: "document" });
+    if (options.pushHistory) pushSelection(fallbackId, fallback.relativePath);
+    renderSidebar();
+    void loadDocument(fallbackId);
+  } else {
+    setSelectedId(null);
+    setPreviewMode({ kind: "empty" });
+    if (options.pushHistory) recordEmptySelection();
+    renderSidebar();
+    renderEmptyPreview("No document selected", "Waiting for viewable files");
+  }
+}
+
 export function recordEmptySelection(replace = false): void {
   const method = replace ? "replaceState" : "pushState";
   window.history[method]({ selectionCleared: true }, "", carryNotificationTarget(appUrl("/"), window.location.search));
@@ -70,6 +95,39 @@ export function pushCommitPreview(repositoryId: string, sha: string) {
   }
   window.history.pushState({ commitRepositoryId: repositoryId, commitSha: sha }, "", nextPath);
 }
+
+// `?pr=<n>` addresses a pull request preview; `tab=files` opens it on Files
+// changed, and `file=<path>` scrolls to one file there, `thread=<id>` to one
+// review thread (focused). The repository (its
+// root path) is left out when it is the workspace's pull request repository,
+// as it is for every pull request the pane shows; `repository=<id>` URLs
+// keep working. Switching Conversation / Files changed pushes an entry too,
+// so Back returns to the other tab before it leaves the pull request.
+export function buildPullRequestPreviewPath(repositoryId: string, number: number, tab: "conversation" | "files" = "conversation", anchor?: string | { file?: string; thread?: string }): string {
+  const { file, thread } = typeof anchor === "string" ? { file: anchor, thread: undefined } : anchor ?? {};
+  const url = new URL(appUrl("/"), window.location.origin);
+  if (repositoryId !== pullRequestRepository(appState.repositories)?.id) url.searchParams.set("repository", repositoryId);
+  url.searchParams.set("pr", String(number));
+  if (tab === "files") url.searchParams.set("tab", "files");
+  if (tab === "files" && thread) url.searchParams.set("thread", thread);
+  else if (tab === "files" && file) url.searchParams.set("file", file);
+  return carryNotificationTarget(`${url.pathname}${url.search}`, window.location.search);
+}
+
+export function pushPullRequestPreview(repositoryId: string, number: number, tab: "conversation" | "files" = "conversation", anchor?: string | { file?: string; thread?: string }) {
+  const nextPath = buildPullRequestPreviewPath(repositoryId, number, tab, anchor);
+  if (`${window.location.pathname}${window.location.search}` === nextPath) return;
+  window.history.pushState({ pullRequestRepositoryId: repositoryId, pullRequest: number }, "", nextPath);
+}
+
+// The same entry, now anchored elsewhere (a jump within Files changed): the
+// URL follows without adding a Back step.
+export function replacePullRequestPreview(repositoryId: string, number: number, tab: "conversation" | "files", anchor?: { file?: string; thread?: string }) {
+  const nextPath = buildPullRequestPreviewPath(repositoryId, number, tab, anchor);
+  if (`${window.location.pathname}${window.location.search}` === nextPath) return;
+  window.history.replaceState({ pullRequestRepositoryId: repositoryId, pullRequest: number }, "", nextPath);
+}
+
 
 // Replace the current history entry with a new selection. Used for follow-mode
 // auto-switches (so the URL stays accurate without polluting the back stack)
@@ -180,6 +238,11 @@ export function attachPopstateHandler() {
       activateCommitPreview(commitPreview, { pushHistory: false });
       return;
     }
+    const pullRequestPreview = pullRequestPreviewParamsFromUrl();
+    if (pullRequestPreview) {
+      activatePullRequestPreview(pullRequestPreview, { pushHistory: false });
+      return;
+    }
 
     const urlRelativePath = appDocumentRelativePath(window.location.pathname);
 
@@ -193,18 +256,7 @@ export function attachPopstateHandler() {
     resumeDocumentSelection();
 
     if (!urlRelativePath) {
-      const fallbackId = defaultDocumentId(appState.roots);
-      if (fallbackId) {
-        setSelectedId(fallbackId);
-        setPreviewMode({ kind: "document" });
-        renderSidebar();
-        void loadDocument(fallbackId);
-      } else {
-        setSelectedId(null);
-        setPreviewMode({ kind: "empty" });
-        renderSidebar();
-        renderEmptyPreview("No document selected", "Waiting for viewable files");
-      }
+      showDefaultDocument({ pushHistory: false });
       return;
     }
 

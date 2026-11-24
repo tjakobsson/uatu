@@ -9,6 +9,12 @@ import { contextualAppUrl } from "../shell/watch-context";
 import { findDocumentById } from "../shell/storage";
 import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
 import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
+import { pullRequestFileFor } from "./pr-file-link";
+import { pullRequestStore } from "../github/pull-request-store";
+import { buildPullRequestPreviewPath } from "../shell/history";
+import { revealPreviewSurface } from "../shell/tab-bar";
+import { activatePullRequestPreview } from "../shell/url";
+import type { RepositorySnapshot, RootGroup } from "../shared/types";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { writeDiffStylePreference, type DiffStyle, type DocumentMeta } from "../shared/types";
 import { appState, safeLocalStorage } from "../shell/state";
@@ -240,6 +246,11 @@ export async function renderDiffIntoPreview(
       void applyDiffStyle(next);
     },
   });
+  // A file the current pull request changes: the way to review it there,
+  // in the Diff view's header row beside its layout toggle (again once the
+  // pull request's files are read, if they weren't yet).
+  linkTarget = doc ? { host, doc } : null;
+  syncPullRequestFileLink();
 
   // The Source / Rendered cache is cleared on every file selection, so
   // `currentRenderedPayload()` returns null while the diff view is the
@@ -250,6 +261,50 @@ export async function renderDiffIntoPreview(
   const choicePayload = doc ? renderedDocumentStubFromMeta(doc) : null;
   syncViewToggle(choicePayload);
   syncLayoutChooser(choicePayload);
+}
+
+// The link, for the Diff view's header row; null when the document isn't in
+// the current pull request (or its files aren't read yet).
+// The rendered Diff the review link belongs to; the store's changes (the
+// pull request's files read, another pull request current) re-check it.
+let linkTarget: { host: HTMLElement; doc: DocumentMeta } | null = null;
+pullRequestStore.subscribe(syncPullRequestFileLink);
+
+function syncPullRequestFileLink(): void {
+  if (!linkTarget?.host.isConnected) { linkTarget = null; return; }
+  const { host, doc } = linkTarget;
+  const link = pullRequestFileLink(doc, appState.roots, appState.repositories);
+  const current = host.querySelector<HTMLAnchorElement>(":scope > .uatu-diff-header > .uatu-diff-pr-link");
+  if (current?.getAttribute("href") === link?.getAttribute("href")) return;
+  let row = host.querySelector<HTMLElement>(":scope > .uatu-diff-header");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "uatu-diff-header";
+    const toolbar = host.querySelector<HTMLElement>(":scope > .uatu-diff-toolbar");
+    host.insertBefore(row, toolbar ?? host.firstChild);
+    if (toolbar) row.append(toolbar);
+  }
+  current?.remove();
+  if (link) row.append(link);
+}
+
+function pullRequestFileLink(doc: Pick<DocumentMeta, "rootId" | "relativePath">, roots: readonly RootGroup[], repositories: readonly RepositorySnapshot[]): HTMLElement | null {
+  const number = pullRequestStore.currentNumber();
+  const detail = number === null ? null : pullRequestStore.detail(number);
+  const target = pullRequestFileFor(doc, roots, repositories, { repositoryId: pullRequestStore.state.repositoryId, number, files: detail?.files ?? null });
+  if (!target) return null;
+  const link = document.createElement("a");
+  link.className = "uatu-diff-pr-link";
+  link.href = buildPullRequestPreviewPath(target.repositoryId, target.number, "files", target.path);
+  link.title = `Comment on this file's lines in pull request #${target.number}'s Files changed`;
+  link.innerHTML = `Review this file in #${target.number} <span aria-hidden="true">→</span>`;
+  link.addEventListener("click", event => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    event.preventDefault();
+    revealPreviewSurface();
+    activatePullRequestPreview({ repositoryId: target.repositoryId, number: target.number, tab: "files", file: target.path }, { pushHistory: true });
+  });
+  return link;
 }
 
 // One paint-cycle yield. Guarded for non-browser (unit test) environments

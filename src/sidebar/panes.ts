@@ -2,7 +2,7 @@
 // menu. The pure data shapes (`PaneId`, `PaneState`, `ALL_PANE_DEFS`) live
 // in `shell/state.ts`; this module is the DOM-interaction half.
 
-import { paneParticipatesInStack } from "./pane-stack";
+import { MIN_PANE_CONTENT_PX, PANE_FLOOR_PX, allocatePaneHeights, paneParticipatesInStack, wholeRowTrim } from "./pane-stack";
 import { renderSidebar } from "./shell";
 import { onRevealUsagePane } from "../chat/usage-pane";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
@@ -14,6 +14,7 @@ import {
   type PaneState,
 } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
+import { onUiModeChange, uiMode } from "../shell/ui-mode";
 
 const panelsToggleElementMaybe = document.querySelector<HTMLButtonElement>("#panels-toggle");
 const panelsMenuElementMaybe = document.querySelector<HTMLDivElement>("#panels-menu");
@@ -31,6 +32,64 @@ const panelsMenuElement: HTMLDivElement = panelsMenuElementMaybe;
 // pane layout through this instead of assigning directly.
 export function setPaneState(next: PaneState): void {
   appState.panes = next;
+}
+
+// Touch mode's pane stack is an accordion: one pane is expanded at a time
+// and takes the stack's remaining height, the others are slim header rows,
+// and a pane's title toggles it. Which pane is expanded is its own per-device
+// preference, kept apart from the desktop layout's collapsed flags and
+// heights so switching an iPad between modes leaves the desktop stack as it
+// was. `null`: every pane folded.
+const TOUCH_EXPANDED_PANE_KEY = "uatu:touch-expanded-pane";
+const DEFAULT_TOUCH_EXPANDED_PANE: PaneId = "files";
+
+function readTouchExpandedPane(): PaneId | null {
+  try {
+    const raw = presentationLocalStorage()?.getItem(TOUCH_EXPANDED_PANE_KEY);
+    if (raw === "none") return null;
+    if (raw && isPaneId(raw)) return raw;
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+  return DEFAULT_TOUCH_EXPANDED_PANE;
+}
+
+let touchExpandedPane: PaneId | null = readTouchExpandedPane();
+
+function touchAccordion(): boolean {
+  return uiMode() === "touch";
+}
+
+// Whether a pane is folded to its header in the current mode.
+export function paneCollapsed(id: PaneId): boolean {
+  return touchAccordion() ? touchExpandedPane !== id : appState.panes[id].collapsed;
+}
+
+// Expands or folds a pane in the current mode and persists that mode's
+// preference. In touch mode, expanding one pane folds the others.
+function setPaneExpanded(id: PaneId, expanded: boolean): void {
+  if (touchAccordion()) {
+    touchExpandedPane = expanded ? id : touchExpandedPane === id ? null : touchExpandedPane;
+    try {
+      presentationLocalStorage()?.setItem(TOUCH_EXPANDED_PANE_KEY, touchExpandedPane ?? "none");
+    } catch {
+      // Ignore storage failures (private mode, quota, etc.).
+    }
+    return;
+  }
+  appState.panes[id].collapsed = !expanded;
+  persistPaneState();
+}
+
+// Shows a pane and expands it (the Search shortcut, the Usage pin, the panels
+// menu), leaving every other pane's stored state alone on desktop.
+export function revealPane(id: PaneId): void {
+  const pane = appState.panes[id];
+  if (pane.visible && !paneCollapsed(id)) return;
+  pane.visible = true;
+  setPaneExpanded(id, true);
+  persistPaneState();
+  renderSidebar();
 }
 
 export function initSidebarPanes() {
@@ -51,7 +110,7 @@ export function initSidebarPanes() {
     }
     appState.panes[paneId].visible = target.checked;
     if (target.checked) {
-      appState.panes[paneId].collapsed = false;
+      setPaneExpanded(paneId, true);
     }
     persistPaneState();
     renderSidebar();
@@ -75,10 +134,22 @@ export function initSidebarPanes() {
       if (!paneId || !isPaneId(paneId)) {
         return;
       }
-      appState.panes[paneId].collapsed = !appState.panes[paneId].collapsed;
-      persistPaneState();
+      setPaneExpanded(paneId, paneCollapsed(paneId));
       renderSidebar();
     });
+  });
+
+  // Touch mode: a pane's title is its accordion toggle (syncPaneTitle).
+  document.querySelector(".pane-stack")?.addEventListener("click", event => {
+    const toggle = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-pane-toggle]");
+    const paneId = toggle?.dataset.paneToggle;
+    if (!paneId || !isPaneId(paneId)) return;
+    setPaneExpanded(paneId, paneCollapsed(paneId));
+    renderSidebar();
+  });
+  onUiModeChange(() => {
+    syncPaneDom();
+    schedulePaneHeightNormalization();
   });
 
   document.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach(resizer => {
@@ -96,11 +167,14 @@ export function initSidebarPanes() {
       const nextPane = nextVisiblePane(paneId);
       const nextStartHeight = nextPane?.getBoundingClientRect().height ?? 0;
       const totalHeight = startHeight + nextStartHeight;
-      const minHeight = 72;
+      const minHeight = paneMinimumHeight(pane);
+      const nextMinHeight = nextPane ? paneMinimumHeight(nextPane) : 0;
 
+      // A drag sets heights outright: no whole-row adjustment until the next fit.
+      rowTrims.clear();
       const onMove = (moveEvent: PointerEvent) => {
         const delta = moveEvent.clientY - startY;
-        const maxHeight = nextPane ? totalHeight - minHeight : 520;
+        const maxHeight = nextPane ? totalHeight - nextMinHeight : 520;
         const nextHeight = Math.max(minHeight, Math.min(maxHeight, startHeight + delta));
         appState.panes[paneId].height = Math.round(nextHeight);
         if (nextPane) {
@@ -144,7 +218,9 @@ export function initSidebarPanes() {
       let lastTapY = 0;
       header.addEventListener("pointerdown", event => {
         const target = event.target as HTMLElement | null;
-        if (target?.closest("button, select, input, [role='radiogroup']")) {
+        // Touch mode's accordion has one expanded pane and no boundaries to
+        // drag; its title button toggles instead.
+        if (touchAccordion() || target?.closest("button, select, input, [role='radiogroup']")) {
           return;
         }
         const pane = header.closest<HTMLElement>("[data-pane-id]");
@@ -181,10 +257,13 @@ export function initSidebarPanes() {
         const prevStartHeight = dragTarget?.pane.getBoundingClientRect().height ?? 0;
         const startHeight = pane.getBoundingClientRect().height;
         const totalHeight = prevStartHeight + startHeight;
-        const minHeight = 72;
+        const prevMinHeight = dragTarget ? paneMinimumHeight(dragTarget.pane) : 0;
+        const minHeight = paneMinimumHeight(pane);
         const dragThreshold = 8;
         let dragging = false;
 
+        // A drag sets heights outright: no whole-row adjustment until the next fit.
+        rowTrims.clear();
         const onMove = (moveEvent: PointerEvent) => {
           if (!dragTarget) {
             return;
@@ -197,7 +276,7 @@ export function initSidebarPanes() {
             dragging = true;
           }
           const prevHeight = Math.max(
-            minHeight,
+            prevMinHeight,
             Math.min(totalHeight - minHeight, prevStartHeight + delta),
           );
           appState.panes[dragTarget.paneId].height = Math.round(prevHeight);
@@ -217,8 +296,7 @@ export function initSidebarPanes() {
                 DOUBLE_TAP_SLOP_PX;
             if (isDoubleTap) {
               lastTapAt = 0;
-              appState.panes[paneId].collapsed = !appState.panes[paneId].collapsed;
-              persistPaneState();
+              setPaneExpanded(paneId, paneCollapsed(paneId));
               renderSidebar();
             } else {
               lastTapAt = now;
@@ -247,14 +325,20 @@ export function initSidebarPanes() {
 
   // The chat readout's "Keep in sidebar" pin: reveal the Usage pane the way
   // the panels menu would, leaving every other pane's persisted state alone.
-  onRevealUsagePane(() => {
-    const pane = appState.panes.usage;
-    if (pane.visible && !pane.collapsed) return;
-    pane.visible = true;
-    pane.collapsed = false;
-    persistPaneState();
-    renderSidebar();
-  });
+  onRevealUsagePane(() => revealPane("usage"));
+
+  // Refit the panes whenever the stack's height changes: a window resize, a
+  // mode switch, or touch mode's Files tab appearing (the stack measures 0
+  // while another tab is in front, so a fit made then is skipped).
+  const stack = document.querySelector<HTMLElement>(".pane-stack");
+  if (stack && typeof ResizeObserver === "function") {
+    let stackHeight = -1;
+    new ResizeObserver(() => {
+      if (stack.clientHeight === stackHeight) return;
+      stackHeight = stack.clientHeight;
+      schedulePaneHeightNormalization();
+    }).observe(stack);
+  }
 
   syncPaneDom();
   renderPanelsMenu();
@@ -264,7 +348,7 @@ function nextVisiblePane(paneId: PaneId): HTMLElement | null {
   const index = ALL_PANE_DEFS.findIndex(pane => pane.id === paneId);
   for (const candidate of ALL_PANE_DEFS.slice(index + 1)) {
     const state = appState.panes[candidate.id];
-    if (!state.visible || state.collapsed) {
+    if (!state.visible || paneCollapsed(candidate.id)) {
       continue;
     }
     return document.querySelector<HTMLElement>(`[data-pane-id="${candidate.id}"]`);
@@ -276,7 +360,7 @@ function previousVisiblePane(paneId: PaneId): HTMLElement | null {
   const index = ALL_PANE_DEFS.findIndex(pane => pane.id === paneId);
   for (const candidate of ALL_PANE_DEFS.slice(0, Math.max(0, index)).reverse()) {
     const state = appState.panes[candidate.id];
-    if (!state.visible || state.collapsed) {
+    if (!state.visible || paneCollapsed(candidate.id)) {
       continue;
     }
     return document.querySelector<HTMLElement>(`[data-pane-id="${candidate.id}"]`);
@@ -294,38 +378,102 @@ export function persistPaneState(): void {
   }
 }
 
+// A pane whose feature this session does not serve (the Pull request pane
+// without GitHub data) carries `data-pane-unavailable`: it stays out of the
+// stack and the panels menu, whatever its stored visibility says. The
+// attribute is authored in index.html so the pane never flashes in first.
+function paneUnavailable(id: PaneId): boolean {
+  return document.querySelector(`[data-pane-id="${id}"]`)?.hasAttribute("data-pane-unavailable") ?? true;
+}
+
+export function setPaneAvailable(id: PaneId, available: boolean): void {
+  const element = document.querySelector<HTMLElement>(`[data-pane-id="${id}"]`);
+  if (!element || element.hasAttribute("data-pane-unavailable") === !available) return;
+  element.toggleAttribute("data-pane-unavailable", !available);
+  syncPaneDom();
+  renderPanelsMenu();
+  schedulePaneHeightNormalization();
+}
+
+function paneShown(id: PaneId): boolean {
+  return appState.panes[id].visible && !paneUnavailable(id);
+}
+
 export function syncPaneDom() {
   const growPaneId = paneIdToGrow();
+  const touch = touchAccordion();
   for (const pane of ALL_PANE_DEFS) {
     const element = document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`);
     if (!element) {
       continue;
     }
     const state = appState.panes[pane.id];
-    element.hidden = !state.visible;
-    element.classList.toggle("is-collapsed", state.collapsed);
-    if (state.height && !state.collapsed) {
-      element.style.flex = `${pane.id === growPaneId ? 1 : 0} 1 ${state.height}px`;
+    const collapsed = paneCollapsed(pane.id);
+    element.hidden = !paneShown(pane.id);
+    element.classList.toggle("is-collapsed", collapsed);
+    if (touch && !collapsed) {
+      // The accordion's one expanded pane takes the rest of the stack. The
+      // Pull request pane is a summary, not a list: it is as tall as what it
+      // shows (scrolling past the room left), and the folded headers follow
+      // right under it instead of under a blank stretch.
+      element.style.flex = pane.id === "pull-request" ? "0 1 auto" : "1 1 0px";
+    } else if (!touch && state.height && !collapsed) {
+      element.style.flex = `${pane.id === growPaneId ? 1 : 0} 1 ${state.height + (rowTrims.get(pane.id) ?? 0)}px`;
     } else {
       element.style.removeProperty("flex");
     }
+    syncPaneTitle(element, pane, touch, collapsed);
     const button = element.querySelector<HTMLButtonElement>("[data-pane-collapse]");
     if (button) {
-      button.textContent = state.collapsed ? "+" : "−";
-      button.setAttribute("aria-label", `${state.collapsed ? "Expand" : "Collapse"} ${pane.label}`);
+      button.textContent = collapsed ? "+" : "−";
+      button.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} ${pane.label}`);
     }
   }
 }
 
+// A pane's title when it is not its label (the Files pane while a pull
+// request is picked: "PR #n files"). Set through here so touch mode's title
+// button keeps its text.
+const paneTitles = new Map<PaneId, string>();
+
+export function setPaneTitle(id: PaneId, title: string): void {
+  paneTitles.set(id, title);
+  const heading = document.querySelector<HTMLElement>(`[data-pane-id="${id}"] > .pane-header h2`);
+  if (heading) (heading.querySelector<HTMLElement>(":scope > [data-pane-toggle]") ?? heading).textContent = title;
+}
+
+// Touch mode: the title is a button that toggles the pane (its ::before
+// covers the header row, so the whole row except the actions answers a tap);
+// desktop keeps the plain heading and its − / + button.
+function syncPaneTitle(element: HTMLElement, pane: (typeof ALL_PANE_DEFS)[number], touch: boolean, collapsed: boolean): void {
+  const heading = element.querySelector<HTMLHeadingElement>(":scope > .pane-header h2");
+  if (!heading) return;
+  let toggle = heading.querySelector<HTMLButtonElement>(":scope > [data-pane-toggle]");
+  const title = paneTitles.get(pane.id) ?? pane.label;
+  if (!touch) {
+    if (toggle) heading.textContent = title;
+    return;
+  }
+  if (!toggle) {
+    const body = element.querySelector<HTMLElement>(":scope > .pane-body");
+    if (body && !body.id) body.id = `pane-body-${pane.id}`;
+    toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "pane-toggle";
+    toggle.dataset.paneToggle = pane.id;
+    if (body) toggle.setAttribute("aria-controls", body.id);
+    toggle.textContent = title;
+    heading.replaceChildren(toggle);
+  }
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+}
+
 function paneIdToGrow(): PaneId | null {
   const filesState = appState.panes.files;
-  if (filesState.visible && !filesState.collapsed) {
+  if (filesState.visible && !paneCollapsed("files")) {
     return "files";
   }
-  const visible = ALL_PANE_DEFS.filter(pane => {
-    const state = appState.panes[pane.id];
-    return state.visible && !state.collapsed;
-  });
+  const visible = ALL_PANE_DEFS.filter(pane => paneShown(pane.id) && !paneCollapsed(pane.id));
   return visible.at(-1)?.id ?? null;
 }
 
@@ -343,7 +491,8 @@ export function schedulePaneHeightNormalization() {
 
 function normalizePaneHeightsToStack() {
   const stack = document.querySelector<HTMLElement>(".pane-stack");
-  if (!stack) {
+  // Touch mode's accordion needs no allocation: its expanded pane flexes.
+  if (!stack || touchAccordion()) {
     return;
   }
 
@@ -357,8 +506,8 @@ function normalizePaneHeightsToStack() {
       Boolean(
         pane.element
         && paneParticipatesInStack({
-          visible: pane.state.visible,
-          collapsed: pane.state.collapsed,
+          visible: paneShown(pane.id),
+          collapsed: paneCollapsed(pane.id),
         }),
       ),
     );
@@ -368,8 +517,7 @@ function normalizePaneHeightsToStack() {
   }
 
   const collapsedHeight = ALL_PANE_DEFS.reduce((sum, pane) => {
-    const state = appState.panes[pane.id];
-    if (!state.visible || !state.collapsed) {
+    if (!paneShown(pane.id) || !paneCollapsed(pane.id)) {
       return sum;
     }
     const element = document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`);
@@ -380,36 +528,106 @@ function normalizePaneHeightsToStack() {
     return;
   }
 
-  const minHeight = Math.min(72, Math.floor(availableHeight / visibleExpanded.length));
-  const heights = new Map<PaneId, number>();
+  const heights = allocatePaneHeights(
+    visibleExpanded.map(pane => ({
+      id: pane.id,
+      requested: pane.state.height ?? pane.element.getBoundingClientRect().height,
+      minimum: paneMinimumHeight(pane.element),
+      required: paneEssentialContentHeight(pane.element) !== null,
+    })),
+    availableHeight,
+    paneIdToGrow() ?? visibleExpanded.at(-1)!.id,
+    PANE_FLOOR_PX,
+  );
   for (const pane of visibleExpanded) {
-    heights.set(pane.id, Math.max(minHeight, pane.state.height ?? pane.element.getBoundingClientRect().height));
+    const height = Math.round(heights.get(pane.id) ?? 0);
+    pane.state.height = height;
+    pane.element.style.flex = `0 0 ${height}px`;
   }
-
-  const total = Array.from(heights.values()).reduce((sum, height) => sum + height, 0);
-  if (total > availableHeight) {
-    const scale = availableHeight / total;
-    for (const [paneId, height] of heights) {
-      heights.set(paneId, Math.max(minHeight, Math.floor(height * scale)));
-    }
+  // A pane of rows ends on a whole row: the pixels of a row its bottom would
+  // cut go to the grow pane (or, when it is the grow pane, the one above).
+  // Only the laid-out size moves (rowTrims, which syncPaneDom applies too);
+  // the stored heights stay the allocation, so repeated fits never ratchet
+  // a pane smaller.
+  rowTrims.clear();
+  const growId = paneIdToGrow() ?? visibleExpanded.at(-1)!.id;
+  for (const [index, pane] of visibleExpanded.entries()) {
+    const trim = paneRowTrim(pane.element);
+    if (trim <= 0) continue;
+    const receiver = pane.id !== growId ? visibleExpanded.find(other => other.id === growId) : visibleExpanded[index - 1];
+    if (!receiver) continue;
+    rowTrims.set(pane.id, (rowTrims.get(pane.id) ?? 0) - trim);
+    rowTrims.set(receiver.id, (rowTrims.get(receiver.id) ?? 0) + trim);
   }
-
-  let normalizedTotal = Array.from(heights.values()).reduce((sum, height) => sum + height, 0);
-  const growPaneId = paneIdToGrow() ?? visibleExpanded.at(-1)?.id;
-  if (growPaneId && normalizedTotal < availableHeight) {
-    heights.set(growPaneId, (heights.get(growPaneId) ?? minHeight) + (availableHeight - normalizedTotal));
-    normalizedTotal = availableHeight;
-  }
-
   for (const pane of visibleExpanded) {
-    const height = heights.get(pane.id) ?? minHeight;
-    pane.state.height = Math.round(height);
-    pane.element.style.flex = `0 0 ${Math.round(height)}px`;
+    const trim = rowTrims.get(pane.id);
+    if (trim) pane.element.style.flex = `0 0 ${(pane.state.height ?? 0) + trim}px`;
   }
 }
 
+// Laid-out height adjustments from the last fit (whole rows), by pane.
+const rowTrims = new Map<PaneId, number>();
+
+// What a `[data-pane-rows]` pane body gives up to end on a whole row at
+// scroll 0 (wholeRowTrim).
+function paneRowTrim(pane: HTMLElement): number {
+  const body = pane.querySelector<HTMLElement>(":scope > .pane-body[data-pane-rows]");
+  if (!body || body.clientHeight === 0) return 0;
+  const { rows, origin } = paneRows(body);
+  const end = body.querySelector<HTMLElement>("[data-pane-essential-end]")?.getBoundingClientRect().bottom;
+  return wholeRowTrim(rows, body.clientHeight, end === undefined ? 0 : end - origin);
+}
+
+// A `[data-pane-rows]` body's rows in its content coordinates (0 at the
+// top of its scrolled content): the children of `[data-pane-rows]`
+// elements, nested ones expanded, hidden ones left out.
+export function paneRows(body: HTMLElement): { rows: { top: number; bottom: number }[]; origin: number } {
+  const origin = body.getBoundingClientRect().top + (parseFloat(getComputedStyle(body).borderTopWidth) || 0) - body.scrollTop;
+  const rows: { top: number; bottom: number }[] = [];
+  const collect = (container: Element) => {
+    for (const child of container.children) {
+      if (child.hasAttribute("data-pane-rows")) { collect(child); continue; }
+      const rect = child.getBoundingClientRect();
+      if (rect.height > 0) rows.push({ top: rect.top - origin, bottom: rect.bottom - origin });
+    }
+  };
+  collect(body);
+  return { rows, origin };
+}
+
+// The smallest height an expanded pane may take: its fixed chrome (header
+// and any toolbar) plus a few rows of content, or plus its essential content
+// when it marks one. Every pane follows the same rule, for the stack
+// allocation and for both resize gestures.
+function paneMinimumHeight(pane: HTMLElement): number {
+  const essential = paneEssentialContentHeight(pane);
+  const body = pane.querySelector<HTMLElement>(":scope > .pane-body");
+  if (essential !== null && body) {
+    // Everything around the body's content box stays as it is.
+    const around = pane.getBoundingClientRect().height - body.clientHeight;
+    return Math.ceil(around + Math.max(MIN_PANE_CONTENT_PX, essential));
+  }
+  const chrome = Array.from(pane.querySelectorAll<HTMLElement>(":scope > .pane-header, .pane-toolbar"))
+    .reduce((sum, element) => sum + element.getBoundingClientRect().height, 0);
+  return Math.ceil(chrome) + MIN_PANE_CONTENT_PX;
+}
+
+// A pane whose body holds a `[data-pane-essential-end]` element (the Pull
+// request pane's actions) must show everything down to it: the height from
+// the body's top to that element's bottom, padding included. Null for other
+// panes, and while the pane is not laid out (a hidden touch tab).
+function paneEssentialContentHeight(pane: HTMLElement): number | null {
+  const body = pane.querySelector<HTMLElement>(":scope > .pane-body");
+  const end = body?.querySelector<HTMLElement>("[data-pane-essential-end]");
+  if (!body || !end || body.clientWidth === 0) return null;
+  const style = getComputedStyle(body);
+  const top = body.getBoundingClientRect().top + (parseFloat(style.borderTopWidth) || 0);
+  const bottom = end.getBoundingClientRect().bottom + (parseFloat(getComputedStyle(end).marginBottom) || 0);
+  return bottom - top + body.scrollTop + (parseFloat(style.paddingBottom) || 0);
+}
+
 export function renderPanelsMenu() {
-  panelsMenuElement.innerHTML = ALL_PANE_DEFS.map(pane => {
+  panelsMenuElement.innerHTML = ALL_PANE_DEFS.filter(pane => !paneUnavailable(pane.id)).map(pane => {
     const checked = appState.panes[pane.id].visible ? " checked" : "";
     return `
       <label class="panel-option">
