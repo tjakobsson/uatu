@@ -17,6 +17,10 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { AGENT_METHODS, CLIENT_METHODS } from "@agentclientprotocol/sdk";
+
+import { antigravityCoverageAnnotations } from "../src/chat/antigravity/sdk-coverage";
+import { createAcpMemory, normalizeAcpUpdate, toolItems } from "../src/chat/antigravity/normalization";
 import { claudeCoverageAnnotations } from "../src/chat/claude/sdk-coverage";
 import { INTENTIONALLY_IGNORED, claudeToolInteraction, createClaudeEventMemory, normalizeClaudeMessage } from "../src/chat/claude/normalization";
 import type { CoverageAnnotations } from "../src/chat/coverage-annotations";
@@ -128,6 +132,10 @@ export const FLOORS = {
   openCodeV1Parts: 8,
   openCodeV2Events: 80,
   openCodeV2Parts: 3,
+  acpUpdates: 10,
+  acpAgentMethods: 8,
+  acpClientMethods: 4,
+  acpToolKinds: 5,
 } as const;
 
 /**
@@ -223,6 +231,49 @@ export function extractOpenCode(sources: OpenCodeSources = OPENCODE_SOURCES): Op
     v1Parts: requireFloor({ names: unionTypeLiterals(v1, "Part"), file: v1File, pattern: "the Part union's type literals" }, FLOORS.openCodeV1Parts),
     v2Events: requireFloor({ names: v2Events, file: manifestFile, pattern: "event definitions' `type: \"…\"` lines (with session-event.d.ts)" }, FLOORS.openCodeV2Events),
     v2Parts: requireFloor({ names: unionTypeLiterals(readDeclarations(messageFile), "AssistantContent"), file: messageFile, pattern: "the AssistantContent union's type literals" }, FLOORS.openCodeV2Parts),
+  };
+}
+
+export type AntigravityVocabulary = {
+  sdkVersion: string;
+  updates: ExtractedAxis;
+  agentMethods: ExtractedAxis;
+  clientMethods: ExtractedAxis;
+  toolKinds: ExtractedAxis;
+};
+
+export type AntigravitySources = { sdkDir: string; methods: { agent: Readonly<Record<string, string>>; client: Readonly<Record<string, string>> } };
+
+export const ANTIGRAVITY_SOURCES: AntigravitySources = {
+  sdkDir: path.join(MODULES, "@agentclientprotocol/sdk"),
+  methods: { agent: AGENT_METHODS, client: CLIENT_METHODS },
+};
+
+/**
+ * Antigravity's vocabulary is the Agent Client Protocol's, as the installed
+ * SDK publishes it (D13): the session update kinds and tool kinds from
+ * `schema/v1/schema.json` (`$defs.SessionUpdate`, `$defs.ToolKind`), and the
+ * agent and client methods from the exported `AGENT_METHODS` and
+ * `CLIENT_METHODS`. The package ships no `schema/meta.json`.
+ */
+export function extractAntigravity(sources: AntigravitySources = ANTIGRAVITY_SOURCES): AntigravityVocabulary {
+  const schemaFile = path.join(sources.sdkDir, "schema/v1/schema.json");
+  let defs: Record<string, { oneOf?: Array<Record<string, unknown>>; anyOf?: Array<Record<string, unknown>>; enum?: unknown[] }> = {};
+  try { defs = (JSON.parse(readDeclarations(schemaFile)) as { $defs?: typeof defs }).$defs ?? {}; }
+  catch (error) { if (error instanceof ExtractionError) throw error; throw new ExtractionError(`agent coverage: ${relative(schemaFile)} is not JSON`); }
+  const variants = (name: string) => defs[name]?.oneOf ?? defs[name]?.anyOf ?? [];
+  const updates = sortedUnique(variants("SessionUpdate").flatMap(variant => {
+    const value = (variant.properties as Record<string, { const?: unknown }> | undefined)?.sessionUpdate?.const;
+    return typeof value === "string" ? [value] : [];
+  }));
+  const toolKinds = sortedUnique([...variants("ToolKind").map(variant => variant.const), ...defs.ToolKind?.enum ?? []].filter((value): value is string => typeof value === "string"));
+  const methodsFile = path.join(sources.sdkDir, "dist/v1/schema/index.js");
+  return {
+    sdkVersion: packageVersion(sources.sdkDir),
+    updates: requireFloor({ names: updates, file: schemaFile, pattern: "$defs.SessionUpdate's sessionUpdate constants" }, FLOORS.acpUpdates),
+    agentMethods: requireFloor({ names: sortedUnique(Object.values(sources.methods.agent)), file: methodsFile, pattern: "the exported AGENT_METHODS" }, FLOORS.acpAgentMethods),
+    clientMethods: requireFloor({ names: sortedUnique(Object.values(sources.methods.client)), file: methodsFile, pattern: "the exported CLIENT_METHODS" }, FLOORS.acpClientMethods),
+    toolKinds: requireFloor({ names: toolKinds, file: schemaFile, pattern: "$defs.ToolKind's constants" }, FLOORS.acpToolKinds),
   };
 }
 
@@ -358,6 +409,35 @@ export function openCodeDedicatedTools(): Entry[] {
   });
 }
 
+/** A session update kind through the Antigravity normalizer, as replay (which reads every kind live does, and user messages too). */
+export function probeAcpUpdate(kind: string): CoverageState {
+  const update = { sessionUpdate: kind, content: { type: "text", text: PROBE }, toolCallId: PROBE, status: "completed", used: 0, size: 1, title: PROBE, currentModeId: PROBE, configOptions: [], availableCommands: [], entries: [] };
+  const { outcome } = normalizeAcpUpdate({ sessionId: PROBE, update }, createAcpMemory(PROBE, "/uatu-coverage-probe"), 0);
+  return stateOf(outcome, false);
+}
+
+/** A tool kind's row: a command row is purpose-built; anything else is the generic tool row. */
+export function probeAcpToolKind(kind: string): { state: CoverageState; renders?: string } {
+  const memory = createAcpMemory(PROBE, "/uatu-coverage-probe");
+  memory.tools.set(PROBE, { kind, title: PROBE, status: "completed" });
+  const [row] = toolItems(memory, PROBE, 0);
+  return row?.type === "command" ? { state: "dedicated", renders: "command row" } : { state: "generic" };
+}
+
+// Which ACP methods the Antigravity stack calls or answers, read from its
+// own source: a method is used when its name appears there as a literal.
+function antigravitySource(): string {
+  const directory = path.join(REPO_ROOT, "src/chat/antigravity");
+  return ["provider.ts", "connection.ts"].map(file => readFileSync(path.join(directory, file), "utf8")).join("\n");
+}
+
+/** Used methods are dedicated; an unused one is ignored when an annotation explains why, and unhandled otherwise. */
+function methodState(key: string, method: string, source: string, annotations: CoverageAnnotations): CoverageState {
+  if (source.includes(`"${method}"`)) return "dedicated";
+  const explained = Object.keys(annotations.reasons).some(candidate => candidate === key || candidate.endsWith("*") && key.startsWith(candidate.slice(0, -1)));
+  return explained ? "ignored" : "unhandled";
+}
+
 function runControls(): void {
   assertControl("unknown Claude message", probeClaudeMessage(PROBE), "unhandled");
   assertControl("unknown Claude system subtype", probeClaudeMessage(`system/${PROBE}`), "unhandled");
@@ -368,13 +448,16 @@ function runControls(): void {
     assertControl(`unknown OpenCode ${generation} event`, probeOpenCodeEvent(generation, PROBE), "unhandled");
     assertControl(`unknown OpenCode ${generation} part`, probeOpenCodePart(generation, PROBE), "unhandled");
   }
+  assertControl("unknown ACP session update", probeAcpUpdate(PROBE), "unhandled");
+  assertControl("ACP agent message chunk", probeAcpUpdate("agent_message_chunk"), "dedicated");
+  assertControl("unknown ACP tool kind", probeAcpToolKind(PROBE).state, "generic");
 }
 
 // ---------------------------------------------------------------------------
 // Reports
 
 export type AgentReport = {
-  id: "claude-code" | "opencode";
+  id: "claude-code" | "opencode" | "antigravity";
   title: string;
   // Every version that decides the vocabulary.
   versionLine: string;
@@ -481,6 +564,22 @@ export function openCodeReport(vocabulary: OpenCodeVocabulary = extractOpenCode(
   };
 }
 
+export function antigravityReport(vocabulary: AntigravityVocabulary = extractAntigravity(), annotations: CoverageAnnotations = antigravityCoverageAnnotations): AgentReport {
+  const source = antigravitySource();
+  const axes = annotate([
+    { id: "updates", title: "Session updates", source: "`@agentclientprotocol/sdk` `schema/v1/schema.json` `SessionUpdate` (its `sessionUpdate` constants)", keyPrefix: "", entries: vocabulary.updates.names.map(name => ({ name, state: probeAcpUpdate(name) })) },
+    { id: "agent-methods", title: "Agent methods (sent to agy)", source: "`@agentclientprotocol/sdk` `AGENT_METHODS`; a method is used when the Antigravity provider or connection names it. Annotation keys are `agent:<method>`", keyPrefix: "agent:", entries: vocabulary.agentMethods.names.map(name => ({ name, state: methodState(`agent:${name}`, name, source, annotations) })) },
+    { id: "client-methods", title: "Client methods (answered for agy)", source: "`@agentclientprotocol/sdk` `CLIENT_METHODS`. Annotation keys are `client:<method>`", keyPrefix: "client:", entries: vocabulary.clientMethods.names.map(name => ({ name, state: methodState(`client:${name}`, name, source, annotations) })) },
+    { id: "tool-kinds", title: "Tool kinds", source: "`@agentclientprotocol/sdk` `schema/v1/schema.json` `ToolKind`. Annotation keys are `kind:<kind>`", keyPrefix: "kind:", entries: vocabulary.toolKinds.names.map(name => ({ name, ...probeAcpToolKind(name) })), notEnumerated: "ACP does not enumerate agy's tool names: a tool call carries its name only in agy's own field. This lists ACP's tool kinds instead; a diff in any tool's content adds file-change rows." },
+  ], annotations, "src/chat/antigravity/sdk-coverage.ts");
+  return {
+    id: "antigravity",
+    title: "Antigravity",
+    versionLine: `ACP v1 through \`@agentclientprotocol/sdk\` ${vocabulary.sdkVersion}`,
+    axes,
+  };
+}
+
 export function gapCount(report: AgentReport): number {
   return report.axes.reduce((sum, axis) => sum + axis.entries.filter(entry => GAP_STATES.has(entry.state)).length, 0);
 }
@@ -507,7 +606,7 @@ const STATE_MEANING: Record<CoverageState, string> = {
 /** Runs the probe controls, then builds every agent's report from the installed SDKs: the path publication takes. */
 export function buildReports(): AgentReport[] {
   runControls();
-  return [claudeReport(), openCodeReport()];
+  return [claudeReport(), openCodeReport(), antigravityReport()];
 }
 
 /** What a dashboard published, per agent id: the versions it was generated against and its entry names per axis id. */
@@ -613,13 +712,13 @@ export function renderDashboard(reports: AgentReport[]): string {
   const out = [
     "<!-- Generated by `bun run coverage:agents` and published by .github/workflows/agent-coverage.yml after every push to main. Hand edits are overwritten. -->",
     "",
-    `${reports.map(report => report.title).join(" and ")} are first-class agents in uatu. The aim is to use what each SDK offers, not the subset they share. This dashboard lists every message type, content block or part, and tool each installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted. When a dependency bump adds or removes vocabulary, a comment on this issue names it.`,
+    `${listOf(reports.map(report => report.title))} are first-class agents in uatu. The aim is to use what each SDK offers, not the subset they share. This dashboard lists every message type, content block or part, and tool each installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted. When a dependency bump adds or removes vocabulary, a comment on this issue names it.`,
     "",
     "| Agent | Generated against | Gaps |",
     "| --- | --- | --- |",
     ...reports.map(report => `| ${report.title} | ${cell(report.versionLine)} | ${gapCount(report)} |`),
     "",
-    "Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the dashboard cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet (`src/chat/claude/sdk-coverage.ts`, `src/chat/opencode/sdk-coverage.ts`).",
+    "Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the dashboard cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet (`src/chat/claude/sdk-coverage.ts`, `src/chat/opencode/sdk-coverage.ts`, `src/chat/antigravity/sdk-coverage.ts`).",
     "",
     "| State | Meaning |",
     "| --- | --- |",
@@ -662,6 +761,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 // Helpers
+
+function listOf(values: string[]): string {
+  return values.length <= 2 ? values.join(" and ") : `${values.slice(0, -1).join(", ")} and ${values.at(-1)}`;
+}
 
 function code(value: string): string {
   return `\`${value}\``;

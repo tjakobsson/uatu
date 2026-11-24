@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { antigravityCoverageAnnotations } from "../src/chat/antigravity/sdk-coverage";
 import { claudeCoverageAnnotations } from "../src/chat/claude/sdk-coverage";
 import { openCodeCoverageAnnotations } from "../src/chat/opencode/sdk-coverage";
 import {
+  ANTIGRAVITY_SOURCES,
   CLAUDE_SOURCES,
+  antigravityReport,
+  extractAntigravity,
   DASHBOARD_ISSUE,
   ExtractionError,
   FLOORS,
@@ -28,6 +32,7 @@ import {
 
 const claude = claudeReport();
 const openCode = openCodeReport();
+const antigravity = antigravityReport();
 
 function entry(report: AgentReport, axis: string, name: string): Entry {
   const found = report.axes.find(candidate => candidate.id === axis)?.entries.find(candidate => candidate.name === name);
@@ -289,9 +294,52 @@ describe("agent coverage: the installed SDKs", () => {
   // annotations must change (an unreadable axis, a stale or unexplained
   // annotation, a probe that no longer tells handled from unhandled), never
   // because a version moved or the vocabulary grew.
-  test("both agents' reports build from the installed SDKs, controls included", () => {
+  test("every agent's report builds from the installed SDKs, controls included", () => {
     const built = buildReports();
-    expect(built.map(report => report.id)).toEqual(["claude-code", "opencode"]);
+    expect(built.map(report => report.id)).toEqual(["claude-code", "opencode", "antigravity"]);
     for (const report of built) expect(report.axes.every(axis => axis.entries.length > 0)).toBe(true);
+  });
+});
+
+describe("agent coverage: Antigravity through the ACP SDK", () => {
+  test("the schema and the exported method lists give every axis", () => {
+    const vocabulary = extractAntigravity();
+    expect(vocabulary.updates.names).toEqual(expect.arrayContaining(["agent_message_chunk", "tool_call", "usage_update"]));
+    expect(vocabulary.agentMethods.names).toEqual(expect.arrayContaining(["initialize", "session/load", "session/prompt"]));
+    expect(vocabulary.clientMethods.names).toEqual(expect.arrayContaining(["session/request_permission", "fs/read_text_file"]));
+    expect(vocabulary.toolKinds.names).toEqual(expect.arrayContaining(["execute", "edit", "read"]));
+  });
+
+  test("an unreadable schema fails naming the file", () => {
+    const stub = mkdtempSync(path.join(tmpdir(), "uatu-coverage-acp-"));
+    writeFileSync(path.join(stub, "package.json"), JSON.stringify({ version: "9.9.9" }));
+    expect(() => extractAntigravity({ ...ANTIGRAVITY_SOURCES, sdkDir: stub })).toThrow(/schema\/v1\/schema\.json does not exist/);
+    mkdirSync(path.join(stub, "schema/v1"), { recursive: true });
+    writeFileSync(path.join(stub, "schema/v1/schema.json"), JSON.stringify({ $defs: {} }));
+    expect(() => extractAntigravity({ ...ANTIGRAVITY_SOURCES, sdkDir: stub })).toThrow(/schema\.json yielded 0 entries for \$defs\.SessionUpdate/);
+  });
+
+  test("states come from the normalizer and the provider's own calls", () => {
+    expect(entry(antigravity, "updates", "agent_message_chunk").state).toBe("dedicated");
+    expect(entry(antigravity, "updates", "usage_update").state).toBe("dedicated");
+    expect(entry(antigravity, "agent-methods", "session/prompt").state).toBe("dedicated");
+    expect(entry(antigravity, "agent-methods", "authenticate")).toEqual(expect.objectContaining({ state: "ignored", reason: expect.stringContaining("agy owns its login") }));
+    expect(entry(antigravity, "client-methods", "session/request_permission").state).toBe("dedicated");
+    expect(entry(antigravity, "client-methods", "fs/read_text_file").state).toBe("ignored");
+    expect(entry(antigravity, "tool-kinds", "execute")).toEqual(expect.objectContaining({ state: "dedicated", renders: "command row" }));
+    expect(entry(antigravity, "tool-kinds", "read").state).toBe("generic");
+    expect(antigravity.axes.find(axis => axis.id === "tool-kinds")?.notEnumerated).toContain("ACP does not enumerate agy's tool names");
+  });
+
+  test("a stale annotation fails, naming the key", () => {
+    const stale = { ...antigravityCoverageAnnotations, reasons: { ...antigravityCoverageAnnotations.reasons, "agent:session/fork": "Not offered." } };
+    expect(() => antigravityReport(extractAntigravity(), stale)).toThrow("src/chat/antigravity/sdk-coverage.ts annotates agent:session/fork, which the installed SDK does not declare");
+  });
+
+  test("the dashboard lists Antigravity with its version line", () => {
+    const dashboard = renderDashboard([claude, openCode, antigravity]);
+    expect(dashboard).toContain(`| Antigravity | ${antigravity.versionLine} |`);
+    expect(dashboard).toContain("Claude Code, OpenCode and Antigravity are first-class agents");
+    expect(dashboard).toMatch(/^### Antigravity: Session updates$/m);
   });
 });

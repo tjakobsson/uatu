@@ -341,7 +341,9 @@ methods from the package's exported `AGENT_METHODS` and `CLIENT_METHODS`, and
 the session update discriminants from its `schema/v1/schema.json`
 (`$defs.SessionUpdate`). It fails loudly,
 naming the file, if an axis yields nothing. The probes feed each kind through
-the Antigravity normalizer. `src/chat/antigravity/sdk-coverage.ts` gives
+the Antigravity normalizer, and ACP's tool kinds through its tool rows. A
+method counts as used when the provider or connection names it; an unused
+one is ignored only with a stated reason. `src/chat/antigravity/sdk-coverage.ts` gives
 reasons for ignored entries (for example, the client file-system and terminal
 methods: UatuCode does not advertise them) and states that ACP does not
 enumerate agy's tool names. CONTRIBUTING.md's list of agent SDKs whose bumps
