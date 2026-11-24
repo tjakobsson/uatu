@@ -164,7 +164,9 @@ denied permissions, and each turn's tokens, model and cost — from `agy`'s
 own transcript (`~/.gemini/antigravity-cli/brain/<id>/...`), which uatu
 reads but never writes. A missing or unrecognized transcript leaves the
 replayed history as it is. When `agy`'s login has expired, a conversation
-already listed is read from that transcript alone. Workspace shutdown ends
+already listed is read from that transcript alone; without one, opening it
+shows the sign-in notice until you sign in through `agy`. uatu keeps no copy
+of Antigravity conversations of its own. Workspace shutdown ends
 every `agy` process uatu started, together with anything it left running.
 
 ### Sending, steering and queued messages

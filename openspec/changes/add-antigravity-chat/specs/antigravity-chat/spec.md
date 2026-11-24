@@ -33,7 +33,8 @@ UatuCode SHALL run Antigravity under the login `agy` already holds and MUST NOT 
 #### Scenario: No login is a login-missing state
 - **WHEN** `agy` answers a conversation listing or creation with its authentication-required error
 - **THEN** Antigravity is ready with a missing login, and its guidance says to run `agy` and sign in
-- **AND** existing Antigravity conversations that were already listed remain readable
+- **AND** an Antigravity conversation that was already listed stays readable only while `agy`'s transcript for it is available; otherwise opening it shows the sign-in notice
+- **AND** UatuCode keeps no copy of Antigravity conversations of its own
 
 #### Scenario: Agent accounts has no Antigravity entry
 - **WHEN** a user opens the Hub's Agent accounts

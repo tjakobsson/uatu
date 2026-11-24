@@ -52,12 +52,12 @@ affect non-chat capabilities of the workspace.
 - **AND** OpenCode is the server's default agent
 
 ### Requirement: An agent without a usable login says so
-A running agent SHALL report usable-login availability independently of startup readiness. Missing login SHALL preserve readable/selectable conversations and produce agent-specific login guidance and failure explanations, clearing after login without restart.
+A running agent SHALL report usable-login availability independently of startup readiness. Missing login SHALL preserve selectable conversations, readable where the agent's own records allow it without the login (for Antigravity, only while `agy`'s transcript is available), and produce agent-specific login guidance and failure explanations, clearing after login without restart.
 
 #### Scenario: Ready agents report login availability without startup failure
 - **WHEN** a running agent reports availability
 - **THEN** Claude Code SHALL report whether any login/key is effective; OpenCode SHALL report whether a provider is logged in or a no-login model is offered; Antigravity SHALL report whether `agy` accepts its cached login
-- **AND** a ready agent lacking usable login SHALL remain ready with readable/selectable conversations and SHALL NOT report startup failure
+- **AND** a ready agent lacking usable login SHALL remain ready with selectable conversations, readable as the requirement above allows, and SHALL NOT report startup failure
 - **AND** new-conversation entry and that agent's composers SHALL name the agent and how to log in while login is missing
 
 #### Scenario: Login failures and account changes update actionable feedback
