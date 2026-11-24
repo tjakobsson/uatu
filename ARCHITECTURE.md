@@ -295,9 +295,19 @@ src/
 │                         (composer.ts), and its DOM presentation (ui.ts),
 │                         plus the shared runtime parts: the lazy service
 │                         (service.ts), the runtime for agents found on
-│                         PATH (path-agent-runtime.ts), and child-process
-│                         stopping and output capture (managed-process.ts).
-│                         Agent-specific code lives below the seam:
+│                         PATH (path-agent-runtime.ts), child-process
+│                         stopping and output capture (managed-process.ts),
+│                         the agent-neutral facts each normalizer writes so
+│                         image capture knows when a reply's text is final
+│                         and its turn has ended (turn-liveness.ts), the
+│                         holder for the permission and question requests
+│                         an agent waits on through callbacks
+│                         (pending-interactions.ts), and the async queue
+│                         behind a provider's events() (push-queue.ts).
+│                         Agent-specific code lives below the seam, each
+│                         stack with a descriptor.ts (the agent's id, name
+│                         and declared login, which cli.ts registers and the
+│                         Hub's Agent accounts read):
 │                         chat/opencode/ (loopback server runtime that
 │                         decides the spawned server's generation, and
 │                         agent-runtime.ts, its chat-service runtime; v1/ and
