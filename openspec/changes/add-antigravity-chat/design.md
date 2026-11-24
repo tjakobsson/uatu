@@ -315,7 +315,9 @@ or a file whose shape is not recognized leaves the replayed history unchanged
 and is logged at debug level only. When agy refuses to load a listed
 conversation because its login has expired, the transcript alone gives its
 history (messages, replies, thoughts and tool rows under the ids replay
-uses). That is the only logged-out reading (decided): without a readable
+uses). That is the only logged-out reading (decided), during a turn too,
+where the read is built beside the running turn's rows rather than over
+them: without a readable
 transcript, opening the conversation shows the sign-in notice, and UatuCode
 keeps no copy of Antigravity conversations of its own, so a conversation's
 in-memory history goes with its released process. Live turns take tokens from

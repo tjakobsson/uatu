@@ -68,6 +68,10 @@ type SteerState = {
   confirm: (confirmation: SteerConfirmation) => void;
 };
 
+// A history a read pages through: the conversation's store, or one built
+// from agy's transcript alone.
+type HistorySource = { readonly items: ConversationItem[]; readonly accounting: StoredMessageAccounting[]; readonly version: string };
+
 type Conversation = {
   readonly sessionId: string;
   readonly memory: AcpMemory;
@@ -299,7 +303,14 @@ export class AntigravityProvider implements ChatProvider {
 
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
     const conversation = this.conversation(sessionId);
-    if (this.login === "missing" && !conversation.turn) {
+    let history: HistorySource = conversation;
+    if (this.login === "missing" && conversation.turn) {
+      // Logged out during a turn: the read is the transcript alone, built
+      // beside the store, so the running turn's rows stay as they stream.
+      const read = await this.transcriptHistory(sessionId);
+      if (!read) throw new AgentLoginRequiredError(NO_TRANSCRIPT_MESSAGE);
+      history = read;
+    } else if (this.login === "missing") {
       // Logged out, the transcript is the only history (D10), reread on every
       // read: never a replay seeded earlier, and nothing once the file is gone.
       // The process's history no longer backs the store, so it goes too:
@@ -320,16 +331,16 @@ export class AntigravityProvider implements ChatProvider {
         if (!await this.seedFromTranscript(conversation)) throw new AgentLoginRequiredError(NO_TRANSCRIPT_MESSAGE);
       } finally { conversation.holds -= 1; this.scheduleIdle(conversation); }
     }
-    const items = conversation.items;
-    const end = historyPageEnd(options.cursor, conversation.version, items.length);
+    const { items, accounting, version } = history;
+    const end = historyPageEnd(options.cursor, version, items.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = items.slice(start, end);
     const ids = new Set(page.map(item => item.id));
     return {
       items: page,
-      accounting: conversation.accounting.filter(entry => ids.has(`usage:${entry.messageId}`)),
+      accounting: accounting.filter(entry => ids.has(`usage:${entry.messageId}`)),
       completeItems: [...items],
-      nextCursor: historyPageCursor(start, conversation.version),
+      nextCursor: historyPageCursor(start, version),
     };
   }
 
@@ -793,21 +804,32 @@ export class AntigravityProvider implements ChatProvider {
 
   /** History from the transcript alone, when agy cannot load the conversation. */
   private async seedFromTranscript(conversation: Conversation): Promise<boolean> {
-    const read = await readSessionTranscript(this.homeDirectory, conversation.sessionId);
-    if (!("steps" in read)) return false;
-    const items = historyFromTranscript(read.steps, conversation.sessionId, this.now());
-    // The same transcript gives the same history, so cursors stay valid
-    // between reads; a changed one is another history.
-    conversation.version = `transcript:${Bun.hash(JSON.stringify(read.steps))}`;
-    conversation.items.splice(0, conversation.items.length, ...items);
-    conversation.accounting.splice(0);
+    const read = await this.transcriptHistory(conversation.sessionId);
+    if (!read) return false;
+    conversation.version = read.version;
+    conversation.items.splice(0, conversation.items.length, ...read.items);
+    conversation.accounting.splice(0, conversation.accounting.length, ...read.accounting);
     const memory = conversation.memory;
-    memory.userCount = items.filter(item => item.type === "user_message").length;
+    memory.userCount = read.items.filter(item => item.type === "user_message").length;
     memory.blockCount = 0;
-    await this.enrichFromTranscript(conversation);
     conversation.seeded = true;
     conversation.fromTranscript = true;
     return true;
+  }
+
+  /** The history agy's transcript alone gives, enriched as replay would be (D10), or undefined without one. */
+  private async transcriptHistory(sessionId: string): Promise<HistorySource | undefined> {
+    const read = await readSessionTranscript(this.homeDirectory, sessionId);
+    if (!("steps" in read)) return undefined;
+    const items = historyFromTranscript(read.steps, sessionId, this.now());
+    const known = (id: string) => this.knownModel(id);
+    const enriched = enrichReplay(items, sessionId, transcriptTurns(read.steps), {
+      family: model => transcriptModelFamily(model, known),
+      price: (usage, modelId) => priceTurn(usage, modelId, this.prices),
+    });
+    // The same transcript gives the same history, so cursors stay valid
+    // between reads; a changed one is another history.
+    return { items: enriched?.items ?? items, accounting: enriched?.accounting ?? [], version: `transcript:${Bun.hash(JSON.stringify(read.steps))}` };
   }
 
   /** Add what replay omits from agy's transcript, or leave replay as it is (design D10). */

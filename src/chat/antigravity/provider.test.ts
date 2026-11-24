@@ -731,6 +731,27 @@ describe.skipIf(process.platform === "win32")("AntigravityProvider", () => {
       expect(await loads()).toBe(before + 1);
     });
 
+    test("logged out during a turn, a read shows the transcript alone and leaves the turn's own rows streaming", async () => {
+      const { fake, provider, waitFor, upserts, ended } = await setup();
+      const session = await provider.createSession("a");
+      await Bun.write(path.join(fake.stateDirectory, "home", ".gemini", "antigravity-cli", "brain", session.id, ".system_generated", "logs", "transcript.jsonl"), [
+        { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nEarlier words\n</USER_REQUEST>" },
+        { step_index: 1, type: "PLANNER_RESPONSE", model: "gemini-4-neon-low", content: "An earlier answer", input_tokens: 10, output_tokens: 1 },
+      ].map(step => JSON.stringify(step)).join("\n"));
+      await provider.prompt(session.id, { id: "p", text: "pause: greet", delivery: "queue" });
+      await waitFor(() => upserts(session.id).some(item => item.type === "assistant_message" && item.markdown === "Hello, "), "the reply's start");
+      await fake.setFlag("auth-missing", true);
+      await provider.listSessions();
+      const texts = (items: ConversationItem[]) => items.flatMap(item => item.type === "user_message" ? [item.text] : item.type === "assistant_message" && item.markdown ? [item.markdown] : []);
+      expect(texts((await provider.listMessages(session.id, { limit: 100 })).items)).toEqual(["Earlier words", "An earlier answer"]);
+      // The running turn's rows were kept: with the login back, they are what a read shows.
+      await fake.setFlag("auth-missing", false);
+      await provider.listSessions();
+      expect(texts((await provider.listMessages(session.id, { limit: 100 })).items)).toEqual(["pause: greet", "Hello, "]);
+      await provider.interrupt(session.id);
+      await ended(session.id);
+    });
+
     test("a resumed prompt whose load agy refuses for its login shows the login notice", async () => {
       const { fake, provider, run, upserts, waitFor } = await setup({ idleReleaseMs: 50 });
       const session = await provider.createSession("a");
