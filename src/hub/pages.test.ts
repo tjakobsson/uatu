@@ -30,6 +30,23 @@ test("authenticated navigation wraps dynamic notifications without losing labell
   }
 });
 
+test("authenticated pages carry the hidden Back control pinned above the brand header, keyed by the user", () => {
+  for (const render of Object.values(htmlFor)) {
+    const html = render();
+    const document = parseHTML(html).document;
+    const controls = [...document.querySelectorAll<HTMLElement>("[data-hub-return]")];
+    expect(controls).toHaveLength(1);
+    expect(controls[0]!.hasAttribute("hidden")).toBe(true);
+    expect(controls[0]!.querySelector("a.hub-return")).not.toBeNull();
+    expect(controls[0]!.nextElementSibling!.className).toBe("hub-header");
+    expect(html).toMatch(/\.hub-return-slot \{[^}]*position: sticky/);
+    expect(html).toContain("scroll-padding-top");
+    expect(html).toContain(JSON.stringify(`uatu.hub.return-v1:${Buffer.from("alice").toString("base64url")}`));
+  }
+  // Without a user (the shared presentation shell) there is no control.
+  expect(loginPage()).not.toContain("data-hub-return");
+});
+
 function documentFor(page: keyof typeof htmlFor) {
   return parseHTML(htmlFor[page]()).document;
 }

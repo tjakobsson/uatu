@@ -14,6 +14,7 @@ import { escapeHtml } from "../shared/html";
 import { PWA_ICON_VERSION } from "../pwa/icons";
 import { worktreeDialogScript } from "../shell/worktree-dialog";
 import { createDashboardGroups, dashboardGroupsStyle } from "./dashboard-groups";
+import { hubReturnBar, hubReturnKey, hubReturnStyle, mountHubReturn } from "./hub-return";
 import { agentAccountsPaneStyle, createAgentAccountsPane } from "./agent-accounts-pane";
 import { createPersonalChatPreferencesPane } from "./personal-chat-preferences-pane";
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-presentation";
@@ -407,6 +408,7 @@ const SHARED_STYLE = `
   @media (prefers-reduced-motion: reduce) { .nav-overlay-spinner { animation-duration: 2.4s; } }
   .nav-overlay-label { font-size: 0.85rem; color: var(--text-subtle); }
   [hidden] { display: none !important; }
+${hubReturnStyle}
 `;
 
 function page(title: string, body: string): string {
@@ -441,10 +443,12 @@ function brandHeader(): string {
 
 type AuthenticatedPage = "dashboard" | "clone" | "settings";
 
-function authenticatedChrome(current: AuthenticatedPage): string {
+// With the signed-in user known, the chrome carries the pinned Back control to
+// the workspace location this user last had open on this device (hub-return.ts).
+function authenticatedChrome(current: AuthenticatedPage, user?: string): string {
   const link = (pageName: AuthenticatedPage, href: string, label: string) =>
     `<a href="${href}"${current === pageName ? ' aria-current="page"' : ""}>${label}</a>`;
-  return `${brandHeader()}
+  return `${user === undefined ? "" : hubReturnBar}${brandHeader()}
 <nav class="hub-nav" aria-label="Hub">
   ${link("dashboard", "/", "Dashboard")}
   ${link("clone", "/clone", "Add workspace")}
@@ -453,7 +457,8 @@ function authenticatedChrome(current: AuthenticatedPage): string {
 </nav><script type="module">
 import { mountNotifications } from "/hub-assets/notifications.js";
 mountNotifications({ apiUrl: "/api/hub/notifications", stateUrl: "/api/hub/state", workerUrl: "/push-worker.js", hosts: ".hub-nav" });
-</script>`;
+</script>${user === undefined ? "" : `
+<script type="module">(${mountHubReturn.toString()})(document, window, ${JSON.stringify(hubReturnKey(user))});</script>`}`;
 }
 
 /** Shared server-rendered Hub shell; callers supply trusted presentation markup. */
@@ -736,7 +741,7 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   const content = pageName === "dashboard" ? dashboard : pageName === "clone" ? addFolder : settings;
   return page(
     pageName === "dashboard" ? "UatuCode Hub" : `UatuCode Hub — ${pageName === "clone" ? "Add workspace" : "Settings"}`,
-    `${authenticatedChrome(pageName)}
+    `${authenticatedChrome(pageName, authenticatedUser)}
 <div data-hub-page="${pageName}">
 <p id="hub-version" class="hub-version"></p>
 <p id="action-error" class="error-text" hidden></p>

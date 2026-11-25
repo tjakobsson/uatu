@@ -79,7 +79,8 @@ src/
 │                   pull-request-checkout creates a pull request's
 │                   worktree through the Hub's worktree family) + hub-nav
 │                   (the Hub's part: workspace list, live activity, the
-│                   Checkouts rows), worktree-dialog
+│                   Checkouts rows) + hub-return (remembers this page's
+│                   location for the Hub pages' Back), worktree-dialog
 │                   (the one client worktree dialog, embedded in both
 │                   the switcher's + New and the Hub dashboard) + worktree-live
 │                   (its `worktrees` live-invalidation subscription),
@@ -176,7 +177,8 @@ src/
 │                   logins through the Hub's own short-lived agent runtimes,
 │                   login attempts, loopback-redirect delivery, and the
 │                   notice that tells running workspaces; the pane is
-│                   `agent-accounts-pane.ts`), pages, server, main
+│                   `agent-accounts-pane.ts`), hub-return (the dashboard's
+│                   and Settings' pinned "← Back to <label>"), pages, server, main
 ├── github/         GitHub pull request review — service (the GithubService
 │                   seam and the UATU_GITHUB off|read|full choice) + gh-service
 │                   (the real one: detection, event-driven refresh, writes
@@ -205,7 +207,8 @@ src/
                     keyed reducer used by Hub and browser), git-fetch-failure
                     (what a failed `git fetch` said, for Hub and child),
                     github-contract (the pull request wire types shared by
-                    child and browser), tree-order (the Files pane's path
+                    child and browser), hub-return (the Back location's
+                    storage key and record), tree-order (the Files pane's path
                     order, shared by the PR scope and Files changed)
 ```
 

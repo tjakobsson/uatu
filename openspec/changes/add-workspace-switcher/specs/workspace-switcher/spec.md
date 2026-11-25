@@ -183,3 +183,24 @@ While a pull request other than the checked-out branch's own is viewed, one acce
 #### Scenario: The viewed pull request's branch gets checked out here
 - **WHEN** the checkout's branch becomes the viewed pull request's branch
 - **THEN** it is the branch's own pull request, and the strip and the eye pill disappear
+
+### Requirement: A Hub session page remembers where you are
+While a Hub-served workspace page is shown, it SHALL remember its location for the Hub's Back control (hub-dashboard), per device and Hub user, in the local storage the Hub's pages share: the workspace's slug and name, the in-app path with its query and fragment, and a label naming the workspace and what is open. It MUST NOT store secrets.
+
+#### Scenario: When the location is written
+- **WHEN** the page is shown, moves by Back or Forward, or is hidden or left
+- **THEN** it writes its current location
+- **AND** a page in a background tab does not overwrite the one in front, and nothing is written outside a Hub
+
+#### Scenario: Leaving a pull request view through the footer
+- **WHEN** the reader views pull request #1 "Refresh the guide" on Files changed in workspace `uatu-pr-sandbox` and activates the switcher footer's `Hub dashboard`
+- **THEN** the remembered location is `/s/uatu-pr-sandbox/?pr=1&tab=files` with the label `uatu-pr-sandbox · #1 Refresh the guide`
+
+#### Scenario: A document
+- **WHEN** the reader leaves workspace `uatu` while `docs/hub.md` is open
+- **THEN** the label is `uatu · docs/hub.md`, and the workspace's root alone is labelled by the workspace name
+
+#### Scenario: Another Hub user on the same device
+- **WHEN** a different Hub user signs in on the same browser
+- **THEN** that user does not see the first user's remembered location
+

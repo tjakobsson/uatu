@@ -1,3 +1,35 @@
+## ADDED Requirements
+
+### Requirement: The Hub's pages lead back to where you were
+The Hub dashboard, Settings and Add workspace pages SHALL offer `← Back to <label>` to the workspace location this Hub user last had open on this device (workspace-switcher), and activating it SHALL open exactly that location. It SHALL be keyboard-reachable, with an accessible name starting `Back to` and naming the label, and shown only while that workspace is registered and present. A location that no longer resolves is left to the session page's fallbacks.
+
+#### Scenario: Pinned in view
+- **WHEN** a Hub page with a location to go back to is scrolled, including by the switcher's Settings link to its personal chat preferences pane
+- **THEN** the control stays pinned at the top of the viewport, below any titlebar inset, as a compact centred bar on desktop
+- **AND** an anchored section starts below it, not under it
+
+#### Scenario: Back to a pull request view from the dashboard
+- **WHEN** the reader leaves pull request #642's Files changed in `atlas` through the switcher's `Hub dashboard`
+- **THEN** the dashboard shows `← Back to atlas · #642 <title>` above the brand header
+- **AND** activating it, by pointer or by Tab then Enter, opens `/s/atlas/?pr=642&tab=files` on Files changed
+
+#### Scenario: Back from Settings
+- **WHEN** the reader reaches Settings the same way
+- **THEN** Settings offers the same control and it restores the same view
+
+#### Scenario: Touch-sized screens
+- **WHEN** the dashboard or Settings is shown on a 390px-wide touch phone with a remembered location
+- **THEN** the control is a full-width row at least 44px tall pinned at the top, unobstructed at its centre
+
+#### Scenario: Nothing to go back to
+- **WHEN** nothing is remembered, or the remembered workspace was removed from the Hub or is missing on disk
+- **THEN** no Back control is shown
+
+#### Scenario: A stopped workspace
+- **WHEN** the remembered workspace has been stopped
+- **THEN** the control says `Stopped` and its accessible name ends `(stopped)`
+- **AND** activating it opens the session's stopped page, and Start there lands on the remembered location
+
 ## MODIFIED Requirements
 
 ### Requirement: Hub-served sessions expose hub navigation

@@ -39,6 +39,11 @@
 - [x] 6.3 Cover it through a real Hub and real Git. Verify `tests/e2e/pull-request-worktree.e2e.ts` (children serve the GitHub fake through `hubGithubFake`), and that `worktree-ui`, `worktree-integration` and `hub-switcher` still pass.
 - [x] 6.4 Update `ARCHITECTURE.md` and `docs/WORKTREES.md`. Verify by reading them against the code.
 
+## 7. Owner feedback: back to where you were
+
+- [x] 7.1 Remember a Hub session page's location per device and Hub user (`src/shell/hub-return.ts`, started by hub-nav once the Hub answers; key and record in `src/shared/hub-return.ts`; the user scope comes from the proxy's `uatu-hub-user` meta). Verify `src/shell/hub-return.test.ts`.
+- [x] 7.2 Offer `← Back to <label>` on the dashboard, Settings and Add workspace (`src/hub/hub-return.ts`, mounted by `authenticatedChrome`): one bar pinned to the top of the viewport (a compact pill on desktop, a full-width 44px row on touch-sized screens) with `scroll-padding-top` so Settings' anchored pane is not under it, only for a registered, present workspace, `Stopped` when stopped. Verify `src/hub/hub-return.test.ts`, `src/hub/pages.test.ts` and `tests/e2e/hub-return.e2e.ts` (PR view from the dashboard and Settings, the bar in view on arrival through the switcher's Settings link, a document, nothing remembered, a forgotten workspace, a stopped one, the keyboard, a phone's 44px row).
+
 ## Workflow follow-up
 
 - Archive after `add-github-pr-review`.

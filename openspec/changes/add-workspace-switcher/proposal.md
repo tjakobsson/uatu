@@ -14,6 +14,8 @@ A workspace page has two independent states: the checkout you work in (files on 
 - **BREAKING (UI):** the "Browse pull requests…" dialog is retired. The Pull request pane's search button and its no-pull-request state open the switcher at Pull requests; the fork menu's "From a pull request…" item is removed.
 - Change Overview's `Local branch` label reads the branch (`⎇ feat/view-pr`) while a pull request is viewed.
 
+- **Back from the Hub's pages:** a session page remembers where you are (the document, or the pull request view with its tab, file and thread), per device and Hub user; the Hub dashboard, Settings and Add workspace offer `← Back to <workspace> · <what was open>` (owner feedback).
+
 Phase 3 adds the real checkout from a pull request with its *Creating…* row and ready notice, on the Hub's `pull-request` create mode (`add-github-pr-review` D12). Out of scope: Navigator links (phase 4).
 
 ## Capabilities
@@ -30,6 +32,6 @@ The open change `add-github-pr-review` (same branch, not archived) is revised in
 
 ## Impact
 
-- Client only; no server or API change. `src/shell/hub-nav.ts` (data and the Checkouts rows), a new `src/shell/switcher.ts` and `src/shell/switcher-model.ts`, `src/shell/pull-request-picker.ts` retired (its query helpers move to the model), `src/shell/tab-bar.ts`, `src/index.html`, `src/styles.css`, `src/sidebar/pull-request-pane.ts`, `src/sidebar/pull-request-scope.ts`, `src/preview/pull-request-view.ts`.
+- Client only, no API change; one server touch: the Hub's proxy names the signed-in user's storage scope in a `<meta>` on session pages, for the Back control. `src/shell/hub-nav.ts` (data and the Checkouts rows), a new `src/shell/switcher.ts` and `src/shell/switcher-model.ts`, `src/shell/pull-request-picker.ts` retired (its query helpers move to the model), `src/shell/tab-bar.ts`, `src/index.html`, `src/styles.css`, `src/sidebar/pull-request-pane.ts`, `src/sidebar/pull-request-scope.ts`, `src/preview/pull-request-view.ts`.
 - Tests: hub-nav unit tests, the picker's unit tests (moved), and e2e suites that drove the old menu (`hub-switcher`, `hub-stopped-session`, `worktree-*`, `hub-nav-bounds`, `terminal-hub-navigation`, `hub-chat-preferences`).
 - Docs: `ARCHITECTURE.md` (pull request review and switcher sections), `CLAUDE.md` folder map.

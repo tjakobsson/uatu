@@ -19,6 +19,7 @@
 
 import type { ServerWebSocket } from "bun";
 import { CHAT_OPERATION_RECEIPT_HEADER } from "../shared/chat-operation-receipt";
+import { HUB_USER_SCOPE_META } from "../shared/hub-return";
 import { HubOperationReceipts } from "./operation-receipts";
 
 import type { RunningSession } from "./backend";
@@ -118,8 +119,10 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   return headers;
 }
 
+// `hubUserScope` names the signed-in Hub user on a proxied page (a
+// base64url string, see hub/hub-return.ts) so its Back location is per user.
 export async function proxyHttp(request: Request, session: RunningSession, policy?: VerifiedChatPolicy,
-  observeSnapshot?: (conversationId: string, value: unknown) => void): Promise<Response> {
+  observeSnapshot?: (conversationId: string, value: unknown) => void, hubUserScope?: string): Promise<Response> {
   const requestUrl = new URL(request.url);
   const target = childUrlFor(session, requestUrl);
   const transport = classifyProxyTransport(requestUrl.pathname);
@@ -274,7 +277,9 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
   }
   if (!noTransform && upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
     upstream = new HTMLRewriter().on("head", { element(head) {
-      head.prepend('<meta name="uatu-hub" content="true">', { html: true });
+      const userScope = hubUserScope && /^[A-Za-z0-9_-]+$/.test(hubUserScope)
+        ? `<meta name="${HUB_USER_SCOPE_META}" content="${hubUserScope}">` : "";
+      head.prepend(`<meta name="uatu-hub" content="true">${userScope}`, { html: true });
     } }).transform(upstream);
     upstream.headers.delete("content-length");
     upstream.headers.delete("etag");

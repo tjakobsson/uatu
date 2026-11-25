@@ -34,6 +34,7 @@ import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "../chat/surface-vi
 import { appBasePath, appUrl, workspaceIdFromBasePath } from "../shared/app-url";
 import type { WorkspaceActivity } from "../shared/live-protocol";
 import { AttentionNotices, renderAttentionNotices } from "./attention-notice";
+import { rememberHubLocation } from "./hub-return";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
 import { openWorktreeFork, workspaceIsCheckout } from "./worktree-dialog";
@@ -1085,6 +1086,8 @@ export function initHubNav(): void {
     applyListedRunning(state.workspaces);
     worktreeApi = state.worktreeApi;
     registerSwitcherHub(hubPart);
+    // Where this page is, for the Hub dashboard's and Settings' Back control.
+    rememberHubLocation(currentId, () => latest.find(entry => entry.id === currentId)?.displayName || currentId);
 
     // A Hub that serves worktree operations publishes inventory
     // invalidations on the page's existing live stream. The real Hub and the

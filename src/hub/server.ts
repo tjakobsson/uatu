@@ -45,6 +45,7 @@ import {
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
 import { FolderManagerError, reconcileRegisteredAliasPaths, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
+import { hubUserScope } from "./hub-return";
 import { isPathAtOrBelow, normalizeAbsolutePath, pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
@@ -1745,7 +1746,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       return proxyHttp(request, running, undefined, deps.workerDismissals
         ? (conversationId, value) => observeWorkerProjection(deps.workerDismissals!, workspaceId, conversationId, value)
-        : undefined);
+        : undefined, hubUserScope(session.user));
     }
 
     // Dashboard + its APIs.
