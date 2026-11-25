@@ -1262,6 +1262,110 @@ test("native Claude completed turns stay sealed while a running turn spans older
   } finally { await h.cleanup(); await fs.rm(path.dirname(file), { recursive: true, force: true }); }
 });
 
+test("a late reference definition inside the cadence reindexes captured images before its line ends", async () => {
+  const h = await visualSubscriptionHarness("test");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  h.files.available = true;
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const result = applyChatEvent(client, event);
+    expect(result.outcome).toBe("applied");
+    client = result.projection;
+  };
+  const visuals = () => (client.items[0] as AssistantMessageItem).visuals?.map(visual => [visual.index, visual.status, visual.id]);
+  try {
+    h.projection.upsert({ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![First][ref]\n\n![Second](second.png)" });
+    await deliveredBatch(h.replay, h.iterator, project);
+    const [[, status, second]] = visuals()! as [[number, string, string]];
+    expect(status).toBe("ready");
+    expect(h.files.reads).toBe(1);
+    // The definition turns the earlier shortcut into the first image, so the
+    // captured image moves to index 1. A raw delta would leave the client
+    // binding that snapshot to the shortcut by its old document index.
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: "\n\n[ref]: first.png" });
+    const definition = await deliveredBatch(h.replay, h.iterator, project);
+    expect(definition).toHaveLength(1);
+    expect(definition[0]?.type).toBe("item.upsert");
+    expect(visuals()).toEqual([[0, "pending", undefined], [1, "ready", second]]);
+    expect(h.files.reads).toBe(1); // The destination at EOF is still provisional.
+  } finally { clock.mockRestore(); await h.cleanup(); }
+});
+
+// Streams reference-definition chunks after a shorthand label and an
+// already-captured image, with the clock frozen inside the cadence.
+async function definitionStreamHarness() {
+  const h = await visualSubscriptionHarness("test");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const captures = spyOn(h.store, "captureMany");
+  const enrichments = spyOn(h.service as unknown as { enrichItem(id: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> }, "enrichItem");
+  h.files.available = true;
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const result = applyChatEvent(client, event);
+    expect(result.outcome).toBe("applied");
+    client = result.projection;
+  };
+  const visuals = () => (client.items[0] as AssistantMessageItem).visuals?.map(visual => [visual.index, visual.status, visual.id]);
+  const work = () => [enrichments.mock.calls.length, captures.mock.calls.length];
+  const append = async (text: string) => {
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text });
+    return (await deliveredBatch(h.replay, h.iterator, project)).map(event => event.type);
+  };
+  const cleanup = async () => { enrichments.mockRestore(); captures.mockRestore(); clock.mockRestore(); await h.cleanup(); };
+  try {
+    h.projection.upsert({ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![First][ref]\n\n![Second](second.png)" });
+    await deliveredBatch(h.replay, h.iterator, project);
+  } catch (error) { await cleanup(); throw error; }
+  const [[, , second]] = visuals()! as [[number, string, string]];
+  const [enriched, captured] = work() as [number, number];
+  return { h, visuals, append, second, cleanup, enrichedSince: () => work().map((count, index) => count - [enriched, captured][index]!) };
+}
+
+test("a split definition destination reindexes once at its opener, leaves continuations on the cadence, and flushes at its line end", async () => {
+  const { h, visuals, append, second, cleanup, enrichedSince } = await definitionStreamHarness();
+  try {
+    // The first destination character resolves the label and moves the
+    // captured image to index 1, so it reindexes inside the frozen cadence.
+    expect(await append("\n\n[ref]: f")).toEqual(["item.upsert"]);
+    expect(enrichedSince()).toEqual([1, 1]);
+    expect(visuals()).toEqual([[0, "pending", undefined], [1, "ready", second]]);
+    // Extending the same provisional destination changes no index.
+    for (const chunk of ["ir", "st", "-im", "age", ".pn", "g"]) expect(await append(chunk)).toEqual(["item.text_delta"]);
+    expect(enrichedSince()).toEqual([1, 1]);
+    expect(h.files.reads).toBe(1);
+    // The line end finalizes the destination and flushes immediately.
+    expect(await append("\n")).toEqual(["item.upsert"]);
+    expect(enrichedSince()).toEqual([2, 2]);
+    expect(visuals()).toEqual([[0, "ready", expect.any(String)], [1, "ready", second]]);
+    expect(h.files.reads).toBe(2);
+  } finally { await cleanup(); }
+});
+
+test("an angle-bracket definition destination reindexes when it closes, and an open title unresolves it until the title closes", async () => {
+  const { h, visuals, append, second, cleanup, enrichedSince } = await definitionStreamHarness();
+  try {
+    // Markdown resolves an angle destination only at its closing '>'.
+    for (const chunk of ["\n\n[ref]: <first", " ima", "ge.png"]) expect(await append(chunk)).toEqual(["item.text_delta"]);
+    expect(enrichedSince()).toEqual([0, 0]);
+    expect(visuals()).toEqual([[0, "ready", second]]);
+    expect(await append(">")).toEqual(["item.upsert"]);
+    expect(enrichedSince()).toEqual([1, 1]);
+    expect(visuals()).toEqual([[0, "pending", undefined], [1, "ready", second]]);
+    // An open title invalidates the definition; closing it restores it.
+    expect(await append(' "')).toEqual(["item.upsert"]);
+    expect(visuals()).toEqual([[0, "ready", second]]);
+    expect(await append("cap")).toEqual(["item.text_delta"]);
+    expect(await append('tion"')).toEqual(["item.upsert"]);
+    expect(enrichedSince()).toEqual([3, 3]);
+    expect(visuals()).toEqual([[0, "pending", undefined], [1, "ready", second]]);
+    expect(h.files.reads).toBe(1);
+    expect(await append("\n")).toEqual(["item.upsert"]);
+    expect(enrichedSince()).toEqual([4, 4]);
+    expect(visuals()).toEqual([[0, "ready", expect.any(String)], [1, "ready", second]]);
+    expect(h.files.reads).toBe(2);
+  } finally { await cleanup(); }
+});
+
 test("a shorthand label inside the cadence stays provisional, then following whitespace flushes its resolved source immediately", async () => {
   const h = await visualSubscriptionHarness("test");
   const clock = spyOn(Date, "now").mockReturnValue(1_000);
