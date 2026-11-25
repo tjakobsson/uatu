@@ -875,9 +875,14 @@ export class ChatAdapter {
   }>();
   // Generation-scoped provenance for liveTurns entries seeded solely by
   // transferring a missing/moved parent's verified recovery row, so a stream
-  // gap withdraws them to `unresolvedBackgroundWork` like other verified reads.
+  // gap withdraws them to `unresolvedRecoveredWorkerTurns` like other verified reads.
   private readonly recoveredWorkerTurns = new Map<string, number>();
   private readonly unresolvedBackgroundWork = new Set<string>();
+  // Kept separate from `unresolvedBackgroundWork` (which tracks a conversation's
+  // own nested background tasks) so `stream.history:<child>` syncing an empty
+  // nested-task list does not erase transferred-turn uncertainty until real
+  // execution or confinement evidence retires it.
+  private readonly unresolvedRecoveredWorkerTurns = new Set<string>();
   private readonly backgroundRecoveries = new Map<string, BackgroundRecovery>();
   // Losing disposable scheduling ownership never waives an exhausted floor.
   // Scalars conservatively cover untracked conversations without a second
@@ -2531,7 +2536,11 @@ export class ChatAdapter {
    * answer on every change.
    */
   activity(): ChatActivity {
-    return { working: this.liveTurns.size > 0 || this.backgroundWork.size > 0, awaiting: this.pendingInteractions.size > 0, unresolved: this.unresolvedBackgroundWork.size > 0 };
+    return {
+      working: this.liveTurns.size > 0 || this.backgroundWork.size > 0,
+      awaiting: this.pendingInteractions.size > 0,
+      unresolved: this.unresolvedBackgroundWork.size > 0 || this.unresolvedRecoveredWorkerTurns.size > 0,
+    };
   }
 
   pendingNotifications() { return this.notifications.pendingSnapshot(); }
@@ -2660,6 +2669,7 @@ export class ChatAdapter {
       ...this.liveTurns.keys(),
       ...this.backgroundWork.keys(),
       ...this.unresolvedBackgroundWork,
+      ...this.unresolvedRecoveredWorkerTurns,
       ...this.pendingInteractions.keys(),
       ...this.activeSessionProbes.keys(),
       ...deferredStopTargets,
@@ -2762,6 +2772,7 @@ export class ChatAdapter {
       const projection = this.projections.get(id);
       if (projection && isLiveConversationStatus(projection.status)) {
         projection.status = "idle";
+        projection.replay.publish({ type: "conversation.status", status: "idle" });
       }
       const stop = this.stoppingTurns.get(id);
       if (stop) {
@@ -2769,14 +2780,14 @@ export class ChatAdapter {
         stop.activeProbeGeneration = undefined;
         if (stop.status && isLiveConversationStatus(stop.status)) stop.status = "idle";
       }
-      this.unresolvedBackgroundWork.add(id);
+      this.unresolvedRecoveredWorkerTurns.add(id);
       changed = true;
     }
     for (const [id, stop] of this.stoppingTurns) {
       if (stop.activeProbeGeneration !== undefined && stop.activeProbeGeneration !== this.backgroundStreamGeneration) {
         stop.activeProbeBaseline = undefined;
         stop.activeProbeGeneration = undefined;
-        this.unresolvedBackgroundWork.add(id);
+        this.unresolvedRecoveredWorkerTurns.add(id);
         changed = true;
       }
     }
@@ -2800,7 +2811,7 @@ export class ChatAdapter {
       if (hasNewerSettlement(childId, child)) return;
       if (child.verified && this.provider.reconcileBackgroundTasks && child.generation !== this.backgroundStreamGeneration) {
         if (!this.liveTurns.has(childId)) {
-          this.unresolvedBackgroundWork.add(childId);
+          this.unresolvedRecoveredWorkerTurns.add(childId);
           this.activityMayHaveChanged();
         }
         return;
@@ -2886,11 +2897,14 @@ export class ChatAdapter {
     const metadata = this.inventorySessions.get(id);
     if (!verifiedInWorkspace && metadata && (!metadata.inWorkspace || metadata.deleted)) return;
     const projection = this.projection(id);
+    const clearedUnresolved = this.unresolvedRecoveredWorkerTurns.delete(id);
     if (!isLiveConversationStatus(projection.status)) {
       projection.statusUpdate("running", undefined, false);
     } else if (!this.liveTurns.has(id)) {
       this.liveTurns.set(id, projection.status);
       this.settledTurns.delete(id);
+      this.activityMayHaveChanged();
+    } else if (clearedUnresolved) {
       this.activityMayHaveChanged();
     }
   }
@@ -2955,6 +2969,7 @@ export class ChatAdapter {
       || this.liveTurns.has(conversationId)
       || this.backgroundWork.has(conversationId)
       || this.unresolvedBackgroundWork.has(conversationId)
+      || this.unresolvedRecoveredWorkerTurns.has(conversationId)
       || this.pendingInteractions.has(conversationId)
       || this.stoppingTurns.has(conversationId)
       || this.inventorySessions.has(conversationId)
@@ -3004,6 +3019,7 @@ export class ChatAdapter {
     this.settledTurns.delete(conversationId);
     this.backgroundWork.delete(conversationId);
     this.unresolvedBackgroundWork.delete(conversationId);
+    this.unresolvedRecoveredWorkerTurns.delete(conversationId);
     this.forgetInteractions(conversationId);
   }
 
@@ -4475,7 +4491,7 @@ export class ChatAdapter {
         if ((interruptRefused || stop.resumed) && stop.activeProbeBaseline !== undefined) {
           if (stop.activeProbeGeneration !== undefined && stop.activeProbeGeneration !== this.backgroundStreamGeneration) {
             if (!this.liveTurns.has(conversationId)) {
-              this.unresolvedBackgroundWork.add(conversationId);
+              this.unresolvedRecoveredWorkerTurns.add(conversationId);
               this.activityMayHaveChanged();
             }
           } else {
@@ -7782,6 +7798,7 @@ export class ChatAdapter {
       if (sourceTransition && status !== "background") {
         this.bumpStatusSequence(id);
         this.recoveredWorkerTurns.delete(id);
+        this.unresolvedRecoveredWorkerTurns.delete(id);
       }
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.

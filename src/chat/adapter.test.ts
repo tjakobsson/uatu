@@ -15826,6 +15826,7 @@ describe("workspace activity summary", () => {
       clearTimeout: timer => { if (timer != null) clearTimeout(timer); },
     };
     const { adapter, provider } = activityAdapter({ taskScheduler });
+    provider.waitForEventStream = async () => {};
     const parent = fixtureSession("p-stream-gap");
     const child = { ...fixtureSession("c-stream-gap"), parentId: parent.id };
     provider.sessions = [parent, child];
@@ -15854,10 +15855,34 @@ describe("workspace activity summary", () => {
     expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests(child.id).status).toBe("running");
 
+    // Open subscriber sees the running child before disconnect, and must receive a
+    // conversation.status idle event when the stream gap withdraws the transferred turn.
+    const subscribed = await adapter.subscribe(child.id);
+    const subscriberIterator = subscribed.events[Symbol.asyncIterator]();
+    expect(subscribed.snapshot.conversation.status).toBe("running");
+
     // Stream gap (disconnect): pump finally withdraws transferred recovery evidence to unresolved,
-    // not leaving the child stuck running / working: true if it finished during the gap.
+    // publishing idle to existing subscribers rather than leaving clients stuck running.
     provider.eventQueue.close();
     await pump;
+    const withdrawnEvent = await subscriberIterator.next();
+    expect(withdrawnEvent.done).toBe(false);
+    expect(withdrawnEvent.value).toMatchObject({ type: "conversation.status", status: "idle" });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: true });
+    expect(adapter.projectionForTests(child.id).status).toBe("idle");
+
+    // V2 reconnect runs stream.history:<child> with an empty transcript (no nested background tasks);
+    // that must NOT clear transferred-turn uncertainty until real execution or confinement evidence arrives.
+    provider.eventQueue = new EventQueue();
+    const pump2 = adapter.startEventPump();
+    tasks.delete(`stream.history:${child.id}`);
+    tasks.delete("stream.discovery");
+    const reconnected = waitForEvent("server.connected");
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await reconnected;
+    await waitUntil(() => tasks.has(`stream.history:${child.id}`) && tasks.has("stream.discovery"));
+    await tasks.get(`stream.history:${child.id}`);
+    await tasks.get("stream.discovery");
     expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: true });
     expect(adapter.projectionForTests(child.id).status).toBe("idle");
 
@@ -15872,7 +15897,9 @@ describe("workspace activity summary", () => {
     await adapter.listConversations();
     expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
 
+    subscribed.events.cancel();
     await adapter.dispose();
+    await pump2;
   });
 
   test("recovered worker child baseline survives unrelated statusSequences evictions past 2,048 entries", async () => {
