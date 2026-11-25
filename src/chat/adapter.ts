@@ -859,7 +859,7 @@ export class ChatAdapter {
   // parent wake can overtake an interrupt response (even across projection
   // eviction); its live status makes that old response stale. Only in-flight
   // Stops retain an observer, and the admission lane permits one per session.
-  private readonly stoppingTurns = new Map<string, { resumed: boolean; status?: ConversationStatus; activeProbeBaseline?: number }>();
+  private readonly stoppingTurns = new Map<string, { resumed: boolean; status?: ConversationStatus; activeProbeBaseline?: number; activeProbeGeneration?: number }>();
   // Conversations holding live background work (`background` status) with no
   // turn in flight. Kept apart from liveTurns on purpose: liveTurns gates the
   // composer's Cancel and held prompts, and a background conversation must
@@ -868,7 +868,15 @@ export class ChatAdapter {
   // Retain the evidence source alongside the existing per-conversation fact:
   // a stream gap must withdraw verified work even after projection eviction,
   // without changing providers' authoritative legacy background behavior.
-  private readonly backgroundWork = new Map<string, { legacy: boolean; verified: boolean; workerChildren?: Map<string, number> }>();
+  private readonly backgroundWork = new Map<string, {
+    legacy: boolean;
+    verified: boolean;
+    workerChildren?: Map<string, { statusBaseline: number; settledBaseline: object | undefined; verified: boolean; generation: number; taskId?: string }>;
+  }>();
+  // Generation-scoped provenance for liveTurns entries seeded solely by
+  // transferring a missing/moved parent's verified recovery row, so a stream
+  // gap withdraws them to `unresolvedBackgroundWork` like other verified reads.
+  private readonly recoveredWorkerTurns = new Map<string, number>();
   private readonly unresolvedBackgroundWork = new Set<string>();
   private readonly backgroundRecoveries = new Map<string, BackgroundRecovery>();
   // Losing disposable scheduling ownership never waives an exhausted floor.
@@ -2558,8 +2566,41 @@ export class ChatAdapter {
     this.activityMayHaveChanged();
   }
 
+  private isStatusPinned(conversationId: string): boolean {
+    if (this.activeSessionProbes.has(conversationId) || this.stoppingTurns.has(conversationId)) return true;
+    for (const work of this.backgroundWork.values()) {
+      if (work.workerChildren?.has(conversationId)) return true;
+    }
+    return false;
+  }
+
+  private evictOldestUnpinnedStatus(): void {
+    for (const [candidate, value] of this.statusSequences) {
+      if (this.isStatusPinned(candidate)) continue;
+      this.statusEvictedFloor = Math.max(this.statusEvictedFloor, value);
+      this.statusSequences.delete(candidate);
+      return;
+    }
+  }
+
   private statusSequence(conversationId: string): number {
     return this.statusSequences.get(conversationId) ?? this.statusEvictedFloor;
+  }
+
+  // Anchor a conversation's current revision in `statusSequences` so unrelated
+  // LRU evictions raising `statusEvictedFloor` cannot impersonate a transition
+  // while this conversation holds a live baseline.
+  private captureStatusBaseline(conversationId: string): number {
+    const existing = this.statusSequences.get(conversationId);
+    if (existing !== undefined) {
+      this.statusSequences.delete(conversationId);
+      this.statusSequences.set(conversationId, existing);
+      return existing;
+    }
+    const baseline = this.statusEvictedFloor;
+    if (this.statusSequences.size >= INVENTORY_SESSION_LIMIT) this.evictOldestUnpinnedStatus();
+    this.statusSequences.set(conversationId, baseline);
+    return baseline;
   }
 
   private bumpStatusSequence(conversationId: string): void {
@@ -2567,11 +2608,7 @@ export class ChatAdapter {
     if (this.statusSequences.has(conversationId)) {
       this.statusSequences.delete(conversationId);
     } else if (this.statusSequences.size >= INVENTORY_SESSION_LIMIT) {
-      const oldest = this.statusSequences.entries().next().value;
-      if (oldest) {
-        this.statusEvictedFloor = Math.max(this.statusEvictedFloor, oldest[1]);
-        this.statusSequences.delete(oldest[0]);
-      }
+      this.evictOldestUnpinnedStatus();
     }
     this.statusSequences.set(conversationId, next);
   }
@@ -2655,7 +2692,7 @@ export class ChatAdapter {
     }
   }
 
-  private forgetMissingSession(id: string, tick?: number): Array<readonly [string, number]> {
+  private forgetMissingSession(id: string, tick?: number): Array<readonly [string, { statusBaseline: number; settledBaseline: object | undefined; verified: boolean; generation: number; taskId?: string }]> {
     const priorWorkerChildren = [...(this.backgroundWork.get(id)?.workerChildren?.entries() ?? [])];
     const absenceTick = tick ?? ++this.presenceClock;
     this.bumpAbsenceSequence(id, absenceTick);
@@ -2715,33 +2752,82 @@ export class ChatAdapter {
     await this.verifyTrackedSessions(missing, signal, presentIds);
   }
 
+  private withdrawStaleRecoveredWorkerTurns(): void {
+    if (!this.provider.reconcileBackgroundTasks || this.disposed) return;
+    let changed = false;
+    for (const [id, generation] of this.recoveredWorkerTurns) {
+      if (generation === this.backgroundStreamGeneration) continue;
+      this.recoveredWorkerTurns.delete(id);
+      this.liveTurns.delete(id);
+      const projection = this.projections.get(id);
+      if (projection && isLiveConversationStatus(projection.status)) {
+        projection.status = "idle";
+      }
+      const stop = this.stoppingTurns.get(id);
+      if (stop) {
+        stop.activeProbeBaseline = undefined;
+        stop.activeProbeGeneration = undefined;
+        if (stop.status && isLiveConversationStatus(stop.status)) stop.status = "idle";
+      }
+      this.unresolvedBackgroundWork.add(id);
+      changed = true;
+    }
+    for (const [id, stop] of this.stoppingTurns) {
+      if (stop.activeProbeGeneration !== undefined && stop.activeProbeGeneration !== this.backgroundStreamGeneration) {
+        stop.activeProbeBaseline = undefined;
+        stop.activeProbeGeneration = undefined;
+        this.unresolvedBackgroundWork.add(id);
+        changed = true;
+      }
+    }
+    if (changed) this.activityMayHaveChanged();
+  }
+
   private async reconcileRecoveredWorkerChildren(
     parentId: string,
-    recoveredWorkerChildren: ReadonlyArray<readonly [string, number]>,
+    recoveredWorkerChildren: ReadonlyArray<readonly [string, { statusBaseline: number; settledBaseline: object | undefined; verified: boolean; generation: number; taskId?: string }]>,
     signal?: AbortSignal,
     presentIds?: ReadonlySet<string>,
     visited = new Set<string>(),
   ): Promise<void> {
     visited.add(parentId);
-    const retainChild = (childId: string, statusBaseline: number): void => {
-      const currentStatus = this.projections.get(childId)?.status;
-      if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
-        || currentStatus === "completed" || currentStatus === "failed" || currentStatus === "interrupted") return;
+    const hasNewerSettlement = (childId: string, child: { statusBaseline: number; settledBaseline: object | undefined }): boolean => {
+      if (this.statusSequence(childId) !== child.statusBaseline) return true;
+      const currentSettled = this.settledTurns.get(childId);
+      return currentSettled !== undefined && currentSettled !== child.settledBaseline;
+    };
+    const retainChild = (childId: string, child: { statusBaseline: number; settledBaseline: object | undefined; verified: boolean; generation: number }): void => {
+      if (hasNewerSettlement(childId, child)) return;
+      if (child.verified && this.provider.reconcileBackgroundTasks && child.generation !== this.backgroundStreamGeneration) {
+        if (!this.liveTurns.has(childId)) {
+          this.unresolvedBackgroundWork.add(childId);
+          this.activityMayHaveChanged();
+        }
+        return;
+      }
       const stop = this.stoppingTurns.get(childId);
-      if (stop) stop.activeProbeBaseline = statusBaseline;
-      else this.seedProbedRunning(childId, statusBaseline, true);
+      if (stop) {
+        stop.activeProbeBaseline = child.statusBaseline;
+        stop.activeProbeGeneration = child.verified && this.provider.reconcileBackgroundTasks && !this.liveTurns.has(childId)
+          ? child.generation
+          : undefined;
+        return;
+      }
+      const hadLiveTurn = this.liveTurns.has(childId);
+      this.seedProbedRunning(childId, child.statusBaseline, true);
+      if (!hadLiveTurn && this.liveTurns.has(childId) && child.verified && this.provider.reconcileBackgroundTasks) {
+        this.recoveredWorkerTurns.set(childId, child.generation);
+      }
     };
     for (const [childId] of recoveredWorkerChildren) this.beginActiveProbe(childId);
     try {
-      for (const [childId, statusBaseline] of recoveredWorkerChildren) {
+      for (const [childId, child] of recoveredWorkerChildren) {
         if (this.disposed || signal?.aborted) return;
         if (visited.has(childId)) continue;
         visited.add(childId);
-        const existingStatus = this.projections.get(childId)?.status;
-        if (this.statusSequence(childId) !== statusBaseline || this.settledTurns.has(childId)
-          || existingStatus === "completed" || existingStatus === "failed" || existingStatus === "interrupted") continue;
+        if (hasNewerSettlement(childId, child)) continue;
         if (presentIds?.has(childId)) {
-          retainChild(childId, statusBaseline);
+          retainChild(childId, child);
           continue;
         }
         const started = ++this.presenceClock;
@@ -2751,22 +2837,22 @@ export class ChatAdapter {
           const inWorkspace = Boolean(session && await this.isInWorkspace(session, false));
           if (this.disposed || signal?.aborted) return;
           if (inWorkspace && session) {
-            if (this.absenceSequence(childId) > started || this.settledTurns.has(childId)) continue;
+            if (this.absenceSequence(childId) > started || hasNewerSettlement(childId, child)) continue;
             this.refreshConfirmedPresence(session, started);
-            retainChild(childId, statusBaseline);
+            retainChild(childId, child);
           } else if (this.presenceSequence(childId) <= started) {
             const nested = this.forgetMissingSession(childId, started);
             if (nested.length > 0) await this.reconcileRecoveredWorkerChildren(childId, nested, signal, presentIds, visited);
           } else if (this.absenceSequence(childId) < this.presenceSequence(childId)) {
             // A newer confirmed presence overtook this stale negative lookup;
             // retain the recovered worker evidence so it is not dropped.
-            retainChild(childId, statusBaseline);
+            retainChild(childId, child);
           }
         } catch {
           // Keep recovered worker activity when a transient provider error prevents
           // verification so subsequent healthy refreshes/reconnects can reconcile it.
           if (!this.disposed && !signal?.aborted && this.absenceSequence(childId) <= started) {
-            retainChild(childId, statusBaseline);
+            retainChild(childId, child);
           }
         }
       }
@@ -2775,7 +2861,11 @@ export class ChatAdapter {
     }
   }
 
-  private async reconcileMovedChildren(parentId: string, signal?: AbortSignal, recoveredWorkerChildren: ReadonlyArray<readonly [string, number]> = []): Promise<void> {
+  private async reconcileMovedChildren(
+    parentId: string,
+    signal?: AbortSignal,
+    recoveredWorkerChildren: ReadonlyArray<readonly [string, { statusBaseline: number; settledBaseline: object | undefined; verified: boolean; generation: number; taskId?: string }]> = [],
+  ): Promise<void> {
     for (const [childId] of recoveredWorkerChildren) this.beginActiveProbe(childId);
     try {
       const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
@@ -2823,7 +2913,7 @@ export class ChatAdapter {
     if (!this.provider.listActiveSessions || candidateIds.size === 0 || this.disposed || signal?.aborted) return;
     const baselines = new Map<string, number>();
     for (const id of candidateIds) {
-      const baseline = initialBaselines?.get(id) ?? this.statusSequence(id);
+      const baseline = initialBaselines?.get(id) ?? this.captureStatusBaseline(id);
       if (this.statusSequence(id) !== baseline) continue;
       baselines.set(id, baseline);
       this.beginActiveProbe(id);
@@ -2883,6 +2973,7 @@ export class ChatAdapter {
     const stop = this.stoppingTurns.get(conversationId);
     if (stop) {
       stop.activeProbeBaseline = undefined;
+      stop.activeProbeGeneration = undefined;
       if (stop.status && (isLiveConversationStatus(stop.status) || stop.status === "background")) {
         stop.status = "idle";
       }
@@ -2908,6 +2999,7 @@ export class ChatAdapter {
       } catch { /* only interaction source ids are owner/request tuples */ }
     }
     this.notifications.forgetConversation(conversationId);
+    this.recoveredWorkerTurns.delete(conversationId);
     this.liveTurns.delete(conversationId);
     this.settledTurns.delete(conversationId);
     this.backgroundWork.delete(conversationId);
@@ -4353,7 +4445,7 @@ export class ChatAdapter {
       // native steer to Queue later is not a new submission or a resume.
       const paused = !this.dormantQueues.has(conversationId);
       this.dormantQueues.add(conversationId);
-      const stop: { resumed: boolean; status?: ConversationStatus; activeProbeBaseline?: number } = { resumed: false };
+      const stop: { resumed: boolean; status?: ConversationStatus; activeProbeBaseline?: number; activeProbeGeneration?: number } = { resumed: false };
       const settledBeforeStop = this.settledTurns.get(conversationId);
       let interruptRefused = false;
       this.stoppingTurns.set(conversationId, stop);
@@ -4381,7 +4473,18 @@ export class ChatAdapter {
         // did not interrupt the conversation (either refused or superseded by
         // a newer resumed execution that moved out and back during interrupt).
         if ((interruptRefused || stop.resumed) && stop.activeProbeBaseline !== undefined) {
-          this.seedProbedRunning(conversationId, stop.activeProbeBaseline);
+          if (stop.activeProbeGeneration !== undefined && stop.activeProbeGeneration !== this.backgroundStreamGeneration) {
+            if (!this.liveTurns.has(conversationId)) {
+              this.unresolvedBackgroundWork.add(conversationId);
+              this.activityMayHaveChanged();
+            }
+          } else {
+            const hadLiveTurn = this.liveTurns.has(conversationId);
+            this.seedProbedRunning(conversationId, stop.activeProbeBaseline);
+            if (!hadLiveTurn && this.liveTurns.has(conversationId) && stop.activeProbeGeneration !== undefined) {
+              this.recoveredWorkerTurns.set(conversationId, stop.activeProbeGeneration);
+            }
+          }
         }
       }
     };
@@ -6390,6 +6493,7 @@ export class ChatAdapter {
           this.backgroundReadyResolve?.();
           this.backgroundReadyResolve = undefined;
           this.backgroundStreamGeneration++;
+          this.withdrawStaleRecoveredWorkerTurns();
           this.backgroundRecoveryFloorUntil = 0;
           this.backgroundRecoverySourceStartedAt = -Infinity;
           for (const [id, recovery] of this.backgroundRecoveries) {
@@ -6580,6 +6684,7 @@ export class ChatAdapter {
           if (work.legacy) this.backgroundWork.set(id, { legacy: true, verified: false });
           else this.backgroundWork.delete(id);
         }
+        this.withdrawStaleRecoveredWorkerTurns();
         this.activityMayHaveChanged();
       }
       if (this.eventCoalescer === coalescer) this.eventCoalescer = null;
@@ -6730,15 +6835,29 @@ export class ChatAdapter {
   private trackBackgroundActivity(id: string, projection: ConversationProjection, status: ConversationStatus, statusClockCap?: number): void {
     let legacy = false, verified = false, unresolved = false, hasActivity = false;
     const previousChildren = this.backgroundWork.get(id)?.workerChildren;
-    const workerChildren = new Map<string, number>();
-    const recordWorkerChild = (childId: string) => {
+    const workerChildren = new Map<string, { statusBaseline: number; settledBaseline: object | undefined; verified: boolean; generation: number; taskId?: string }>();
+    const recordWorkerChild = (childId: string, isVerified: boolean, taskId: string) => {
       const existing = previousChildren?.get(childId);
-      if (existing !== undefined) {
-        workerChildren.set(childId, existing);
+      if (existing !== undefined && existing.taskId === taskId) {
+        workerChildren.set(childId, {
+          statusBaseline: existing.statusBaseline,
+          settledBaseline: existing.settledBaseline,
+          verified: existing.verified || isVerified,
+          generation: isVerified ? this.backgroundStreamGeneration : existing.generation,
+          taskId,
+        });
         return;
       }
       const current = this.statusSequence(childId);
-      workerChildren.set(childId, statusClockCap !== undefined ? Math.min(current, statusClockCap) : current);
+      if (statusClockCap !== undefined && current > statusClockCap) return;
+      const statusBaseline = this.captureStatusBaseline(childId);
+      workerChildren.set(childId, {
+        statusBaseline,
+        settledBaseline: this.settledTurns.get(childId),
+        verified: isVerified,
+        generation: this.backgroundStreamGeneration,
+        taskId,
+      });
     };
     for (const item of projection.filter(item => item.type === "background_task" && !item.foreground)) {
       if (item.type !== "background_task" || item.foreground) continue;
@@ -6747,10 +6866,10 @@ export class ChatAdapter {
         const state = workerState(item.status, item.stateUncertain, item.activity);
         verified ||= state === "working";
         unresolved ||= state === "unknown";
-        if (state === "working" && item.childConversationId) recordWorkerChild(item.childConversationId);
+        if (state === "working" && item.childConversationId) recordWorkerChild(item.childConversationId, true, item.taskId);
       } else if (this.provider.reconcileBackgroundTasks && item.status === "running") {
         legacy = true;
-        if (item.childConversationId) recordWorkerChild(item.childConversationId);
+        if (item.childConversationId) recordWorkerChild(item.childConversationId, false, item.taskId);
       }
     }
     // Providers without independent observations retain their authoritative
@@ -7494,116 +7613,138 @@ export class ChatAdapter {
   private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<boolean> {
     const priorWorkerChildren = [...(this.backgroundWork.get(lifecycle.id)?.workerChildren?.entries() ?? [])];
     if (lifecycle.kind === "deleted") {
-      this.cancelRevertReconciliation(lifecycle.id);
-      this.forgetActivity(lifecycle.id);
+      for (const [childId] of priorWorkerChildren) this.beginActiveProbe(childId);
     }
-    if (lifecycle.kind === "moved") {
-      const inWorkspace = await this.isInWorkspace(lifecycle);
-      const finishMovedOut = async (): Promise<false> => {
+    try {
+      if (lifecycle.kind === "deleted") {
         this.cancelRevertReconciliation(lifecycle.id);
-        const wasListed = this.listedSessions.delete(lifecycle.id);
-        const previous = this.inventorySessions.get(lifecycle.id);
-        if (previous !== undefined || wasListed) {
-          const parentId = this.sessionParents.get(lifecycle.id) ?? null;
-          const next: InventorySessionMetadata = {
-            inWorkspace: false,
-            parentId,
-            title: previous?.title ?? lifecycle.title,
-            deleted: false,
-          };
-          this.rememberInventorySession(lifecycle.id, next, true);
-          if (wasListed && !inventoryVisible(previous)) this.inventory.invalidate();
-        }
-        await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal, priorWorkerChildren);
-        return false;
-      };
-      if (!inWorkspace) return finishMovedOut();
-      const moveInStarted = ++this.presenceClock;
-      this.beginActiveProbe(lifecycle.id);
-      let confirmed: ProviderSession | null | undefined;
-      try {
-        try {
-          confirmed = await this.provider.getSession(lifecycle.id);
-        } catch {
-          confirmed = undefined;
-        }
-        if (confirmed === null || (confirmed !== undefined && !await this.isInWorkspace(confirmed, false))) {
-          if (this.presenceSequence(lifecycle.id) <= moveInStarted) this.forgetActivity(lifecycle.id, moveInStarted);
-          return finishMovedOut();
-        }
-      } finally {
-        this.endActiveProbe(lifecycle.id);
+        this.forgetActivity(lifecycle.id);
       }
-      if (this.absenceSequence(lifecycle.id) > moveInStarted) {
-        return false;
-      }
-      const parentId = confirmed !== undefined
-        ? (confirmed.parentId ?? null)
-        : this.sessionParents.get(lifecycle.id) ?? null;
-      if (confirmed !== undefined) {
-        boundedSet(this.sessionParents, lifecycle.id, parentId, INVENTORY_SESSION_LIMIT);
-      }
-      const previous = this.inventorySessions.get(lifecycle.id);
-      const next: InventorySessionMetadata = {
-        inWorkspace: true,
-        parentId,
-        title: previous?.title ?? confirmed?.title ?? lifecycle.title,
-        deleted: false,
-      };
-      // Fence any concurrent stale lookup or list cleanup from before move-in.
-      this.bumpStatusSequence(lifecycle.id);
-      this.bumpPresenceSequence(lifecycle.id, moveInStarted);
-      this.rememberInventorySession(lifecycle.id, next, true);
-      if (parentId === null) {
-        boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
-        this.scheduleBackgroundRecovery(lifecycle.id);
-      }
-      if (confirmed !== undefined && this.provider.listActiveSessions) {
-        const probeBaseline = this.statusSequence(lifecycle.id);
+      if (lifecycle.kind === "moved") {
+        const inWorkspace = await this.isInWorkspace(lifecycle);
+        const finishMovedOut = async (): Promise<false> => {
+          this.cancelRevertReconciliation(lifecycle.id);
+          const wasListed = this.listedSessions.delete(lifecycle.id);
+          const previous = this.inventorySessions.get(lifecycle.id);
+          if (previous !== undefined || wasListed) {
+            const parentId = this.sessionParents.get(lifecycle.id) ?? null;
+            const next: InventorySessionMetadata = {
+              inWorkspace: false,
+              parentId,
+              title: previous?.title ?? lifecycle.title,
+              deleted: false,
+            };
+            this.rememberInventorySession(lifecycle.id, next, true);
+            if (wasListed && !inventoryVisible(previous)) this.inventory.invalidate();
+          }
+          await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal, priorWorkerChildren);
+          return false;
+        };
+        if (!inWorkspace) return finishMovedOut();
+        const moveInStarted = ++this.presenceClock;
         this.beginActiveProbe(lifecycle.id);
-        void this.runTask(
-          `active.probe:${lifecycle.id}`,
-          () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal, new Map([[lifecycle.id, probeBaseline]])),
-        ).catch(() => undefined).finally(() => this.endActiveProbe(lifecycle.id));
+        let confirmed: ProviderSession | null | undefined;
+        let confirmedOwnership = false;
+        try {
+          try {
+            confirmed = await this.provider.getSession(lifecycle.id);
+          } catch {
+            confirmed = undefined;
+          }
+          if (confirmed !== undefined && confirmed !== null && await this.isInWorkspace(confirmed, false)) {
+            confirmedOwnership = true;
+          } else if (confirmed !== undefined) {
+            if (this.presenceSequence(lifecycle.id) <= moveInStarted) {
+              this.forgetActivity(lifecycle.id, moveInStarted);
+              return finishMovedOut();
+            }
+            if (this.absenceSequence(lifecycle.id) >= this.presenceSequence(lifecycle.id)) {
+              return false;
+            }
+            // A newer successful confinement read overtook this stale negative
+            // confirmation: skip move-out side effects and proceed with the
+            // active-session probe using the newer cached metadata.
+            confirmed = undefined;
+            confirmedOwnership = true;
+          }
+        } finally {
+          this.endActiveProbe(lifecycle.id);
+        }
+        if (this.absenceSequence(lifecycle.id) > moveInStarted && this.absenceSequence(lifecycle.id) >= this.presenceSequence(lifecycle.id)) {
+          return false;
+        }
+        const parentId = confirmed !== undefined
+          ? (confirmed.parentId ?? null)
+          : this.sessionParents.get(lifecycle.id) ?? null;
+        if (confirmed !== undefined) {
+          boundedSet(this.sessionParents, lifecycle.id, parentId, INVENTORY_SESSION_LIMIT);
+        }
+        const previous = this.inventorySessions.get(lifecycle.id);
+        const next: InventorySessionMetadata = {
+          inWorkspace: true,
+          parentId,
+          title: previous?.title ?? confirmed?.title ?? lifecycle.title,
+          deleted: false,
+        };
+        // Fence any concurrent stale lookup or list cleanup from before move-in.
+        this.bumpStatusSequence(lifecycle.id);
+        this.bumpPresenceSequence(lifecycle.id, moveInStarted);
+        this.rememberInventorySession(lifecycle.id, next, true);
+        if (parentId === null) {
+          boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
+          this.scheduleBackgroundRecovery(lifecycle.id);
+        }
+        if (confirmedOwnership && this.provider.listActiveSessions) {
+          const probeBaseline = this.captureStatusBaseline(lifecycle.id);
+          this.beginActiveProbe(lifecycle.id);
+          void this.runTask(
+            `active.probe:${lifecycle.id}`,
+            () => this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal, new Map([[lifecycle.id, probeBaseline]])),
+          ).catch(() => undefined).finally(() => this.endActiveProbe(lifecycle.id));
+        }
+        return true;
       }
-      return true;
+      // A sparse update names only what changed (2.x's rename: id and title).
+      // Parentage it does not mention is unchanged, not cleared: a child
+      // renamed mid-turn must keep mirroring its requests to its parent. A
+      // read that fails leaves the cached answer, which is what it would have
+      // been cleared to.
+      // A deleted session cannot be read, so a sparse deletion takes the
+      // cached parent and nothing else.
+      const parentId = lifecycle.sparse
+        ? lifecycle.kind === "deleted"
+          ? this.sessionParents.get(lifecycle.id) ?? null
+          : await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null)
+        : lifecycle.parentId ?? null;
+      // Classification forgets the activity of a session outside the workspace.
+      const next = await this.classifyInventorySession({ ...lifecycle, parentId: parentId ?? undefined }, lifecycle.kind === "deleted");
+      if (!lifecycle.sparse && lifecycle.kind !== "deleted" && next.inWorkspace) this.bumpPresenceSequence(lifecycle.id);
+      if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
+      const previous = this.inventorySessions.get(lifecycle.id);
+      const wasListed = this.listedSessions.has(lifecycle.id);
+      if (lifecycle.kind === "deleted" || !next.inWorkspace) this.listedSessions.delete(lifecycle.id);
+      // A sparse event's directory is the workspace by assumption, not by the
+      // wire (2.x's deletion carries none), so it vouches for nothing unseen:
+      // only a session this adapter listed can have left the list.
+      const eventDescribesVisibleSession = lifecycle.sparse
+        ? wasListed
+        : next.inWorkspace && next.parentId === null;
+      const relevantDeletion = lifecycle.kind === "deleted"
+        && previous?.deleted !== true
+        && (inventoryVisible(previous) || eventDescribesVisibleSession);
+      this.rememberInventorySession(lifecycle.id, next, lifecycle.kind !== "deleted");
+      if (relevantDeletion || (lifecycle.kind !== "deleted" && !next.inWorkspace && wasListed && !inventoryVisible(previous))) {
+        this.inventory.invalidate();
+      }
+      if (lifecycle.kind === "deleted" || !next.inWorkspace) {
+        await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal, priorWorkerChildren);
+      }
+      return next.inWorkspace;
+    } finally {
+      if (lifecycle.kind === "deleted") {
+        for (const [childId] of priorWorkerChildren) this.endActiveProbe(childId);
+      }
     }
-    // A sparse update names only what changed (2.x's rename: id and title).
-    // Parentage it does not mention is unchanged, not cleared: a child
-    // renamed mid-turn must keep mirroring its requests to its parent. A
-    // read that fails leaves the cached answer, which is what it would have
-    // been cleared to.
-    // A deleted session cannot be read, so a sparse deletion takes the
-    // cached parent and nothing else.
-    const parentId = lifecycle.sparse
-      ? lifecycle.kind === "deleted"
-        ? this.sessionParents.get(lifecycle.id) ?? null
-        : await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null)
-      : lifecycle.parentId ?? null;
-    // Classification forgets the activity of a session outside the workspace.
-    const next = await this.classifyInventorySession({ ...lifecycle, parentId: parentId ?? undefined }, lifecycle.kind === "deleted");
-    if (!lifecycle.sparse && lifecycle.kind !== "deleted" && next.inWorkspace) this.bumpPresenceSequence(lifecycle.id);
-    if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
-    const previous = this.inventorySessions.get(lifecycle.id);
-    const wasListed = this.listedSessions.has(lifecycle.id);
-    if (lifecycle.kind === "deleted" || !next.inWorkspace) this.listedSessions.delete(lifecycle.id);
-    // A sparse event's directory is the workspace by assumption, not by the
-    // wire (2.x's deletion carries none), so it vouches for nothing unseen:
-    // only a session this adapter listed can have left the list.
-    const eventDescribesVisibleSession = lifecycle.sparse
-      ? wasListed
-      : next.inWorkspace && next.parentId === null;
-    const relevantDeletion = lifecycle.kind === "deleted"
-      && previous?.deleted !== true
-      && (inventoryVisible(previous) || eventDescribesVisibleSession);
-    this.rememberInventorySession(lifecycle.id, next, lifecycle.kind !== "deleted");
-    if (relevantDeletion || (lifecycle.kind !== "deleted" && !next.inWorkspace && wasListed && !inventoryVisible(previous))) {
-      this.inventory.invalidate();
-    }
-    if (lifecycle.kind === "deleted" || !next.inWorkspace) {
-      await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal, priorWorkerChildren);
-    }
-    return next.inWorkspace;
   }
 
   private async configuration(id: string): Promise<ConversationConfiguration> {
@@ -7638,7 +7779,10 @@ export class ChatAdapter {
       // adapter-synthesized `background` and synthetic worker-completion
       // transitions (`sourceTransition === false`) must not suppress an
       // in-flight active-session probe for a live parent turn.
-      if (sourceTransition && status !== "background") this.bumpStatusSequence(id);
+      if (sourceTransition && status !== "background") {
+        this.bumpStatusSequence(id);
+        this.recoveredWorkerTurns.delete(id);
+      }
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);
