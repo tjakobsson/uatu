@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
 import { openTreeFile, treeRow } from "./tree-helpers";
-import { expectStageTransform, readStageTransform } from "./transform-helpers";
+import { expectStageTransform, readStageScale, readStageTransform } from "./transform-helpers";
 import { standardBeforeEach } from "./fixtures";
 import { afterAnimationFrames } from "./sync-helpers";
 
@@ -404,19 +404,19 @@ test.describe("desktop layout", () => {
 
     await trigger.click();
 
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
-    await expect(page.locator("dialog.mermaid-viewer .mermaid-viewer-stage svg")).toBeVisible();
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer .media-viewer-stage svg")).toBeVisible();
     // Toolbar exposes the documented controls.
-    await expect(page.locator(".mermaid-viewer-toolbar [aria-label='Zoom in']")).toBeVisible();
-    await expect(page.locator(".mermaid-viewer-toolbar [aria-label='Zoom out']")).toBeVisible();
-    await expect(page.locator(".mermaid-viewer-toolbar [aria-label='Fit to screen']")).toBeVisible();
+    await expect(page.locator(".media-viewer-toolbar [aria-label='Zoom in']")).toBeVisible();
+    await expect(page.locator(".media-viewer-toolbar [aria-label='Zoom out']")).toBeVisible();
+    await expect(page.locator(".media-viewer-toolbar [aria-label='Fit to screen']")).toBeVisible();
   });
 
   test("Escape closes the diagram viewer and returns focus to the trigger", async ({ page }) => {
     await openTreeFile(page, "diagram.md");
     const trigger = page.locator("#preview .mermaid-trigger");
     await trigger.click();
-    const dialog = page.locator("dialog.mermaid-viewer");
+    const dialog = page.locator("dialog.media-viewer");
     await expect(dialog).toHaveAttribute("open", "");
 
     await page.keyboard.press("Escape");
@@ -431,11 +431,11 @@ test.describe("desktop layout", () => {
   test("the diagram viewer fills the entire browser canvas", async ({ page }) => {
     await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
-    const dialog = page.locator("dialog.mermaid-viewer");
+    const dialog = page.locator("dialog.media-viewer");
     await expect(dialog).toHaveAttribute("open", "");
 
     const dimensions = await page.evaluate(() => {
-      const dlg = document.querySelector<HTMLElement>("dialog.mermaid-viewer");
+      const dlg = document.querySelector<HTMLElement>("dialog.media-viewer");
       if (!dlg) return null;
       const rect = dlg.getBoundingClientRect();
       return {
@@ -455,37 +455,47 @@ test.describe("desktop layout", () => {
   test("wheel scrolling inside the diagram viewer changes the stage transform", async ({ page }) => {
     await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
 
     // The viewer fits on the frame after it opens; let that frame run.
     await afterAnimationFrames(page);
-    const stage = page.locator(".mermaid-viewer-stage");
-    const before = await stage.evaluate(el => (el as HTMLElement).style.transform);
+    const before = (await readStageTransform(page))!;
 
-    const viewport = page.locator(".mermaid-viewer-viewport");
+    const viewport = page.locator(".media-viewer-viewport");
     const box = await viewport.boundingBox();
     expect(box).not.toBeNull();
     await page.mouse.move((box?.x ?? 0) + (box?.width ?? 0) / 2, (box?.y ?? 0) + (box?.height ?? 0) / 2);
     await page.mouse.wheel(0, -300);
 
-    await expect
-      .poll(async () => stage.evaluate(el => (el as HTMLElement).style.transform))
-      .not.toBe(before);
+    await expect.poll(() => readStageScale(page)).toBeGreaterThan(before.scale);
   });
 
-  test("editing the watched file while the diagram viewer is open closes the viewer", async ({ page }) => {
+  test("editing the watched file keeps the diagram viewer open at the same transform, showing the re-rendered diagram", async ({ page }) => {
     await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
-    const dialog = page.locator("dialog.mermaid-viewer");
+    const dialog = page.locator("dialog.media-viewer");
     await expect(dialog).toHaveAttribute("open", "");
+    await afterAnimationFrames(page);
+    await page.keyboard.press("+");
+    await page.keyboard.press("+");
+    await expect.poll(() => readStageScale(page)).toBeGreaterThan(1);
+    const zoomed = (await readStageTransform(page))!;
 
+    // A fill changes what the diagram shows but not its geometry. The edit to
+    // the prose shows the whole document re-rendered.
+    const original = await fs.readFile(workspacePath("diagram.md"), "utf8");
     await fs.writeFile(
       workspacePath("diagram.md"),
-      "# Diagram Fixture\n\nText only — no diagram here.\n",
+      original
+        .replace("Visit https://example.com for docs.", "Visit https://example.com for the edited docs.")
+        .replace("  Preview --> Browser\n", "  Preview --> Browser\n  style Browser fill:#fde68a\n"),
       "utf8",
     );
+    await expect(page.locator("#preview")).toContainText("for the edited docs");
 
-    await expect(dialog).not.toHaveAttribute("open", "");
+    await expect(page.locator(".media-viewer-stage svg [style*='fde68a']").first()).toBeAttached();
+    await expect(dialog).toHaveAttribute("open", "");
+    await expectStageTransform(page, zoomed);
   });
 
   test("each Mermaid shape (flowchart, sequence, C4, wide, component-interaction) renders an inline SVG", async ({ page }) => {
@@ -567,10 +577,10 @@ test.describe("desktop layout", () => {
     // Use the C4 diagram (third) since it relies most heavily on internal
     // references (markers, gradients, arrowheads).
     await page.locator("#preview .mermaid-trigger").nth(2).click();
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
 
     const refsResolve = await page.evaluate(() => {
-      const svg = document.querySelector<SVGElement>("dialog.mermaid-viewer .mermaid-viewer-stage svg");
+      const svg = document.querySelector<SVGElement>("dialog.media-viewer .media-viewer-stage svg");
       if (!svg) return null;
       const ids = new Set<string>();
       for (const el of svg.querySelectorAll<Element>("[id]")) {
@@ -613,12 +623,12 @@ test.describe("desktop layout", () => {
     const triggers = page.locator("#preview .mermaid-trigger");
     for (let i = 0; i < 5; i += 1) {
       await triggers.nth(i).click();
-      const dialog = page.locator("dialog.mermaid-viewer");
+      const dialog = page.locator("dialog.media-viewer");
       await expect(dialog).toHaveAttribute("open", "");
 
       const fills = await page.evaluate(() => {
         const svg = document.querySelector<SVGElement>(
-          "dialog.mermaid-viewer .mermaid-viewer-stage svg",
+          "dialog.media-viewer .media-viewer-stage svg",
         );
         if (!svg) return null;
         // Check every element's computed fill — at least one rect, polygon,
@@ -656,20 +666,23 @@ test.describe("desktop layout", () => {
     const triggers = page.locator("#preview .mermaid-trigger");
     for (let i = 0; i < 5; i += 1) {
       await triggers.nth(i).click();
-      await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+      await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
       // The viewer fits on the frame after it opens; let that frame run.
       await afterAnimationFrames(page);
 
       const offset = await page.evaluate(() => {
-        const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
-        const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+        const stage = document.querySelector<HTMLElement>(".media-viewer-stage");
+        const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport");
         if (!stage || !viewport) return null;
         const sb = stage.getBoundingClientRect();
         const vb = viewport.getBoundingClientRect();
+        // Fit keeps the diagram clear of the toolbar: it is centred in the
+        // area above it.
+        const toolbarTop = document.querySelector(".media-viewer-toolbar")!.getBoundingClientRect().top;
         const stageCenterX = sb.left + sb.width / 2;
         const stageCenterY = sb.top + sb.height / 2;
         const viewportCenterX = vb.left + vb.width / 2;
-        const viewportCenterY = vb.top + vb.height / 2;
+        const viewportCenterY = vb.top + (toolbarTop - vb.top) / 2;
         return {
           dx: Math.abs(stageCenterX - viewportCenterX),
           dy: Math.abs(stageCenterY - viewportCenterY),
@@ -679,7 +692,7 @@ test.describe("desktop layout", () => {
       });
 
       expect(offset).not.toBeNull();
-      // Stage center should be within ~20px of viewport center.
+      // Stage center should be within ~20px of the centre of the fit area.
       expect(offset!.dx).toBeLessThan(20);
       expect(offset!.dy).toBeLessThan(20);
       // And the stage must be inside (not off-screen): center within the viewport.
@@ -687,7 +700,7 @@ test.describe("desktop layout", () => {
       expect(offset!.dy).toBeLessThan(offset!.viewportHeight / 2);
 
       await page.keyboard.press("Escape");
-      await expect(page.locator("dialog.mermaid-viewer")).not.toHaveAttribute("open", "");
+      await expect(page.locator("dialog.media-viewer")).not.toHaveAttribute("open", "");
     }
   });
 
@@ -698,25 +711,17 @@ test.describe("desktop layout", () => {
     // every keyboard shortcut in one place.
     await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
     // The viewer fits on the frame after it opens; let that frame run.
     await afterAnimationFrames(page);
 
-    const stage = page.locator(".mermaid-viewer-stage");
-    const transform = () => stage.evaluate(el => (el as HTMLElement).style.transform);
-    const scale = () =>
-      page.evaluate(() => {
-        const match = document
-          .querySelector<HTMLElement>(".mermaid-viewer-stage")!
-          .style.transform.match(/scale\(([\d.]+)\)/);
-        return match ? Number.parseFloat(match[1]!) : Number.NaN;
-      });
+    const scale = () => readStageScale(page);
 
     const fitted = (await readStageTransform(page))!;
     const fittedScale = await scale();
     expect(Number.isFinite(fittedScale)).toBe(true);
 
-    const box = (await page.locator(".mermaid-viewer-viewport").boundingBox())!;
+    const box = (await page.locator(".media-viewer-viewport").boundingBox())!;
     const centreX = box.x + box.width / 2;
     const centreY = box.y + box.height / 2;
 
@@ -732,7 +737,7 @@ test.describe("desktop layout", () => {
     // Cursor-anchored wheel zoom: the world point under the cursor stays put.
     const anchorBefore = await page.evaluate(
       ({ x, y }) => {
-        const stageEl = document.querySelector<HTMLElement>(".mermaid-viewer-stage")!;
+        const stageEl = document.querySelector<HTMLElement>(".media-viewer-stage")!;
         const rect = stageEl.getBoundingClientRect();
         return { u: (x - rect.left) / rect.width, v: (y - rect.top) / rect.height };
       },
@@ -744,7 +749,7 @@ test.describe("desktop layout", () => {
     await expect.poll(scale).toBeGreaterThan(fittedScale);
     const anchorAfter = await page.evaluate(
       ({ x, y }) => {
-        const stageEl = document.querySelector<HTMLElement>(".mermaid-viewer-stage")!;
+        const stageEl = document.querySelector<HTMLElement>(".media-viewer-stage")!;
         const rect = stageEl.getBoundingClientRect();
         return { u: (x - rect.left) / rect.width, v: (y - rect.top) / rect.height };
       },
@@ -759,10 +764,10 @@ test.describe("desktop layout", () => {
     await expectStageTransform(page, fitted);
 
     // Toolbar actions.
-    await page.locator(".mermaid-viewer-toolbar [aria-label='Zoom in']").click();
+    await page.locator(".media-viewer-toolbar [aria-label='Zoom in']").click();
     expect(await scale()).toBeGreaterThan(fittedScale);
-    await page.locator(".mermaid-viewer-toolbar [aria-label='Zoom out']").click();
-    await page.locator(".mermaid-viewer-toolbar [aria-label='Fit to screen']").click();
+    await page.locator(".media-viewer-toolbar [aria-label='Zoom out']").click();
+    await page.locator(".media-viewer-toolbar [aria-label='Fit to screen']").click();
     await expectStageTransform(page, fitted);
 
     // Keyboard shortcuts: +, -, 0 and f.
@@ -777,9 +782,11 @@ test.describe("desktop layout", () => {
     await page.keyboard.press("f");
     await expectStageTransform(page, fitted);
 
-    // Dismissal is still exactly Escape and the close control.
+    // None of the clicks above, all on the diagram, dismissed the viewer;
+    // Escape does.
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
     await page.keyboard.press("Escape");
-    await expect(page.locator("dialog.mermaid-viewer")).not.toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).not.toHaveAttribute("open", "");
   });
 
   test("the diagram viewer scales the diagram to a meaningful fraction of the modal", async ({
@@ -794,14 +801,14 @@ test.describe("desktop layout", () => {
     await expectAllDiagramsRendered(page, 5);
 
     await page.locator("#preview .mermaid-trigger").first().click();
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
 
     // The viewer fits on the frame after it opens; let that frame run.
     await afterAnimationFrames(page);
 
     const ratios = await page.evaluate(() => {
-      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
-      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      const stage = document.querySelector<HTMLElement>(".media-viewer-stage");
+      const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport");
       if (!stage || !viewport) return null;
       const stageBox = stage.getBoundingClientRect();
       const viewportBox = viewport.getBoundingClientRect();

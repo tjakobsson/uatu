@@ -8,7 +8,7 @@
 
 import { expect, test } from "./fixtures";
 import { openTreeFile, treeRow } from "./tree-helpers";
-import { expectStageTransform, readStageTransform } from "./transform-helpers";
+import { expectStageTransform, readStageScale, readStageTransform } from "./transform-helpers";
 import { afterAnimationFrames } from "./sync-helpers";
 
 function readStoredValue(page: import("@playwright/test").Page, suffix: string): Promise<string | null> {
@@ -188,18 +188,18 @@ test.describe("iPad mermaid viewer", () => {
     const trigger = page.locator("#preview .mermaid-trigger");
     await expect(trigger).toBeVisible();
     await trigger.tap();
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
     // The viewer fits on the frame after it opens; let that frame run.
     await afterAnimationFrames(page);
   }
 
   async function toolbarGeometry(page: import("@playwright/test").Page) {
     return page.evaluate(() => {
-      const toolbar = document.querySelector<HTMLElement>(".mermaid-viewer-toolbar");
-      const dialog = document.querySelector<HTMLElement>("dialog.mermaid-viewer");
+      const toolbar = document.querySelector<HTMLElement>(".media-viewer-toolbar");
+      const dialog = document.querySelector<HTMLElement>("dialog.media-viewer");
       if (!toolbar || !dialog) return null;
       const buttons = Array.from(
-        document.querySelectorAll<HTMLElement>(".mermaid-viewer-button"),
+        document.querySelectorAll<HTMLElement>(".media-viewer-button"),
       ).map(button => {
         const rect = button.getBoundingClientRect();
         return { width: rect.width, height: rect.height, top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
@@ -272,7 +272,7 @@ test.describe("iPad mermaid viewer", () => {
     ) => {
       await page.evaluate(
         ({ type, pointerId, x, y }) => {
-          document.querySelector<HTMLElement>(".mermaid-viewer-viewport")!.dispatchEvent(
+          document.querySelector<HTMLElement>(".media-viewer-viewport")!.dispatchEvent(
             new PointerEvent(type, {
               pointerId,
               pointerType: "touch",
@@ -289,15 +289,7 @@ test.describe("iPad mermaid viewer", () => {
         { type, pointerId, x, y },
       );
     };
-    const scale = () =>
-      page.evaluate(() => {
-        const match = document
-          .querySelector<HTMLElement>(".mermaid-viewer-stage")!
-          .style.transform.match(/scale\(([\d.]+)\)/);
-        return match ? Number.parseFloat(match[1]!) : Number.NaN;
-      });
-    const transform = () =>
-      page.locator(".mermaid-viewer-stage").evaluate(el => (el as HTMLElement).style.transform);
+    const scale = () => readStageScale(page);
 
     const fitted = (await readStageTransform(page))!;
     const before = await scale();
@@ -315,7 +307,7 @@ test.describe("iPad mermaid viewer", () => {
     // separate round-trips would measure harness latency rather than the
     // viewer, and stop pairing on a loaded runner.
     await page.evaluate(() => {
-      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport")!;
+      const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport")!;
       for (const [type, pointerId] of [
         ["pointerdown", 3],
         ["pointerup", 3],

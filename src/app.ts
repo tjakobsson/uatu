@@ -6,7 +6,7 @@ import { hubUrl, isHubPage, workspaceIdFromBasePath, appBasePath } from "./share
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
-import { installMermaidTriggerHandler } from "./preview/mermaid";
+import { initPreviewMediaZoom } from "./preview/media-zoom";
 import { initViewModeControls, scheduleDiffPrewarmWhenIdle } from "./preview/view-mode";
 import { initOutline } from "./preview/outline";
 import { attachAutoStackObserver } from "./preview/layout";
@@ -19,7 +19,8 @@ import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
 import { initFilesPaneFilterControls } from "./sidebar/files-filter";
 import { initMediaDock } from "./media/dock";
 import { mediaPlayer } from "./media/controller";
-import { initFollowToggle } from "./shell/follow";
+import { initFollowToggle, setFollowEnabled, syncFollowToggle } from "./shell/follow";
+import { setBeforeMediaPreviewAudition } from "./media/preview";
 import { initActiveSurfaceTracking } from "./find/active-surface";
 import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
@@ -100,6 +101,11 @@ initUiMode();
 initDesktopViewport();
 initTabBar();
 initMediaDock();
+// Auditioning from the preview card stops Follow, as it does from Files.
+setBeforeMediaPreviewAudition(() => {
+  setFollowEnabled(false);
+  syncFollowToggle();
+});
 // A cached page can return with its JS heap intact. End the audition before
 // page departure so pageshow/foreground recovery cannot restore playback.
 window.addEventListener("pagehide", () => mediaPlayer.close());
@@ -122,7 +128,7 @@ initChangeOverviewClickHandler();
 initFilesPaneFilterControls();
 initFollowToggle();
 installAnchorHandlers();
-installMermaidTriggerHandler();
+initPreviewMediaZoom();
 initViewModeControls();
 initOutline();
 attachAutoStackObserver();

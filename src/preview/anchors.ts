@@ -25,6 +25,16 @@ if (!previewElementMaybe) {
 
 const previewElement: HTMLElement = previewElementMaybe;
 
+// The link a preview click landed in, unless a handler nearer the target
+// already took the click (a linked image opening the media viewer).
+function clickedAnchor(event: MouseEvent): HTMLAnchorElement | null {
+  if (event.defaultPrevented) {
+    return null;
+  }
+  const target = event.target;
+  return target instanceof HTMLElement ? target.closest("a") : null;
+}
+
 // Intercept clicks on in-page anchor links (`<a href="#x">`) in the preview and
 // scroll the matching element into view directly. Letting the browser handle
 // these natively would resolve them against `<base href>` (set per-document to
@@ -34,11 +44,7 @@ const previewElement: HTMLElement = previewElementMaybe;
 // gives us same-document scroll regardless of the base href.
 export function initInPageAnchorHandler() {
   previewElement.addEventListener("click", event => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-    const anchor = target.closest("a");
+    const anchor = clickedAnchor(event);
     if (!anchor) {
       return;
     }
@@ -100,11 +106,7 @@ export function cssEscape(value: string): string {
 // through to the browser's default behavior.
 export function initCrossDocAnchorHandler() {
   previewElement.addEventListener("click", event => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-    const anchor = target.closest("a");
+    const anchor = clickedAnchor(event);
     if (!anchor) {
       return;
     }

@@ -6,7 +6,7 @@
 
 import { escapeHtml } from "../shared/html";
 import { clearPreviewType } from "./header";
-import { closeMermaidViewer } from "./mermaid-viewer";
+import { releasePreviewZoom } from "./media-zoom";
 import { hideViewToggle } from "./view-mode";
 import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
 import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
@@ -33,7 +33,7 @@ const previewElement: HTMLElement = previewElementMaybe;
 export function renderEmptyPreview(title: string, body: string) {
   releaseMediaPreview();
   cancelDiffPresentation();
-  closeMermaidViewer();
+  releasePreviewZoom();
   previewTitleElement.textContent = title;
   previewPathElement.textContent = body;
   clearPreviewType();

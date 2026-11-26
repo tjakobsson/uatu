@@ -771,9 +771,13 @@ export class CoordinatedScrollOwner {
     this.touchPaused = false;
     this.touchY = this.ownsInput(event) && !this.inTextControl(event) ? event.touches[0]?.clientY ?? null : null;
   };
+  /** A move whose default content inside the transcript prevented (a zoomed
+   * visual panning under the finger) cannot scroll it, so it says nothing
+   * about where the reader wants to be. */
   private touchMove = (event: TouchEvent): void => {
     const y = event.touches[0]?.clientY;
-    if (y !== undefined && this.touchY !== null && this.ownsInput(event) && !this.inTextControl(event)) {
+    if (y !== undefined && this.touchY !== null && !event.defaultPrevented
+      && this.ownsInput(event) && !this.inTextControl(event)) {
       if (y > this.touchY) {
         if (!this.touchPaused || this.options.anchor.isPinned()) {
           this.pause();

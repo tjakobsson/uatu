@@ -1,7 +1,20 @@
-import type { APIRequestContext, Page, Route } from "@playwright/test";
+import type { APIRequestContext, Locator, Page, Route } from "@playwright/test";
 
 import { chooseChatModel, openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
+import {
+  backdropPoint,
+  centreOf,
+  checkerboardPng,
+  expectViewerClosed,
+  expectViewerOpen,
+  pinch,
+  recordWheels,
+  viewerDialog,
+  viewerMediaPoint,
+} from "./media-viewer-helpers";
+import { afterAnimationFrames } from "./sync-helpers";
 
 // 1x1 red PNG — small enough to inline, real enough to sniff.
 const PNG = Buffer.from(
@@ -17,7 +30,10 @@ async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   token = response.token;
   await page.goto(`/?t=${encodeURIComponent(token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await openChatPanel(page);
+  if (await page.locator("html").getAttribute("data-ui-mode") === "touch") {
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-surface")).toBeVisible();
+  } else await openChatPanel(page);
   await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
 }
 
@@ -73,9 +89,9 @@ async function newConversation(page: Page): Promise<string> {
   return select.inputValue();
 }
 
-async function attachViaPicker(page: Page, name = "shot.png"): Promise<void> {
+async function attachViaPicker(page: Page, name = "shot.png", buffer = PNG): Promise<void> {
   const uploaded = page.waitForResponse(response => response.url().includes("/attachments") && response.request().method() === "POST");
-  await page.locator("#chat-attach-input").setInputFiles({ name, mimeType: "image/png", buffer: PNG });
+  await page.locator("#chat-attach-input").setInputFiles({ name, mimeType: "image/png", buffer });
   expect((await uploaded).status()).toBe(201);
 }
 
@@ -441,33 +457,71 @@ test.describe("restore stays within the cap", () => {
 test.describe("attachment viewer", () => {
   test.beforeEach(async ({ page, request }) => bootChat(page, request));
 
-  test("thumbnails open full size in place and dismiss on Escape or click", async ({ page }) => {
+  test("thumbnails open the shared viewer in place and dismiss only on Escape, close or the empty backdrop", async ({ page }, testInfo) => {
     await newConversation(page);
     await attachViaPicker(page);
-    // Pending-strip thumbnail opens the local preview.
-    await page.locator("#chat-attachments .chat-attachment-view").click();
-    const viewer = page.locator("#chat-image-viewer");
-    await expect(viewer).toBeVisible();
-    await expect(viewer.locator("img")).toHaveAttribute("alt", "shot.png");
+    // Pending-strip thumbnail opens the local preview, with no inline zoom:
+    // a thumbnail is small media.
+    const pending = page.locator("#chat-attachments .chat-attachment-view");
+    await expect(page.locator("#chat-attachments .media-zoom-frame")).toHaveCount(0);
+    await pending.click();
+    const viewer = viewerDialog(page);
+    await expectViewerOpen(page);
+    const image = page.locator(".media-viewer-stage img");
+    await expect(image).toHaveAttribute("alt", "shot.png");
+    await expect(image).toHaveAttribute("src", /^blob:/);
+    // The attachment's name is shown as its caption, as text.
+    await expect(page.locator(".media-viewer-caption")).toBeVisible();
+    await expect(page.locator(".media-viewer-caption")).toHaveText("shot.png");
+    await captureScreenshot(page, testInfo, "chat-attachment-viewer-caption");
     await page.keyboard.press("Escape");
-    await expect(viewer).toBeHidden();
+    await expectViewerClosed(page);
+    await expect(pending).toBeFocused();
 
     await send(page, "see attached");
-    // Timeline thumbnail opens the served image; a click dismisses.
-    await page.locator("#chat-items .chat-attachment-view").first().click();
-    await expect(viewer).toBeVisible();
-    await expect(viewer.locator("img")).toHaveAttribute("src", /\/api\/chat\/attachments\//);
-    await expect.poll(() => viewer.locator("img").evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
-    await viewer.click();
-    await expect(viewer).toBeHidden();
+    // Timeline thumbnail opens the served image; a click on the image keeps
+    // the viewer open, the close control and the empty backdrop dismiss it.
+    const sent = page.locator("#chat-items .chat-attachment-view").first();
+    await sent.click();
+    await expectViewerOpen(page);
+    await expect(image).toHaveAttribute("src", /\/api\/chat\/attachments\//);
+    await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
+    const media = await viewerMediaPoint(page);
+    await page.mouse.click(media.x, media.y);
+    await afterAnimationFrames(page);
+    await expect(viewer).toHaveAttribute("open", "");
+    await page.locator(".media-viewer-close").click();
+    await expectViewerClosed(page);
+    await sent.click();
+    await expectViewerOpen(page);
+    const backdrop = await backdropPoint(page);
+    await page.mouse.click(backdrop.x, backdrop.y);
+    await expectViewerClosed(page);
     // Still in the conversation — no navigation happened.
     await expect(page.locator("#chat-items")).toContainText("see attached");
+  });
+
+  test("a cross-origin thumbnail source never opens the viewer", async ({ page }) => {
+    await newConversation(page);
+    await attachViaPicker(page);
+    await send(page, "origin check");
+    // Rewritten and clicked in one task, so no re-render of the row can
+    // restore the real source in between.
+    await page.locator("#chat-items .chat-attachment-view").first().evaluate((element: HTMLElement) => {
+      element.setAttribute("data-attachment-view", "https://elsewhere.invalid/shot.png");
+      element.click();
+    });
+    await afterAnimationFrames(page);
+    await expectViewerClosed(page);
   });
 
   test("closing the viewer never leaves the log holding a focus ring", async ({ page }) => {
     await newConversation(page);
     await attachViaPicker(page);
     await send(page, "ring check");
+    // The accepted draft is re-rendered as the history item; let that land, so
+    // the thumbnail that opens the viewer is the one still there at close.
+    await expect(page.locator("#chat-items .chat-user-message:not(.is-pending) .chat-attachment-view")).toHaveCount(1);
     // Safari focuses the tapped tabindex="0" log, not the thumbnail button,
     // so the dialog's focus restoration returns to the container and paints
     // a ring around the whole conversation. Emulate that flow: the log holds
@@ -476,11 +530,101 @@ test.describe("attachment viewer", () => {
       document.getElementById("chat-timeline")!.focus();
       document.querySelector<HTMLButtonElement>("#chat-items .chat-attachment-view")!.click();
     });
-    await expect(page.locator("#chat-image-viewer")).toBeVisible();
+    await expectViewerOpen(page);
     await page.keyboard.press("Escape");
-    await expect(page.locator("#chat-image-viewer")).toBeHidden();
-    // The close handler blurs the restored container focus.
+    await expectViewerClosed(page);
+    // Focus returns to the thumbnail that opened the viewer.
+    await expect(page.locator("#chat-items .chat-attachment-view").first()).toBeFocused();
+
+    // With the opener gone, the dialog's own restoration lands on the log,
+    // and chat's close hook blurs it.
+    await page.evaluate(() => {
+      document.getElementById("chat-timeline")!.focus();
+      document.querySelector<HTMLButtonElement>("#chat-items .chat-attachment-view")!.click();
+    });
+    await expectViewerOpen(page);
+    await page.evaluate(() => document.querySelector("#chat-items .chat-attachment-view")!.remove());
+    await page.keyboard.press("Escape");
+    await expectViewerClosed(page);
     await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? "")).not.toBe("chat-timeline");
+  });
+});
+
+// Thumbnails are previews of a larger image, so even one rendered at 96 CSS
+// px or more a side (the small-media floor) gets no inline zoom: activating it
+// opens the viewer on the full image.
+async function sendLargeThumbnail(page: Page) {
+  await newConversation(page);
+  await attachViaPicker(page, "large.png", checkerboardPng(400, 300));
+  // The Send control, not Enter: on touch Enter adds a line.
+  await page.locator("#chat-input").fill("large attachment");
+  const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+  await page.getByRole("button", { name: "Send message" }).click();
+  await accepted;
+  const thumbnail = page.locator("#chat-items .chat-user-message:not(.is-pending) .chat-attachment-view").first();
+  const image = thumbnail.locator("img");
+  await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(400);
+  const box = (await image.boundingBox())!;
+  expect(box.width).toBeGreaterThanOrEqual(96);
+  expect(box.height).toBeGreaterThanOrEqual(96);
+  await expect(page.locator("#chat-items .media-zoom-frame, #chat-items .media-zoom-toolbar")).toHaveCount(0);
+  return { thumbnail, image, box };
+}
+
+async function expectNotZoomedInline(page: Page, image: Locator, box: { width: number; height: number }): Promise<void> {
+  await expect(page.locator("#chat-items .media-zoom-frame")).toHaveCount(0);
+  expect(await image.evaluate(element => getComputedStyle(element).transform)).toBe("none");
+  const after = (await image.boundingBox())!;
+  expect(Math.abs(after.width - box.width)).toBeLessThan(0.5);
+  expect(Math.abs(after.height - box.height)).toBeLessThan(0.5);
+}
+
+test.describe("attachment thumbnails stay viewer-only", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a thumbnail of at least 96px a side has no inline zoom; the wheel leaves it, and click and Enter open the viewer", async ({ page }) => {
+    const { thumbnail, image, box } = await sendLargeThumbnail(page);
+    await thumbnail.hover();
+    await expect(page.locator("#chat-items .media-zoom-toolbar")).toHaveCount(0);
+    const wheels = await recordWheels(page);
+    await page.mouse.wheel(0, 120);
+    // Ctrl+wheel is what a trackpad pinch produces.
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, -120);
+    await page.keyboard.up("Control");
+    await expect.poll(wheels).toEqual([false, false]);
+    await expectViewerClosed(page);
+    await expectNotZoomedInline(page, image, box);
+
+    await thumbnail.click();
+    await expectViewerOpen(page);
+    await expect(page.locator(".media-viewer-stage img")).toHaveAttribute("src", /\/api\/chat\/attachments\//);
+    await page.keyboard.press("Escape");
+    await expectViewerClosed(page);
+    await thumbnail.focus();
+    await page.keyboard.press("Enter");
+    await expectViewerOpen(page);
+    await page.keyboard.press("Escape");
+    await expectViewerClosed(page);
+    await expect(thumbnail).toBeFocused();
+  });
+});
+
+test.describe("attachment thumbnails stay viewer-only on touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a pinch on a thumbnail of at least 96px a side never zooms it inline, and a tap opens the viewer", async ({ page }) => {
+    const { thumbnail, image, box } = await sendLargeThumbnail(page);
+    const cdp = await page.context().newCDPSession(page);
+    await pinch(cdp, await centreOf(image), 30, 90);
+    await afterAnimationFrames(page);
+    await expectViewerClosed(page);
+    await expectNotZoomedInline(page, image, box);
+
+    await thumbnail.tap();
+    await expectViewerOpen(page);
+    await expect(page.locator(".media-viewer-stage img")).toHaveAttribute("src", /\/api\/chat\/attachments\//);
   });
 });
 
@@ -776,6 +920,37 @@ test.describe("model switch after staging", () => {
     await page.locator("#chat-input").press("Enter");
     const body = (await accepted).request().postDataJSON() as { attachments?: unknown[] };
     expect(body.attachments).toHaveLength(1);
+  });
+});
+
+test.describe("attachment viewer on touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a tapped thumbnail opens the shared viewer, a tap on the image keeps it, and a backdrop tap closes it", async ({ page }) => {
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await newConversation(page);
+    await attachViaPicker(page);
+    // Touch Enter is a newline; the send control sends.
+    await page.locator("#chat-input").fill("touch view");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-send").tap();
+    await accepted;
+    const thumbnail = page.locator("#chat-items .chat-user-message:not(.is-pending) .chat-attachment-view");
+    await expect(thumbnail).toHaveCount(1);
+    await expect(page.locator("#chat-items .media-zoom-frame")).toHaveCount(0);
+
+    await thumbnail.tap();
+    await expectViewerOpen(page);
+    await expect(page.locator(".media-viewer-stage img")).toHaveAttribute("src", /\/api\/chat\/attachments\//);
+    const media = await viewerMediaPoint(page);
+    await page.touchscreen.tap(media.x, media.y);
+    await afterAnimationFrames(page);
+    await expect(viewerDialog(page)).toHaveAttribute("open", "");
+    const backdrop = await backdropPoint(page);
+    await page.touchscreen.tap(backdrop.x, backdrop.y);
+    await expectViewerClosed(page);
+    await expect(page.locator("#chat-items")).toContainText("touch view");
   });
 });
 

@@ -35,7 +35,8 @@ cognitive debt.
 ## Features
 
 - Markdown / AsciiDoc rendering with unified metadata cards for frontmatter and AsciiDoc header attributes
-- Mermaid diagrams (fenced and `[source,mermaid]`) with a fullscreen pan/zoom viewer
+- Mermaid diagrams (fenced and `[source,mermaid]`)
+- Zoom and pan for images, SVGs, Mermaid diagrams and chat media: inline within the media's own box (toolbar and drag on desktop, pinch on touch), or in one shared fullscreen viewer
 - Syntax highlighting for source files, plus per-file copy-to-clipboard on every code block
 - Cross-document `.md`/`.adoc` link navigation; live reload over one server-sent-events stream per tab, however many panes are open
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)

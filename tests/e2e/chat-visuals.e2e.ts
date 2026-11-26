@@ -5,8 +5,22 @@ import type { APIRequestContext, Page } from "@playwright/test";
 import { openChatPanel } from "./chat-helpers";
 import { frames, position, settleScroll } from "./chat-shell-helpers";
 import { workspacePath } from "./config";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
+import {
+  backdropPoint,
+  centreOf,
+  expectViewerClosed,
+  expectViewerOpen,
+  mouseDrag,
+  pinch,
+  recordWheels,
+  touchDrag,
+  viewerDialog,
+  viewerMediaPoint,
+} from "./media-viewer-helpers";
+import { expectTransformClose as expectTransform, readInlineTransform } from "./transform-helpers";
 
 const browserTest = withEngineBrowsers(test);
 
@@ -70,10 +84,25 @@ test.describe("agent inline visuals", () => {
       await publish(request, conversationId, id, markdown + "\n\nPlease review the result.");
       await expect(visual.locator(".chat-visual-source")).toBeVisible();
       await visual.getByRole("button", { name: "Preview", exact: true }).click();
+      // The image opens the shared viewer at fit. Only Escape, the close
+      // control or the empty backdrop dismiss it; a click on the image keeps it.
       await image.click();
-      await expect(page.locator("#chat-image-viewer")).toBeVisible();
+      await expectViewerOpen(page);
+      const media = await viewerMediaPoint(page);
+      await page.mouse.click(media.x, media.y);
+      await frames(page);
+      await expect(viewerDialog(page)).toHaveAttribute("open", "");
       await page.keyboard.press("Escape");
-      await expect(page.locator("#chat-image-viewer")).not.toBeVisible();
+      await expectViewerClosed(page);
+      await image.click();
+      await expectViewerOpen(page);
+      const backdrop = await backdropPoint(page);
+      await page.mouse.click(backdrop.x, backdrop.y);
+      await expectViewerClosed(page);
+      await image.click();
+      await expectViewerOpen(page);
+      await page.locator(".media-viewer-close").click();
+      await expectViewerClosed(page);
       await visual.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath(`${viewport.name}-inline-svg.png`) });
     });
@@ -93,13 +122,26 @@ test.describe("agent inline visuals", () => {
       expect(inline.width / inline.height).toBeCloseTo(800 / 430, 1);
       const content = await page.locator("#chat-items .chat-assistant-content").boundingBox();
       expect(inline.width).toBeLessThanOrEqual(content!.width + 1);
+      // With no width of its own, it fills the message width.
+      expect(inline.width).toBeGreaterThan(content!.width * 0.9);
       await image.click();
-      const enlarged = page.locator("#chat-image-viewer img");
+      await expectViewerOpen(page);
+      const enlarged = page.locator(".media-viewer-stage img");
       await expect.poll(() => enlarged.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
-      const size = await enlarged.boundingBox();
-      expect(size!.width).toBeGreaterThanOrEqual(Math.min(inline.width, viewport.width * 0.9) - 1);
-      expect(size!.width / size!.height).toBeCloseTo(800 / 430, 1);
+      // At fit the enlarged SVG has real dimensions and sits inside the
+      // visible viewport.
+      const size = (await enlarged.boundingBox())!;
+      const visible = await page.evaluate(() => ({ width: window.innerWidth, height: window.visualViewport?.height ?? window.innerHeight }));
+      expect(size.width).toBeGreaterThan(0);
+      expect(size.height).toBeGreaterThan(0);
+      expect(size.x).toBeGreaterThanOrEqual(-0.5);
+      expect(size.y).toBeGreaterThanOrEqual(-0.5);
+      expect(size.x + size.width).toBeLessThanOrEqual(visible.width + 0.5);
+      expect(size.y + size.height).toBeLessThanOrEqual(visible.height + 0.5);
+      expect(size.width).toBeGreaterThanOrEqual(Math.min(inline.width, viewport.width * 0.8) - 1);
+      expect(size.width / size.height).toBeCloseTo(800 / 430, 1);
       await page.keyboard.press("Escape");
+      await expectViewerClosed(page);
     });
     test(`${viewport.name}: delayed image decoding and streaming preserve an earlier reading anchor until Latest is requested`, async ({ page, request }) => {
       const errors: string[] = [];
@@ -366,6 +408,239 @@ test.describe("agent inline visuals", () => {
     await visual.getByRole("button", { name: "Source", exact: true }).click();
     await expect(visual.locator(".chat-visual-source code")).toHaveText(SVG);
     expect(errors).toEqual([]);
+  });
+});
+
+// --- Inline zoom on visuals (src/zoom/inline.ts) ---------------------------
+
+const WIDE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="430" viewBox="0 0 800 430"><rect width="800" height="430" fill="#e8eefc"/><path d="M0 0L800 430" stroke="#123" stroke-width="3"/><text x="40" y="80" font-size="32">Zoomable</text></svg>';
+const ZOOM_FIT = { tx: 0, ty: 0, scale: 1 };
+
+// A streaming reply whose captured SVG has loaded; returns its zoom frame.
+async function publishZoomableVisual(page: Page, request: APIRequestContext, conversationId: string, id: string, markdown: string) {
+  await control(request, { action: "status", conversationId, status: "running" });
+  await publish(request, conversationId, id, markdown);
+  const frame = page.locator(`[data-chat-item-id="${id}"] .chat-visual .media-zoom-frame`);
+  await expect(frame.locator("img")).toHaveCount(1);
+  await frame.scrollIntoViewIfNeeded();
+  await expect.poll(() => frame.locator("img").evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(800);
+  await expect.poll(async () => ((await frame.boundingBox())?.width ?? 0) >= 96).toBe(true);
+  // Marks the node, so a re-created frame cannot pass for the retained one.
+  await frame.evaluate(element => element.setAttribute("data-test-retained", "true"));
+  return frame;
+}
+
+test.describe("visual inline zoom on desktop", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("toolbar zoom and drag pan the visual, a text delta keeps the zoom, and the viewer opens only at fit or through expand", async ({ page, request }, testInfo) => {
+    const conversationId = await boot(page, request);
+    const markdown = `Here is the chart.\n\n\`\`\`svg\n${WIDE_SVG}\n\`\`\`\n`;
+    const frame = await publishZoomableVisual(page, request, conversationId, "zoom-desktop", markdown);
+    const toolbar = frame.locator(".media-zoom-toolbar");
+    const button = (name: string) => toolbar.getByRole("button", { name, exact: true });
+
+    await expect(toolbar).toBeHidden();
+    await frame.hover();
+    for (const name of ["Zoom out", "Zoom in", "Fit", "Open fullscreen viewer"]) await expect(button(name)).toBeVisible();
+    // The named activator keeps its name; the toolbar is outside it.
+    await expect(frame.getByRole("button", { name: "Enlarge SVG graphic", exact: true })).toHaveCount(1);
+    expect(await frame.locator("button button").count()).toBe(0);
+    const box = (await frame.boundingBox())!;
+
+    await button("Zoom in").click();
+    await button("Zoom in").click();
+    const zoomed = (await readInlineTransform(frame))!;
+    expect(zoomed.scale).toBeCloseTo(1.25 ** 2, 3);
+    await captureScreenshot(page, testInfo, "chat-visual-inline-zoomed");
+    expect(await frame.locator(":scope > .media-zoom-clip").evaluate(element => getComputedStyle(element).overflow)).toBe("hidden");
+    // Zooming keeps the visual's box where it was.
+    const held = (await frame.boundingBox())!;
+    for (const side of ["x", "y", "width", "height"] as const) expect(Math.abs(held[side] - box[side])).toBeLessThan(0.02);
+
+    // A drag pans; neither it nor a click on zoomed media opens the viewer.
+    await mouseDrag(page, await centreOf(frame), -20, -16);
+    const panned = (await readInlineTransform(frame))!;
+    expect(panned.tx).toBeCloseTo(zoomed.tx - 20, 0);
+    expect(panned.ty).toBeCloseTo(zoomed.ty - 16, 0);
+    await frame.click();
+    await frames(page);
+    await expectViewerClosed(page);
+
+    // The wheel over zoomed media keeps its default (scrolling) and leaves the zoom.
+    const wheels = await recordWheels(page);
+    await frame.hover();
+    await page.mouse.wheel(0, 120);
+    await expect.poll(wheels).toEqual([false]);
+    expectTransform(await readInlineTransform(frame), panned);
+
+    // A streamed text delta re-renders the reply but keeps the visual's zoom.
+    await publish(request, conversationId, "zoom-desktop", `${markdown}\nA streamed sentence after the chart.`);
+    await expect(page.locator('[data-chat-item-id="zoom-desktop"]')).toContainText("A streamed sentence after the chart.");
+    await expect(frame).toHaveAttribute("data-test-retained", "true");
+    expectTransform(await readInlineTransform(frame), panned);
+
+    // Expand opens the viewer at fit; closing it leaves the inline zoom.
+    await frame.hover();
+    await button("Open fullscreen viewer").click();
+    await expectViewerOpen(page);
+    await expect(page.locator(".media-viewer-stage img")).toHaveAttribute("src", /\/api\/chat\/visuals\/[0-9a-f]{64}$/);
+    await page.keyboard.press("+");
+    // With the pointer away from the visual, its toolbar is hidden until
+    // focus is back on it.
+    await page.mouse.move(1, 1);
+    await expect(toolbar).toBeHidden();
+    await page.keyboard.press("Escape");
+    await expectViewerClosed(page);
+    // Focus returns to the expand control that opened the viewer.
+    await expect(button("Open fullscreen viewer")).toBeFocused();
+    expectTransform(await readInlineTransform(frame), panned);
+
+    // Back at fit, a click opens the viewer.
+    await frame.hover();
+    await button("Fit").click();
+    expectTransform(await readInlineTransform(frame), ZOOM_FIT);
+    await frame.click();
+    await expectViewerOpen(page);
+    await page.keyboard.press("Escape");
+    await expectViewerClosed(page);
+  });
+});
+
+test.describe("SVG visual sizing at fit", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("an SVG that declares its width keeps it, frame and image alike, rather than filling the message", async ({ page, request }) => {
+    const conversationId = await boot(page, request);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120"><rect width="200" height="120" fill="#e8eefc"/></svg>';
+    // Captured snapshots outlive a reset: a fresh id keeps an earlier run's out.
+    const id = `sized-svg-${randomUUID()}`;
+    await publish(request, conversationId, id, `\`\`\`svg\n${svg}\n\`\`\``, true);
+    const frame = page.locator(`[data-chat-item-id="${id}"] .chat-visual .media-zoom-frame`);
+    const image = frame.locator("img");
+    await expect(image).toHaveCount(1);
+    await frame.scrollIntoViewIfNeeded();
+    await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(200);
+    const content = (await page.locator("#chat-items .chat-assistant-content").boundingBox())!;
+    expect(content.width).toBeGreaterThan(280);
+    await expect.poll(async () => Math.round((await image.boundingBox())?.width ?? 0)).toBe(200);
+    expect(Math.round((await frame.boundingBox())!.width)).toBe(200);
+  });
+
+  test("a viewBox-only SVG that loaded while its Source tab was shown fills the message once Preview is selected", async ({ page, request }) => {
+    const conversationId = await boot(page, request);
+    // Captured snapshots outlive a reset: fresh content keeps an earlier run's out.
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 430"><rect width="800" height="430" fill="#e8eefc"/><text x="40" y="80" font-size="32">${randomUUID()}</text></svg>`;
+    const id = `hidden-viewbox-${randomUUID()}`;
+    // The image's bytes are held until its Source tab is showing.
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const visualBytes = /\/api\/chat\/visuals\/[0-9a-f]{64}$/;
+    await page.route(visualBytes, async route => {
+      await gate;
+      await route.continue();
+    });
+    try {
+      const requested = page.waitForRequest(candidate => visualBytes.test(new URL(candidate.url()).pathname));
+      await publish(request, conversationId, id, `\`\`\`svg\n${svg}\n\`\`\``, true);
+      await requested;
+      const visual = page.locator(`[data-chat-item-id="${id}"] .chat-visual`);
+      await visual.locator('[data-visual-tab="source"]').click();
+      await expect(visual.locator(".chat-visual-preview")).toBeHidden();
+      release();
+      const image = visual.locator(".media-zoom-frame img");
+      await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
+
+      await visual.locator('[data-visual-tab="preview"]').click();
+      await expect(visual.locator(".chat-visual-preview")).toBeVisible();
+      const content = (await page.locator(`[data-chat-item-id="${id}"] .chat-assistant-content`).boundingBox())!;
+      // With no width of its own, it fills the message width, as it does when it loads shown.
+      await expect.poll(async () => (await image.boundingBox())?.width ?? 0).toBeGreaterThan(content.width * 0.9);
+      const box = (await image.boundingBox())!;
+      expect(box.width / box.height).toBeCloseTo(800 / 430, 1);
+    } finally {
+      release();
+      await page.unroute(visualBytes);
+    }
+  });
+});
+
+test.describe("visual inline zoom on touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("a pinch zooms the visual and not the page, a text delta keeps the zoom, and fit and expand show only when zoomed", async ({ page, request }) => {
+    const conversationId = await boot(page, request);
+    const markdown = `\`\`\`svg\n${WIDE_SVG}\n\`\`\`\n`;
+    const frame = await publishZoomableVisual(page, request, conversationId, "zoom-touch", markdown);
+    const toolbar = frame.locator(".media-zoom-toolbar");
+    const button = (name: string) => toolbar.getByRole("button", { name, exact: true });
+    await expect(toolbar).toBeHidden();
+
+    // Two fingers spreading on the visual.
+    const cdp = await page.context().newCDPSession(page);
+    await pinch(cdp, await centreOf(frame), 40, 120);
+    const zoomed = (await readInlineTransform(frame))!;
+    expect(zoomed.scale).toBeGreaterThan(1.5);
+    await frames(page);
+    expect(await page.evaluate(() => window.visualViewport?.scale ?? 1)).toBe(1);
+
+    await expect(button("Fit")).toBeVisible();
+    await expect(button("Open fullscreen viewer")).toBeVisible();
+    await expect(button("Zoom in")).toBeHidden();
+    await expect(button("Zoom out")).toBeHidden();
+
+    await publish(request, conversationId, "zoom-touch", `${markdown}\nA streamed sentence after the chart.`);
+    await expect(page.locator('[data-chat-item-id="zoom-touch"]')).toContainText("A streamed sentence after the chart.");
+    await expect(frame).toHaveAttribute("data-test-retained", "true");
+    expectTransform(await readInlineTransform(frame), zoomed);
+
+    // A tap on zoomed media does not open the viewer.
+    await frame.tap();
+    await frames(page);
+    await expectViewerClosed(page);
+
+    await button("Fit").tap();
+    expectTransform(await readInlineTransform(frame), ZOOM_FIT);
+    await expect(toolbar).toBeHidden();
+
+    // At fit, a tap opens the viewer; a tap on the image keeps it open.
+    await frame.tap();
+    await expectViewerOpen(page);
+    const media = await viewerMediaPoint(page);
+    await page.touchscreen.tap(media.x, media.y);
+    await frames(page);
+    await expect(viewerDialog(page)).toHaveAttribute("open", "");
+    const backdrop = await backdropPoint(page);
+    await page.touchscreen.tap(backdrop.x, backdrop.y);
+    await expectViewerClosed(page);
+  });
+
+  test("a one-finger pan on a zoomed visual in a live reply keeps the transcript following it", async ({ page, request }) => {
+    const conversationId = await boot(page, request);
+    const timeline = page.locator("#chat-timeline");
+    for (let i = 0; i < 6; i++) await publish(request, conversationId, `before-visual-${i}`,
+      `Earlier message ${i}\n\n${"A deterministic line of transcript context. ".repeat(12)}`);
+    const markdown = `\`\`\`svg\n${WIDE_SVG}\n\`\`\`\n`;
+    const frame = await publishZoomableVisual(page, request, conversationId, "zoom-follow", markdown);
+    await expect.poll(async () => (await position(timeline)).bottom).toBeLessThan(2);
+
+    const cdp = await page.context().newCDPSession(page);
+    await pinch(cdp, await centreOf(frame), 40, 120);
+    const zoomed = (await readInlineTransform(frame))!;
+    expect(zoomed.scale).toBeGreaterThan(1.5);
+    // A finger moving down pans the media down. Unconsumed, the same drag
+    // would scroll the transcript up and stop following.
+    await touchDrag(cdp, await centreOf(frame), 0, 40);
+    const panned = (await readInlineTransform(frame))!;
+    expect(panned.ty).toBeGreaterThan(zoomed.ty);
+    await frames(page);
+
+    const extent = await timeline.evaluate(element => element.scrollHeight);
+    const more = Array.from({ length: 6 }, (_, i) => `Streamed paragraph ${i}. ${"More of the live reply. ".repeat(10)}`).join("\n\n");
+    await publish(request, conversationId, "zoom-follow", `${markdown}\n${more}`);
+    await expect(page.locator('[data-chat-item-id="zoom-follow"]')).toContainText("Streamed paragraph 5.");
+    await expect.poll(() => timeline.evaluate(element => element.scrollHeight)).toBeGreaterThan(extent + 100);
+    await expect.poll(async () => (await position(timeline)).bottom).toBeLessThan(50);
   });
 });
 

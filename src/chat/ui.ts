@@ -35,6 +35,7 @@ import { revealWorkerRequest } from "./worker-dismissal-client-request";
 import { CompactWorkersView } from "./compact-workers-view";
 import { expandedWorkBudget } from "./work-budget";
 import { renderChatMarkdown } from "./markdown";
+import { openChatMedia } from "./media-viewer";
 import { decorateChatVisuals } from "./visual-ui";
 import { SHELL_WORKER_STOP_WARNING, SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
@@ -212,10 +213,6 @@ export function initChat(api = new ChatApiClient()): void {
   const attachButton = document.querySelector<HTMLButtonElement>("#chat-attach");
   const attachInput = document.querySelector<HTMLInputElement>("#chat-attach-input");
   const attachmentsStrip = document.querySelector<HTMLElement>("#chat-attachments");
-  const imageViewer = document.querySelector<HTMLDialogElement>("#chat-image-viewer");
-  const imageViewerImage = document.querySelector<HTMLImageElement>("#chat-image-viewer-image");
-  const imageViewerName = document.querySelector<HTMLElement>("#chat-image-viewer-name");
-  const imageViewerClose = document.querySelector<HTMLButtonElement>("#chat-image-viewer-close");
   const copyStatus = document.querySelector<HTMLElement>("#chat-copy-status");
   const contextUsage = document.querySelector<HTMLDetailsElement>("#chat-context-usage");
   const contextUsageFill = document.querySelector<HTMLElement>("#chat-context-usage-meter .chat-context-meter-fill");
@@ -2294,48 +2291,16 @@ export function initChat(api = new ChatApiClient()): void {
    */
   const stageAttachmentFiles = (files: File[]) => composer.attach(files);
 
-  const openAttachmentViewer = (src: string, name: string) => {
-    if (!imageViewer || !imageViewerImage) return;
-    // The attribute round trip means the value technically arrives from the
-    // DOM, so it is re-validated against the only two shapes this app ever
-    // writes there: a staged blob: preview and the same-origin serve route.
-    let resolved: URL;
-    try { resolved = new URL(src, window.location.href); } catch { return; }
-    if (resolved.protocol !== "blob:" && resolved.origin !== window.location.origin) return;
-    imageViewerImage.src = resolved.href;
-    imageViewerImage.alt = name;
-    if (imageViewerName) imageViewerName.textContent = name;
-    imageViewer.showModal();
-  };
-  const closeAttachmentViewer = () => {
-    imageViewer?.close();
-    // Freed eagerly so a revoked object URL or a huge image does not linger.
-    if (imageViewerImage) imageViewerImage.src = "";
-  };
   // One delegated listener covers every surface a thumbnail renders in —
-  // timeline, queue dock, drill-down, and the composer strip.
+  // timeline, queue dock, drill-down, and the composer strip — and opens the
+  // shared media viewer at fit. Thumbnails are small media: no inline zoom.
   surface.addEventListener("click", event => {
     const view = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-attachment-view]") : null;
     if (!view) return;
-    const src = view.getAttribute("data-attachment-view");
-    if (!src) return;
-    openAttachmentViewer(src, view.getAttribute("data-attachment-view-name") ?? "attachment");
+    const source = view.getAttribute("data-attachment-view");
+    if (!source) return;
+    openChatMedia({ source, name: view.getAttribute("data-attachment-view-name") ?? "attachment", kind: "raster", opener: view });
   });
-  // Escape closes natively; any click dismisses too — the dialog is a
-  // viewer, not a form, so there is nothing a stray click could lose.
-  imageViewer?.addEventListener("click", closeAttachmentViewer);
-  imageViewer?.addEventListener("close", () => {
-    if (imageViewerImage) imageViewerImage.src = "";
-    // The dialog's focus restoration targets whatever held focus before
-    // showModal(). A pointer flow in Safari focuses the tabindex="0" log,
-    // not the thumbnail button, and the restored focus then paints a ring
-    // around the whole conversation. Blurring only the container is safe:
-    // a keyboard flow restores to the thumbnail button itself, which keeps
-    // its own focus ring untouched.
-    const restored = document.activeElement;
-    if (restored instanceof HTMLElement && restored.classList.contains("chat-timeline")) restored.blur();
-  });
-  imageViewerClose?.addEventListener("click", closeAttachmentViewer);
 
   attachButton?.addEventListener("click", () => {
     if (attachButton.disabled) return;

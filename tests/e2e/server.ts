@@ -336,6 +336,8 @@ async function handleE2EReset(request: Request): Promise<Response> {
   let body: {
     file?: string;
     extras?: Record<string, string>;
+    // Binary files (images), base64-encoded, written with `extras`.
+    binaryExtras?: Record<string, string>;
     dirty?: Record<string, string>;
     git?: boolean;
     nonGit?: boolean;
@@ -417,15 +419,19 @@ async function handleE2EReset(request: Request): Promise<Response> {
   if (previousWorkspaceRoot !== E2E_WORKSPACE_ROOT) {
     await fs.rm(previousWorkspaceRoot, { recursive: true, force: true });
   }
+  const writeSeed = async (relativePath: string, contents: string | Buffer) => {
+    const target = path.join(activeWorkspaceRoot, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
   if (body.extras) {
-    for (const [relativePath, contents] of Object.entries(body.extras)) {
-      const target = path.join(activeWorkspaceRoot, relativePath);
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, contents, "utf8");
-    }
+    for (const [relativePath, contents] of Object.entries(body.extras)) await writeSeed(relativePath, contents);
     // A seeded root README must stay the default selection; the write above
     // just reset the mtime the workspace reset gave it.
     if (Object.hasOwn(body.extras, "README.md")) await promoteRootReadme(activeWorkspaceRoot);
+  }
+  if (body.binaryExtras) {
+    for (const [relativePath, base64] of Object.entries(body.binaryExtras)) await writeSeed(relativePath, Buffer.from(base64, "base64"));
   }
   if (body.uatuConfig) {
     await fs.writeFile(

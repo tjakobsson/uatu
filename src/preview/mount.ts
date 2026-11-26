@@ -8,7 +8,6 @@ import { deferHiddenPreview } from "./deferred";
 import { contextualAppUrl } from "../shell/watch-context";
 import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
-import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
 import type { FileFacts, RootGroup, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
@@ -35,6 +34,7 @@ import {
 import { renderImagePreview } from "./image";
 import { imageSources, refreshImageRevisions } from "./image-revision";
 import { observePreviewSvgImages, preparePreviewHtml } from "./svg-images";
+import { attachPreviewMediaZoom, beginPreviewZoom, discardPreviewZoom, previewZoomSession, releasePreviewZoom, savePreviewZoom, syncPreviewViewer } from "./media-zoom";
 import { canEmbedImages, createEmbeddedImagesLearner, recordEmbeddedImages, type EmbeddedImagesLookup } from "./embedded-images";
 import { fetchWithinBudget } from "../shell/bounded-fetch";
 import { isViewableImageName } from "../shared/viewable-image";
@@ -176,6 +176,7 @@ export function forgetDocumentCache(documentId: string): void {
 export function refreshPreviewImages(roots: RootGroup[]): void {
   if (appState.previewMode.kind !== "document") return;
   refreshImageRevisions(previewElement, appBasePath(), roots, documentRevisionKey);
+  syncPreviewViewer();
 }
 
 // Mount a fetched document payload into the preview body. Centralizes the
@@ -210,7 +211,8 @@ export async function applyDocumentPayload(
   setPreviewType(payload);
   previewElement.classList.remove("empty");
   setPreviewBase(payload.path);
-  closeMermaidViewer();
+  // Re-rendering the same presentation keeps zoom; anything else drops it.
+  beginPreviewZoom(previewZoomSession(payload.id, appState.viewMode, appState.viewLayout));
 
   // Rendered and Source share the repository/filesystem facts presentation;
   // Diff wires its comparison-specific variant in diff.ts. In split layouts
@@ -276,9 +278,11 @@ export async function renderSinglePayload(
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
+  savePreviewZoom();
   previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
+  attachPreviewMediaZoom(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
   // preview body so users can switch between Single / Side by side /
   // Stacked from beside the content — same pattern as the diff view's
@@ -410,9 +414,11 @@ export async function renderSplitPayloads(
   renderedPane.append(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(renderedPayload.html)));
 
   mountLayoutToolbar(true);
+  savePreviewZoom();
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
   refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
+  attachPreviewMediaZoom(renderedPane);
 
   attachMetadataCardToggleListener(renderedPane);
   // Lazy install (resolves on setup, diagrams stream in) — see the
@@ -483,6 +489,10 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     // The update signal marks "the doc you are viewing changed on disk" —
     // it must not survive into a different document.
     clearUpdateSignal();
+    // Zoom belongs to the file it was made on: selecting another closes the
+    // viewer now, not once the new file has loaded, and a quick return to the
+    // first file, before the second mounts, finds nothing to carry back.
+    discardPreviewZoom();
     // Reset synchronously *before* fetch + innerHTML swap so the new content
     // paints at the top in a single layout pass. Doing it after the swap can
     // briefly flash the new content at the previous doc's scroll offset.
@@ -519,6 +529,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     documentLoadRetry.settle();
     syncFileFactsStrip({ kind: "hidden" });
     if (mediaKind(doc.name)) {
+      releasePreviewZoom();
       renderMediaPreview(doc, documentIndex.epoch);
     } else if (isViewableImageName(doc.name)) {
       renderImagePreview(doc);

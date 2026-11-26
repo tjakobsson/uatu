@@ -16,7 +16,9 @@ import { removeTerminalGates, terminalGate, waitForTerminalReady } from "./termi
 import {
   expectStageTransform,
   expectStageTransformDiffers,
+  readStageScale,
   readStageTransform,
+  transformsClose,
 } from "./transform-helpers";
 
 // iPhone 13 Pro portrait. hasTouch + isMobile make Chromium report a coarse
@@ -612,23 +614,16 @@ test.describe("touch mermaid viewer", () => {
     const trigger = page.locator("#preview .mermaid-trigger");
     await expect(trigger).toBeVisible();
     await trigger.tap();
-    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    await expect(page.locator("dialog.media-viewer")).toHaveAttribute("open", "");
     // Let the deferred fit-to-viewport RAF (scheduled with the open) run
     // before measuring.
     await nextAnimationFrame(page);
   }
 
-  function stageTransform(page: import("@playwright/test").Page): Promise<string> {
-    return page.locator(".mermaid-viewer-stage").evaluate(el => (el as HTMLElement).style.transform);
-  }
-
-  function stageScale(page: import("@playwright/test").Page): Promise<number> {
-    return page.evaluate(() => {
-      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
-      const match = stage?.style.transform.match(/scale\(([\d.]+)\)/);
-      return match ? Number.parseFloat(match[1]!) : Number.NaN;
-    });
-  }
+  // The committed transform: the viewer commits about 120ms after input
+  // stops, even with fingers still down, and these helpers wait for it.
+  const stageTransform = readStageTransform;
+  const stageScale = readStageScale;
 
   // Playwright has no pinch primitive; drive the pointer events the viewer
   // actually listens to. `isPrimary` matters — the second finger is not.
@@ -641,7 +636,7 @@ test.describe("touch mermaid viewer", () => {
   ): Promise<void> {
     await page.evaluate(
       ({ type, pointerId, x, y }) => {
-        const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+        const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport");
         if (!viewport) throw new Error("no viewer viewport");
         viewport.dispatchEvent(
           new PointerEvent(type, {
@@ -668,8 +663,8 @@ test.describe("touch mermaid viewer", () => {
     await openViewer(page);
 
     const geometry = await page.evaluate(() => {
-      const close = document.querySelector<HTMLElement>(".mermaid-viewer-close");
-      const dialog = document.querySelector<HTMLElement>("dialog.mermaid-viewer");
+      const close = document.querySelector<HTMLElement>(".media-viewer-close");
+      const dialog = document.querySelector<HTMLElement>("dialog.media-viewer");
       if (!close || !dialog) return null;
       const rect = close.getBoundingClientRect();
       return {
@@ -692,8 +687,8 @@ test.describe("touch mermaid viewer", () => {
     expect(geometry!.rect.height).toBeGreaterThanOrEqual(44);
     expect(geometry!.rect.width).toBeGreaterThanOrEqual(44);
 
-    await page.locator(".mermaid-viewer-close").tap();
-    await expect(page.locator("dialog.mermaid-viewer")).not.toHaveAttribute("open", "");
+    await page.locator(".media-viewer-close").tap();
+    await expect(page.locator("dialog.media-viewer")).not.toHaveAttribute("open", "");
   });
 
   test("two-finger pinch zooms the diagram", async ({ page }) => {
@@ -728,39 +723,25 @@ test.describe("touch mermaid viewer", () => {
 
     await dispatchPointer(page, "pointerdown", 1, 200, 400);
     await dispatchPointer(page, "pointermove", 1, 230, 430);
-    const afterPan = await stageTransform(page);
+    const afterPan = (await stageTransform(page))!;
 
     // Second finger lands — no movement of either finger, so nothing should move.
     await dispatchPointer(page, "pointerdown", 2, 300, 500);
-    expect(await stageTransform(page)).toBe(afterPan);
+    expect(transformsClose(await stageTransform(page), afterPan)).toBe(true);
 
     // …and lifts again. Still nothing should move.
     await dispatchPointer(page, "pointerup", 2, 300, 500);
-    expect(await stageTransform(page)).toBe(afterPan);
+    expect(transformsClose(await stageTransform(page), afterPan)).toBe(true);
 
     // The surviving finger resumes panning from where it is, not from where
     // the pan originally started.
     await dispatchPointer(page, "pointermove", 1, 240, 440);
-    const resumed = await stageTransform(page);
-    expect(resumed).not.toBe(afterPan);
+    const resumed = (await stageTransform(page))!;
+    expectStageTransformDiffers(resumed, afterPan);
 
-    const delta = await page.evaluate(
-      ({ before, after }) => {
-        const parse = (t: string) => {
-          const m = t.match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
-          return m ? { x: Number.parseFloat(m[1]!), y: Number.parseFloat(m[2]!) } : null;
-        };
-        const a = parse(before);
-        const b = parse(after);
-        if (!a || !b) return null;
-        return { dx: b.x - a.x, dy: b.y - a.y };
-      },
-      { before: afterPan, after: resumed },
-    );
     // Exactly the 10px the finger moved — no jump folded in.
-    expect(delta).not.toBeNull();
-    expect(Math.abs(delta!.dx - 10)).toBeLessThan(1.5);
-    expect(Math.abs(delta!.dy - 10)).toBeLessThan(1.5);
+    expect(Math.abs(resumed.tx - afterPan.tx - 10)).toBeLessThan(1.5);
+    expect(Math.abs(resumed.ty - afterPan.ty - 10)).toBeLessThan(1.5);
 
     await dispatchPointer(page, "pointerup", 1, 240, 440);
   });
@@ -776,7 +757,7 @@ test.describe("touch mermaid viewer", () => {
     steps: Array<["pointerdown" | "pointermove" | "pointerup", number, number, number]>,
   ): Promise<void> {
     await page.evaluate(sequence => {
-      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport");
       if (!viewport) throw new Error("no viewer viewport");
       for (const [type, pointerId, x, y] of sequence) {
         viewport.dispatchEvent(
@@ -873,13 +854,14 @@ test.describe("touch mermaid viewer", () => {
     // gesture rather than about how fast the harness can dispatch.
     //
     // Tap, then a pan past the movement limit, then a tap back where the first
-    // one landed.
+    // one landed. The pan is kept short so that point is still on the
+    // diagram: a tap on the empty backdrop closes the viewer.
     await dispatchSequence(page, [
       ["pointerdown", 51, 195, 300],
       ["pointerup", 51, 195, 300],
       ["pointerdown", 52, 195, 300],
-      ["pointermove", 52, 195, 500],
-      ["pointerup", 52, 195, 500],
+      ["pointermove", 52, 195, 340],
+      ["pointerup", 52, 195, 340],
       ["pointerdown", 53, 195, 300],
       ["pointerup", 53, 195, 300],
     ]);
@@ -916,8 +898,8 @@ test.describe("touch mermaid viewer", () => {
     }
 
     const overlap = await page.evaluate(() => {
-      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
-      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      const stage = document.querySelector<HTMLElement>(".media-viewer-stage");
+      const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport");
       if (!stage || !viewport) return null;
       const s = stage.getBoundingClientRect();
       const v = viewport.getBoundingClientRect();
@@ -940,8 +922,8 @@ test.describe("touch mermaid viewer", () => {
       await dispatchPointer(page, "pointerup", 20 + pass, -2000, -3000);
     }
     const reverse = await page.evaluate(() => {
-      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
-      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      const stage = document.querySelector<HTMLElement>(".media-viewer-stage");
+      const viewport = document.querySelector<HTMLElement>(".media-viewer-viewport");
       if (!stage || !viewport) return null;
       const s = stage.getBoundingClientRect();
       const v = viewport.getBoundingClientRect();
@@ -959,7 +941,7 @@ test.describe("touch mermaid viewer", () => {
     // a one-finger pan target, so a downward drag already means "move the
     // diagram up" — no swipe-to-dismiss is layered on top of it.
     await openViewer(page);
-    const dialog = page.locator("dialog.mermaid-viewer");
+    const dialog = page.locator("dialog.media-viewer");
 
     for (const speed of [40, 400]) {
       await dispatchPointer(page, "pointerdown", 30 + speed, 195, 200);

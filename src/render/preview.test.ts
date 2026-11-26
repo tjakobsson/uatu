@@ -6,10 +6,12 @@ import {
   __resetMermaidStateForTests,
   normalizeMermaidSvg,
   normalizeRenderedDiagram,
+  onMermaidDiagramRendered,
   renderMermaidDiagrams,
   reobserveMermaidDiagrams,
   replaceMermaidCodeBlocks,
   rerenderMermaidDiagrams,
+  setMermaidRenderPriority,
 } from "./preview";
 
 // renderMermaidDiagrams resolves when lazy rendering is INSTALLED, not when
@@ -76,7 +78,7 @@ describe("rendered diagram normalization", () => {
     expect(svg.getAttribute("width")).toBe("100%");
   });
 
-  test("normalizeRenderedDiagram wraps the SVG in a button trigger with badge", () => {
+  test("normalizeRenderedDiagram frames a named button trigger with the zoom toolbar beside it", () => {
     const div = doc.createElement("div");
     div.className = "mermaid";
     div.innerHTML =
@@ -84,11 +86,18 @@ describe("rendered diagram normalization", () => {
 
     normalizeRenderedDiagram(div as unknown as HTMLElement);
 
-    const trigger = div.querySelector("button.mermaid-trigger");
-    expect(trigger).not.toBeNull();
+    const frame = div.querySelector(":scope > .media-zoom-frame");
+    expect(frame).not.toBeNull();
+    const trigger = frame?.querySelector(":scope > .media-zoom-clip > button.mermaid-trigger");
     expect(trigger?.getAttribute("type")).toBe("button");
-    expect(trigger?.querySelector("svg")).not.toBeNull();
-    expect(trigger?.querySelector(".mermaid-trigger-badge")).not.toBeNull();
+    expect(trigger?.getAttribute("aria-label")).toBe("Open diagram in fullscreen viewer");
+    expect(trigger?.querySelector(":scope > svg")).not.toBeNull();
+    // The old badge is gone; expand is a toolbar control outside the button.
+    expect(div.querySelector(".mermaid-trigger-badge")).toBeNull();
+    expect(trigger?.querySelector("button")).toBeNull();
+    expect(div.querySelectorAll("button button").length).toBe(0);
+    const toolbar = frame?.querySelector(":scope > .media-zoom-toolbar");
+    expect(toolbar?.querySelector('[aria-label="Open fullscreen viewer"]')).not.toBeNull();
   });
 
   test("normalizeRenderedDiagram is idempotent", () => {
@@ -100,6 +109,9 @@ describe("rendered diagram normalization", () => {
     normalizeRenderedDiagram(div as unknown as HTMLElement);
 
     expect(div.querySelectorAll("button.mermaid-trigger").length).toBe(1);
+    expect(div.querySelectorAll(".media-zoom-frame").length).toBe(1);
+    expect(div.querySelectorAll(".media-zoom-toolbar").length).toBe(1);
+    expect(div.querySelectorAll("button button").length).toBe(0);
   });
 });
 
@@ -221,7 +233,7 @@ describe("lazy mermaid render queue", () => {
 
   // Records each rendered node's source at invocation time — the node's
   // textContent is replaced by the rendered SVG, so asserting on it later
-  // reads the badge glyph instead of the diagram source.
+  // would not read the diagram source.
   let renderedSources: string[] = [];
   const okRun = () =>
     mock(async (options: { nodes: HTMLElement[] }) => {
@@ -264,6 +276,27 @@ describe("lazy mermaid render queue", () => {
     expect(rendered.every(node => !node.classList.contains("mermaid-pending"))).toBe(true);
     // FIFO: processed in DOM order.
     expect(renderedSources).toEqual(["graph A", "graph B", "graph C"]);
+  });
+
+  test("the rendered-diagram listener hears each framed diagram, fresh and from the cache", async () => {
+    const run = okRun();
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run };
+    const heard: HTMLElement[] = [];
+    onMermaidDiagramRendered(node => heard.push(node));
+    try {
+      const fresh = containerWith("graph HOOK");
+      await installAndDrain(fresh);
+      const cached = containerWith("graph HOOK");
+      await installAndDrain(cached);
+
+      expect(run.mock.calls.length).toBe(1);
+      expect(heard).toEqual([fresh.querySelector(".mermaid")!, cached.querySelector(".mermaid")!]);
+      for (const node of heard) {
+        expect(node.querySelector(":scope > .media-zoom-frame > .media-zoom-clip > button.mermaid-trigger > svg")).not.toBeNull();
+      }
+    } finally {
+      onMermaidDiagramRendered(null);
+    }
   });
 
   test("a new install abandons the previous install's pending queue entries", async () => {
@@ -436,6 +469,47 @@ describe("lazy mermaid render queue", () => {
     expect(nodes[0]?.querySelector("svg")).not.toBeNull();
     expect(nodes[1]?.querySelector("svg")).toBeNull();
     expect(nodes[1]?.classList.contains("mermaid-pending")).toBe(true);
+  });
+});
+
+describe("prioritized mermaid diagrams", () => {
+  afterEach(() => {
+    setMermaidRenderPriority(null);
+    delete (globalThis as { mermaid?: unknown }).mermaid;
+    delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+  });
+
+  test("a diagram the priority picks renders without approaching the viewport; the rest wait", async () => {
+    __resetMermaidStateForTests();
+    const doc = parseHTML("<!doctype html><html><body></body></html>").document as unknown as Document;
+    const run = mock(async (options: { nodes: HTMLElement[] }) => {
+      for (const node of options.nodes) node.innerHTML = '<svg viewBox="0 0 10 10"></svg>';
+    });
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run };
+    // An observer that never reports an intersection: everything is off-screen.
+    const observed: Element[] = [];
+    class FakeObserver {
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeObserver;
+    const container = doc.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph A</div><div class="mermaid">graph SHOWN</div>';
+    const nodes = Array.from(container.querySelectorAll<HTMLElement>(".mermaid"));
+    setMermaidRenderPriority(node => node === nodes[1]);
+
+    await renderMermaidDiagrams(container as unknown as ParentNode);
+    await __drainMermaidQueueForTests();
+
+    expect(run.mock.calls.length).toBe(1);
+    expect(nodes[1]!.querySelector("svg")).not.toBeNull();
+    expect(nodes[0]!.querySelector("svg")).toBeNull();
+    expect(nodes[0]!.classList.contains("mermaid-pending")).toBe(true);
+    // It is not observed, so an intersection cannot queue it a second time.
+    expect(observed).toEqual([nodes[0]!]);
   });
 });
 
