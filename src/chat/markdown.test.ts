@@ -103,13 +103,15 @@ describe("chat Markdown security", () => {
       const { document } = parseHTML(`<div id="root">${html}</div>`);
       const frame = document.querySelector(".chat-visual-preview > .media-zoom-frame")!;
       expect(frame).not.toBeNull();
-      const button = frame.querySelector(":scope > button.chat-visual-enlarge.media-zoom-activator")!;
+      const button = frame.querySelector(":scope > .media-zoom-clip > button.chat-visual-enlarge.media-zoom-activator")!;
       // The accessible name is kept.
       expect(button.getAttribute("aria-label")).toBe(mimeType === "image/png" ? "Enlarge Shot <one>" : "Enlarge SVG graphic");
       expect(button.querySelector(":scope > img.media-zoom-stage")?.getAttribute("src")).toBe(`/api/chat/visuals/${VISUAL_ID}`);
       // Opening goes through inline zoom, not the attachment handler.
       expect(button.hasAttribute("data-attachment-view")).toBe(false);
       const toolbar = frame.querySelector(":scope > .media-zoom-toolbar")!;
+      // The group is named after the visual it zooms.
+      expect(toolbar.getAttribute("aria-label")).toBe(mimeType === "image/png" ? "Zoom controls for Shot <one>" : "Zoom controls for SVG graphic");
       expect(Array.from(toolbar.querySelectorAll("button"), control => control.getAttribute("aria-label")))
         .toEqual(["Zoom out", "Zoom in", "Fit", "Open fullscreen viewer"]);
       expect(document.querySelectorAll("button button, button a, a button, button [role=group]")).toHaveLength(0);

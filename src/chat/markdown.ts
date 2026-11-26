@@ -48,7 +48,7 @@ function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): str
   const image = ready && !refusedCount
     // Framed for inline zoom: the button stays the one named activator, and
     // the zoom toolbar is its sibling, never inside it (visual-ui.ts binds it).
-    ? `${inlineFrameHtml(`<button type="button" class="chat-visual-enlarge ${ACTIVATOR_CLASS}" aria-label="Enlarge ${escapeHtml(input.alt)}"><img class="${STAGE_CLASS}" src="${escapeHtml(src)}" alt="${escapeHtml(input.alt)}" loading="lazy" decoding="async"></button>`)}<span class="chat-visual-fallback" role="status" hidden>Could not display ${escapeHtml(input.alt || "image")}.${reference ? ` ${reference}` : ""}</span>`
+    ? `${inlineFrameHtml(`<button type="button" class="chat-visual-enlarge ${ACTIVATOR_CLASS}" aria-label="Enlarge ${escapeHtml(input.alt)}"><img class="${STAGE_CLASS}" src="${escapeHtml(src)}" alt="${escapeHtml(input.alt)}" loading="lazy" decoding="async"></button>`, input.alt)}<span class="chat-visual-fallback" role="status" hidden>Could not display ${escapeHtml(input.alt || "image")}.${reference ? ` ${reference}` : ""}</span>`
     : `<span class="chat-visual-fallback"${pending ? ' role="status"' : ""}>${escapeHtml(message)}${reference ? ` ${reference}` : ""}</span>`;
   const controls = svg
     ? `<span class="chat-visual-controls" role="group" aria-label="SVG view"><button type="button" data-visual-tab="preview" aria-pressed="true">Preview</button><button type="button" data-visual-tab="source" aria-pressed="false">Source</button><button type="button" data-visual-copy${input.kind === "svg" && !hasId ? "" : ' disabled title="Open Source to load SVG before copying"'}>Copy source</button></span>`

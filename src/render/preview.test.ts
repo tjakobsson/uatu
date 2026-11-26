@@ -88,7 +88,7 @@ describe("rendered diagram normalization", () => {
 
     const frame = div.querySelector(":scope > .media-zoom-frame");
     expect(frame).not.toBeNull();
-    const trigger = frame?.querySelector(":scope > button.mermaid-trigger");
+    const trigger = frame?.querySelector(":scope > .media-zoom-clip > button.mermaid-trigger");
     expect(trigger?.getAttribute("type")).toBe("button");
     expect(trigger?.getAttribute("aria-label")).toBe("Open diagram in fullscreen viewer");
     expect(trigger?.querySelector(":scope > svg")).not.toBeNull();
@@ -292,7 +292,7 @@ describe("lazy mermaid render queue", () => {
       expect(run.mock.calls.length).toBe(1);
       expect(heard).toEqual([fresh.querySelector(".mermaid")!, cached.querySelector(".mermaid")!]);
       for (const node of heard) {
-        expect(node.querySelector(":scope > .media-zoom-frame > button.mermaid-trigger > svg")).not.toBeNull();
+        expect(node.querySelector(":scope > .media-zoom-frame > .media-zoom-clip > button.mermaid-trigger > svg")).not.toBeNull();
       }
     } finally {
       onMermaidDiagramRendered(null);

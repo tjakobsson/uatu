@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
+import { DOUBLE_TAP_MAX_GAP_MS } from "./gestures";
+import { FIT_MARGIN, KEY_PAN_STEP, KEY_PAN_STEP_LARGE, MAX_SCALE, PAN_KEEP_VISIBLE } from "./transform";
+
 type Harness = {
   window: Window & typeof globalThis;
   document: Document;
@@ -9,6 +12,18 @@ type Harness = {
 };
 
 const GLOBALS = ["window", "document", "Event", "requestAnimationFrame", "cancelAnimationFrame", "devicePixelRatio", "visualViewport"];
+
+// Browsers queue a dialog's close event as a task; by default it fires at
+// once here, and `deferCloseEvents` holds it until `flushCloseEvents`.
+let queuedCloseEvents: (() => void)[] | null = null;
+function deferCloseEvents(): void {
+  queuedCloseEvents = [];
+}
+function flushCloseEvents(): void {
+  const queued = queuedCloseEvents ?? [];
+  queuedCloseEvents = null;
+  for (const fire of queued) fire();
+}
 
 // linkedom has no <dialog> behaviour; give it the two methods and the `open`
 // reflection the viewer relies on, and fire `close` the way browsers do.
@@ -37,7 +52,9 @@ function polyfillDialog(window: any): () => void {
   proto.close = function (this: Element) {
     if (!this.hasAttribute("open")) return;
     this.removeAttribute("open");
-    this.dispatchEvent(new window.Event("close"));
+    const fire = () => this.dispatchEvent(new window.Event("close"));
+    if (queuedCloseEvents) queuedCloseEvents.push(fire);
+    else fire();
   };
   return undo;
 }
@@ -98,6 +115,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  flushCloseEvents();
   // As a reader would close it, whichever open a test left it on.
   h.document.querySelector<HTMLDialogElement>("dialog.media-viewer")?.close();
   h.restore();
@@ -253,6 +271,29 @@ describe("closing the media viewer", () => {
     expect(h.document.querySelector("dialog.media-viewer")!.hasAttribute("open")).toBe(false);
   });
 
+  test("an open before the last close's event arrives keeps its own content and hooks", () => {
+    deferCloseEvents();
+    const calls: string[] = [];
+    const first = h.viewer.openMediaViewer({ kind: "raster", src: "http://localhost/a.png" }, { afterClose: () => calls.push("a") });
+    first.close();
+    // A tap's follow-up click opening media straight away, in the same task.
+    const second = h.viewer.openMediaViewer({ kind: "raster", src: "http://localhost/b.png" }, { afterClose: () => calls.push("b") });
+    flushCloseEvents();
+    expect(h.document.querySelector("dialog.media-viewer")!.hasAttribute("open")).toBe(true);
+    expect(h.document.querySelector(".media-viewer-stage img")!.getAttribute("src")).toBe("http://localhost/b.png");
+    expect(calls).toEqual(["a"]);
+    second.close();
+    flushCloseEvents();
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  test("a touch on the viewer never ends in a click on what lies beneath it", () => {
+    h.viewer.openMediaViewer({ kind: "mermaid", svg: mermaidSvg(h.document) }, {});
+    const end = new h.window.Event("touchend", { bubbles: true, cancelable: true });
+    h.document.querySelector(".media-viewer-viewport")!.dispatchEvent(end);
+    expect(end.defaultPrevented).toBe(true);
+  });
+
   test("a second open replaces the first opener's hooks", () => {
     const calls: string[] = [];
     const first = h.viewer.openMediaViewer({ kind: "raster", src: "http://localhost/a.png" }, { afterClose: () => calls.push("a") });
@@ -282,10 +323,11 @@ describe("a viewer session across re-renders", () => {
     });
   }
 
-  // A pointer event as the viewport receives it from a touch screen.
-  function pointer(type: string, id: number, x: number, y: number, time: number): void {
+  // A pointer event as the viewport receives it, from a touch screen unless
+  // another pointer type is given.
+  function pointer(type: string, id: number, x: number, y: number, time: number, pointerType = "touch"): void {
     const event = new h.window.Event(type, { bubbles: true });
-    for (const [key, value] of Object.entries({ pointerId: id, clientX: x, clientY: y, timeStamp: time, pointerType: "touch", button: 0 })) {
+    for (const [key, value] of Object.entries({ pointerId: id, clientX: x, clientY: y, timeStamp: time, pointerType, button: 0 })) {
       Object.defineProperty(event, key, { value });
     }
     h.document.querySelector(".media-viewer-viewport")!.dispatchEvent(event);
@@ -570,10 +612,39 @@ describe("a viewer session across re-renders", () => {
       pointer("pointerup", id, to[0], to[1], time + 32);
     }
 
-    test("a tap that starts and ends on the backdrop closes the viewer", () => {
+    // A backdrop tap closes once no second press can pair with it.
+    const settle = () => Bun.sleep(DOUBLE_TAP_MAX_GAP_MS + 40);
+
+    test("a tap that starts and ends on the backdrop closes the viewer once it has settled", async () => {
       fitted();
       tapAt(1, [400, 60], [404, 58], 0);
+      expect(dialogOpen()).toBe(true);
+      await settle();
       expect(dialogOpen()).toBe(false);
+    });
+
+    test("a double-tap on the backdrop fits the media and keeps the viewer open", async () => {
+      fitted();
+      press("Zoom in");
+      // Zoomed in, the media spans y 60–540: above it is backdrop.
+      tapAt(1, [400, 30], [400, 30], 0);
+      tapAt(2, [402, 32], [402, 32], 120);
+      await settle();
+      expect(dialogOpen()).toBe(true);
+      expect(state()).toEqual({ tx: 16, ty: 108, scale: 1.92 });
+    });
+
+    test("a double-click on the backdrop fits the media and keeps the viewer open", async () => {
+      fitted();
+      press("Zoom in");
+      for (const time of [0, 120]) {
+        pointer("pointerdown", 1, 400, 30, time, "mouse");
+        pointer("pointerup", 1, 400, 30, time + 16, "mouse");
+      }
+      h.document.querySelector(".media-viewer-viewport")!.dispatchEvent(new h.window.Event("dblclick", { bubbles: true, cancelable: true }));
+      await settle();
+      expect(dialogOpen()).toBe(true);
+      expect(state()).toEqual({ tx: 16, ty: 108, scale: 1.92 });
     });
 
     test("a press that starts on the media and ends just past its edge does not close", () => {
@@ -588,7 +659,7 @@ describe("a viewer session across re-renders", () => {
       expect(dialogOpen()).toBe(true);
     });
 
-    test("a tap while the media is still loading closes the viewer, and a drag does not", () => {
+    test("a tap while the media is still loading closes the viewer, and a drag does not", async () => {
       h.viewer.openMediaViewer({ kind: "raster", src: "http://localhost/shot.png" }, {});
       sizeViewport();
       // Nothing is on show yet: the whole viewport is empty backdrop.
@@ -597,14 +668,16 @@ describe("a viewer session across re-renders", () => {
       pointer("pointerup", 1, 480, 300, 32);
       expect(dialogOpen()).toBe(true);
       tapAt(2, [400, 300], [402, 300], 600);
+      await settle();
       expect(dialogOpen()).toBe(false);
     });
 
-    test("a backdrop tap straight after a tap on the media closes rather than pairing into a double-tap", () => {
+    test("a backdrop tap straight after a tap on the media closes rather than pairing into a double-tap", async () => {
       fitted();
       tapAt(1, [400, 112], [400, 112], 0);
       expect(dialogOpen()).toBe(true);
       tapAt(2, [400, 96], [400, 96], 100);
+      await settle();
       expect(dialogOpen()).toBe(false);
     });
   });
@@ -705,7 +778,118 @@ describe("a viewer session across re-renders", () => {
       resized();
       const bounded = state();
       expect(bounded.scale).toBeCloseTo(zoomed.scale, 6);
-      expect(bounded.tx).toBeLessThanOrEqual(390 - 48);
+      expect(bounded.tx).toBeLessThanOrEqual(390 - PAN_KEEP_VISIBLE);
+    });
+  });
+
+  describe("keyboard pan", () => {
+    const key = (init: { key: string; shiftKey?: boolean }) => {
+      const event = new h.window.Event("keydown", { bubbles: true, cancelable: true });
+      for (const [name, value] of Object.entries({ shiftKey: false, ...init })) Object.defineProperty(event, name, { value });
+      h.document.querySelector(".media-viewer-close")!.dispatchEvent(event);
+      return event;
+    };
+
+    test("arrow keys move the view a step the way they point, and Shift moves it further", () => {
+      h.viewer.openMediaViewer({ kind: "mermaid", svg: diagram("0 0 400 200", "One") }, {});
+      sizeViewport();
+      press("Fit to screen");
+      press("Zoom in");
+      press("Zoom in");
+      const start = state();
+      // Like scrolling: ArrowRight brings what is to the right into view.
+      expect(key({ key: "ArrowRight" }).defaultPrevented).toBe(true);
+      expect(state()).toEqual({ ...start, tx: start.tx - KEY_PAN_STEP });
+      key({ key: "ArrowDown" });
+      expect(state()).toEqual({ ...start, tx: start.tx - KEY_PAN_STEP, ty: start.ty - KEY_PAN_STEP });
+      key({ key: "ArrowLeft", shiftKey: true });
+      key({ key: "ArrowUp", shiftKey: true });
+      expect(state()).toEqual({ ...start, tx: start.tx - KEY_PAN_STEP + KEY_PAN_STEP_LARGE, ty: start.ty - KEY_PAN_STEP + KEY_PAN_STEP_LARGE });
+    });
+  });
+
+  describe("zoom level", () => {
+    const level = () => h.document.querySelector(".media-viewer-zoom-level")!.textContent;
+    const status = () => h.document.querySelector(".media-viewer-status")!.textContent;
+    const disabled = (label: string) =>
+      h.document.querySelector(`.media-viewer-toolbar [aria-label="${label}"]`)!.getAttribute("aria-disabled") === "true";
+
+    test("the toolbar shows the zoom relative to fit, and announces changes made by its controls and keys", () => {
+      h.viewer.openMediaViewer({ kind: "mermaid", svg: diagram("0 0 400 200", "One") }, {});
+      sizeViewport();
+      press("Fit to screen");
+      expect(level()).toBe("100%");
+      press("Zoom in");
+      expect(level()).toBe("125%");
+      expect(status()).toBe("Zoom 125%");
+      press("Fit to screen");
+      expect(status()).toBe("Zoom 100%");
+    });
+
+    test("a gesture updates the level shown but announces nothing", () => {
+      h.viewer.openMediaViewer({ kind: "mermaid", svg: diagram("0 0 400 200", "One") }, {});
+      sizeViewport();
+      press("Fit to screen");
+      const announced = status();
+      pointer("pointerdown", 1, 350, 300, 0);
+      pointer("pointerdown", 2, 450, 300, 0);
+      pointer("pointermove", 2, 550, 300, 16);
+      pointer("pointerup", 1, 350, 300, 32);
+      pointer("pointerup", 2, 550, 300, 32);
+      expect(level()).toBe("200%");
+      expect(status()).toBe(announced);
+    });
+
+    test("zoom in and zoom out are marked unavailable at the limits, and stay focusable", () => {
+      h.viewer.openMediaViewer({ kind: "mermaid", svg: diagram("0 0 400 200", "One") }, {});
+      sizeViewport();
+      press("Fit to screen");
+      expect(disabled("Zoom in")).toBe(false);
+      expect(disabled("Zoom out")).toBe(false);
+      for (let i = 0; i < 20; i += 1) press("Zoom in");
+      expect(state().scale).toBe(MAX_SCALE);
+      expect(disabled("Zoom in")).toBe(true);
+      expect(h.document.querySelector<HTMLButtonElement>('.media-viewer-toolbar [aria-label="Zoom in"]')!.disabled).toBe(false);
+      for (let i = 0; i < 40; i += 1) press("Zoom out");
+      expect(disabled("Zoom out")).toBe(true);
+      expect(disabled("Zoom in")).toBe(false);
+    });
+  });
+
+  describe("fit leaves room for the toolbar and the caption", () => {
+    function placeBands(captionBottom: number | null, toolbarTop: number): void {
+      const at = (selector: string, top: number, bottom: number) =>
+        Object.defineProperty(h.document.querySelector(selector)!, "getBoundingClientRect", {
+          configurable: true,
+          value: () => ({ left: 300, right: 500, x: 300, y: top, top, bottom, width: 200, height: bottom - top }),
+        });
+      at(".media-viewer-toolbar", toolbarTop, toolbarTop + 44);
+      if (captionBottom !== null) at(".media-viewer-caption", captionBottom - 24, captionBottom);
+    }
+
+    test("tall media fits between the caption and the toolbar", () => {
+      h.viewer.openMediaViewer({ kind: "mermaid", svg: diagram("0 0 200 400", "Tall") }, {});
+      sizeViewport();
+      placeBands(null, 540);
+      press("Fit to screen");
+      // 540px above the toolbar, less the fit margin.
+      const fitted = state();
+      expect(fitted.scale).toBeCloseTo((540 - FIT_MARGIN) / 400, 6);
+      expect(fitted.ty).toBeCloseTo((540 - 400 * fitted.scale) / 2, 6);
+    });
+
+    test("a caption takes its band off the top", () => {
+      h.viewer.openMediaViewer({ kind: "raster", src: "http://localhost/tall.png", caption: "tall.png" }, {});
+      runFrames();
+      sizeViewport();
+      placeBands(40, 540);
+      const images = Array.from(h.document.querySelectorAll<HTMLImageElement>(".media-viewer-stage img"));
+      Object.defineProperty(images[0]!, "naturalWidth", { configurable: true, value: 200 });
+      Object.defineProperty(images[0]!, "naturalHeight", { configurable: true, value: 400 });
+      images[0]!.dispatchEvent(new h.window.Event("load"));
+      const fitted = state();
+      expect(fitted.scale).toBeCloseTo((500 - FIT_MARGIN) / 400, 6);
+      expect(fitted.ty).toBeCloseTo(40 + (500 - 400 * fitted.scale) / 2, 6);
     });
   });
 });

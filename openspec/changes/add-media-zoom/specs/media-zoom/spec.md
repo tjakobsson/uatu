@@ -85,6 +85,43 @@ On desktop, zoomable inline media SHALL show an overlay toolbar with zoom in, zo
 - **WHEN** the user activates expand on inline media
 - **THEN** the fullscreen viewer opens with that media at fit
 
+### Requirement: Inline controls never hide narrow media
+Zoomable media narrower than 200 CSS pixels SHALL show its inline toolbar outside its box, above it or, where the space above is out of view, below it, both at fit and zoomed. That toolbar MUST NOT cover the media and SHALL stay within the visible area. Wider media SHALL show the toolbar over its top-right corner.
+
+#### Scenario: A narrow diagram shows its toolbar above it
+- **WHEN** the pointer hovers a rendered Mermaid diagram 134 CSS pixels wide, at fit or zoomed
+- **THEN** its zoom in, zoom out, fit and expand controls are shown just above the diagram
+- **AND** no control covers any part of the diagram
+
+#### Scenario: Narrow media at the top of the view shows its toolbar below it
+- **WHEN** narrow media sits just below the top of the visible area, such as under the preview's sticky header, and the pointer hovers it
+- **THEN** its toolbar is shown just below the media, inside the visible area
+
+### Requirement: Each zoom action has one icon everywhere
+The inline toolbar and the viewer toolbar SHALL show the same icon for the same action, and fit and expand SHALL have clearly different icons. Every control SHALL keep its accessible name, and the icons MUST add no text that Find can match.
+
+#### Scenario: Fit looks the same inline and in the viewer
+- **WHEN** the user compares the inline toolbar with the viewer toolbar
+- **THEN** fit has the same icon in both
+- **AND** expand, inline, has an icon different from fit
+
+### Requirement: Zoom controls show their limits and the level
+Zoom in and zoom out SHALL be marked unavailable, while staying focusable, at the maximum and the minimum zoom; inline, zoom out is unavailable at fit. The viewer toolbar SHALL show the zoom level as a percentage of fit, where 100% is the media fitted. A level set by a toolbar control or a key SHALL be announced through a polite status region, and a pinch, a wheel or a drag MUST NOT announce.
+
+#### Scenario: The viewer shows the level relative to fit
+- **WHEN** the viewer opens at fit and the user activates zoom in once
+- **THEN** the toolbar shows 100% and then 125%
+- **AND** "Zoom 125%" is announced politely
+
+#### Scenario: Controls at a limit are unavailable but focusable
+- **WHEN** inline media is at fit, or zoomed media reaches the maximum scale
+- **THEN** zoom out, or zoom in, is announced as unavailable and keeps keyboard focus when it has it
+
+#### Scenario: A gesture announces nothing
+- **WHEN** the user pinches or scrolls the wheel in the viewer
+- **THEN** the level shown follows the zoom
+- **AND** no level is announced
+
 ### Requirement: The wheel never zooms inline media
 Inline media MUST NOT respond to wheel input, including the wheel events a trackpad pinch produces. Wheel input over inline media SHALL keep its default effect, so scrolling continues to scroll the surrounding surface. Wheel and trackpad pinch zoom SHALL be available in the fullscreen viewer.
 
@@ -98,7 +135,7 @@ Inline media MUST NOT respond to wheel input, including the wheel events a track
 - **THEN** the inline media's zoom is unchanged
 
 ### Requirement: Touch inline zoom uses pinch and one-finger pan
-On touch, a two-finger pinch on zoomable inline media SHALL zoom that media, anchored on the midpoint between the fingers, and MUST NOT zoom the page. At fit, a one-finger drag on the media SHALL scroll the page. Once the media is zoomed past fit, a one-finger drag SHALL pan the media, and the fit and expand controls SHALL be shown.
+On touch, a two-finger pinch on zoomable inline media SHALL zoom that media, anchored on the midpoint between the fingers, and MUST NOT zoom the page. At fit, a one-finger drag on the media SHALL scroll the page. Once the media is zoomed past fit, a one-finger drag SHALL pan the media, and the fit and expand controls SHALL be shown. A drag that reaches the media's top or bottom edge SHALL scroll the page with the rest of its movement.
 
 #### Scenario: Pinching media zooms the media, not the page
 - **WHEN** the user pinches outward with two fingers on an inline image
@@ -111,9 +148,14 @@ On touch, a two-finger pinch on zoomable inline media SHALL zoom that media, anc
 - **AND** the media's zoom and pan are unchanged
 
 #### Scenario: One finger pans zoomed media
-- **WHEN** inline media is zoomed past fit and the user drags one finger across it
+- **WHEN** inline media is zoomed past fit and the user drags one finger across it, within the media's edges
 - **THEN** the media pans within its box
 - **AND** the page does not scroll
+
+#### Scenario: A pan past the media's edge scrolls the page
+- **WHEN** inline media is zoomed past fit and the user drags one finger up further than the media extends below its box
+- **THEN** the media stops with its bottom edge aligned to the box
+- **AND** the page scrolls by the rest of the finger's movement
 
 #### Scenario: Zoomed media shows fit and expand controls
 - **WHEN** inline media on touch is zoomed past fit
@@ -161,7 +203,7 @@ An image inside a link that also holds other content, such as text other than wh
 - **AND** the image shows no inline zoom controls and the viewer does not open
 
 ### Requirement: Zoomable media is keyboard operable
-Each zoomable media SHALL be reachable by keyboard as one interactive element with an accessible name, and Enter or Space on it SHALL open the fullscreen viewer. Its inline zoom controls SHALL be separate focusable controls, not nested inside another interactive element. A rendered Mermaid diagram SHALL keep the accessible name "Open diagram in fullscreen viewer".
+Each zoomable media SHALL be reachable by keyboard as one interactive element with an accessible name, and Enter or Space on it SHALL open the fullscreen viewer. Its inline zoom controls SHALL be separate focusable controls, not nested inside another interactive element. A rendered Mermaid diagram SHALL keep the accessible name "Open diagram in fullscreen viewer". Arrow keys on focused media zoomed inline SHALL pan it without scrolling the page; at fit they keep their default.
 
 #### Scenario: A rendered diagram is focusable and opens with Enter or Space
 - **WHEN** a user tabs through the preview to a rendered Mermaid diagram
@@ -173,10 +215,29 @@ Each zoomable media SHALL be reachable by keyboard as one interactive element wi
 - **THEN** focus moves through the visible inline zoom controls
 - **AND** no control is nested inside another button or link
 
+#### Scenario: Arrow keys pan zoomed inline media
+- **WHEN** keyboard focus is on inline media zoomed past fit and the user presses an arrow key
+- **THEN** the media pans to show more of it in that direction
+- **AND** the page does not scroll
+- **AND** at fit the same key scrolls the page as usual
+
 #### Scenario: A linked image without a name still has one
 - **WHEN** a document contains a link whose only content is an image with empty alt text, and neither has any other name
 - **THEN** the link is announced with a name saying that it opens the image in the fullscreen viewer
 - **AND** a name the author gave the link or the image is kept unchanged
+
+### Requirement: Image activators say what they open
+An image, a responsive image or a linked image that activates the viewer SHALL keep its alt text or authored name as its accessible name and SHALL carry the description "Opens in the fullscreen viewer". Each inline toolbar group SHALL be named after its media, as "Zoom controls for" followed by the media's alt text, or "diagram" for a Mermaid diagram.
+
+#### Scenario: An image says that it opens the viewer
+- **WHEN** a screen reader reaches a document image with the alt text "figure"
+- **THEN** it is announced as a button named "figure", described as "Opens in the fullscreen viewer"
+- **AND** its toolbar is a group named "Zoom controls for figure"
+
+#### Scenario: A diagram's names are kept
+- **WHEN** a screen reader reaches a rendered Mermaid diagram
+- **THEN** it is announced as "Open diagram in fullscreen viewer", with no further description
+- **AND** its toolbar is a group named "Zoom controls for diagram"
 
 ### Requirement: One shared fullscreen viewer serves every surface
 A single fullscreen viewer SHALL present media from every zoomable surface. It SHALL always open at fit, showing the media's real content rather than any placeholder used for deferred loading. It SHALL fill the visible viewport, keep its controls inside it and clear of device safe areas in every orientation, and present targets of at least 44px on coarse-pointer devices. Closing it SHALL leave inline zoom unchanged.
@@ -194,6 +255,10 @@ A single fullscreen viewer SHALL present media from every zoomable surface. It S
 - **WHEN** the user opens the viewer for a document SVG whose inline image is currently suspended because it is off-screen
 - **THEN** the viewer shows the SVG's actual content
 
+#### Scenario: A viewer opened straight after closing shows its media
+- **WHEN** the viewer closes and media is activated again before the page has handled anything else, such as by the click a closing tap ends in
+- **THEN** the viewer opens showing that media at fit
+
 #### Scenario: Closing the viewer keeps inline zoom
 - **WHEN** the user zooms inline media to 2×, opens the viewer through expand, zooms there, and closes the viewer
 - **THEN** the inline media is still at 2× with the same pan
@@ -204,7 +269,7 @@ A single fullscreen viewer SHALL present media from every zoomable surface. It S
 - **AND** each control is at least 44px on a coarse pointer
 
 ### Requirement: The viewer supports pointer, touch, toolbar and keyboard navigation
-The viewer SHALL support single-pointer drag-to-pan, cursor-anchored wheel and trackpad-pinch zoom, midpoint-anchored two-finger pinch, double-click and double-tap to fit, a toolbar with zoom in, zoom out, fit and close, and the `+`, `-`, `0` and `f` keys. Panning SHALL keep part of the media in view, and zoom SHALL be clamped to a bounded range.
+The viewer SHALL support single-pointer drag-to-pan, cursor-anchored wheel and trackpad-pinch zoom, midpoint-anchored two-finger pinch, double-click and double-tap anywhere in it to fit, a toolbar with zoom in, zoom out, fit and close, the `+`, `-`, `0` and `f` keys, and arrow keys to pan, Shift with an arrow by a larger step. Panning SHALL keep at least 96 CSS pixels of the media in view on each axis, and zoom SHALL be clamped to a bounded range.
 
 #### Scenario: Wheel zoom centers on the cursor
 - **WHEN** the viewer is open and the user scrolls the wheel over the media
@@ -236,6 +301,15 @@ The viewer SHALL support single-pointer drag-to-pan, cursor-anchored wheel and t
 - **WHEN** the user double-clicks the media, or taps it twice in quick succession with a touch pointer
 - **THEN** the media returns to fit, scaled and centered
 
+#### Scenario: A double-click on the empty backdrop fits rather than closes
+- **WHEN** the user has panned the media aside and double-clicks or double-taps the empty backdrop
+- **THEN** the media returns to fit
+- **AND** the viewer remains open
+
+#### Scenario: Arrow keys pan the media
+- **WHEN** the viewer is open and the user presses an arrow key, or Shift with an arrow key
+- **THEN** the view moves a step in that direction, or a larger step with Shift
+
 #### Scenario: Toolbar and keys operate the viewer
 - **WHEN** the viewer is open and the user activates zoom in, zoom out or fit, or presses `+`, `-`, `0` or `f`
 - **THEN** the corresponding zoom in, zoom out or fit is applied
@@ -245,7 +319,7 @@ The viewer SHALL support single-pointer drag-to-pan, cursor-anchored wheel and t
 - **THEN** the scale stops at the viewer's maximum, or at its minimum
 
 ### Requirement: The viewer closes only on deliberate dismissal
-The viewer SHALL close on Escape, on its close control, or on a click or tap on the empty backdrop around the media. A drag, a pan, a pinch, or a click or tap on the media MUST NOT close it. Closing SHALL return keyboard focus to the element that opened it when that element still exists.
+The viewer SHALL close on Escape, on its close control, or on a single click or tap on the empty backdrop around the media once no second press has followed within the double-tap interval. A drag, a pan, a pinch, a double-click or double-tap, or a click or tap on the media MUST NOT close it, and the press that closes it MUST NOT reach the page beneath. Closing SHALL return keyboard focus to the element that opened it when that element still exists.
 
 #### Scenario: Escape closes the viewer and returns focus
 - **WHEN** the viewer is open and the user presses Escape
@@ -253,8 +327,13 @@ The viewer SHALL close on Escape, on its close control, or on a click or tap on 
 - **AND** keyboard focus returns to the media that opened it
 
 #### Scenario: A click on the empty backdrop closes the viewer
-- **WHEN** the viewer shows media at fit and the user clicks or taps the empty area beside it without dragging
+- **WHEN** the viewer shows media at fit and the user clicks or taps the empty area beside it without dragging, and presses nothing more within the double-tap interval
 - **THEN** the viewer closes
+
+#### Scenario: The tap that closes the viewer reaches nothing beneath it
+- **WHEN** on a touch screen the user taps the empty backdrop above media or a link on the page beneath
+- **THEN** the viewer closes
+- **AND** nothing on the page beneath is activated, so no other viewer opens and no link is followed
 
 #### Scenario: A pan gesture never dismisses the viewer
 - **WHEN** the user drags across the viewer with one finger or the mouse, at any speed and starting anywhere, including the empty backdrop
@@ -275,6 +354,29 @@ The viewer SHALL close on Escape, on its close control, or on a click or tap on 
 #### Scenario: A backdrop tap straight after a tap on the media closes the viewer
 - **WHEN** the user taps the media and then, within the double-tap interval, taps the empty backdrop close by
 - **THEN** the viewer closes rather than fitting the media as a double-tap would
+
+### Requirement: The viewer keeps its media distinct and uncovered
+Media in the viewer SHALL be drawn with an edge and a shadow, so it stays distinct from the backdrop in both themes. Fit SHALL place the media between the caption and the toolbar, so that neither covers it, unless together they would leave less than half the viewer's height.
+
+#### Scenario: Light media on a light backdrop keeps its edge
+- **WHEN** the viewer shows a mostly white image in the light theme, panned so that only a strip of it is in view
+- **THEN** the image's edge and shadow set it apart from the backdrop
+
+#### Scenario: Tall media fits clear of the toolbar
+- **WHEN** the viewer opens on media taller than it is wide
+- **THEN** the media at fit ends above the toolbar, and below the caption when there is one
+
+### Requirement: The viewer's focus ring follows the keyboard
+Opening the viewer SHALL move keyboard focus to its close control. That control SHALL show a focus ring when the viewer was opened from the keyboard; when it was opened by a click or a tap, no ring SHALL show until a key is pressed in the viewer.
+
+#### Scenario: A tap opens the viewer without a focus ring
+- **WHEN** the user taps media at fit on a touch screen
+- **THEN** the viewer opens with focus on its close control and no focus ring
+- **AND** once the user presses a key in the viewer, the focused control shows its ring
+
+#### Scenario: A keyboard open shows the ring
+- **WHEN** the user presses Enter on focused media
+- **THEN** the viewer opens with a focus ring on its close control
 
 ### Requirement: Raster media offers actual pixels
 For raster media, the viewer SHALL offer a "1:1 actual pixels" action that shows one image pixel per device pixel, its native size. Once the user has zoomed raster media in past fit, inline or in the viewer, its pixels SHALL render as sharp blocks while it is shown larger than its native size. At fit it SHALL be smoothed, even when fitting enlarges it. SVG and Mermaid media SHALL NOT offer this action.

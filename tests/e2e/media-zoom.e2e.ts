@@ -26,6 +26,7 @@ import {
   type StageTransform,
 } from "./transform-helpers";
 import { afterAnimationFrames } from "./sync-helpers";
+import { DOUBLE_TAP_MAX_GAP_MS } from "../../src/zoom/gestures";
 import {
   backdropPoint,
   centreOf,
@@ -176,6 +177,8 @@ const foreignDoc = () => {
 // first rendered window, and the touch suites' row then opens as "File
 // unavailable" (seen with 35 files; not yet diagnosed).
 const desktopExtras = () => ({
+  // Narrow media that can be scrolled to the top of the view.
+  "long-square.md": `# Square\n\nIntro paragraph.\n\n![square](./square.png)\n\n${TRAILING}\n`,
   "foreign.md": foreignDoc(),
   // A linked image its author took out of the tab order.
   "untabbed.md": '# Untabbed\n\nSee [the target](./target.md) first.\n\n<a href="./target.md" tabindex="-1"><img src="./photo.png" alt="untabbed photo"></a>\n\nAfter the untabbed photo.\n',
@@ -207,10 +210,10 @@ async function seed(
 
 // --- Helpers ------------------------------------------------------------------
 
-async function openDiagramViewer(page: Page): Promise<void> {
+async function openDiagramViewer(page: Page): Promise<StageTransform> {
   await openTreeFile(page, "diagram.md");
   await page.locator("#preview .mermaid-trigger").click();
-  await expectViewerOpen(page);
+  return expectViewerOpen(page);
 }
 
 const FIT: StageTransform = { tx: 0, ty: 0, scale: 1 };
@@ -263,7 +266,7 @@ async function layoutOf(page: Page, frameSelector: string, nextText: string | nu
       if (unwrap) {
         // The same document without the integration: the activator back in
         // the frame's place, no frame, no toolbar.
-        const activator = frame.querySelector(":scope > .media-zoom-activator")!;
+        const activator = frame.querySelector(":scope > .media-zoom-clip > .media-zoom-activator")!;
         frame.replaceWith(activator);
         media = activator.matches(".media-zoom-stage") ? activator : activator.querySelector(".media-zoom-stage")!;
       }
@@ -290,16 +293,19 @@ function expectSameLayout(actual: { media: Rect; next: Rect | null }, expected: 
   }
 }
 
-// Each named inline control lies inside its frame's box, so a zoomed frame,
-// which clips to that box, never cuts it off.
-async function expectControlsInside(frame: Locator, names: string[]): Promise<void> {
+// Narrow media's inline controls lie beside its box, never over it, and
+// inside the visible window, so they hide none of the media and stay in reach.
+async function expectControlsBeside(frame: Locator, names: string[]): Promise<void> {
   const box = (await frame.boundingBox())!;
+  const window = await frame.page().evaluate(() => ({ width: innerWidth, height: innerHeight }));
   for (const name of names) {
     const button = frame.locator(".media-zoom-toolbar").getByRole("button", { name, exact: true });
     await expect(button).toBeVisible();
     const b = (await button.boundingBox())!;
-    const inside = b.x >= box.x - 0.5 && b.y >= box.y - 0.5 && b.x + b.width <= box.x + box.width + 0.5 && b.y + b.height <= box.y + box.height + 0.5;
-    expect(inside, `${name} at ${JSON.stringify(b)} in ${JSON.stringify(box)}`).toBe(true);
+    const overlaps = b.x < box.x + box.width - 0.5 && b.x + b.width > box.x + 0.5 && b.y < box.y + box.height - 0.5 && b.y + b.height > box.y + 0.5;
+    expect(overlaps, `${name} at ${JSON.stringify(b)} over ${JSON.stringify(box)}`).toBe(false);
+    const visible = b.x >= 0 && b.y >= 0 && b.x + b.width <= window.width && b.y + b.height <= window.height;
+    expect(visible, `${name} at ${JSON.stringify(b)} in ${JSON.stringify(window)}`).toBe(true);
   }
 }
 
@@ -345,6 +351,19 @@ test.describe("media viewer dismissal", () => {
     await expect(viewerDialog(page)).toHaveAttribute("open", "");
   });
 
+  test("a double-click on the backdrop after panning fits the media and keeps the viewer open", async ({ page }) => {
+    const fitted = await openDiagramViewer(page);
+    const centre = await centreOf(page.locator(".media-viewer-stage"));
+    await mouseDrag(page, centre, 0, -600);
+    // Below the media, which the drag moved up and almost out of view.
+    const viewport = (await page.locator(".media-viewer-viewport").boundingBox())!;
+    await page.mouse.dblclick(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+    await expectStageTransform(page, fitted);
+    // Well past the double-click interval, it is still open.
+    await page.waitForTimeout(DOUBLE_TAP_MAX_GAP_MS * 2);
+    await expect(viewerDialog(page)).toHaveAttribute("open", "");
+  });
+
   test("a click on the media does not close the viewer", async ({ page }) => {
     await openDiagramViewer(page);
     const centre = await centreOf(page.locator(".media-viewer-stage"));
@@ -383,6 +402,46 @@ test.describe("media viewer dismissal on touch", () => {
     const point = await backdropPoint(page);
     await page.touchscreen.tap(point.x, point.y);
     await expectViewerClosed(page);
+  });
+
+  test("the tap that closes the viewer from its backdrop reaches nothing beneath it", async ({ page }) => {
+    // Every click that lands on the page rather than in the viewer.
+    await page.evaluate(() => {
+      const clicks: string[] = ((window as any).__pageClicks = []);
+      document.addEventListener("click", event => {
+        const target = event.target as Element;
+        if (!target.closest("dialog.media-viewer")) clicks.push(target.tagName);
+      }, true);
+    });
+    const point = await backdropPoint(page);
+    await page.touchscreen.tap(point.x, point.y);
+    await expectViewerClosed(page);
+    await afterAnimationFrames(page, 4);
+    expect(await page.evaluate(() => (window as any).__pageClicks)).toEqual([]);
+    await expectViewerClosed(page);
+  });
+
+  test("a viewer opened straight after it closed shows its media", async ({ page }) => {
+    // Close and open again in one task, as a tap whose follow-up click lands
+    // on media would, before the dialog's queued close event is dispatched.
+    await page.evaluate(() => {
+      document.querySelector<HTMLButtonElement>(".media-viewer-close")!.click();
+      const activator = document.querySelector<HTMLElement>("#preview .image-preview .media-zoom-activator")!;
+      activator.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await expectViewerOpen(page);
+    await afterAnimationFrames(page, 4);
+    await expect(page.locator(".media-viewer-stage img")).toHaveCount(1);
+    await expect(page.locator(".media-viewer-stage")).toHaveAttribute("data-zoom-state", /./);
+  });
+
+  test("opened by a tap, the close control has focus without a ring until a key is pressed", async ({ page }) => {
+    const close = page.locator(".media-viewer-close");
+    await expect(close).toBeFocused();
+    expect(await close.evaluate(el => getComputedStyle(el).outlineStyle)).toBe("none");
+    await page.keyboard.press("Shift+Tab");
+    const focused = page.locator(".media-viewer-toolbar button:focus");
+    expect(await focused.evaluate(el => getComputedStyle(el).outlineStyle)).toBe("solid");
   });
 
   test("a tap on the media does not close the viewer", async ({ page }) => {
@@ -441,7 +500,7 @@ test.describe("the media viewer on a narrow touch screen", () => {
   test("a linked raster image's six controls stay inside the visible viewport", async ({ page, request }, testInfo) => {
     await seed(page, request);
     await openTouchFile(page, "media.md");
-    const linked = page.locator('#preview .media-zoom-frame:has(> a > img[alt="linked photo"])');
+    const linked = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > img[alt="linked photo"])');
     await expectLaidOut(linked);
     await linked.tap();
     await expectViewerOpen(page);
@@ -490,7 +549,7 @@ for (const deviceScaleFactor of [1, 2]) {
     test("a raster at fit stays smooth, inline and in the viewer, and renders pixelated only once zoomed in past native size", async ({ page, request }) => {
       await seed(page, request);
       await openTreeFile(page, "media.md");
-      const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="photo"])');
+      const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="photo"])');
       await expectLaidOut(frame);
       const image = frame.locator("img");
       const pixelated = (target: Locator) => target.evaluate(el => getComputedStyle(el).imageRendering === "pixelated");
@@ -541,6 +600,54 @@ test.describe("SVG media in the viewer", () => {
       await expectViewerClosed(page);
       await expect(expand).toBeFocused();
     }
+  });
+
+  test("tall media fits clear of the toolbar, which never covers it", async ({ page }) => {
+    await openTreeFile(page, "tall-viewbox.svg");
+    const frame = page.locator("#preview .image-preview .media-zoom-frame");
+    await expectLaidOut(frame);
+    await frame.click();
+    await expectViewerOpen(page);
+    const stage = (await page.locator(".media-viewer-stage").boundingBox())!;
+    const toolbar = (await page.locator(".media-viewer-toolbar").boundingBox())!;
+    expect(stage.y + stage.height).toBeLessThanOrEqual(toolbar.y + 0.5);
+    expect(stage.y).toBeGreaterThanOrEqual(0);
+  });
+
+  test("the toolbar shows the zoom level relative to fit, and arrow keys pan", async ({ page }) => {
+    await openTreeFile(page, "wide.svg");
+    const frame = page.locator("#preview .image-preview .media-zoom-frame");
+    await expectLaidOut(frame);
+    await frame.locator(".media-zoom-activator").focus();
+    await page.keyboard.press("Enter");
+    const fitted = await expectViewerOpen(page);
+    const level = page.locator(".media-viewer-toolbar .media-viewer-zoom-level");
+    await expect(level).toHaveText("100%");
+    // Opened from the keyboard, close shows its focus ring.
+    expect(await page.locator(".media-viewer-close").evaluate(el => getComputedStyle(el).outlineStyle)).toBe("solid");
+    await page.keyboard.press("+");
+    await expect(level).toHaveText("125%");
+    await expect(page.locator(".media-viewer-status")).toHaveText("Zoom 125%");
+    const zoomed = (await readStageTransform(page))!;
+    await page.keyboard.press("ArrowRight");
+    await expectStageTransform(page, { ...zoomed, tx: zoomed.tx - 40 });
+    await page.keyboard.press("0");
+    await expectStageTransform(page, fitted);
+  });
+
+  test("media in the viewer has an edge and a shadow, and fit and expand look different in both toolbars", async ({ page }) => {
+    await openTreeFile(page, "wide.svg");
+    const frame = page.locator("#preview .image-preview .media-zoom-frame");
+    await expectLaidOut(frame);
+    const glyph = (locator: Locator) => locator.evaluate(el => getComputedStyle(el, "::before").content);
+    await frame.hover();
+    const inlineFit = await glyph(frame.locator('[data-zoom-action="fit"]'));
+    const inlineExpand = await glyph(frame.locator('[data-zoom-action="expand"]'));
+    expect(inlineFit).not.toBe(inlineExpand);
+    await frame.click();
+    await expectViewerOpen(page);
+    expect(await glyph(page.locator('.media-viewer-toolbar [aria-label="Fit to screen"]'))).toBe(inlineFit);
+    expect(await page.locator(".media-viewer-stage").evaluate(el => getComputedStyle(el).boxShadow)).not.toBe("none");
   });
 
   test("a window resize fits fitted media to the new size and keeps zoomed media's scale", async ({ page }) => {
@@ -655,7 +762,7 @@ const SURFACES: Surface[] = [
   {
     name: "a document PNG",
     file: "media.md",
-    frame: '#preview .media-zoom-frame:has(> img[alt="photo"])',
+    frame: '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="photo"])',
     activator: '#preview img[alt="photo"]',
     next: "After the photo.",
     source: /\/photo\.png\?revision=/,
@@ -663,7 +770,7 @@ const SURFACES: Surface[] = [
   {
     name: "a document SVG",
     file: "media.md",
-    frame: '#preview .media-zoom-frame:has(> img[alt="figure"])',
+    frame: '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="figure"])',
     activator: '#preview img[alt="figure"]',
     next: "After the figure.",
     source: /\/wide\.svg\?revision=/,
@@ -713,7 +820,8 @@ test.describe("inline zoom on desktop", () => {
       if (evidence) await captureScreenshot(page, testInfo, "media-zoom-inline-zoomed");
       expectSameLayout(await layoutOf(page, surface.frame, surface.next), atFit);
       // The zoomed media is clipped to the box.
-      expect(await frame.evaluate(el => getComputedStyle(el).overflow)).toBe("hidden");
+      expect(await frame.locator(":scope > .media-zoom-clip").evaluate(el => getComputedStyle(el).overflow)).toBe("hidden");
+      expect(await frame.locator(":scope > .media-zoom-clip").boundingBox()).toEqual(await frame.boundingBox());
 
       const zoomedOut = await zoomInline(frame, "Zoom out");
       expect(zoomedOut.scale).toBeCloseTo(1.25 ** 2, 3);
@@ -797,7 +905,7 @@ test.describe("inline zoom on desktop", () => {
 
   test("a 16×16 badge has no toolbar and opens the viewer", async ({ page }) => {
     await openTreeFile(page, "media.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="badge"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="badge"])');
     await frame.scrollIntoViewIfNeeded();
     // Past the deferred-loading placeholder, at its real size.
     await expect.poll(async () => await frame.boundingBox()).toMatchObject({ width: 16, height: 16 });
@@ -814,7 +922,7 @@ test.describe("inline zoom on desktop", () => {
 
   test("an image under the small-media limit stays small media inside margins that widen its box", async ({ page }) => {
     await openTreeFile(page, "spaced.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="spaced photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="spaced photo"])');
     const image = frame.locator("img");
     await expect.poll(() => image.evaluate(el => (el as HTMLImageElement).complete && (el as HTMLImageElement).naturalWidth > 0)).toBe(true);
     await expect.poll(async () => (await image.boundingBox())?.width).toBeCloseTo(80, 0);
@@ -829,7 +937,7 @@ test.describe("inline zoom on desktop", () => {
 
   test("an image with margins zooms in its own box: panned to either corner it still covers that box, and nothing moves", async ({ page }) => {
     await openTreeFile(page, "margined.md");
-    const selector = '#preview .media-zoom-frame:has(> img[alt="margined photo"])';
+    const selector = '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="margined photo"])';
     const frame = page.locator(selector);
     await expectLaidOut(frame);
     // Rectangles relative to #preview: the frame (the clip), the image, and
@@ -870,7 +978,7 @@ test.describe("inline zoom on desktop", () => {
   test("a responsive image whose picked source changes format brings that format's actions to an open viewer", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await openTreeFile(page, "mixed-picture.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> picture > img[alt="mixed photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > picture > img[alt="mixed photo"])');
     await expectLaidOut(frame);
     await expectPicked(frame.locator("img"), /\/wide\.svg$/);
     await frame.click();
@@ -893,28 +1001,48 @@ test.describe("inline zoom on desktop", () => {
 
   test("a linked image its author took out of the tab order is still reached by Tab and opens the viewer on Enter", async ({ page }) => {
     await openTreeFile(page, "untabbed.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> a > img[alt="untabbed photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > img[alt="untabbed photo"])');
     await expectLaidOut(frame);
     await page.locator("#preview a", { hasText: "the target" }).focus();
     await page.keyboard.press("Tab");
-    await expect(frame.locator(":scope > a")).toBeFocused();
+    await expect(frame.locator(":scope > .media-zoom-clip > a")).toBeFocused();
     await page.keyboard.press("Enter");
     await expectViewerOpen(page);
     await expect(page.locator("#preview-path")).toHaveText("untabbed.md");
   });
 
-  test("media just above the small-media limit keeps every toolbar control inside its box, at fit and zoomed", async ({ page }) => {
+  test("narrow media shows its toolbar beside its box, never over it, at fit and zoomed", async ({ page }) => {
     await openTreeFile(page, "square.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="square"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="square"])');
     await expectLaidOut(frame);
     const controls = ["Zoom out", "Zoom in", "Fit", "Open fullscreen viewer"];
     await frame.hover();
-    await expectControlsInside(frame, controls);
+    await expectControlsBeside(frame, controls);
     await zoomInline(frame, "Zoom in", 2);
     await frame.hover();
-    await expectControlsInside(frame, controls);
+    // Zoomed, the media is clipped to its box, and the toolbar is not.
+    await expectControlsBeside(frame, controls);
     // Each control is reachable: zoom out twice is back at fit.
     expectClose(await zoomInline(frame, "Zoom out", 2), FIT);
+  });
+
+  test("narrow media at the top of the view shows its toolbar below it rather than under the header", async ({ page }) => {
+    await openTreeFile(page, "long-square.md");
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="square"])');
+    await expectLaidOut(frame);
+    // Scroll the image up to just below the preview's sticky header.
+    await frame.evaluate(element => {
+      const shell = document.querySelector(".preview-shell")!;
+      const header = document.querySelector(".preview-header")!.getBoundingClientRect();
+      shell.scrollTop += element.getBoundingClientRect().top - header.bottom - 4;
+    });
+    const centre = await centreOf(frame);
+    await page.mouse.move(centre.x, centre.y);
+    const toolbar = frame.locator(".media-zoom-toolbar");
+    await expect(toolbar).toBeVisible();
+    const box = (await frame.boundingBox())!;
+    expect((await toolbar.boundingBox())!.y).toBeGreaterThanOrEqual(box.y + box.height - 0.5);
+    await expectControlsBeside(frame, ["Zoom in"]);
   });
 
   // Hover applies before any pointer event reaches the page, so media found
@@ -925,7 +1053,7 @@ test.describe("inline zoom on desktop", () => {
     await revealDiagram(page);
     const frames = {
       diagram: page.locator("#preview .mermaid > .media-zoom-frame"),
-      badge: page.locator('#preview .media-zoom-frame:has(> img[alt="badge"])'),
+      badge: page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="badge"])'),
     };
     for (const [name, frame] of Object.entries(frames)) {
       await frame.scrollIntoViewIfNeeded();
@@ -960,7 +1088,7 @@ test.describe("inline zoom on desktop", () => {
 
   test("a linked image opens the viewer, and Open link loads the in-app document", async ({ page }) => {
     await openTreeFile(page, "media.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> a > img[alt="linked photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > img[alt="linked photo"])');
     await expectLaidOut(frame);
     await frame.click();
     await expectViewerOpen(page);
@@ -987,7 +1115,7 @@ test.describe("inline zoom on desktop", () => {
   test("a responsive <picture> image zooms inline and opens the viewer on the source the browser picked", async ({ page }) => {
     await openTreeFile(page, "picture.md");
     // The <picture> is framed whole, so its <img> stays its direct child.
-    const frame = page.locator('#preview .media-zoom-frame:has(> picture > img[alt="responsive photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > picture > img[alt="responsive photo"])');
     await expectLaidOut(frame);
     const image = frame.locator("img");
     await expect.poll(() => image.evaluate(el => (el as HTMLImageElement).currentSrc)).toMatch(/\/wide-photo\.png$/);
@@ -1004,7 +1132,7 @@ test.describe("inline zoom on desktop", () => {
     await expectViewerClosed(page);
 
     // A link holding only a <picture> is its activator, and Open link follows it.
-    const linked = page.locator('#preview .media-zoom-frame:has(> a > picture > img[alt="linked responsive photo"])');
+    const linked = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > picture > img[alt="linked responsive photo"])');
     await expectLaidOut(linked);
     await linked.click();
     await expectViewerOpen(page);
@@ -1020,7 +1148,7 @@ test.describe("inline zoom on desktop", () => {
     expect(new URL(foreign).origin).not.toBe(new URL(page.url()).origin);
     const actualPixels = page.locator('.media-viewer-toolbar [aria-label="1:1 actual pixels"]');
     for (const [alt, offered] of [["unknown format", false], ["foreign png", true]] as const) {
-      const frame = page.locator(`#preview .media-zoom-frame:has(> img[alt="${alt}"])`);
+      const frame = page.locator(`#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="${alt}"])`);
       await expectLaidOut(frame);
       await frame.click();
       await expectViewerOpen(page);
@@ -1061,7 +1189,7 @@ test.describe("inline zoom on desktop", () => {
 
   test("a responsive image resets to fit when an edit swaps which candidate its descriptors pick", async ({ page }) => {
     await openTreeFile(page, "density-picture.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> picture > img[alt="responsive photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > picture > img[alt="responsive photo"])');
     const image = frame.locator("img");
     await expectLaidOut(frame);
     await expectPicked(image, /\/wide-photo\.png$/);
@@ -1085,7 +1213,7 @@ test.describe("inline zoom on desktop", () => {
       if (/"kind":"(patch|snapshot)"/.test(event.data)) documentUpdates += 1;
     });
     await openTreeFile(page, "svg-fallback-picture.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> picture > img[alt="svg fallback photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > picture > img[alt="svg fallback photo"])');
     const image = frame.locator("img");
     await expectLaidOut(frame);
     await expectPicked(image, /\/wide\.svg\?revision=/);
@@ -1120,7 +1248,7 @@ const pageScale = (page: Page) => page.evaluate(() => window.visualViewport?.sca
 const pageScrollY = (page: Page) => page.evaluate(() => window.scrollY);
 
 const TOUCH_SURFACES = [
-  { name: "a document image", file: "media.md", frame: '#preview .media-zoom-frame:has(> img[alt="photo"])' },
+  { name: "a document image", file: "media.md", frame: '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="photo"])' },
   { name: "a Mermaid diagram", file: "media.md", frame: "#preview .mermaid > .media-zoom-frame", diagram: true },
   { name: "the image file preview", file: "photo.png", frame: "#preview .image-preview .media-zoom-frame" },
 ];
@@ -1170,7 +1298,7 @@ test.describe("inline zoom on touch", () => {
 
   test("keyboard focus shows the whole toolbar, while a tap at fit and the viewer it opens leave it hidden", async ({ page }) => {
     await openTouchFile(page, "media.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="figure"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="figure"])');
     await expectLaidOut(frame);
     const toolbar = frame.locator(".media-zoom-toolbar");
     const button = (name: string) => toolbar.getByRole("button", { name, exact: true });
@@ -1188,6 +1316,8 @@ test.describe("inline zoom on touch", () => {
     await page.locator("#preview a", { hasText: "the target" }).focus();
     await page.keyboard.press("Shift+Tab");
     await expect(page.getByRole("button", { name: "figure", exact: true })).toBeFocused();
+    await expect(page.getByRole("button", { name: "figure", exact: true })).toHaveAccessibleDescription("Opens in the fullscreen viewer");
+    await expect(page.getByRole("group", { name: "Zoom controls for figure" })).toHaveCount(1);
     for (const name of ["Zoom out", "Zoom in", "Fit", "Open fullscreen viewer"]) await expect(button(name)).toBeVisible();
     await page.keyboard.press("Tab");
     await expect(button("Zoom out")).toBeFocused();
@@ -1197,21 +1327,39 @@ test.describe("inline zoom on touch", () => {
     expect((await readInlineTransform(frame))!.scale).toBeCloseTo(1.25, 3);
   });
 
-  test("media just above the small-media limit keeps fit and expand inside its box once zoomed", async ({ page }) => {
+  test("narrow media shows fit and expand beside its box once zoomed", async ({ page }) => {
     await openTouchFile(page, "square.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="square"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="square"])');
     await expectLaidOut(frame);
     const cdp = await page.context().newCDPSession(page);
     await pinch(cdp, await centreOf(frame), 20, 80);
     expect((await readInlineTransform(frame))!.scale).toBeGreaterThan(1.5);
-    await expectControlsInside(frame, ["Fit", "Open fullscreen viewer"]);
+    await expectControlsBeside(frame, ["Fit", "Open fullscreen viewer"]);
     await frame.locator(".media-zoom-toolbar").getByRole("button", { name: "Fit", exact: true }).tap();
     expectClose(await readInlineTransform(frame), FIT);
   });
 
+  test("a one-finger pan that reaches the zoomed media's edge goes on scrolling the page", async ({ page }) => {
+    await openTouchFile(page, "media.md");
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="photo"])');
+    await expectLaidOut(frame);
+    const cdp = await page.context().newCDPSession(page);
+    await pinch(cdp, await centreOf(frame), 40, 80);
+    const zoomed = (await readInlineTransform(frame))!;
+    expect(zoomed.scale).toBeGreaterThan(1.3);
+    const box = (await frame.boundingBox())!;
+    const before = await pageScrollY(page);
+    // Up by far more than the media has left below its box.
+    const reach = -(box.height * zoomed.scale - box.height + zoomed.ty);
+    await touchDrag(cdp, await centreOf(frame), 0, reach - 150, 16);
+    const panned = (await readInlineTransform(frame))!;
+    expect(panned.ty).toBeCloseTo(box.height - box.height * panned.scale, 0);
+    await expect.poll(() => pageScrollY(page)).toBeGreaterThan(before + 100);
+  });
+
   test("one finger scrolls the page at fit, and pans without scrolling once zoomed", async ({ page }) => {
     await openTouchFile(page, "media.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> img[alt="photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="photo"])');
     await expectLaidOut(frame);
     const cdp = await page.context().newCDPSession(page);
 
@@ -1245,7 +1393,7 @@ test.describe("inline zoom on touch", () => {
 // naively, the image collapses to nothing. It must lay out exactly as it does
 // unframed — loaded, suspended off-screen and reloaded (svg-images.ts swaps a
 // placeholder in and out), in the document and in the file preview.
-const VIEWBOX_DOC_FRAME = '#preview .media-zoom-frame:has(> img[alt="viewbox figure"])';
+const VIEWBOX_DOC_FRAME = '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="viewbox figure"])';
 const FILE_FRAME = "#preview .image-preview .media-zoom-frame";
 
 async function expectViewBoxDocument(page: Page): Promise<void> {
@@ -1283,6 +1431,24 @@ test.describe("viewBox-only SVGs on desktop", () => {
     await openTreeFile(page, "viewbox.md");
     await expectViewBoxDocument(page);
   });
+
+  for (const file of ["viewbox.svg", "tall-viewbox.svg", "viewbox.md"]) {
+    test(`opening ${file} reports no ResizeObserver loop`, async ({ page }) => {
+      // Sizing a frame inside its own size notification makes the browser
+      // report a loop as a page error (Bun's dev overlay shows it full-page).
+      await page.addInitScript(() => {
+        const errors: string[] = ((window as any).__pageErrors = []);
+        window.addEventListener("error", event => errors.push(event.message));
+      });
+      // Loaded with the page (the file's own URL), as well as opened in it.
+      await openTreeFile(page, file);
+      await page.reload();
+      const frame = page.locator(file.endsWith(".md") ? VIEWBOX_DOC_FRAME : FILE_FRAME);
+      await expectLaidOut(frame);
+      await afterAnimationFrames(page, 4);
+      expect(await page.evaluate(() => (window as any).__pageErrors)).toEqual([]);
+    });
+  }
 
   for (const file of ["viewbox.svg", "tall-viewbox.svg"]) {
     test(`the ${file} file preview keeps its unframed box, and zooming keeps it`, async ({ page }) => {
@@ -1348,7 +1514,7 @@ test.describe("percentage-width images", () => {
 
   test("on desktop, each keeps its unframed box, and zooming keeps it", async ({ page }) => {
     await openTreeFile(page, "percent.md");
-    const selector = '#preview .media-zoom-frame:has(> img[alt="half photo"])';
+    const selector = '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="half photo"])';
     const frame = page.locator(selector);
     await expectLaidOut(frame);
     const atFit = await layoutOf(page, selector, "After the half photo.");
@@ -1406,7 +1572,7 @@ async function expectPicked(image: Locator, source: RegExp): Promise<void> {
 }
 
 const MEDIA_FRAMES = {
-  photo: '#preview .media-zoom-frame:has(> img[alt="photo"])',
+  photo: '#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="photo"])',
   diagram: "#preview .mermaid > .media-zoom-frame",
 };
 
@@ -1663,7 +1829,7 @@ test.describe("zoom across edits and navigation", () => {
 
   test("a zoomed image an edit moved off-screen keeps its zoom through a second edit before it loads", async ({ page }) => {
     await openTreeFile(page, "media.md");
-    const figure = page.locator('#preview .media-zoom-frame:has(> img[alt="figure"])');
+    const figure = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="figure"])');
     await expectLaidOut(figure);
     const zoomed = await zoomInline(figure, "Zoom in", 2);
 
@@ -1721,7 +1887,7 @@ test.describe("zoom across edits and navigation", () => {
 
   test("an open viewer follows its SVG to a new revision even when an edit moved the image off-screen", async ({ page }) => {
     await openTreeFile(page, "media.md");
-    const figure = page.locator('#preview .media-zoom-frame:has(> img[alt="figure"])');
+    const figure = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > img[alt="figure"])');
     await expectLaidOut(figure);
     await figure.click();
     await expectViewerOpen(page);
@@ -1756,7 +1922,7 @@ test.describe("zoom across edits and navigation", () => {
 
   test("an edit that removes a linked image drops Open link from the viewer, and its focus moves to close", async ({ page }) => {
     await openTreeFile(page, "media.md");
-    const linked = page.locator('#preview .media-zoom-frame:has(> a > img[alt="linked photo"])');
+    const linked = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > img[alt="linked photo"])');
     await expectLaidOut(linked);
     await linked.click();
     await expectViewerOpen(page);
@@ -1772,7 +1938,7 @@ test.describe("zoom across edits and navigation", () => {
 
   test("an edit that removes one copy of an image leaves the viewer and inline zoom on the copy that stays", async ({ page }) => {
     await openTreeFile(page, "media.md");
-    const linked = page.locator('#preview .media-zoom-frame:has(> a > img[alt="linked photo"])');
+    const linked = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > img[alt="linked photo"])');
     await expectLaidOut(linked);
     const zoomed = await zoomInline(linked, "Zoom in", 2);
     await (await hoverToolbarButton(linked, "Open fullscreen viewer")).click();
@@ -1801,7 +1967,7 @@ test.describe("zoom across edits and navigation", () => {
     // The linked copy of the same source, later in the document, stays.
     await fs.writeFile(workspacePath("media.md"), MEDIA_DOC.replace("![photo](./photo.png)", "").replace("Intro paragraph.", "Intro paragraph, edited."));
     await expect(page.locator("#preview")).toContainText("Intro paragraph, edited.");
-    await expectLaidOut(page.locator('#preview .media-zoom-frame:has(> a > img[alt="linked photo"])'));
+    await expectLaidOut(page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > a > img[alt="linked photo"])'));
     await afterAnimationFrames(page);
     await expect(viewerDialog(page)).toHaveAttribute("open", "");
     await expect(openLink).toHaveCount(0);
@@ -1809,7 +1975,7 @@ test.describe("zoom across edits and navigation", () => {
 
   test("a responsive image keeps its zoom through an edit, and resets when the edit replaces the source it shows", async ({ page }) => {
     await openTreeFile(page, "picture.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> picture > img[alt="responsive photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > picture > img[alt="responsive photo"])');
     const image = frame.locator("img");
     await expectLaidOut(frame);
     await expectPicked(image, /\/wide-photo\.png$/);
@@ -1829,7 +1995,7 @@ test.describe("zoom across edits and navigation", () => {
 
   test("an open viewer follows a responsive image through an edit to the source the browser picked, never its fallback", async ({ page }) => {
     await openTreeFile(page, "picture.md");
-    const frame = page.locator('#preview .media-zoom-frame:has(> picture > img[alt="responsive photo"])');
+    const frame = page.locator('#preview .media-zoom-frame:has(> .media-zoom-clip > picture > img[alt="responsive photo"])');
     await expectLaidOut(frame);
     await expectPicked(frame.locator("img"), /\/wide-photo\.png$/);
     await frame.click();

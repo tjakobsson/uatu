@@ -3760,9 +3760,17 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   width: 100%;
 }
 
-.media-zoom-frame > .media-zoom-activator,
+.media-zoom-clip > .media-zoom-activator,
 .media-zoom-frame .media-zoom-stage {
   vertical-align: baseline;
+}
+
+/* The clip a zoom is cut to. At fit it has no box of its own, so the
+   activator lays out exactly as it would in the frame; zoomed it is the
+   frame's box. The toolbar is the frame's other child, outside the clip, so
+   narrow media can show it beyond its box. */
+.media-zoom-clip {
+  display: contents;
 }
 
 .media-zoom-activator {
@@ -3771,12 +3779,12 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
 
 /* The focus ring goes on the frame: a zoomed frame clips its content, and an
    outline drawn by the activator itself would be cut off. */
-.media-zoom-frame > .media-zoom-activator:focus-visible {
+.media-zoom-clip > .media-zoom-activator:focus-visible {
   outline: none;
   box-shadow: none;
 }
 
-.media-zoom-frame:has(> .media-zoom-activator:focus-visible) {
+.media-zoom-frame:has(> .media-zoom-clip > .media-zoom-activator:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -3787,14 +3795,20 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
    custom properties on the frame, so a clone of the stage (the viewer's)
    carries none of them. */
 .media-zoom-frame.is-zoomed {
-  overflow: hidden;
-  contain: strict;
   /* A drag pans; it must not select. */
   -webkit-user-select: none;
   user-select: none;
 }
 
-.media-zoom-frame.is-zoomed > .media-zoom-activator:not(.media-zoom-stage) {
+.media-zoom-frame.is-zoomed > .media-zoom-clip {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  contain: strict;
+}
+
+.media-zoom-frame.is-zoomed > .media-zoom-clip > .media-zoom-activator:not(.media-zoom-stage) {
   display: block;
   width: 100%;
   height: 100%;
@@ -3828,9 +3842,9 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   image-rendering: pixelated;
 }
 
-/* The toolbar fits inside the smallest box that gets one (SMALL_MEDIA_PX, 96
-   CSS px a side), because a zoomed frame clips to its box: in a narrow box it
-   wraps into rows rather than reach past the frame's left edge. */
+/* The toolbar sits in the media's top-right corner. Media narrower than
+   COMPACT_MEDIA_PX (200 CSS px) would be hidden by it, so there it sits
+   outside the frame instead (below). */
 .media-zoom-toolbar {
   position: absolute;
   top: 0.4rem;
@@ -3882,11 +3896,58 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   outline-offset: -2px;
 }
 
-/* Glyphs are generated, so the toolbar adds no text for Find to index. */
-.media-zoom-zoom-out::before { content: "−"; }
-.media-zoom-zoom-in::before { content: "+"; }
-.media-zoom-fit::before { content: "⊡"; }
-.media-zoom-expand::before { content: "⛶"; }
+/* Narrow media (src/zoom/inline.ts marks it compact): the toolbar sits just
+   above the frame, left-aligned with it, or below it when the space above is
+   out of view. It touches the frame, so the pointer never leaves the frame's
+   hover on its way to the toolbar. */
+.media-zoom-frame.is-compact > .media-zoom-toolbar {
+  top: auto;
+  right: auto;
+  bottom: 100%;
+  left: 0;
+  max-width: none;
+  flex-wrap: nowrap;
+}
+
+.media-zoom-frame.is-compact.has-toolbar-below > .media-zoom-toolbar {
+  top: 100%;
+  bottom: auto;
+}
+
+/* One icon per action in both toolbars, inline and in the viewer: each
+   control carries its action in data-zoom-action. Fit (back to the whole
+   media) and expand (open the fullscreen viewer) are deliberately unlike.
+   Generated, so the inline toolbar adds no text for Find to index. */
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="zoom-out"]::before { content: "−"; }
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="zoom-in"]::before { content: "+"; }
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="fit"]::before { content: "⊡"; }
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="expand"]::before { content: "⛶"; }
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="actual-pixels"]::before { content: "1:1"; }
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="open-link"]::before { content: "↗"; }
+:is(.media-zoom-button, .media-viewer-button)[data-zoom-action="close"]::before { content: "×"; }
+
+/* A zoom control at its limit stays focusable (aria-disabled), dimmed. */
+:is(.media-zoom-button, .media-viewer-button)[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+:is(.media-zoom-button, .media-viewer-button)[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+/* The status regions that announce zoom levels (src/zoom/announce.ts). */
+.media-zoom-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* A pointer that hovers sees the toolbar on hover and on keyboard focus.
    Small media (badges, icons) never offers it, nor does any media until the
@@ -3939,8 +4000,8 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
     font-size: 1.2rem;
   }
 
-  /* Two rows of 44px targets do not fit a 96px box either, so they stay in
-     one row and give up width there instead. */
+  /* Four 44px targets only just fit the narrowest box that keeps the toolbar
+     inside (COMPACT_MEDIA_PX): they stay in one row and give up width there. */
   .media-zoom-toolbar {
     flex-wrap: nowrap;
   }
@@ -4003,6 +4064,11 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
   will-change: transform;
   user-select: none;
   pointer-events: none;
+  /* An edge and a shadow, so light media stays distinct from a light
+     backdrop (and dark from dark) wherever it is panned. */
+  box-shadow:
+    0 0 0 1px var(--border-soft),
+    0 4px 20px light-dark(rgba(15, 23, 42, 0.18), rgba(0, 0, 0, 0.55));
 }
 
 /* The stage's layout size is the committed scaled size (set by
@@ -4110,6 +4176,26 @@ html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
 .media-viewer-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Opened by a click or a tap, focus on close shows no ring until a key is
+   pressed in the viewer (src/zoom/viewer.ts). */
+.media-viewer[data-pointer-opened] .media-viewer-button:focus-visible {
+  outline: none;
+}
+
+/* The zoom level, relative to fit, between zoom out and zoom in. */
+.media-viewer-zoom-level {
+  align-self: center;
+  min-width: 3.25em;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text-subtle);
+}
+
+.media-viewer-zoom-level:empty {
+  display: none;
 }
 
 .media-viewer-close {
@@ -10806,8 +10892,8 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
    frame, button and image then fill the message width together, so the frame
    stays the image's box. An SVG that declares its size keeps it. */
 .chat-visual-preview > .media-zoom-frame.is-fluid,
-.chat-visual-preview > .media-zoom-frame.is-fluid > .chat-visual-enlarge,
-.chat-visual-preview > .media-zoom-frame.is-fluid > .chat-visual-enlarge img {
+.chat-visual-preview > .media-zoom-frame.is-fluid > .media-zoom-clip > .chat-visual-enlarge,
+.chat-visual-preview > .media-zoom-frame.is-fluid > .media-zoom-clip > .chat-visual-enlarge img {
   width: 100%;
 }
 

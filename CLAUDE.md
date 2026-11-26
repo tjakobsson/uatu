@@ -126,8 +126,9 @@ src/
 │                   keep-visible and inline cover pan bounds, actual pixels;
 │                   gestures: the pan/pinch/tap/double-tap state machine fed
 │                   by Pointer or Touch events; motion: the intent-to-
-│                   transform step and the commit-at-rest protocol both
-│                   surfaces share), the media descriptor
+│                   transform step, keyboard pan and the commit-at-rest
+│                   protocol both surfaces share; announce: the polite live
+│                   region for zoom-level changes), the media descriptor
 │                   (media: kind, identity, link, small-media test), the
 │                   inline controller (inline: frame, activator and toolbar
 │                   as siblings, no wheel listener, touch-action by zoom

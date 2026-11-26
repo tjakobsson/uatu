@@ -676,10 +676,13 @@ test.describe("desktop layout", () => {
         if (!stage || !viewport) return null;
         const sb = stage.getBoundingClientRect();
         const vb = viewport.getBoundingClientRect();
+        // Fit keeps the diagram clear of the toolbar: it is centred in the
+        // area above it.
+        const toolbarTop = document.querySelector(".media-viewer-toolbar")!.getBoundingClientRect().top;
         const stageCenterX = sb.left + sb.width / 2;
         const stageCenterY = sb.top + sb.height / 2;
         const viewportCenterX = vb.left + vb.width / 2;
-        const viewportCenterY = vb.top + vb.height / 2;
+        const viewportCenterY = vb.top + (toolbarTop - vb.top) / 2;
         return {
           dx: Math.abs(stageCenterX - viewportCenterX),
           dy: Math.abs(stageCenterY - viewportCenterY),
@@ -689,7 +692,7 @@ test.describe("desktop layout", () => {
       });
 
       expect(offset).not.toBeNull();
-      // Stage center should be within ~20px of viewport center.
+      // Stage center should be within ~20px of the centre of the fit area.
       expect(offset!.dx).toBeLessThan(20);
       expect(offset!.dy).toBeLessThan(20);
       // And the stage must be inside (not off-screen): center within the viewport.

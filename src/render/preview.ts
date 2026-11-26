@@ -418,7 +418,7 @@ export function normalizeRenderedDiagram(node: HTMLElement): void {
   trigger.setAttribute("aria-label", "Open diagram in fullscreen viewer");
   trigger.append(svg);
   node.replaceChildren(trigger);
-  createInlineFrame(trigger, svg);
+  createInlineFrame(trigger, svg, "diagram");
 }
 
 export function normalizeMermaidSvg(svg: SVGElement): void {

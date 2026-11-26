@@ -338,9 +338,10 @@ src/
 │                         keep-visible and cover pan bounds, actual pixels;
 │                         gestures.ts — pan/pinch/tap state machine over
 │                         plain points from Pointer or Touch events;
-│                         motion.ts — intents to transforms, commit at
-│                         rest), the
-│                         media descriptor (media.ts), the inline
+│                         motion.ts — intents to transforms, arrow-key pan,
+│                         commit at rest), the
+│                         media descriptor (media.ts), zoom-level
+│                         announcements (announce.ts), the inline
 │                         controller (inline.ts), and the one shared
 │                         fullscreen viewer (viewer.ts). Imports nothing from
 │                         preview/, chat/ or shell/ (boundary.test.ts)
@@ -2143,10 +2144,11 @@ is archived, `openspec/changes/add-media-zoom/specs/media-zoom/spec.md`).
 math in `transform.ts` (clamp, anchored zoom, fit, the viewer's keep-visible
 pan bound and the inline cover bound, actual pixels), the pointer state
 machine in `gestures.ts`, fed plain points from Pointer or Touch events, and
-`motion.ts`, which both surfaces use to turn pan and pinch intents into
-transforms and to commit at rest, keeping their own bounds and taps — plus
-the media descriptor (`media.ts`), the inline controller (`inline.ts`) and the
-one shared fullscreen viewer (`viewer.ts`). It imports nothing from
+`motion.ts`, which both surfaces use to turn pan and pinch intents and arrow
+keys into transforms and to commit at rest, keeping their own bounds and taps —
+plus the media descriptor (`media.ts`), the polite zoom-level announcements
+(`announce.ts`), the inline controller (`inline.ts`) and the one shared
+fullscreen viewer (`viewer.ts`). It imports nothing from
 `preview/`, `chat/` or `shell/`; `src/zoom/boundary.test.ts` enforces that.
 Surfaces pass in what only they know: the real image source (the preview's
 `previewImageSource`, never the off-screen SVG placeholder), the link around
@@ -2160,10 +2162,18 @@ zoom on assistant visuals) and `src/chat/media-viewer.ts` (chat's way into the
 viewer).
 
 Inline zoom stays inside the media's at-fit box: a frame takes the media's
-layout, so nothing around it moves, and is held at that box while zoomed. It
+layout, so nothing around it moves, and is held at that box while zoomed. The
+media sits in a clip inside the frame (`display: contents` at fit, the frame's
+box once zoomed), and the toolbar beside the clip is never clipped: on media
+narrower than 200 CSS px (`COMPACT_MEDIA_PX`) it sits outside the frame,
+above it or, where that space is out of view (a sticky header, the top of the
+scroller), below it. It
 registers no `wheel` listener, so it never holds up a scroll. Touch gets a
 pinch through `touch-action: pan-x pan-y` at fit plus a non-passive listener
-that claims a second finger, and `touch-action: none` once zoomed. Zoomed, the
+that claims a second finger, and `touch-action: none` once zoomed; a
+one-finger pan that reaches the media's top or bottom edge scrolls the page
+with the rest of its movement (`panOverflow`, `motion.ts`). Arrow keys pan
+focused zoomed media and keep their default at fit. Zoomed, the
 media's margins (an image's `hspace`) move from inside the frame onto it, so
 the frame clips to the media's own box and its outer box stays put. Media under
 96 CSS px on a side (the media's own box, not its frame's margins) gets no
@@ -2223,6 +2233,23 @@ those instead of parsing `style.transform`. Raster media renders
 and its pixels are then enlarged past native size (`rasterEnlarged` in
 `media.ts`, for both surfaces); at fit it is smoothed, even when fitting
 enlarges it.
+
+**Viewer details.** Fit keeps the media between the caption and the toolbar
+(`fitBands`), and panning keeps at least 96 CSS px of it in view
+(`PAN_KEEP_VISIBLE`); the media has an edge and a shadow so it never melts
+into the backdrop. Zoom levels are relative to fit, inline and in the
+viewer: the viewer's toolbar shows the level, zoom in and out are
+`aria-disabled` (still focusable) at their limits, and a level a control or a
+key sets is announced through a polite status region (`announce.ts`; inline
+uses one region on `<body>`, outside every Find surface), never a gesture. A
+backdrop tap closes only once it has settled (no second press within
+`DOUBLE_TAP_MAX_GAP_MS`), so a double-click or double-tap anywhere fits. The
+viewport cancels every `touchend`, so the click a closing tap would end in
+never reaches the page. Closing tears the open down at once rather than on
+the dialog's queued `close` event, which would otherwise clear a viewer
+opened again in between. Opened by a click or a tap, focus on close shows no
+ring until a key is pressed (`data-pointer-opened`). Both toolbars draw one
+CSS icon per action from `data-zoom-action`.
 Device pixels are counted as `devicePixelRatio` times the page's pinch zoom
 (`devicePixelScale` in `media.ts`), for pixelation and "1:1 actual pixels"
 alike; the viewer's zoom range always reaches down to the actual-pixels

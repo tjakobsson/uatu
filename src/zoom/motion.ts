@@ -7,7 +7,7 @@
 // committed state, so both are unit-testable without layout.
 
 import type { GestureIntent } from "./gestures";
-import { COMMIT_DELAY_MS, pinchTransform, type Point, type ScaleLimits, type ZoomTransform } from "./transform";
+import { COMMIT_DELAY_MS, KEY_PAN_STEP, KEY_PAN_STEP_LARGE, pinchTransform, type Point, type ScaleLimits, type ZoomTransform } from "./transform";
 
 export type GestureSurface = {
   transform(): ZoomTransform;
@@ -20,6 +20,10 @@ export type GestureSurface = {
   canPan(): boolean;
   // A drag that moves the media began (true) or ended (false).
   panning(active: boolean): void;
+  // After each pan move: how far the pan asked to go past the surface's pan
+  // bound, in total since the pan (re)started; zero while within it. Inline
+  // touch hands that on to the page as a scroll.
+  panOverflow?(dx: number, dy: number): void;
   tap?(intent: Extract<GestureIntent, { type: "tap" }>): void;
   doubleTap?(intent: Extract<GestureIntent, { type: "double-tap" }>): void;
 };
@@ -44,7 +48,10 @@ export function gestureZoom(surface: GestureSurface): (intent: GestureIntent) =>
       }
       case "pan":
         if (panOrigin && surface.canPan()) {
-          surface.move({ tx: panOrigin.tx + intent.dx, ty: panOrigin.ty + intent.dy, scale: surface.transform().scale });
+          const asked = { tx: panOrigin.tx + intent.dx, ty: panOrigin.ty + intent.dy, scale: surface.transform().scale };
+          surface.move(asked);
+          const moved = surface.transform();
+          surface.panOverflow?.(asked.tx - moved.tx, asked.ty - moved.ty);
         }
         return;
       case "pinch-start":
@@ -70,6 +77,25 @@ export function gestureZoom(surface: GestureSurface): (intent: GestureIntent) =>
         return;
     }
   };
+}
+
+// The pan an arrow key asks for: like scrolling, the view moves the way the
+// key points, so the media moves the other way. Shift takes a larger step.
+export function keyPan(event: Pick<KeyboardEvent, "key" | "shiftKey" | "altKey" | "ctrlKey" | "metaKey">): { dx: number; dy: number } | null {
+  if (event.altKey || event.ctrlKey || event.metaKey) return null;
+  const step = event.shiftKey ? KEY_PAN_STEP_LARGE : KEY_PAN_STEP;
+  switch (event.key) {
+    case "ArrowLeft":
+      return { dx: step, dy: 0 };
+    case "ArrowRight":
+      return { dx: -step, dy: 0 };
+    case "ArrowUp":
+      return { dx: 0, dy: step };
+    case "ArrowDown":
+      return { dx: 0, dy: -step };
+    default:
+      return null;
+  }
 }
 
 export type RestCommitTarget = {

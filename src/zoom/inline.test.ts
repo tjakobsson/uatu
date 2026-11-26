@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
+import { KEY_PAN_STEP } from "./transform";
+
 import {
   ACTIVATOR_CLASS,
   attachInlineZoom,
+  CLIP_CLASS,
   createInlineFrame,
   createZoomCarry,
   FRAME_CLASS,
@@ -15,6 +18,14 @@ import {
 type Rect = { width: number; height: number };
 
 type ResizeCallback = (entries: { target: Element; contentRect: Rect }[]) => void;
+
+// The global animation frame as this file found it, put back after each test.
+const originalFrame = Object.getOwnPropertyDescriptor(globalThis, "requestAnimationFrame");
+
+afterEach(() => {
+  if (originalFrame) Object.defineProperty(globalThis, "requestAnimationFrame", originalFrame);
+  else Reflect.deleteProperty(globalThis, "requestAnimationFrame");
+});
 
 // linkedom has no ResizeObserver. This one reports a target's box as soon as
 // it is observed, as a browser's first notification does; `resize` reports a
@@ -38,7 +49,21 @@ function dom(body: string) {
   const resize = (target: Element) => {
     for (const entry of observed) if (entry.target === target) notify(entry);
   };
-  return { window: window as any, document: document as unknown as Document, resize, observing: () => observed.size };
+  // Animation frames run only when a test says the next frame has come.
+  // linkedom's window reads through to the global object, so the stub goes
+  // there and is undone after each test, or later files never get a frame.
+  let frames: (() => void)[] = [];
+  Object.defineProperty(globalThis, "requestAnimationFrame", {
+    configurable: true,
+    writable: true,
+    value: (callback: () => void) => frames.push(callback),
+  });
+  const nextFrame = () => {
+    const due = frames;
+    frames = [];
+    for (const callback of due) callback();
+  };
+  return { window: window as any, document: document as unknown as Document, resize, nextFrame, observing: () => observed.size };
 }
 
 // linkedom does no layout; give an element the box a browser would.
@@ -96,11 +121,16 @@ describe("inline frame structure", () => {
 
     expect(frame.classList.contains(FRAME_CLASS)).toBe(true);
     expect(frame.parentElement?.id).toBe("p");
-    expect(Array.from(frame.children).map(child => child.tagName)).toEqual(["IMG", "SPAN"]);
+    // The media sits in a clip, the box a zoom is clipped to; the toolbar
+    // beside it is not clipped, so it can sit outside narrow media.
+    expect(Array.from(frame.children).map(child => child.className)).toEqual([CLIP_CLASS, "media-zoom-toolbar"]);
+    expect(image.parentElement!.className).toBe(CLIP_CLASS);
     expect(image.getAttribute("role")).toBe("button");
     expect(image.getAttribute("tabindex")).toBe("0");
-    // The alt stays the name.
+    // The alt stays the name, and a description says what activating it does.
     expect(image.getAttribute("aria-label")).toBeNull();
+    expect(image.getAttribute("aria-description")).toBe("Opens in the fullscreen viewer");
+    expect(frame.querySelector(".media-zoom-toolbar")!.getAttribute("aria-label")).toBe("Zoom controls for Architecture");
     expect(toolbarLabels(frame)).toEqual(["Zoom out", "Zoom in", "Fit", "Open fullscreen viewer"]);
     expect(nestedControls(frame)).toBe(0);
     // Toolbar glyphs come from CSS: the frame adds no text for Find to index.
@@ -117,8 +147,11 @@ describe("inline frame structure", () => {
   test("an image without alt text gets an accessible name", () => {
     const { document } = dom('<p><img id="i" src="a.png"></p>');
     const image = document.getElementById("i") as HTMLImageElement;
-    createInlineFrame(image, image);
+    const frame = createInlineFrame(image, image);
     expect(image.getAttribute("aria-label")).toBe("Open image in fullscreen viewer");
+    // The name says it all already.
+    expect(image.hasAttribute("aria-description")).toBe(false);
+    expect(frame.querySelector(".media-zoom-toolbar")!.getAttribute("aria-label")).toBe("Zoom controls");
   });
 
   test("a linked image keeps the link as its activator and the toolbar outside it", () => {
@@ -127,7 +160,10 @@ describe("inline frame structure", () => {
     const image = document.getElementById("i") as HTMLImageElement;
     const frame = createInlineFrame(link, image);
 
-    expect(Array.from(frame.children).map(child => child.tagName)).toEqual(["A", "SPAN"]);
+    expect(Array.from(frame.children).map(child => child.className)).toEqual([CLIP_CLASS, "media-zoom-toolbar"]);
+    expect(link.parentElement!.className).toBe(CLIP_CLASS);
+    expect(link.getAttribute("aria-description")).toBe("Opens in the fullscreen viewer");
+    expect(frame.querySelector(".media-zoom-toolbar")!.getAttribute("aria-label")).toBe("Zoom controls for Logo");
     expect(image.parentElement).toBe(link);
     expect(image.hasAttribute("role")).toBe(false);
     expect(link.querySelector("button")).toBeNull();
@@ -147,8 +183,11 @@ describe("inline frame structure", () => {
     );
     const button = document.getElementById("b") as HTMLButtonElement;
     const svg = button.querySelector("svg")!;
-    const frame = createInlineFrame(button, svg);
-    expect(createInlineFrame(button, svg)).toBe(frame);
+    const frame = createInlineFrame(button, svg, "diagram");
+    expect(createInlineFrame(button, svg, "diagram")).toBe(frame);
+    expect(frame.querySelector(".media-zoom-toolbar")!.getAttribute("aria-label")).toBe("Zoom controls for diagram");
+    // Its name already says that it opens the viewer.
+    expect(button.hasAttribute("aria-description")).toBe(false);
     expect(document.querySelectorAll(`.${FRAME_CLASS}`).length).toBe(1);
     expect(document.querySelectorAll(".media-zoom-toolbar").length).toBe(1);
     expect(button.getAttribute("aria-label")).toBe("Open diagram in fullscreen viewer");
@@ -159,7 +198,7 @@ describe("inline frame structure", () => {
   test("the HTML form matches the DOM-built frame and takes a controller", () => {
     const button = (id: string) =>
       `<button id="${id}" type="button" class="${ACTIVATOR_CLASS}" aria-label="Enlarge chart"><img class="${STAGE_CLASS}" alt="chart" src="a.png"></button>`;
-    const { document } = dom(`<p id="built">${button("b1")}</p><p id="html">${inlineFrameHtml(button("b2"))}</p>`);
+    const { document } = dom(`<p id="built">${button("b1")}</p><p id="html">${inlineFrameHtml(button("b2"), "chart")}</p>`);
     const b1 = document.getElementById("b1") as HTMLButtonElement;
     const built = createInlineFrame(b1, b1.querySelector("img")!);
     const rendered = document.querySelector<HTMLElement>(`#html > .${FRAME_CLASS}`)!;
@@ -244,8 +283,8 @@ describe("inline controller", () => {
     expect(frame.style.getPropertyValue("--media-zoom-fluid-width")).toBe("50%");
   });
 
-  test("a viewBox-only image that loaded while hidden is made fluid once it is shown", () => {
-    const { window, document, resize } = dom('<div id="tab"><img id="i" alt="Chart" src="chart.svg"></div>');
+  test("a viewBox-only image that loaded while hidden is made fluid on the frame after it is shown", () => {
+    const { window, document, resize, nextFrame } = dom('<div id="tab"><img id="i" alt="Chart" src="chart.svg"></div>');
     // linkedom computes no styles; this image has no borders or padding.
     window.getComputedStyle = () => ({ getPropertyValue: () => "" });
     const image = document.getElementById("i") as HTMLImageElement;
@@ -265,6 +304,10 @@ describe("inline controller", () => {
     Object.defineProperty(image, "getClientRects", { configurable: true, value: () => [{ width: 0, height: 0 }] });
     setRect(image, { width: 0, height: 0 });
     resize(tab);
+    // Not inside the size notification: resizing the observed frame there
+    // makes the browser report a ResizeObserver loop.
+    expect(frame.classList.contains("is-fluid")).toBe(false);
+    nextFrame();
     expect(frame.classList.contains("is-fluid")).toBe(true);
   });
 
@@ -386,6 +429,78 @@ describe("inline controller", () => {
     expect(opened).toBe(1);
     // The link is not followed.
     expect(plain.defaultPrevented).toBe(true);
+  });
+});
+
+describe("inline controls for narrow media", () => {
+  test("media narrower than the compact width gets its toolbar outside its box, wider media inside", () => {
+    for (const [width, compact] of [[134, true], [199, true], [200, false], [400, false]] as const) {
+      const { document } = dom('<p><img id="i" alt="Shot" src="a.png"></p>');
+      const image = document.getElementById("i") as HTMLImageElement;
+      const frame = createInlineFrame(image, image);
+      layOut(frame, { width, height: 300 });
+      attachInlineZoom(frame, { kind: "raster", open: () => {} });
+      expect(frame.classList.contains("is-compact")).toBe(compact);
+    }
+  });
+});
+
+describe("inline zoom by keyboard and its level", () => {
+  function setup() {
+    const { window, document } = dom('<p><img id="i" alt="Shot" src="a.png"></p>');
+    const image = document.getElementById("i") as HTMLImageElement;
+    const frame = createInlineFrame(image, image);
+    layOut(frame, { width: 400, height: 300 });
+    const zoom = attachInlineZoom(frame, { kind: "raster", open: () => {} });
+    const key = (key: string, shiftKey = false) => {
+      const e = event(window, "keydown", { key, shiftKey });
+      image.dispatchEvent(e);
+      return e;
+    };
+    const status = () => document.querySelector("body > .media-zoom-status")?.textContent ?? null;
+    return { window, document, image, frame, zoom, key, status };
+  }
+
+  test("arrow keys on zoomed media pan it without scrolling the page; at fit they keep their default", () => {
+    const { frame, zoom, key } = setup();
+    expect(key("ArrowRight").defaultPrevented).toBe(false);
+    for (let i = 0; i < 3; i += 1) control(frame, "Zoom in").click();
+    const start = zoom.transform();
+    expect(key("ArrowRight").defaultPrevented).toBe(true);
+    expect(zoom.transform()).toEqual({ ...start, tx: start.tx - KEY_PAN_STEP });
+    key("ArrowUp", true);
+    // Up shows what is above: the media moves down, until its top edge.
+    expect(zoom.transform()).toEqual({ ...start, tx: start.tx - KEY_PAN_STEP, ty: 0 });
+  });
+
+  test("zoom out is unavailable at fit and zoom in at the maximum, and both stay focusable", () => {
+    const { frame } = setup();
+    const unavailable = (label: string) => control(frame, label).getAttribute("aria-disabled") === "true";
+    expect(unavailable("Zoom out")).toBe(true);
+    expect(unavailable("Zoom in")).toBe(false);
+    for (let i = 0; i < 20; i += 1) control(frame, "Zoom in").click();
+    expect(unavailable("Zoom in")).toBe(true);
+    expect(unavailable("Zoom out")).toBe(false);
+    expect(control(frame, "Zoom in").disabled).toBe(false);
+    control(frame, "Fit").click();
+    expect(unavailable("Zoom out")).toBe(true);
+    expect(unavailable("Zoom in")).toBe(false);
+  });
+
+  test("a level its controls set is announced politely, relative to fit; a pinch announces nothing", () => {
+    const { window, image, frame, status } = setup();
+    control(frame, "Zoom in").click();
+    expect(status()).toBe("Zoom 125%");
+    const region = (image.ownerDocument as Document).querySelector("body > .media-zoom-status")!;
+    expect(region.getAttribute("role")).toBe("status");
+    expect(region.getAttribute("aria-live")).toBe("polite");
+    control(frame, "Fit").click();
+    expect(status()).toBe("Zoom 100%");
+    const touch = (identifier: number, clientX: number) => ({ identifier, clientX, clientY: 150, target: image });
+    const fingers = (type: string, touches: object[]) => image.dispatchEvent(event(window, type, { touches, changedTouches: touches, timeStamp: 0 }));
+    fingers("touchstart", [touch(1, 150), touch(2, 250)]);
+    fingers("touchmove", [touch(1, 100), touch(2, 300)]);
+    expect(status()).toBe("Zoom 100%");
   });
 });
 

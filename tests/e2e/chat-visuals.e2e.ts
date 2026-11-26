@@ -453,7 +453,7 @@ test.describe("visual inline zoom on desktop", () => {
     const zoomed = (await readInlineTransform(frame))!;
     expect(zoomed.scale).toBeCloseTo(1.25 ** 2, 3);
     await captureScreenshot(page, testInfo, "chat-visual-inline-zoomed");
-    expect(await frame.evaluate(element => getComputedStyle(element).overflow)).toBe("hidden");
+    expect(await frame.locator(":scope > .media-zoom-clip").evaluate(element => getComputedStyle(element).overflow)).toBe("hidden");
     // Zooming keeps the visual's box where it was.
     const held = (await frame.boundingBox())!;
     for (const side of ["x", "y", "width", "height"] as const) expect(Math.abs(held[side] - box[side])).toBeLessThan(0.02);

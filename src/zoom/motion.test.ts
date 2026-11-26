@@ -48,6 +48,32 @@ describe("gestureZoom", () => {
     expect(s.events).toEqual(["panning", "still"]);
   });
 
+  test("what a pan asks for beyond the surface's bound is reported, so the page can scroll it", () => {
+    let current: ZoomTransform = { tx: 0, ty: -50, scale: 2 };
+    const overflow: [number, number][] = [];
+    const tracker = new GestureTracker(
+      gestureZoom({
+        transform: () => current,
+        toBox: point => point,
+        limits: () => ({ min: 1, max: 4 }),
+        // The media's bottom edge is reached at ty -100.
+        move: next => {
+          current = { ...next, ty: Math.max(next.ty, -100) };
+        },
+        canPan: () => true,
+        panning: () => {},
+        panOverflow: (dx, dy) => overflow.push([dx, dy]),
+      }),
+    );
+    tracker.down(touch(1, 100, 300));
+    tracker.move(touch(1, 100, 260, 16));
+    tracker.move(touch(1, 100, 180, 32));
+    tracker.move(touch(1, 100, 230, 48));
+    // Within the bound nothing is left over; past it, all that the bound held back.
+    expect(overflow).toEqual([[0, 0], [0, -70], [0, -20]]);
+    expect(current.ty).toBe(-100);
+  });
+
   test("a surface that cannot pan now leaves a drag alone", () => {
     const s = surface({ canPan: () => false });
     s.tracker.down(touch(1, 100, 100));

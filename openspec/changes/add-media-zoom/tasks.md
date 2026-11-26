@@ -192,6 +192,38 @@ E2E fixtures go through `/__e2e/reset` extras, as in
   installed PWA. Record the device, OS and result in the PR, because
   emulation does not reproduce Safari's gesture handling.
 
+## 7. UX review fixes
+
+- [x] 7.1 Touch click-through: a backdrop tap that closes the viewer no
+  longer lets its follow-up click reach the page (the viewport cancels every
+  `touchend`), and closing finishes at once rather than on the queued
+  `close` event, which emptied a viewer opened again in between. Verify with
+  `viewer.test.ts` and the touch dismissal tests in `media-zoom.e2e.ts`.
+- [x] 7.2 Fluid sizing waits for the next frame after a size notification,
+  so a viewBox-only SVG reports no ResizeObserver loop. Verify with
+  `inline.test.ts` and the "reports no ResizeObserver loop" e2e tests.
+- [x] 7.3 Arrow keys pan in the viewer (Shift: larger step) and on focused
+  zoomed inline media. Verify with `viewer.test.ts` and `inline.test.ts`.
+- [x] 7.4 The viewer shows the zoom level relative to fit; zoom in and out
+  are `aria-disabled` at their limits, inline and in the viewer; levels set
+  by controls and keys are announced politely. Verify with unit tests and
+  `media-zoom.e2e.ts`.
+- [x] 7.5 A one-finger pan past zoomed inline media's top or bottom edge
+  scrolls the page. Verify with `motion.test.ts` and `media-zoom.e2e.ts`.
+- [x] 7.6 One CSS icon per action in both toolbars; fit and expand differ.
+- [x] 7.7 Viewer media has an edge and a shadow; the keep-visible strip is
+  96px.
+- [x] 7.8 A backdrop tap closes only once settled, so a double-click or
+  double-tap anywhere fits.
+- [x] 7.9 Media narrower than 200 CSS px shows its toolbar outside its box,
+  above it or below it when the space above is out of view; the zoom is
+  clipped by an inner clip, not the frame.
+- [x] 7.10 Fit keeps viewer media clear of the toolbar and the caption.
+- [x] 7.11 Opened by a click or a tap, the viewer's close control shows no
+  focus ring until a key is pressed.
+- [x] 7.12 Image activators are described as opening the viewer, and each
+  inline toolbar group is named after its media.
+
 ## Workflow follow-up
 
 - At PR time, assemble screenshots by running the relevant suites with

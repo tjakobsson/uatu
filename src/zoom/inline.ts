@@ -3,10 +3,15 @@
 //
 // Markup, built by `createInlineFrame`:
 //
-//   span.media-zoom-frame          the clipping box; takes the media's at-fit
-//     <activator>                  layout, and is locked to it while zoomed
-//       … .media-zoom-stage        the element that is transformed
-//     span.media-zoom-toolbar      a sibling of the activator, never inside it
+//   span.media-zoom-frame          takes the media's at-fit layout, and is
+//                                  locked to it while zoomed
+//     span.media-zoom-clip         the box a zoom is clipped to: no box of its
+//                                  own at fit, the frame's box while zoomed
+//       <activator>
+//         … .media-zoom-stage      the element that is transformed
+//     span.media-zoom-toolbar      beside the clip, never inside the activator
+//                                  or clipped, so on narrow media it can sit
+//                                  outside the frame (`is-compact`)
 //
 // The activator is the one focusable, named element for the media: a diagram's
 // button, an image's enclosing link, or the image itself made a button.
@@ -25,12 +30,14 @@
 // frame, relative to the fit box (fit is `{"tx":0,"ty":0,"scale":1}`), and
 // `data-zoom-pending` marks a commit still to come.
 
+import { announceZoom, createZoomStatus } from "./announce";
 import { GestureTracker, pointerPoint, touchPoint } from "./gestures";
-import { devicePixelScale, isMermaidIdentity, isSmallMedia, naturalSize, rasterEnlarged, sameAspectRatio, type MediaKind } from "./media";
-import { gestureZoom, RestCommit } from "./motion";
+import { COMPACT_MEDIA_PX, devicePixelScale, isMermaidIdentity, isSmallMedia, naturalSize, rasterEnlarged, sameAspectRatio, type MediaKind } from "./media";
+import { gestureZoom, keyPan, RestCommit } from "./motion";
 import { boundCover, MAX_SCALE, ZOOM_STEP, zoomAt, type Size, type ZoomTransform } from "./transform";
 
 export const FRAME_CLASS = "media-zoom-frame";
+export const CLIP_CLASS = "media-zoom-clip";
 export const ACTIVATOR_CLASS = "media-zoom-activator";
 export const STAGE_CLASS = "media-zoom-stage";
 const TOOLBAR_CLASS = "media-zoom-toolbar";
@@ -38,6 +45,12 @@ const TOOLBAR_CLASS = "media-zoom-toolbar";
 // until its controller has measured it. Built in, so hover can never show a
 // toolbar before the media is known to be large enough for one.
 const SMALL_CLASS = "is-small";
+// Media narrower than COMPACT_MEDIA_PX, whose toolbar would cover it: the
+// toolbar sits outside the frame, above it or, without room there, below.
+const COMPACT_CLASS = "is-compact";
+const TOOLBAR_BELOW_CLASS = "has-toolbar-below";
+// What activating framed media does, for an activator whose name is its own.
+const OPENS_VIEWER = "Opens in the fullscreen viewer";
 
 // Inline zoom runs from fit (1, relative to the fit box) to the viewer's maximum.
 const INLINE_LIMITS = { min: 1, max: MAX_SCALE };
@@ -57,15 +70,24 @@ const TOOLBAR: [ToolbarAction, string][] = [
 ];
 
 // The toolbar's one markup, for frames built in the DOM and frames rendered
-// as HTML alike. The glyphs are CSS-generated: the frame adds no text for
-// Find to index.
-const TOOLBAR_HTML =
-  `<span class="${TOOLBAR_CLASS}" role="group" aria-label="Zoom controls">` +
-  TOOLBAR.map(
-    ([action, label]) =>
-      `<button type="button" class="media-zoom-button media-zoom-${action}" data-zoom-action="${action}" aria-label="${label}" title="${label}"></button>`,
-  ).join("") +
-  "</span>";
+// as HTML alike, its group named after the media it zooms. The glyphs are
+// CSS-generated: the frame adds no text for Find to index.
+function toolbarHtml(mediaName: string): string {
+  const name = mediaName.trim();
+  const label = name ? `Zoom controls for ${escapeAttribute(name)}` : "Zoom controls";
+  return (
+    `<span class="${TOOLBAR_CLASS}" role="group" aria-label="${label}">` +
+    TOOLBAR.map(
+      ([action, label]) =>
+        `<button type="button" class="media-zoom-button media-zoom-${action}" data-zoom-action="${action}" aria-label="${label}" title="${label}"></button>`,
+    ).join("") +
+    "</span>"
+  );
+}
+
+function escapeAttribute(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 export type InlineZoomOptions = {
   // Read each time it matters, so a getter can follow media whose format is
@@ -112,11 +134,12 @@ const controllers = new WeakMap<HTMLElement, InlineZoom>();
 
 // Wrap `activator` in a frame with a toolbar beside it. `stage` is the
 // element to transform: the activator itself, or media inside it.
+// `mediaName` names the toolbar's group; by default an image's alt text.
 // Idempotent: an activator already framed returns its frame.
-export function createInlineFrame(activator: HTMLElement, stage: Element): HTMLElement {
+export function createInlineFrame(activator: HTMLElement, stage: Element, mediaName?: string): HTMLElement {
   const existing = activator.parentElement;
-  if (existing?.classList.contains(FRAME_CLASS)) {
-    return existing;
+  if (existing?.classList.contains(CLIP_CLASS) && existing.parentElement?.classList.contains(FRAME_CLASS)) {
+    return existing.parentElement;
   }
   const document = activator.ownerDocument;
   activator.classList.add(ACTIVATOR_CLASS);
@@ -130,14 +153,20 @@ export function createInlineFrame(activator: HTMLElement, stage: Element): HTMLE
     activator.removeAttribute("tabindex");
   }
   // The activator is the media's one named control. A name the author gave
-  // it (its own label, a title, an image's alt, a linked image's alt) stays.
+  // it (its own label, a title, an image's alt, a linked image's alt) stays,
+  // and a description says that activating it opens the viewer, which an
+  // image or a link would not otherwise tell. A button names its own action.
   if (!hasAuthoredName(activator)) activator.setAttribute("aria-label", "Open image in fullscreen viewer");
+  else if (activator.tagName !== "BUTTON" && !activator.hasAttribute("aria-description")) activator.setAttribute("aria-description", OPENS_VIEWER);
 
   const frame = document.createElement("span");
   frame.className = `${FRAME_CLASS} ${SMALL_CLASS}`;
+  const clip = document.createElement("span");
+  clip.className = CLIP_CLASS;
   activator.replaceWith(frame);
-  frame.append(activator);
-  frame.insertAdjacentHTML("beforeend", TOOLBAR_HTML);
+  clip.append(activator);
+  frame.append(clip);
+  frame.insertAdjacentHTML("beforeend", toolbarHtml(mediaName ?? (stage.tagName === "IMG" ? stage.getAttribute("alt") ?? "" : "")));
   return frame;
 }
 
@@ -145,8 +174,15 @@ export function createInlineFrame(activator: HTMLElement, stage: Element): HTMLE
 // `activatorHtml` is the activator, already carrying ACTIVATOR_CLASS, with
 // STAGE_CLASS on itself or on the media inside it; it must be a button or a
 // link, since only `createInlineFrame` makes other elements focusable.
-export function inlineFrameHtml(activatorHtml: string): string {
-  return `<span class="${FRAME_CLASS} ${SMALL_CLASS}">${activatorHtml}${TOOLBAR_HTML}</span>`;
+// `mediaName` names the toolbar's group.
+export function inlineFrameHtml(activatorHtml: string, mediaName = ""): string {
+  return `<span class="${FRAME_CLASS} ${SMALL_CLASS}"><span class="${CLIP_CLASS}">${activatorHtml}</span>${toolbarHtml(mediaName)}</span>`;
+}
+
+// A frame's activator: the one focusable, named element for its media.
+export function activatorOf(frame: Element): HTMLElement | null {
+  const clip = childWithClass(frame, CLIP_CLASS);
+  return clip && childWithClass(clip, ACTIVATOR_CLASS);
 }
 
 export function attachInlineZoom(frame: HTMLElement, options: InlineZoomOptions): InlineZoom {
@@ -174,13 +210,14 @@ export function viewerFocusReturn(opener: HTMLElement): { returnFocusTo: HTMLEle
   const frame = opener.closest<HTMLElement>(`.${FRAME_CLASS}`);
   const viaExpand = opener.matches(EXPAND_SELECTOR);
   return {
-    returnFocusTo: (frame && childWithClass(frame, ACTIVATOR_CLASS)) ?? opener,
+    returnFocusTo: (frame && activatorOf(frame)) ?? opener,
     afterReturn: () => {
       // The activator focus returned to: the one given, or a re-rendered
       // copy's that replaced it (see MediaViewerSession.replace).
       const returned = opener.ownerDocument.activeElement;
-      if (!viaExpand || !returned?.classList.contains(ACTIVATOR_CLASS) || !returned.parentElement) return;
-      childWithClass(returned.parentElement, TOOLBAR_CLASS)?.querySelector<HTMLElement>(EXPAND_SELECTOR)?.focus();
+      const returnedFrame = returned?.classList.contains(ACTIVATOR_CLASS) ? returned.closest(`.${FRAME_CLASS}`) : null;
+      if (!viaExpand || !returnedFrame) return;
+      childWithClass(returnedFrame, TOOLBAR_CLASS)?.querySelector<HTMLElement>(EXPAND_SELECTOR)?.focus();
     },
   };
 }
@@ -227,6 +264,48 @@ function margins(element: Element): Record<(typeof SIDES)[number], number> {
   return { top: side("top"), right: side("right"), bottom: side("bottom"), left: side("left") };
 }
 
+// The polite status region inline zoom announces levels through: one per
+// page, outside every surface, so Find never indexes what it says.
+function inlineStatus(document: Document): HTMLElement {
+  const existing = document.body.querySelector<HTMLElement>(":scope > .media-zoom-status");
+  if (existing) return existing;
+  const region = createZoomStatus(document, "media-zoom-status");
+  document.body.append(region);
+  return region;
+}
+
+// Whether the page shows its own content at a point near `frame`: inside the
+// window and the frame's scroller, and not under page chrome (a sticky or
+// fixed element) or outside the content (a header beside the scroller).
+function inView(frame: HTMLElement, x: number, y: number): boolean {
+  const document = frame.ownerDocument;
+  const view = document.defaultView;
+  if (!view || x < 0 || y < 0 || x > view.innerWidth || y > view.innerHeight) return false;
+  const hit = document.elementFromPoint?.(x, y);
+  if (!hit) return false;
+  const scroller = verticalScroller(frame);
+  if (scroller && scroller !== document.scrollingElement && !scroller.contains(hit)) return false;
+  // Chrome is what covers the point without holding the frame.
+  for (let node: Element | null = hit; node && !node.contains(frame); node = node.parentElement) {
+    const position = view.getComputedStyle(node).position;
+    if (position === "sticky" || position === "fixed") return false;
+  }
+  return true;
+}
+
+// The nearest ancestor that scrolls vertically, else the page's scroller.
+// The body's overflow is the viewport's (it propagates), so the walk ends
+// below it.
+function verticalScroller(element: Element): Element | null {
+  const view = element.ownerDocument.defaultView;
+  const body = element.ownerDocument.body;
+  for (let node = element.parentElement; node && node !== body; node = node.parentElement) {
+    const overflow = view?.getComputedStyle?.(node).getPropertyValue("overflow-y") ?? "";
+    if ((overflow === "auto" || overflow === "scroll") && node.scrollHeight > node.clientHeight) return node;
+  }
+  return element.ownerDocument.scrollingElement ?? element.ownerDocument.documentElement;
+}
+
 function childWithClass(parent: Element, className: string): HTMLElement | null {
   return (Array.from(parent.children).find(child => child.classList.contains(className)) as HTMLElement) ?? null;
 }
@@ -244,7 +323,11 @@ class InlineController implements InlineZoom {
       limits: () => INLINE_LIMITS,
       move: next => this.apply(next, "settle"),
       canPan: () => this.zoomed,
-      panning: active => this.frame.classList.toggle("is-panning", active && this.zoomed),
+      panning: active => {
+        this.frame.classList.toggle("is-panning", active && this.zoomed);
+        this.scrolledOverflow = 0;
+      },
+      panOverflow: (_dx, dy) => this.handOffScroll(dy),
     }),
   );
   private readonly rest: RestCommit;
@@ -257,6 +340,8 @@ class InlineController implements InlineZoom {
   private small = true;
   // A touch sequence this controller has claimed from the browser.
   private touchOwned = false;
+  // How far the page has scrolled for the current touch pan (see handOffScroll).
+  private scrolledOverflow = 0;
   private sizeWatch: ResizeObserver | null = null;
   // The bitmap width of a source a `srcset` picked (see measureBitmap); null
   // for any other source, whose natural width is its bitmap's.
@@ -264,7 +349,7 @@ class InlineController implements InlineZoom {
   private containerWatch: { observer: ResizeObserver; width: number | null } | null = null;
 
   constructor(readonly frame: HTMLElement, private readonly options: InlineZoomOptions) {
-    const activator = childWithClass(frame, ACTIVATOR_CLASS);
+    const activator = activatorOf(frame);
     const stage = activator?.classList.contains(STAGE_CLASS) ? activator : activator?.querySelector(`.${STAGE_CLASS}`);
     if (!activator || !stage) {
       throw new Error("attachInlineZoom: frame has no activator or stage");
@@ -279,10 +364,14 @@ class InlineController implements InlineZoom {
       },
     });
     this.writeState();
+    this.syncControls();
     this.syncTouchAction();
     this.syncFluid();
     // An image loaded before this controller (from the cache) has no load to come.
     this.measureBitmap();
+    // A compact toolbar is placed as it is about to show.
+    frame.addEventListener("pointerenter", () => this.placeToolbar());
+    frame.addEventListener("focusin", () => this.placeToolbar());
 
     stage.addEventListener("load", () => {
       this.syncFluid();
@@ -367,9 +456,18 @@ class InlineController implements InlineZoom {
     const Observer = this.frame.ownerDocument.defaultView?.ResizeObserver;
     if (!Observer) return;
     // The first notification, delivered on observe, is the first measurement.
+    // Fluid sizing resizes the frame, so it waits for the next frame: resizing
+    // an observed element inside its own notification makes the browser
+    // report a ResizeObserver loop.
     this.sizeWatch = new Observer(() => {
       this.measure();
-      if (!this.frame.classList.contains("is-fluid")) this.syncFluid();
+      if (this.frame.classList.contains("is-fluid")) return;
+      const fluid = () => {
+        if (this.sizeWatch && !this.frame.classList.contains("is-fluid")) this.syncFluid();
+      };
+      const view = this.frame.ownerDocument.defaultView;
+      if (view?.requestAnimationFrame) view.requestAnimationFrame(fluid);
+      else fluid();
     });
     this.sizeWatch.observe(this.frame);
     if (this.frame.parentElement) this.sizeWatch.observe(this.frame.parentElement);
@@ -379,9 +477,26 @@ class InlineController implements InlineZoom {
   // the media has (an image's `hspace`).
   private measure(): void {
     if (this.zoomed) return;
-    this.small = isSmallMedia(contentBox(this.stage));
+    const box = contentBox(this.stage);
+    this.small = isSmallMedia(box);
     this.frame.classList.toggle(SMALL_CLASS, this.small);
+    this.frame.classList.toggle(COMPACT_CLASS, box.width < COMPACT_MEDIA_PX);
     this.syncTouchAction();
+  }
+
+  // A compact toolbar goes above the frame, or below it when the space above
+  // is out of view: past the top of the window or the frame's scroller, or
+  // under a sticky header.
+  private placeToolbar(): void {
+    if (!this.frame.classList.contains(COMPACT_CLASS)) return;
+    const toolbar = childWithClass(this.frame, TOOLBAR_CLASS);
+    if (!toolbar) return;
+    const frame = this.frame.getBoundingClientRect();
+    const height = toolbar.getBoundingClientRect().height;
+    const x = frame.left + 4;
+    const roomAbove = inView(this.frame, x, frame.top - height + 2);
+    const roomBelow = inView(this.frame, x, frame.bottom + height - 2);
+    this.frame.classList.toggle(TOOLBAR_BELOW_CLASS, !roomAbove && roomBelow);
   }
 
   // The media's intrinsic size: an image's natural size once it has loaded,
@@ -436,12 +551,15 @@ class InlineController implements InlineZoom {
     switch (button?.dataset.zoomAction) {
       case "zoom-in":
         this.zoomBy(ZOOM_STEP);
+        this.announce();
         return;
       case "zoom-out":
         this.zoomBy(1 / ZOOM_STEP);
+        this.announce();
         return;
       case "fit":
         this.reset();
+        this.announce();
         return;
       case "expand":
         this.options.open(button!);
@@ -464,9 +582,17 @@ class InlineController implements InlineZoom {
     this.options.open(this.activator);
   }
 
+  // Arrow keys pan zoomed media (at fit they keep their default, scrolling).
   // Buttons and links activate natively on Enter (and buttons on Space); the
   // rest is handled here.
   private onKeyDown(event: KeyboardEvent): void {
+    const pan = this.zoomed && this.active ? keyPan(event) : null;
+    if (pan) {
+      event.preventDefault();
+      const { tx, ty, scale } = this.current;
+      this.apply({ tx: tx + pan.dx, ty: ty + pan.dy, scale }, "now");
+      return;
+    }
     if (event.key !== "Enter" && event.key !== " ") return;
     const tag = this.activator.tagName;
     if (tag === "BUTTON" || (tag === "A" && event.key === "Enter")) return;
@@ -513,6 +639,21 @@ class InlineController implements InlineZoom {
     if (event.cancelable) event.preventDefault();
     for (const touch of Array.from(event.changedTouches)) this.tracker[phase](touchPoint(touch, event));
     if (this.tracker.size === 0) this.touchOwned = false;
+  }
+
+  // A one-finger pan on zoomed media that runs into the media's top or bottom
+  // edge goes on as a page scroll, so zoomed media never traps the page. `dy`
+  // is the part of the pan's whole offset the edge held back; the page has
+  // scrolled for some of it already. Mouse and pen drags stay on the media.
+  private handOffScroll(dy: number): void {
+    if (!this.touchOwned || this.tracker.size !== 1) return;
+    const step = dy - this.scrolledOverflow;
+    this.scrolledOverflow = dy;
+    if (step !== 0) verticalScroller(this.frame)?.scrollBy(0, -step);
+  }
+
+  private announce(): void {
+    announceZoom(inlineStatus(this.frame.ownerDocument), this.current.scale);
   }
 
   private local(point: { x: number; y: number }) {
@@ -566,7 +707,17 @@ class InlineController implements InlineZoom {
     if (!this.zoomed) this.lock(box);
     this.current = bounded;
     this.updatePixelation();
+    this.syncControls();
     this.rest.show(bounded, mode);
+  }
+
+  // Zoom out is unavailable at fit and zoom in at the maximum. They stay
+  // focusable (`aria-disabled`, not `disabled`), so pressing one to its limit
+  // never drops keyboard focus.
+  private syncControls(): void {
+    const toolbar = childWithClass(this.frame, TOOLBAR_CLASS);
+    toolbar?.querySelector(".media-zoom-zoom-out")?.setAttribute("aria-disabled", String(!this.zoomed));
+    toolbar?.querySelector(".media-zoom-zoom-in")?.setAttribute("aria-disabled", String(this.current.scale >= INLINE_LIMITS.max * (1 - 1e-6)));
   }
 
   // Hold the frame at the media's fit box, so the stage can leave the flow and
@@ -587,6 +738,8 @@ class InlineController implements InlineZoom {
     this.setStageSize(box, 1);
     this.syncTouchAction();
     this.watchContainer();
+    // Touch shows the toolbar once zoomed.
+    this.placeToolbar();
   }
 
   private setStageSize(box: Size, scale: number): void {
@@ -606,6 +759,7 @@ class InlineController implements InlineZoom {
     }
     this.frame.removeAttribute("data-zoom-pending");
     this.writeState();
+    this.syncControls();
     this.syncTouchAction();
     this.syncFluid();
   }

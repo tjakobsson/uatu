@@ -9,6 +9,9 @@ export const MAX_SCALE = 8;
 export const WHEEL_ZOOM_RATE = 0.001;
 // Toolbar and keyboard zoom step.
 export const ZOOM_STEP = 1.25;
+// Arrow-key pan, in CSS px; with Shift, the larger step.
+export const KEY_PAN_STEP = 40;
+export const KEY_PAN_STEP_LARGE = 200;
 // Space left around content fitted into the viewer.
 export const FIT_MARGIN = 32;
 
@@ -16,8 +19,9 @@ export const FIT_MARGIN = 32;
 // Not "fully contained" — at high zoom the content is deliberately larger
 // than the screen and has to be pannable past its edges. Only the state where
 // nothing at all is on screen is disallowed, because its only recovery was
-// the fit button, which on a phone was itself off-screen.
-export const PAN_KEEP_VISIBLE = 48;
+// the fit button, which on a phone was itself off-screen. A strip wide enough
+// to notice, even where light media meets a light backdrop.
+export const PAN_KEEP_VISIBLE = 96;
 
 // Rendering commits at rest: about this long after input stops, a zoomed
 // stage is laid out at its scaled size so vector content is redrawn sharp.
@@ -27,6 +31,11 @@ export type ZoomTransform = { tx: number; ty: number; scale: number };
 export type Size = { width: number; height: number };
 export type Point = { x: number; y: number };
 export type ScaleLimits = { min: number; max: number };
+// Bands at the top and bottom of a box that fitted content keeps clear of
+// (the viewer's caption and toolbar).
+export type Bands = { top: number; bottom: number };
+
+const NO_BANDS: Bands = { top: 0, bottom: 0 };
 
 const VIEWER_LIMITS: ScaleLimits = { min: MIN_SCALE, max: MAX_SCALE };
 
@@ -93,20 +102,22 @@ export function pinchTransform(
 }
 
 // The largest scale that shows the whole content inside the box less
-// `FIT_MARGIN`, centred. Capped at the maximum scale, but never raised to the
-// minimum: content too large to fit at the minimum still fits whole.
-export function fitTransform(content: Size, box: Size): ZoomTransform {
-  if (content.width <= 0 || content.height <= 0 || box.width <= 0 || box.height <= 0) {
+// `FIT_MARGIN` and the bands, centred between the bands. Capped at the
+// maximum scale, but never raised to the minimum: content too large to fit at
+// the minimum still fits whole.
+export function fitTransform(content: Size, box: Size, bands: Bands = NO_BANDS): ZoomTransform {
+  const height = box.height - bands.top - bands.bottom;
+  if (content.width <= 0 || content.height <= 0 || box.width <= 0 || height <= 0) {
     return { tx: 0, ty: 0, scale: 1 };
   }
   const scale = Math.min(
     (box.width - FIT_MARGIN) / content.width,
-    (box.height - FIT_MARGIN) / content.height,
+    (height - FIT_MARGIN) / content.height,
     MAX_SCALE,
   );
   return {
     tx: (box.width - content.width * scale) / 2,
-    ty: (box.height - content.height * scale) / 2,
+    ty: bands.top + (height - content.height * scale) / 2,
     scale,
   };
 }
@@ -116,9 +127,9 @@ export function fitTransform(content: Size, box: Size): ZoomTransform {
 // itself offers: fit, for content that only fits below MIN_SCALE, so zooming
 // out never moves away from fit; and `offered` (actual pixels, which on a
 // dense screen of a pinch-zoomed page can be well under MIN_SCALE).
-export function viewerScaleLimits(content: Size, box: Size, offered: number[] = []): ScaleLimits {
+export function viewerScaleLimits(content: Size, box: Size, offered: number[] = [], bands: Bands = NO_BANDS): ScaleLimits {
   const usable = offered.filter(scale => Number.isFinite(scale) && scale > 0);
-  return { min: Math.min(MIN_SCALE, fitTransform(content, box).scale, ...usable), max: MAX_SCALE };
+  return { min: Math.min(MIN_SCALE, fitTransform(content, box, bands).scale, ...usable), max: MAX_SCALE };
 }
 
 // The viewer's pan bound: keep at least `PAN_KEEP_VISIBLE` of the scaled

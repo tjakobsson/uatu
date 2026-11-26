@@ -26,7 +26,7 @@
 
 import { onMermaidDiagramRendered, setMermaidRenderPriority } from "../render/preview";
 import {
-  ACTIVATOR_CLASS,
+  activatorOf,
   attachInlineZoom,
   createInlineFrame,
   createZoomCarry,
@@ -262,10 +262,6 @@ function openPreviewViewer(descriptor: ViewerDescriptor, identity: string, opene
   viewer = { session, identity };
 }
 
-function activatorOf(frame: HTMLElement): HTMLElement | null {
-  return frame.querySelector<HTMLElement>(`:scope > .${ACTIVATOR_CLASS}`);
-}
-
 function closePreviewViewer(): void {
   viewer?.session.close();
   viewer = null;
@@ -355,10 +351,10 @@ function imageDescriptor(image: HTMLImageElement, frame: HTMLElement): ViewerDes
 
 function attachDiagram(node: HTMLElement): void {
   const frame = node.querySelector<HTMLElement>(`:scope > .${FRAME_CLASS}`);
-  const trigger = frame?.querySelector<HTMLButtonElement>(":scope > button.mermaid-trigger");
+  const trigger = frame && activatorOf(frame);
   const svg = trigger?.querySelector<SVGElement>(":scope > svg");
   const root = previewRoot();
-  if (!frame || !trigger || !svg || !root?.contains(node)) return;
+  if (!frame || !trigger?.matches("button.mermaid-trigger") || !svg || !root?.contains(node)) return;
   const identity = mermaidIdentity(node, root);
   const zoom = attachInlineZoom(frame, {
     kind: "mermaid",

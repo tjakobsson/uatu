@@ -72,6 +72,21 @@ describe("zoomAt", () => {
   });
 });
 
+describe("fitTransform between bands", () => {
+  test("fits into the box less a band at the top and one at the bottom, centred between them", () => {
+    const fit = fitTransform({ width: 300, height: 3000 }, VIEWPORT, { top: 40, bottom: 100 });
+    expect(fit.scale).toBeCloseTo((800 - 140 - 32) / 3000, 9);
+    expect(fit.tx).toBeCloseTo((1000 - 300 * fit.scale) / 2, 9);
+    expect(fit.ty).toBeCloseTo(40 + (660 - 3000 * fit.scale) / 2, 9);
+  });
+
+  test("the viewer's minimum reaches down to the fit between its bands", () => {
+    const bands = { top: 0, bottom: 300 };
+    const limits = viewerScaleLimits({ width: 300, height: 3000 }, VIEWPORT, [], bands);
+    expect(limits.min).toBeCloseTo(fitTransform({ width: 300, height: 3000 }, VIEWPORT, bands).scale, 9);
+  });
+});
+
 describe("fitTransform", () => {
   test("fits wide content to the width and centres it vertically", () => {
     const fit = fitTransform({ width: 2000, height: 400 }, VIEWPORT);

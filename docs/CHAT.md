@@ -1074,9 +1074,12 @@ Each image preview zooms inline, within its own box, so the reply around it
 never moves. A visual shown smaller than 96 CSS pixels in width or height has
 no inline zoom; selecting it opens the fullscreen viewer. With a mouse, hovering the image or focusing it shows **Zoom
 in**, **Zoom out**, **Fit** and **Open fullscreen viewer** controls, and
-dragging a zoomed image pans it. The wheel always scrolls the conversation;
+dragging a zoomed image pans it, as do the arrow keys while it has focus.
+On an image narrower than 200 CSS pixels the controls sit just outside it,
+so they never hide it. The wheel always scrolls the conversation;
 it never zooms an inline image. On touch, pinch the image to zoom it rather
-than the page, and drag one finger to pan it once zoomed. At fit, one finger
+than the page, and drag one finger to pan it once zoomed; a drag that reaches
+the image's top or bottom edge goes on scrolling the conversation. At fit, one finger
 still scrolls the conversation. A zoomed image shows **Fit** and **Open
 fullscreen viewer**. Streamed text arriving in the same reply keeps an
 image's zoom.
@@ -1088,12 +1091,15 @@ viewer. Attachment thumbnails, in sent messages, the queue and the
 composer, open the same viewer directly, showing the full image. They have
 no inline zoom at any size, because a thumbnail is only a preview of the
 image. The viewer shows the attachment's name, or a visual's alt text, as a
-caption across the top. It opens at fit and supports drag, wheel and pinch zoom,
-double-click or double-tap to fit, its toolbar, and the `+`, `-`, `0` and
-`f` keys. Raster images also offer **1:1 actual pixels**. It closes on
-Escape, its close control, or a click or tap on the empty area around the
-image (a press that starts or ends on the image does not count); a click on
-the image or a drag leaves it open. Closing it returns
+caption across the top. It opens at fit, clear of the caption and the
+toolbar, and supports drag, wheel and pinch zoom, double-click or double-tap
+anywhere to fit, its toolbar, which shows the zoom level relative to fit, the
+`+`, `-`, `0` and `f` keys, and the arrow keys to pan (Shift for a larger
+step). Raster images also offer **1:1 actual pixels**. It closes on
+Escape, its close control, or a single click or tap on the empty area around
+the image once no second press follows (a press that starts or ends on the
+image does not count, and the tap never reaches the page beneath); a click on
+the image, a double-click or a drag leaves it open. Closing it returns
 focus to the image or thumbnail that opened it and leaves any inline zoom as
 it was. Zoom is never saved, so leaving the conversation or reloading
 shows every image at fit. The viewer opens only in-browser object (`blob:`)

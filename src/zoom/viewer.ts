@@ -17,9 +17,10 @@
 // where to return focus); this module imports nothing from them.
 
 import { createVisualViewportSizer, type VisualViewportSizer } from "../shared/visual-viewport";
-import { classifyPress, GestureTracker, pointerPoint } from "./gestures";
+import { announceZoom, createZoomStatus, zoomLevelLabel } from "./announce";
+import { classifyPress, DOUBLE_TAP_MAX_GAP_MS, GestureTracker, pointerPoint } from "./gestures";
 import { devicePixelScale, naturalSize, rasterEnlarged, sameAspectRatio, type MediaKind } from "./media";
-import { gestureZoom, RestCommit } from "./motion";
+import { gestureZoom, keyPan, RestCommit } from "./motion";
 import {
   actualPixelsScale,
   boundKeepVisible,
@@ -29,6 +30,7 @@ import {
   ZOOM_STEP,
   zoomAt,
   zoomTo,
+  type Bands,
   type ScaleLimits,
   type Size,
   type ZoomTransform,
@@ -96,6 +98,10 @@ type ViewerInternals = {
   stage: HTMLDivElement;
   toolbar: HTMLDivElement;
   caption: HTMLParagraphElement;
+  // The zoom level, relative to fit, shown in the toolbar; and the polite
+  // status region that announces a level a control or a key set.
+  level: HTMLSpanElement;
+  status: HTMLElement;
   buttons: {
     zoomOut: HTMLButtonElement;
     zoomIn: HTMLButtonElement;
@@ -135,6 +141,10 @@ type ViewerInternals = {
   afterClose: (() => void) | null;
   // Bumped on every open: identifies the open a MediaViewerSession belongs to.
   session: number;
+  // The last open whose close has been finished (see finishClose).
+  finished: number;
+  // A backdrop tap waiting to settle before it closes (see settleBackdropTap).
+  pendingClose: ReturnType<typeof setTimeout> | null;
 };
 
 let viewer: ViewerInternals | null = null;
@@ -163,7 +173,7 @@ export function openMediaViewer(descriptor: ViewerDescriptor, options: ViewerOpe
       fitToViewport(internals);
     },
     close: () => {
-      if (current()) internals.dialog.close();
+      if (current()) closeViewer(internals);
     },
   };
 }
@@ -187,16 +197,22 @@ function createViewer(): ViewerInternals {
   caption.id = "media-viewer-caption";
   caption.hidden = true;
 
+  // Glyphs are CSS-generated from each control's action, the same rule the
+  // inline toolbar uses, so one action has one icon everywhere.
   const buttons = {
-    zoomOut: makeToolbarButton("Zoom out", "−"),
-    zoomIn: makeToolbarButton("Zoom in", "+"),
-    fit: makeToolbarButton("Fit to screen", "⛶"),
-    actualPixels: makeToolbarButton("1:1 actual pixels", "1:1", "media-viewer-actual-pixels"),
-    openLink: makeToolbarButton("Open link", "↗", "media-viewer-open-link"),
-    close: makeToolbarButton("Close viewer", "×", "media-viewer-close"),
+    zoomOut: makeToolbarButton("Zoom out", "zoom-out"),
+    zoomIn: makeToolbarButton("Zoom in", "zoom-in"),
+    fit: makeToolbarButton("Fit to screen", "fit"),
+    actualPixels: makeToolbarButton("1:1 actual pixels", "actual-pixels", "media-viewer-actual-pixels"),
+    openLink: makeToolbarButton("Open link", "open-link", "media-viewer-open-link"),
+    close: makeToolbarButton("Close viewer", "close", "media-viewer-close"),
   };
 
-  dialog.append(viewport, caption, toolbar);
+  const level = document.createElement("span");
+  level.className = "media-viewer-zoom-level";
+  const status = createZoomStatus(document, "media-viewer-status");
+
+  dialog.append(viewport, caption, toolbar, status);
 
   const internals: ViewerInternals = {
     dialog,
@@ -204,6 +220,8 @@ function createViewer(): ViewerInternals {
     stage,
     toolbar,
     caption,
+    level,
+    status,
     buttons,
     tracker: new GestureTracker(intent => handleIntent(intent), {
       // Before an image has a size nothing is on show, so the whole
@@ -241,6 +259,8 @@ function createViewer(): ViewerInternals {
     returnFocusTo: null,
     afterClose: null,
     session: 0,
+    finished: 0,
+    pendingClose: null,
   };
 
   // Drag pans, pinch zooms about the fingers, a tap on the empty backdrop
@@ -254,56 +274,53 @@ function createViewer(): ViewerInternals {
     canPan: () => true,
     panning: active => viewport.classList.toggle("is-panning", active),
     tap: intent => {
-      if (intent.target === "backdrop") dialog.close();
+      if (intent.target === "backdrop") settleBackdropTap(internals);
     },
-    doubleTap: () => fitToViewport(internals),
+    doubleTap: () => {
+      cancelPendingClose(internals);
+      fitToViewport(internals);
+    },
   });
 
-  buttons.close.addEventListener("click", () => dialog.close());
-  buttons.zoomIn.addEventListener("click", () => zoomByStep(internals, ZOOM_STEP));
-  buttons.zoomOut.addEventListener("click", () => zoomByStep(internals, 1 / ZOOM_STEP));
-  buttons.fit.addEventListener("click", () => fitToViewport(internals));
-  buttons.actualPixels.addEventListener("click", () => showActualPixels(internals));
+  buttons.close.addEventListener("click", () => closeViewer(internals));
+  // Controls and keys announce the level they set; gestures do not.
+  const announced = (action: () => void) => () => {
+    action();
+    announceLevel(internals);
+  };
+  buttons.zoomIn.addEventListener("click", announced(() => zoomByStep(internals, ZOOM_STEP)));
+  buttons.zoomOut.addEventListener("click", announced(() => zoomByStep(internals, 1 / ZOOM_STEP)));
+  buttons.fit.addEventListener("click", announced(() => fitToViewport(internals)));
+  buttons.actualPixels.addEventListener("click", announced(() => showActualPixels(internals)));
   buttons.openLink.addEventListener("click", () => {
     const link = internals.link;
-    dialog.close();
+    closeViewer(internals);
     link?.click();
   });
 
+  // Escape closes the dialog natively. Its close event is queued as a task,
+  // so by the time it arrives the viewer may be open again (see finishClose).
   dialog.addEventListener("close", () => {
-    // The viewer is reused for every open, so gesture state is dropped here
-    // or it carries into the next one: a pointer whose `pointerup` never
-    // arrived would leave a phantom finger, and a trailing single tap would
-    // pair with the first tap of the next session into a double-tap.
-    internals.tracker.reset();
-    internals.visible.detach();
-    internals.rest.reset();
-    internals.contentGeneration += 1;
-    internals.pending = null;
-    stage.replaceChildren();
-    stage.removeAttribute("data-zoom-state");
-    stage.removeAttribute("data-zoom-pending");
-    const target = internals.returnFocusTo;
-    const afterClose = internals.afterClose;
-    internals.returnFocusTo = null;
-    internals.afterClose = null;
-    internals.link = null;
-    if (target && document.body.contains(target)) {
-      target.focus();
-    }
-    afterClose?.();
+    if (!dialog.open) finishClose(internals);
   });
 
   dialog.addEventListener("keydown", event => {
-    if (event.key === "+" || event.key === "=") {
+    // The keyboard is in use: focus rings show from here on (see openViewer).
+    dialog.removeAttribute("data-pointer-opened");
+    const pan = keyPan(event);
+    if (pan) {
       event.preventDefault();
-      zoomByStep(internals, ZOOM_STEP);
+      const { tx, ty, scale } = internals.transform;
+      apply(internals, { tx: tx + pan.dx, ty: ty + pan.dy, scale }, "now");
+    } else if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      announced(() => zoomByStep(internals, ZOOM_STEP))();
     } else if (event.key === "-" || event.key === "_") {
       event.preventDefault();
-      zoomByStep(internals, 1 / ZOOM_STEP);
+      announced(() => zoomByStep(internals, 1 / ZOOM_STEP))();
     } else if (event.key === "0" || event.key.toLowerCase() === "f") {
       event.preventDefault();
-      fitToViewport(internals);
+      announced(() => fitToViewport(internals))();
     }
   });
 
@@ -311,6 +328,8 @@ function createViewer(): ViewerInternals {
     if (event.button !== 0) {
       return;
     }
+    // A further press means the last backdrop tap was not a lone one.
+    cancelPendingClose(internals);
     // Third and later fingers are ignored rather than given a meaning; they
     // are not captured, so their moves never reach the handlers either.
     if (internals.tracker.down(pointerPoint(event))) {
@@ -342,8 +361,20 @@ function createViewer(): ViewerInternals {
   // `touch-action: none` — which the pan surface needs — interferes with it.
   viewport.addEventListener("dblclick", event => {
     event.preventDefault();
+    cancelPendingClose(internals);
     fitToViewport(internals);
   });
+
+  // The viewport takes no clicks, and the one a touch ends in must not reach
+  // the page: a backdrop tap closes the viewer, and the click the browser
+  // then synthesizes would land on whatever lies beneath it.
+  viewport.addEventListener(
+    "touchend",
+    event => {
+      if (event.cancelable) event.preventDefault();
+    },
+    { passive: false },
+  );
 
   // A rotation, a window resize or the visible viewport changing size moves
   // the viewport's edges: fitted media fits again, and zoomed media keeps its
@@ -402,17 +433,22 @@ function releasePointer(viewport: HTMLElement, pointerId: number): void {
   }
 }
 
-function makeToolbarButton(label: string, glyph: string, extraClass?: string): HTMLButtonElement {
+function makeToolbarButton(label: string, action: string, extraClass?: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = extraClass ? `media-viewer-button ${extraClass}` : "media-viewer-button";
+  button.dataset.zoomAction = action;
   button.setAttribute("aria-label", label);
   button.title = label;
-  button.textContent = glyph;
   return button;
 }
 
+
 function openViewer(internals: ViewerInternals, descriptor: ViewerDescriptor, options: ViewerOpenOptions): void {
+  // A close whose event has not arrived yet (Escape) is finished first, so
+  // the previous open's focus return and hooks run, and run for it alone.
+  if (!internals.dialog.open) finishClose(internals);
+  cancelPendingClose(internals);
   internals.session += 1;
   internals.contentGeneration += 1;
   const generation = internals.contentGeneration;
@@ -428,6 +464,9 @@ function openViewer(internals: ViewerInternals, descriptor: ViewerDescriptor, op
   internals.pending = null;
   internals.transform = { tx: 0, ty: 0, scale: 1 };
   internals.fitted = true;
+  internals.level.textContent = "";
+  internals.buttons.zoomIn.setAttribute("aria-disabled", "false");
+  internals.buttons.zoomOut.setAttribute("aria-disabled", "false");
 
   syncToolbar(internals);
   syncCaption(internals, descriptor.caption);
@@ -477,8 +516,78 @@ function openViewer(internals: ViewerInternals, descriptor: ViewerDescriptor, op
       if (generation === internals.contentGeneration) fitToViewport(internals);
     });
   }
-  // The close button is a sensible initial keyboard target.
-  internals.buttons.close.focus();
+  // The close button is a sensible initial keyboard target. Its focus ring is
+  // for the keyboard: opened by a click or a tap, it shows none until a key
+  // is pressed in the viewer (some browsers count programmatic focus after a
+  // tap as keyboard focus).
+  const keyboard = openedByKeyboard(document);
+  internals.dialog.toggleAttribute("data-pointer-opened", !keyboard);
+  internals.buttons.close.focus({ focusVisible: keyboard } as FocusOptions);
+}
+
+// Whether the viewer is opened from the keyboard: the element focused when it
+// opens shows a keyboard focus ring.
+function openedByKeyboard(document: Document): boolean {
+  try {
+    return document.activeElement?.matches(":focus-visible") ?? false;
+  } catch {
+    return false;
+  }
+}
+
+// Close the dialog and finish at once, rather than on its close event: that
+// is queued as a task, and an open in between (a tap's follow-up click
+// landing on media) would otherwise have its content cleared and its hooks
+// run as the old open's.
+function closeViewer(internals: ViewerInternals): void {
+  if (internals.dialog.open) internals.dialog.close();
+  finishClose(internals);
+}
+
+// Tear down the open that just closed, once. The viewer is reused for every
+// open, so gesture state is dropped here or it carries into the next one: a
+// pointer whose `pointerup` never arrived would leave a phantom finger, and a
+// trailing single tap would pair with the first tap of the next open into a
+// double-tap.
+function finishClose(internals: ViewerInternals): void {
+  if (internals.finished === internals.session) return;
+  internals.finished = internals.session;
+  cancelPendingClose(internals);
+  internals.tracker.reset();
+  internals.visible.detach();
+  internals.rest.reset();
+  internals.contentGeneration += 1;
+  internals.pending = null;
+  const { stage } = internals;
+  stage.replaceChildren();
+  stage.removeAttribute("data-zoom-state");
+  stage.removeAttribute("data-zoom-pending");
+  const target = internals.returnFocusTo;
+  const afterClose = internals.afterClose;
+  internals.returnFocusTo = null;
+  internals.afterClose = null;
+  internals.link = null;
+  if (target && document.body.contains(target)) {
+    target.focus();
+  }
+  afterClose?.();
+}
+
+// A tap on the empty backdrop closes the viewer only once it has settled: a
+// second press within the double-tap interval makes it part of a double-tap
+// or double-click, which fits, or of a drag, which pans.
+function settleBackdropTap(internals: ViewerInternals): void {
+  cancelPendingClose(internals);
+  internals.pendingClose = setTimeout(() => {
+    internals.pendingClose = null;
+    closeViewer(internals);
+  }, DOUBLE_TAP_MAX_GAP_MS);
+}
+
+function cancelPendingClose(internals: ViewerInternals): void {
+  if (internals.pendingClose === null) return;
+  clearTimeout(internals.pendingClose);
+  internals.pendingClose = null;
 }
 
 function setKind(internals: ViewerInternals, kind: MediaKind): void {
@@ -497,8 +606,9 @@ function setKind(internals: ViewerInternals, kind: MediaKind): void {
 // goes hands focus to close, the viewer's initial keyboard target.
 function syncToolbar(internals: ViewerInternals): void {
   const { buttons, toolbar } = internals;
-  const wanted: HTMLButtonElement[] = [
+  const wanted: HTMLElement[] = [
     buttons.zoomOut,
+    internals.level,
     buttons.zoomIn,
     buttons.fit,
     ...(internals.kind === "raster" ? [buttons.actualPixels] : []),
@@ -507,7 +617,7 @@ function syncToolbar(internals: ViewerInternals): void {
   ];
   let lostFocus = false;
   for (const child of Array.from(toolbar.children)) {
-    if (wanted.includes(child as HTMLButtonElement)) continue;
+    if (wanted.includes(child as HTMLElement)) continue;
     lostFocus ||= child.contains(document.activeElement);
     child.remove();
   }
@@ -674,7 +784,51 @@ function apply(internals: ViewerInternals, next: ZoomTransform, mode: CommitMode
   internals.transform = bounded;
   internals.fitted = false;
   updatePixelation(internals);
+  syncLevel(internals);
   internals.rest.show(bounded, mode);
+}
+
+// The zoom relative to fit (see announce.ts).
+function levelOverFit(internals: ViewerInternals): number {
+  if (!internals.base) return 1;
+  return internals.transform.scale / fitTransform(internals.base, viewportSize(internals), fitBands(internals)).scale;
+}
+
+// The level shown, and zoom in and out marked unavailable at the limits. They
+// stay focusable (`aria-disabled`, not `disabled`): a control that loses focus
+// as it is pressed would drop the keyboard out of the dialog.
+function syncLevel(internals: ViewerInternals): void {
+  // Runs on every gesture frame: only what changed is written.
+  const text = zoomLevelLabel(levelOverFit(internals));
+  if (internals.level.textContent !== text) internals.level.textContent = text;
+  const { min, max } = scaleLimits(internals);
+  const { scale } = internals.transform;
+  setUnavailable(internals.buttons.zoomIn, scale >= max * (1 - 1e-6));
+  setUnavailable(internals.buttons.zoomOut, scale <= min * (1 + 1e-6));
+}
+
+function setUnavailable(button: HTMLButtonElement, unavailable: boolean): void {
+  const value = String(unavailable);
+  if (button.getAttribute("aria-disabled") !== value) button.setAttribute("aria-disabled", value);
+}
+
+function announceLevel(internals: ViewerInternals): void {
+  if (internals.base) announceZoom(internals.status, levelOverFit(internals));
+}
+
+// The bands fitted media keeps clear of: the caption across the top and the
+// toolbar across the bottom, as laid out now. Ignored when they would leave
+// less than half the viewport (a short landscape phone), where the media is
+// better fitted larger, under them.
+function fitBands(internals: ViewerInternals): Bands {
+  const viewport = internals.viewport.getBoundingClientRect();
+  const toolbar = internals.toolbar.getBoundingClientRect();
+  const caption = internals.caption.hidden ? null : internals.caption.getBoundingClientRect();
+  const bands = {
+    top: caption && caption.height > 0 ? Math.max(0, caption.bottom - viewport.top) : 0,
+    bottom: toolbar.height > 0 ? Math.max(0, viewport.bottom - toolbar.top) : 0,
+  };
+  return bands.top + bands.bottom > viewport.height / 2 ? { top: 0, bottom: 0 } : bands;
 }
 
 // See `rasterEnlarged`. Only once zoomed in past fit: at fit (including a
@@ -686,7 +840,7 @@ function updatePixelation(internals: ViewerInternals): void {
     internals.kind === "raster" &&
     natural !== null &&
     base !== null &&
-    scale > fitTransform(base, viewportSize(internals)).scale * (1 + 1e-6) &&
+    scale > fitTransform(base, viewportSize(internals), fitBands(internals)).scale * (1 + 1e-6) &&
     rasterEnlarged(natural.width, base.width * scale, devicePixelScale(window));
   internals.stage.classList.toggle("is-pixelated", enlarged);
 }
@@ -695,7 +849,7 @@ function updatePixelation(internals: ViewerInternals): void {
 function scaleLimits(internals: ViewerInternals): ScaleLimits {
   // Unknown content gets the plain range: an empty size fits at 1.
   const actual = actualPixels(internals);
-  return viewerScaleLimits(internals.base ?? { width: 0, height: 0 }, viewportSize(internals), actual === null ? [] : [actual]);
+  return viewerScaleLimits(internals.base ?? { width: 0, height: 0 }, viewportSize(internals), actual === null ? [] : [actual], fitBands(internals));
 }
 
 // The scale "1:1 actual pixels" shows raster media at; null for other media.
@@ -717,7 +871,7 @@ function fitToViewport(internals: ViewerInternals): void {
   if (!internals.base) {
     return;
   }
-  apply(internals, fitTransform(internals.base, viewportSize(internals)), "now");
+  apply(internals, fitTransform(internals.base, viewportSize(internals), fitBands(internals)), "now");
   internals.fitted = true;
 }
 

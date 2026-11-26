@@ -25,6 +25,9 @@ export type MediaDescriptor = {
 // Media with either rendered side below this many CSS px (badges, icons,
 // thumbnails) gets no inline zoom; activating it opens the viewer.
 export const SMALL_MEDIA_PX = 96;
+// Media narrower than this is too narrow for the inline toolbar to sit over
+// it without hiding it: the toolbar goes outside the media instead.
+export const COMPACT_MEDIA_PX = 200;
 
 export function isSmallMedia(size: Size): boolean {
   return size.width < SMALL_MEDIA_PX || size.height < SMALL_MEDIA_PX;

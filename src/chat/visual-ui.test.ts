@@ -164,7 +164,7 @@ describe("chat visual controls", () => {
     decorateChatVisuals(root);
     expect(frame.getAttribute("data-zoom-state")).toBe(JSON.stringify({ tx: 0, ty: 0, scale: 1 }));
     expect(frame.style.touchAction).toBe("");
-    expect(frame.querySelector(":scope > button.chat-visual-enlarge")?.getAttribute("aria-label")).toBe("Enlarge SVG graphic");
+    expect(frame.querySelector(":scope > .media-zoom-clip > button.chat-visual-enlarge")?.getAttribute("aria-label")).toBe("Enlarge SVG graphic");
     expect(root.querySelectorAll("button button, button a, a button")).toHaveLength(0);
   });
 

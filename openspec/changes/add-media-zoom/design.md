@@ -84,8 +84,10 @@ Modules:
 - `transform.ts`: pure math for `{tx, ty, scale}`. It covers clamping,
   point-anchored zoom, pinch (computed from the pinch's start, so the media
   point under the fingers' starting midpoint follows the midpoint as it
-  moves), fit and centring, and two pan-bound policies:
-  *keep-visible* (48px, the viewer's existing rule) and *cover* (inline: the
+  moves), fit and centring (optionally between bands the content keeps
+  clear of: the viewer's caption and toolbar), and two pan-bound policies:
+  *keep-visible* (96px; the old viewer kept 48px, raised so a strip of light
+  media on a light backdrop still stands out) and *cover* (inline: the
   zoomed media always covers its box, and scale never drops below fit).
 - `gestures.ts`: the pointer-map state machine lifted from the Mermaid
   viewer. It turns input points into pan, pinch, tap and double-tap
@@ -93,9 +95,15 @@ Modules:
   unit-tested without a DOM and fed by either Pointer or Touch events.
 - `motion.ts`: what both surfaces do with those intents. `gestureZoom`
   turns pan and pinch intents into transforms from the baseline taken when
-  each gesture (re)starts, and `RestCommit` runs the commit-at-rest protocol
-  (decision 5). Each surface keeps its own pan bound, zoom range, layout
-  writes and tap behaviour.
+  each gesture (re)starts, and reports how far a pan asked to go past the
+  surface's bound (`panOverflow`); `keyPan` turns arrow keys into a pan; and
+  `RestCommit` runs the commit-at-rest protocol (decision 5). Each surface
+  keeps its own pan bound, zoom range, layout writes and tap behaviour.
+- `announce.ts`: the polite status region that announces a zoom level a
+  control or key set. Levels are relative to fit (100% is fitted) on both
+  surfaces, because fit is where every zoom starts and returns to, and media
+  without a natural size (Mermaid, viewBox-only SVG) has nothing else to be
+  relative to.
 - `media.ts`: the media descriptor. It records the kind (`raster`,
   `svg-image` or `mermaid`), the real source, the identity key, the enclosing
   link, the aspect ratio, and the small-media test (either rendered side
@@ -127,12 +135,26 @@ takes on the media's at-fit layout box (`display: inline-block`,
 `max-width: 100%`, `line-height: 0`, the image's own vertical alignment),
 so at fit nothing moves. Inside the frame are:
 
-- the **activator**, the one focusable, named element for the media;
+- the **clip**, the box a zoom is cut to. At fit it is `display: contents`,
+  so it adds no box and the activator lays out as it would in the frame;
+  zoomed, it is the frame's box with `overflow: hidden`;
+- the **activator**, inside the clip, the one focusable, named element for
+  the media;
 - the **stage**, the element that is transformed;
-- the **toolbar**, a sibling of the activator, never inside it. Because a
-  zoomed frame clips to its box, the toolbar fits inside the smallest box
-  that gets one (96 CSS px a side): there it wraps into rows for a fine
-  pointer, and its 44px coarse-pointer controls narrow in one row.
+- the **toolbar**, the clip's sibling, never inside the activator and never
+  clipped. Over media at least 200 CSS px wide it sits in the top-right
+  corner. Narrower media (`COMPACT_MEDIA_PX`) would be hidden by it (a 134px
+  diagram under a 120px toolbar), so there it sits outside the frame: above
+  it, or below it when the space above is out of view, which a hit test
+  decides as the toolbar is about to show (a sticky header over the content,
+  the top of the window or scroller).
+
+The toolbar group is named after its media ("Zoom controls for" and its alt
+text, or "diagram"), with names in attributes so Find gains no text. An
+image, `<picture>` or link activator keeps its alt or authored name and is
+described as opening the viewer (`aria-description`), since nothing else
+tells a screen-reader user that activating an image opens a viewer. Buttons
+(Mermaid, chat visuals) already name that action and get no description.
 
 | Surface | Activator | Stage |
 |---|---|---|
@@ -218,13 +240,30 @@ Touch handling inline:
 Inline media registers no `wheel` listener at all, so it cannot block
 scrolling and cannot react to the wheel events a trackpad pinch produces.
 
+Zoomed media would otherwise trap the page on a phone: under `touch-action:
+none` every one-finger drag on it is a pan. So once a pan reaches the
+media's top or bottom edge, what the cover bound holds back (`panOverflow`)
+scrolls the nearest vertical scroller, and reversing the finger scrolls it
+back before the media pans again. Mouse and pen drags stay on the media.
+Arrow keys on a focused zoomed activator pan it (`preventDefault`, so the page
+does not scroll); at fit they keep their default.
+
 ### 4. One viewer, generalized
 
 `viewer.ts` keeps the existing viewer's structure, constants, gesture code
 and CSS, renamed from `mermaid-viewer*` to `media-viewer*`. Its toolbar
-order stays zoom out, zoom in and fit, then "1:1 actual pixels" (raster
-only) and "Open link" (linked media only), then close. Content comes from
-the descriptor:
+order stays zoom out, the zoom level, zoom in and fit, then "1:1 actual
+pixels" (raster only) and "Open link" (linked media only), then close. Both
+toolbars draw one CSS icon per action from `data-zoom-action` (fit `⊡`,
+expand `⛶`), so the viewer's fit no longer borrows inline expand's icon.
+Zoom in and out are `aria-disabled` at the ends of the range, not
+`disabled`, so a control pressed to its limit keeps keyboard focus inside the
+modal. Arrow keys pan by 40px, 200px with Shift, like scrolling: ArrowDown
+shows more of what is below. Fit keeps the media between the caption and the
+toolbar (`fitBands`), measured as laid out, unless together they would take
+more than half the height (a short landscape phone), where the media is
+better fitted larger beneath them. The stage has an edge and a shadow in
+both themes. Content comes from the descriptor:
 
 - **Mermaid:** cloned SVG with remapped ids, as today.
 - **Image kind.** `imageKind` in `media.ts` decides raster or vector. SVG is
@@ -251,10 +290,31 @@ backdrop: it both started and ended outside the media's rectangle
 the tap slop, or the reverse, was aimed at the media. Drags, pinches, and
 taps on the media never close it. A tap's target is decided before it can
 pair with an earlier tap, so a tap on the media followed quickly by a tap on
-the backdrop is a backdrop tap, not a double-tap. This applies
+the backdrop is a backdrop tap, not a double-tap. A backdrop tap closes only
+once it has settled: a further press within the double-tap interval
+(`DOUBLE_TAP_MAX_GAP_MS`) cancels it, so two taps or a double-click on the
+backdrop fit the media (the mouse through the native `dblclick`), and closing
+waits about 300ms. This applies
 to every surface (see Assumptions). Before an image has loaded nothing is on
 show, so a tap anywhere in the viewport is on the empty backdrop and closes
-it; a drag still does not. A press pans only once it can no longer
+it; a drag still does not.
+
+On touch the browser follows a tap with a synthesized click at the same
+point, after the dialog may have closed, so it landed on the page beneath
+(opening other media or following a link). The viewport cancels every
+`touchend` (it takes no clicks itself; its toolbar is outside it), which
+cancels that click. And closing is finished at once (`finishClose`), not on
+the dialog's `close` event: browsers queue that event as a task, so a viewer
+opened again in between had its new content cleared and its hooks run as the
+old open's. The event still finishes a close the browser made itself
+(Escape), unless the viewer has opened again, and an open finishes any close
+still pending first.
+
+The close control takes focus on open. Opened by a click or a tap (the
+element focused at that moment does not match `:focus-visible`), the dialog
+carries `data-pointer-opened`, which hides the focus ring until a key is
+pressed in the viewer: WebKit counts programmatic focus after a tap as
+keyboard focus. A press pans only once it can no longer
 be a tap (past the tap slop, or a touch held past 400ms), so one press never
 both moves the media and closes the viewer. The slop is 12px for a finger,
 which lands imprecisely, and 4px for a mouse, which holds still to click: a
@@ -471,11 +531,14 @@ unit test asserts that `src/zoom/` imports none of `shell/state`,
   96 CSS px, measured whenever the media's box changes.
 - **Inline range and bounds.** Inline zoom cannot go below fit, and inline
   pan uses the *cover* bound, so no blank area shows inside the box. The
-  viewer keeps 0.2–8 and the 48px rule, except that its minimum reaches down
+  viewer keeps 0.2–8 and a keep-visible rule (now 96px), except that its minimum reaches down
   to the fit scale for media that only fits below 0.2 (a 3000px screenshot on
   a phone), so fit always shows the whole media and zooming out stays there.
 - **Actual pixels.** "1:1" means one image pixel per device pixel, and it is
   a viewer action only. The inline toolbar is exactly +, −, fit and expand.
+- **Zoom level.** The viewer's readout is relative to fit, not to the
+  media's natural size: 100% is fitted, as inline. So "1:1 actual pixels"
+  reads as whatever multiple of fit it is.
 - **What counts as a re-render.** View-mode and layout changes count as a
   different session; only re-renders of the same presentation keep zoom. A
   theme-driven Mermaid re-render is a same-session re-render.
