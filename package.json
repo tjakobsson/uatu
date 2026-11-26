@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "2.9.1",
-    "@anthropic-ai/claude-agent-sdk": "0.3.330",
+    "@anthropic-ai/claude-agent-sdk": "0.3.332",
     "@anthropic-ai/sdk": "1.12.0",
     "@asciidoctor/core": "^4.0.7",
     "@block65/webcrypto-web-push": "2.0.0",
