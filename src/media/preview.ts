@@ -5,11 +5,20 @@ import { clearPreviewType, previewPathElement, previewTitleElement, setPreviewBa
 import { hideViewToggle } from "../preview/view-mode";
 import { mountLayoutToolbar } from "../preview/layout";
 import { refreshOutline } from "../preview/outline";
-import { setFollowEnabled, syncFollowToggle } from "../shell/follow";
 import { documentIndex } from "../shell/document-state";
 import "./preview.css";
 
 let unsubscribe: (() => void) | null = null;
+// What Play does before the audition starts (app.ts: turn Follow off). It is
+// injected because importing shell/follow here would put the shell, sidebar
+// and shell/events underneath preview/mount.ts, which imports this module.
+// Bun's dev runtime hands a module still evaluating up such a cycle to its
+// importers as null, so module-scope reads of it crash the dev bundle
+// (tests/e2e/dev-bundle.e2e.ts).
+let beforeAudition: () => void = () => {};
+export function setBeforeMediaPreviewAudition(run: () => void): void {
+  beforeAudition = run;
+}
 export function releaseMediaPreview(): void {
   if (!unsubscribe) return;
   unsubscribe(); unsubscribe = null;
@@ -40,7 +49,7 @@ export function renderMediaPreview(doc: DocumentMeta, epoch: string | null): voi
   play.onclick = () => {
     const latest = latestSource();
     if (!latest) return;
-    setFollowEnabled(false); syncFollowToggle(); mediaPlayer.audition(latest, [latest]);
+    beforeAudition(); mediaPlayer.audition(latest, [latest]);
   };
   retry.onclick = () => {
     const current = mediaPlayer.snapshot().source;
