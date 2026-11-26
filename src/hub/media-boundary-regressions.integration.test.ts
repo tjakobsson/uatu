@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
+import { connect } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { testRunningSession } from "../../tests/contracts/session-link";
@@ -163,6 +164,36 @@ describe("media boundary preserves the other Hub protocols", () => {
       expect(takeover.closed()).toEqual({ code: 4410, reason: "session taken" });
       await waitFor(() => wsActive === 0, "takeover child release");
     } finally { takeover.socket.close(); }
+  });
+
+  test("a refused WebSocket upgrade does not answer the browser's next request on that connection", async () => {
+    // WebKit reuses the connection a refused upgrade arrived on for its next
+    // fetch; that fetch must not be handled as the refused upgrade's URL.
+    const socket = connect(hub.port!, "127.0.0.1");
+    let received = "", closed = false;
+    socket.on("data", data => { received += data.toString("latin1"); });
+    socket.on("close", () => { closed = true; });
+    socket.on("error", () => {});
+    const response = () => {
+      const head = /^HTTP\/1\.1 (\d{3})[^\r]*\r\n([\s\S]*?)\r\n\r\n/.exec(received);
+      const length = Number(/^content-length:\s*(\d+)/im.exec(head?.[2] ?? "")?.[1] ?? 0);
+      return head && received.length >= head[0].length + length
+        ? { status: Number(head[1]), head: head[2]!, body: received.slice(head[0].length, head[0].length + length) } : undefined;
+    };
+    try {
+      const host = `127.0.0.1:${hub.port}`;
+      socket.write(`GET /s/project/api/terminal?t=forged HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${origin}\r\n`
+        + "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+      await waitFor(() => closed || response() !== undefined, "upgrade refusal");
+      expect(response()?.status).toBe(401);
+      expect(response()?.head).toMatch(/^connection: close$/im);
+      received = "";
+      socket.write(`GET /s/project/api/state HTTP/1.1\r\nHost: ${host}\r\nCookie: ${cookie}\r\n\r\n`);
+      await waitFor(() => closed || response() !== undefined, "the reused connection's answer");
+      const reused = response();
+      if (reused) { expect(reused.status).toBe(200); expect(JSON.parse(reused.body).method).toBe("GET"); }
+      await waitFor(() => closed, "refused connection close");
+    } finally { socket.destroy(); }
   });
 
   test("login rate limiting retains the trusted proxy's last client-IP hop", async () => {
