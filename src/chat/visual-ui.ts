@@ -1,6 +1,8 @@
 import { attachCopyButtons } from "../preview/code-block";
 import { appUrl } from "../shared/app-url";
+import { attachInlineZoom, FRAME_CLASS, removeInlineFrame } from "../zoom/inline";
 import { copyChatText } from "./copy-actions";
+import { openChatMedia } from "./media-viewer";
 
 /** Reconcile only one native assistant bubble. Return its logical focused
  * control for restoration after the staging tree is installed, never autofocus.
@@ -128,10 +130,14 @@ export function decorateChatVisuals(root: HTMLElement): void {
     }
     const image = visual.querySelector<HTMLImageElement>(".chat-visual-enlarge img");
     if (image) {
+      bindVisualZoom(visual, image);
       const failed = () => {
         const fallback = visual.querySelector<HTMLElement>(".chat-visual-fallback");
         if (fallback) fallback.hidden = false;
-        image.closest(".chat-visual-enlarge")?.remove();
+        // The zoom toolbar, and its controller, go with their media.
+        const frame = image.closest<HTMLElement>(`.${FRAME_CLASS}`);
+        if (frame) removeInlineFrame(frame);
+        else image.closest(".chat-visual-enlarge")?.remove();
       };
       image.addEventListener("error", failed, { once: true });
       // Cached failures can finish before this newly rendered node is bound.
@@ -139,6 +145,25 @@ export function decorateChatVisuals(root: HTMLElement): void {
       if (image.complete && image.naturalWidth === 0) failed();
     }
   }
+}
+
+// Inline zoom for a visual, with the shared viewer behind its click at fit and
+// its expand control. Zoom lives on the frame, and the frame lives on the
+// retained visual: `reconcileChatVisuals` keeps a captured visual's node
+// across streamed text by its snapshot key, which is its resolved source, so
+// a text delta never resets the zoom.
+function bindVisualZoom(visual: HTMLElement, image: HTMLImageElement): void {
+  const frame = image.closest<HTMLElement>(`.${FRAME_CLASS}`);
+  const button = image.closest<HTMLElement>(".chat-visual-enlarge");
+  if (!frame || !button) return;
+  const kind = visual.classList.contains("is-svg") ? "svg-image" : "raster";
+  attachInlineZoom(frame, {
+    kind,
+    open: opener => {
+      const { width, height } = frame.getBoundingClientRect();
+      openChatMedia({ source: image.getAttribute("src") ?? "", name: image.alt, kind, opener, fallbackSize: { width, height } });
+    },
+  });
 }
 
 function messageOf(error: unknown): string {

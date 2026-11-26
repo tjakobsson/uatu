@@ -1,8 +1,6 @@
-// Mermaid trigger click handling and theme selection for the preview body.
-// Extracted from `app.ts` so the Mermaid-viewer integration lives next to
-// the rest of the preview/ rendering pipeline.
+// Mermaid theme selection and re-observation for the preview body. Opening a
+// diagram in the fullscreen viewer is inline zoom's job (media-zoom.ts).
 
-import { ensureMermaidViewer } from "./mermaid-viewer";
 import {
   reobserveMermaidDiagrams,
   rerenderMermaidDiagrams,
@@ -10,14 +8,6 @@ import {
 } from "../render/preview";
 import { activeColorScheme, onColorSchemeChange } from "../shell/theme";
 import { onUiModeChange } from "../shell/ui-mode";
-
-const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
-
-if (!previewElementMaybe) {
-  throw new Error("uatu UI failed to initialize (preview/mermaid)");
-}
-
-const previewElement: HTMLElement = previewElementMaybe;
 
 // Mermaid's stock "dark" theme is nearly grayscale. The "base" theme with
 // explicit variables echoes the light default's lavender/amber hues on
@@ -77,24 +67,3 @@ onUiModeChange(() => {
 });
 
 window.addEventListener("resize", () => reobserveMermaidDiagrams(), { passive: true });
-
-export function handleMermaidTriggerClick(event: MouseEvent): void {
-  const target = event.target;
-  if (!(target instanceof Element)) {
-    return;
-  }
-  const trigger = target.closest<HTMLButtonElement>("button.mermaid-trigger");
-  if (!trigger || !previewElement.contains(trigger)) {
-    return;
-  }
-  const svg = trigger.querySelector<SVGElement>("svg");
-  if (!svg) {
-    return;
-  }
-  event.preventDefault();
-  ensureMermaidViewer().open({ svg, returnFocusTo: trigger });
-}
-
-export function installMermaidTriggerHandler(): void {
-  previewElement.addEventListener("click", handleMermaidTriggerClick);
-}

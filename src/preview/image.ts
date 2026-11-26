@@ -2,7 +2,6 @@
 // is a binary file whose extension is in the viewable allowlist. Extracted
 // from `app.ts` so the preview/ feature folder owns this thin renderer.
 
-import { closeMermaidViewer } from "./mermaid-viewer";
 import { escapeHtmlAttribute } from "../shared/html";
 import type { DocumentMeta } from "../shared/types";
 import {
@@ -15,6 +14,7 @@ import { hideViewToggle } from "./view-mode";
 import { documentRevisionKey } from "../shell/document-state";
 import { withImageRevision } from "./image-revision";
 import { observePreviewSvgImages, preparePreviewHtml, setPreviewImageSource } from "./svg-images";
+import { adoptPreviewMedia, attachPreviewMediaZoom, beginPreviewZoom, previewZoomSession, savePreviewZoom, syncPreviewViewer } from "./media-zoom";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -25,7 +25,7 @@ if (!previewElementMaybe) {
 const previewElement: HTMLElement = previewElementMaybe;
 
 export function renderImagePreview(doc: DocumentMeta): void {
-  closeMermaidViewer();
+  beginPreviewZoom(previewZoomSession(doc.id, "image", "single"));
   setPreviewBase(doc.relativePath);
   previewTitleElement.textContent = doc.name;
   previewPathElement.textContent = doc.relativePath;
@@ -46,13 +46,18 @@ export function renderImagePreview(doc: DocumentMeta): void {
   const src = withImageRevision(`./${encodeURIComponent(doc.name)}`, documentRevisionKey(doc.id));
   // The image already on screen is kept, not rebuilt: its source moves to the
   // new revision in place, so the old bitmap stays up until the new one has
-  // loaded and the pane neither blanks nor loses its scroll position.
-  const mounted = previewElement.querySelector<HTMLImageElement>(":scope > .image-preview > img");
+  // loaded and the pane neither blanks nor loses its scroll position. Its
+  // inline zoom, and an open viewer on it, follow on load (media-zoom.ts).
+  const mounted = previewElement.querySelector<HTMLImageElement>(":scope > .image-preview img");
   if (mounted && mounted.dataset.documentId === doc.id) {
     const next = new URL(src, mounted.baseURI).href;
     setPreviewImageSource(mounted, next);
+    adoptPreviewMedia();
+    syncPreviewViewer();
     return;
   }
+  savePreviewZoom();
   previewElement.replaceChildren(preparePreviewHtml(`<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" data-document-id="${escapeHtmlAttribute(doc.id)}" src="${escapeHtmlAttribute(src)}"></div>`));
   observePreviewSvgImages(previewElement);
+  attachPreviewMediaZoom(previewElement);
 }

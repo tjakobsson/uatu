@@ -6,7 +6,7 @@ import { hubUrl, isHubPage, workspaceIdFromBasePath, appBasePath } from "./share
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
-import { installMermaidTriggerHandler } from "./preview/mermaid";
+import { initPreviewMediaZoom } from "./preview/media-zoom";
 import { initViewModeControls, scheduleDiffPrewarmWhenIdle } from "./preview/view-mode";
 import { initOutline } from "./preview/outline";
 import { attachAutoStackObserver } from "./preview/layout";
@@ -122,7 +122,7 @@ initChangeOverviewClickHandler();
 initFilesPaneFilterControls();
 initFollowToggle();
 installAnchorHandlers();
-installMermaidTriggerHandler();
+initPreviewMediaZoom();
 initViewModeControls();
 initOutline();
 attachAutoStackObserver();

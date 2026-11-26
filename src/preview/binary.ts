@@ -3,7 +3,7 @@
 // Extracted from `app.ts` so the preview/ feature folder owns this thin
 // renderer alongside its sibling `renderImagePreview`.
 
-import { closeMermaidViewer } from "./mermaid-viewer";
+import { releasePreviewZoom } from "./media-zoom";
 import type { DocumentMeta } from "../shared/types";
 import { clearPreviewType, previewPathElement, previewTitleElement } from "./header";
 import { hideViewToggle } from "./view-mode";
@@ -17,7 +17,7 @@ if (!previewElementMaybe) {
 const previewElement: HTMLElement = previewElementMaybe;
 
 export function renderBinaryUnavailable(doc: DocumentMeta): void {
-  closeMermaidViewer();
+  releasePreviewZoom();
   previewTitleElement.textContent = doc.name;
   previewPathElement.textContent = doc.relativePath;
   clearPreviewType();

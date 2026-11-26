@@ -6,8 +6,10 @@
 
 import { test as base, expect, type APIRequestContext, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { E2E_FIXTURE_ROOT } from "./config";
 import { waitForPortsFree, workerServerPort } from "./ports";
 import { treeRow } from "./tree-helpers";
 
@@ -114,9 +116,34 @@ export const test = base.extend<{}, WorkerFixtures>({
 
 export { expect };
 
+// What a suite adds to the fixture workspace for its tests, written by the
+// reset before the session starts: text files as the reset's `extras`, binary
+// files (images) base64-encoded as its `binaryExtras`.
+export type WorkspaceSeed = {
+  extras?: Record<string, string>;
+  files?: Record<string, Uint8Array>;
+};
+
+// The fixture workspace's file count, plus every seeded path it does not
+// already have: what the indexed count reads once discovery has finished.
+async function expectedFileCount(seed: WorkspaceSeed): Promise<number> {
+  const seeded = new Set([...Object.keys(seed.extras ?? {}), ...Object.keys(seed.files ?? {})]);
+  let added = 0;
+  for (const relativePath of seeded) {
+    const present = await fs.access(path.join(E2E_FIXTURE_ROOT, relativePath)).then(() => true, () => false);
+    if (!present) added += 1;
+  }
+  return FIXTURE_FILE_COUNT + added;
+}
+
+const FIXTURE_FILE_COUNT = 18;
+
 // Standard per-test boot used by the vast majority of feature suites: reset
-// the workspace, clear browser-side persisted preferences, wait for the tree
-// to mount, and establish a clean baseline (README.md selected, follow off).
+// the workspace (with the suite's `seed`, if any), clear browser-side
+// persisted preferences, wait for the tree to mount, and establish a clean
+// baseline (README.md selected, follow off). In touch mode (an `isMobile`
+// project) the tree lives in the Files tab: the baseline is checked there
+// and the page is left on the Preview tab.
 //
 // Follow's boot state is non-deterministic because @pierre/trees can fire
 // `onSelectionChange` asynchronously after our synchronous programmatic-
@@ -133,8 +160,9 @@ export { expect };
 //    PATCH must have landed first, or it would repopulate the personal state
 //    that later reset cleared. Every path to follow=false persists it, so the
 //    server holding follow=false is the proof.
-export async function standardBeforeEach(page: Page, request: APIRequestContext): Promise<void> {
-  await request.post("/__e2e/reset");
+export async function standardBeforeEach(page: Page, request: APIRequestContext, seed: WorkspaceSeed = {}): Promise<void> {
+  const binaryExtras = seed.files && Object.fromEntries(Object.entries(seed.files).map(([relativePath, contents]) => [relativePath, Buffer.from(contents).toString("base64")]));
+  await request.post("/__e2e/reset", seed.extras || binaryExtras ? { data: { extras: seed.extras, binaryExtras } } : undefined);
   await page.goto("/");
   // Clear browser-side persisted preferences so a prior test cannot leak
   // state into this one. localStorage persists across tests within the same
@@ -147,12 +175,14 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
     }
   });
   await page.reload();
+  const touch = (await page.locator("html").getAttribute("data-ui-mode")) === "touch";
+  if (touch) await page.locator("#touch-tab-files").click();
   // Tree rows are rendered inside `@pierre/trees`' shadow DOM with
   // `role="treeitem"` and `data-item-path` — Playwright pierces the shadow
   // root automatically when given a CSS selector.
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "18 files");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", `${await expectedFileCount(seed)} files`);
   await waitForPreviewToSettle(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await normalizeFollowOff(page);
@@ -162,6 +192,10 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
     async () => (await request.get("/api/personal-state").then(response => response.json())).follow,
     { message: "follow=false persisted to the personal state" },
   ).toBe(false);
+  if (touch) {
+    await page.locator("#touch-tab-preview").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+  }
 }
 
 // Turn Follow off by clicking the chip iff it is on. Reading the chip and

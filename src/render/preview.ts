@@ -1,4 +1,5 @@
 import { appUrl } from "../shared/app-url";
+import { createInlineFrame, FRAME_CLASS } from "../zoom/inline";
 
 type MermaidRuntime = {
   initialize: (options: { startOnLoad: boolean; securityLevel: string; theme: string; themeVariables?: Record<string, string | boolean> }) => void;
@@ -70,6 +71,23 @@ const queuedNodes = new Set<HTMLElement>();
 // insertion-ordered, which gives us cheap oldest-first eviction. Failed
 // renders are never cached so a corrected source re-renders.
 const renderedSvgCache = new Map<string, string>();
+
+// Told about each diagram once its SVG is in place, so the preview can attach
+// inline zoom to it as it renders out of the lazy queue.
+let diagramRenderedListener: ((node: HTMLElement) => void) | null = null;
+
+export function onMermaidDiagramRendered(listener: ((node: HTMLElement) => void) | null): void {
+  diagramRenderedListener = listener;
+}
+
+// Picks diagrams that render as soon as they are installed instead of waiting
+// to approach the viewport: the one an open fullscreen viewer shows, whose
+// re-render the viewer needs even when an edit moved it off-screen.
+let renderPriority: ((node: HTMLElement) => boolean) | null = null;
+
+export function setMermaidRenderPriority(priority: ((node: HTMLElement) => boolean) | null): void {
+  renderPriority = priority;
+}
 
 // Install lazy rendering for every `.mermaid` node in the container.
 // Resolves once observation is set up — NOT when all diagrams are rendered;
@@ -159,7 +177,10 @@ function installObserver(
   lastObserverRoot = root;
   activeObserver = observer;
   for (const node of nodes) {
-    observer.observe(node);
+    // A prioritized diagram is queued now instead of observed, so an
+    // intersection can never queue it a second time.
+    if (renderPriority?.(node)) enqueueDiagram({ node, generation, themeInputs });
+    else observer.observe(node);
   }
   return true;
 }
@@ -265,6 +286,7 @@ async function renderSingleDiagram(
     node.innerHTML = cachedSvg;
     node.classList.remove(PENDING_CLASS);
     normalizeRenderedDiagram(node);
+    diagramRenderedListener?.(node);
     return;
   }
 
@@ -326,6 +348,10 @@ async function renderSingleDiagram(
       node.removeAttribute("data-processed");
       node.classList.add(PENDING_CLASS);
     }
+    return;
+  }
+  if (svg) {
+    diagramRenderedListener?.(node);
   }
 }
 
@@ -370,7 +396,8 @@ export function replaceMermaidCodeBlocks(html: string): string {
 
 // Strip Mermaid's intrinsic-pixel sizing from a rendered diagram so the SVG
 // scales to its container, then wrap the SVG in a button trigger that opens
-// the fullscreen viewer.
+// the fullscreen viewer, framed for inline zoom with the zoom toolbar (whose
+// expand control was once a badge inside the button) as its sibling.
 export function normalizeRenderedDiagram(node: HTMLElement): void {
   const svg = node.querySelector<SVGElement>("svg");
   if (!svg) {
@@ -380,7 +407,7 @@ export function normalizeRenderedDiagram(node: HTMLElement): void {
 
   // Don't double-wrap if normalize is called twice on the same node.
   for (const child of Array.from(node.children) as Element[]) {
-    if (child.classList.contains("mermaid-trigger")) {
+    if (child.classList.contains(FRAME_CLASS)) {
       return;
     }
   }
@@ -389,14 +416,9 @@ export function normalizeRenderedDiagram(node: HTMLElement): void {
   trigger.type = "button";
   trigger.className = "mermaid-trigger";
   trigger.setAttribute("aria-label", "Open diagram in fullscreen viewer");
-
-  const badge = node.ownerDocument.createElement("span");
-  badge.className = "mermaid-trigger-badge";
-  badge.setAttribute("aria-hidden", "true");
-  badge.textContent = "⛶";
-
-  trigger.append(svg, badge);
+  trigger.append(svg);
   node.replaceChildren(trigger);
+  createInlineFrame(trigger, svg);
 }
 
 export function normalizeMermaidSvg(svg: SVGElement): void {

@@ -153,6 +153,50 @@ describe("chat visual controls", () => {
       expect(root.querySelector<HTMLElement>(".chat-visual")?.dataset.visualSourceLoaded).toBe("true");
     } finally { globalThis.fetch = oldFetch; }
   });
+  test("a ready visual gets inline zoom, with no control nested in its named button", () => {
+    const { document } = parseHTML(`<div id="root">${renderChatMarkdown("```svg\n<svg/>\n```", {
+      visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }],
+    })}</div>`);
+    const root = document.querySelector("#root") as unknown as HTMLElement;
+    const frame = root.querySelector<HTMLElement>(".media-zoom-frame")!;
+    // No inline controls until the controller has measured the visual.
+    expect(frame.classList.contains("is-small")).toBe(true);
+    decorateChatVisuals(root);
+    expect(frame.getAttribute("data-zoom-state")).toBe(JSON.stringify({ tx: 0, ty: 0, scale: 1 }));
+    expect(frame.style.touchAction).toBe("");
+    expect(frame.querySelector(":scope > button.chat-visual-enlarge")?.getAttribute("aria-label")).toBe("Enlarge SVG graphic");
+    expect(root.querySelectorAll("button button, button a, a button")).toHaveLength(0);
+  });
+
+  test("a streamed text delta keeps a retained visual's inline zoom", () => {
+    const { document, window } = parseHTML('<div id="root"></div>');
+    const root = document.querySelector("#root") as unknown as HTMLElement;
+    const visuals = [{ index: 0, status: "ready" as const, id: VISUAL_ID, mimeType: "image/png" }];
+    const markdown = "![Shot](./shot.png)";
+    root.innerHTML = renderChatMarkdown(markdown, { streaming: true, visuals });
+    decorateChatVisuals(root);
+    const frame = root.querySelector<HTMLElement>(".media-zoom-frame")!;
+    // linkedom does no layout; give the frame and its image the box a browser would.
+    for (const element of [frame, frame.querySelector("img")!]) {
+      Object.defineProperty(element, "getBoundingClientRect", {
+        value: () => ({ left: 0, top: 0, x: 0, y: 0, right: 400, bottom: 300, width: 400, height: 300 }),
+      });
+    }
+    frame.querySelector('[data-zoom-action="zoom-in"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const zoomed = frame.getAttribute("data-zoom-state");
+    expect(JSON.parse(zoomed!).scale).toBeCloseTo(1.25, 6);
+
+    const stage = document.createElement("div") as unknown as HTMLElement;
+    stage.innerHTML = renderChatMarkdown(`${markdown}\n\nMore prose.`, { streaming: true, visuals });
+    reconcileChatVisuals(root, stage);
+    root.replaceChildren(...Array.from(stage.childNodes));
+    decorateChatVisuals(root);
+    expect(root.textContent).toContain("More prose.");
+    expect(root.querySelector(".media-zoom-frame")).toBe(frame);
+    expect(frame.getAttribute("data-zoom-state")).toBe(zoomed);
+    expect(frame.classList.contains("is-zoomed")).toBe(true);
+  });
+
   test("a completed decode failure shows the original reference even before binding", () => {
     const { document } = parseHTML(`<div id="root">${renderChatMarkdown('![Broken <shot>](./broken.png)', {
       visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/png" }],
@@ -186,9 +230,39 @@ describe("chat visual controls", () => {
     image.dispatchEvent(new window.Event("error"));
     expect(root.querySelector<HTMLElement>(".chat-visual-fallback")!.hidden).toBe(false);
     expect(root.querySelector(".chat-visual-enlarge")).toBeNull();
+    // The zoom toolbar goes with its media.
+    expect(root.querySelector(".media-zoom-frame, .media-zoom-toolbar")).toBeNull();
     expect(root.querySelector('[data-visual-tab="source"]')).not.toBeNull();
     expect(root.querySelector("[data-visual-copy]")).not.toBeNull();
     expect(root.querySelector(".chat-visual-source code")).not.toBeNull();
+  });
+
+  test("a decode failure releases the inline zoom it removes, so nothing keeps observing the reply", () => {
+    const { document, window } = parseHTML(`<div id="root">${renderChatMarkdown("![Shot](./shot.png)", {
+      visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/png" }],
+    })}</div>`);
+    // linkedom has no ResizeObserver: count what is observed. Its window
+    // writes through to the global object, so the stub is undone after.
+    const saved = Object.getOwnPropertyDescriptor(globalThis, "ResizeObserver");
+    const observed = new Set<Element>();
+    (window as any).ResizeObserver = class {
+      private readonly targets: Element[] = [];
+      observe(target: Element) { this.targets.push(target); observed.add(target); }
+      disconnect() { for (const target of this.targets) observed.delete(target); }
+    };
+    try {
+      const root = document.querySelector("#root") as unknown as HTMLElement;
+      const image = root.querySelector("img")!;
+      Object.defineProperties(image, { complete: { value: false }, naturalWidth: { value: 0 } });
+      decorateChatVisuals(root);
+      expect(observed.size).toBeGreaterThan(0);
+      image.dispatchEvent(new window.Event("error"));
+      expect(root.querySelector(".media-zoom-frame")).toBeNull();
+      expect(observed.size).toBe(0);
+    } finally {
+      if (saved) Object.defineProperty(globalThis, "ResizeObserver", saved);
+      else Reflect.deleteProperty(globalThis, "ResizeObserver");
+    }
   });
 
   for (const attributes of ['id="chat-aside-answer"', 'class="chat-request-plan"', 'class="chat-subagent-result"']) {

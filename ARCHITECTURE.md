@@ -294,10 +294,12 @@ src/
 │                         conversation ids, per-agent status, merged
 │                         inventory), client transport + validation, the
 │                         timeline renderer, the browser Composer workflow
-│                         (composer.ts), and its DOM presentation (ui.ts),
-│                         plus the shared runtime parts: the lazy service
-│                         (service.ts), the runtime for agents found on
-│                         PATH (path-agent-runtime.ts), child-process
+│                         (composer.ts), its DOM presentation (ui.ts), and
+│                         media-viewer.ts (attachments and visuals into
+│                         zoom/'s shared viewer, behind the blob:/same-origin
+│                         source guard), plus the shared runtime parts: the
+│                         lazy service (service.ts), the runtime for agents
+│                         found on PATH (path-agent-runtime.ts), child-process
 │                         stopping and output capture (managed-process.ts),
 │                         the agent-neutral facts each normalizer writes so
 │                         image capture knows when a reply's text is final
@@ -326,8 +328,22 @@ src/
 │                         capability, connection chip, PWA registration
 ├── preview/              The right pane — every renderer that mounts HTML
 │                         into #preview: rendered / source / diff views,
-│                         layout chooser, mermaid, anchors, image/binary
-│                         fallbacks, metadata card, code-block decorations
+│                         layout chooser, mermaid, media-zoom (inline zoom
+│                         and the viewer wired to preview images and
+│                         diagrams, kept across edits of the shown file),
+│                         anchors, image/binary fallbacks,
+│                         metadata card, code-block decorations
+├── zoom/                 Media zoom shared by the preview and chat: the
+│                         engine (transform.ts — fit, clamp, anchored zoom,
+│                         keep-visible and cover pan bounds, actual pixels;
+│                         gestures.ts — pan/pinch/tap state machine over
+│                         plain points from Pointer or Touch events;
+│                         motion.ts — intents to transforms, commit at
+│                         rest), the
+│                         media descriptor (media.ts), the inline
+│                         controller (inline.ts), and the one shared
+│                         fullscreen viewer (viewer.ts). Imports nothing from
+│                         preview/, chat/ or shell/ (boundary.test.ts)
 ├── sidebar/              The left pane — sidebar shell, pane visibility/
 │                         sizing, the @pierre/trees-backed Files tree,
 │                         Change Overview, Git Log, Files-pane filter
@@ -916,7 +932,7 @@ The four authoritative rules of the `follow-mode` capability — defined in `ope
 - **Rule C** (file event + follow on): selection moves to the changed file when the preview can show it — a document, or an image it renders inline (`isFollowableFile` in `src/shared/types.ts`, used by the server's `changedId` nomination in `src/server/file-index.ts` and by the client). Other binaries are ignored. The exception is an image embedded in the document on screen: its change keeps the selection and the embedded image refreshes in place. The embedded images come from the document's rendered payload (`src/preview/embedded-images.ts`), never from the live preview DOM, so the exception holds in Rendered, Source, Diff, and split views; a document shown only as Source or Diff has its rendered payload looked up once per revision for this. What a document embeds is known only for its current revision; until then an image change is held, not guessed (`imageChangeOutcome` in `src/shell/follow-rules.ts` answers select, stay, or defer). `src/shell/image-follow.ts` holds that one decision and settles it when the lookup answers — embedded stays, otherwise, or if the lookup fails or goes unanswered for 10 s, the image is followed — but only while Follow is on and the selection, user activation, Follow switches, and the document's revision are unchanged; any newer file change cancels it. All three selection paths in `events.ts` (incremental patch, full frame, reconcile) apply it through one helper, `followableChange`.
 - **Rule D** (file event + follow off): selection unchanged; if the changed file equals the current selection, the preview reloads in place; otherwise just the tree refreshes.
 
-Images in the preview — an opened image or one embedded in a rendered document — that resolve to a watched file carry that file's change revision as a `?revision=` query (`documentRevisionKey`, applied by `src/preview/image-revision.ts`), updated in place on mount and on every applied state update. A browser reuses an already-decoded image for an unchanged URL whatever the cache headers say, so this is what makes a changed image show its new content without re-rendering the document around it; the static-file fallback matches on the path and ignores the query. An image Follow switched to is an ordinary destination afterwards: reload, workspace-root resume, and Back restore it (`boot.ts`, `history.ts` accept any `isFollowableFile`).
+Images in the preview — an opened image or one embedded in a rendered document — that resolve to a watched file carry that file's change revision as a `?revision=` query (`documentRevisionKey`, applied by `src/preview/image-revision.ts` to an `<img>`'s `src`), updated in place on mount and on every applied state update. A browser reuses an already-decoded image for an unchanged URL whatever the cache headers say, so this is what makes a changed image show its new content without re-rendering the document around it; the static-file fallback matches on the path and ignores the query. A `<source>`'s `srcset` carries no revision, so a responsive image whose changed file only a `<source>` names is not refreshed live (the document-watch-index `srcset`/`<picture>` exclusion). An image Follow switched to is an ordinary destination afterwards: reload, workspace-root resume, and Back restore it (`boot.ts`, `history.ts` accept any `isFollowableFile`).
 
 ## Chat surface
 
@@ -2115,6 +2131,106 @@ syntax, heading markers, or code fences exist in the file but not in the
 rendered DOM. So the result lands in whatever view the reader is already using
 and falls back to Source only when the match cannot be found there — Source
 being where the searched text always exists.
+
+## Media zoom
+
+Images, SVGs, Mermaid diagrams and chat media zoom and pan the same way
+everywhere because one folder owns the behaviour and the surfaces only plug
+into it. The contract is `openspec/specs/media-zoom/spec.md` (until the change
+is archived, `openspec/changes/add-media-zoom/specs/media-zoom/spec.md`).
+
+**Engine and adapter seam.** `src/zoom/` holds the engine — pure transform
+math in `transform.ts` (clamp, anchored zoom, fit, the viewer's keep-visible
+pan bound and the inline cover bound, actual pixels), the pointer state
+machine in `gestures.ts`, fed plain points from Pointer or Touch events, and
+`motion.ts`, which both surfaces use to turn pan and pinch intents into
+transforms and to commit at rest, keeping their own bounds and taps — plus
+the media descriptor (`media.ts`), the inline controller (`inline.ts`) and the
+one shared fullscreen viewer (`viewer.ts`). It imports nothing from
+`preview/`, `chat/` or `shell/`; `src/zoom/boundary.test.ts` enforces that.
+Surfaces pass in what only they know: the real image source (the preview's
+`previewImageSource`, never the off-screen SVG placeholder), the link around
+the media, where focus returns, and for chat a `blob:`/same-origin source
+guard and a caption (the attachment's name). Focus returns from the viewer to
+the opener, or for framed media to its activator and on to expand when expand
+opened it (`viewerFocusReturn`, `inline.ts`), since a hidden toolbar control
+cannot take focus first. The adapters are `src/preview/media-zoom.ts` (document images, the
+image file preview, Mermaid as it renders), `src/chat/visual-ui.ts` (inline
+zoom on assistant visuals) and `src/chat/media-viewer.ts` (chat's way into the
+viewer).
+
+Inline zoom stays inside the media's at-fit box: a frame takes the media's
+layout, so nothing around it moves, and is held at that box while zoomed. It
+registers no `wheel` listener, so it never holds up a scroll. Touch gets a
+pinch through `touch-action: pan-x pan-y` at fit plus a non-passive listener
+that claims a second finger, and `touch-action: none` once zoomed. Zoomed, the
+media's margins (an image's `hspace`) move from inside the frame onto it, so
+the frame clips to the media's own box and its outer box stays put. Media under
+96 CSS px on a side (the media's own box, not its frame's margins) gets no
+inline controls, only the viewer; a frame counts as small until its
+controller has measured it. Chat attachment thumbnails are
+viewer-only at any size (they preview a larger image) and get no frame. An image that shares its link
+with other content stays a plain link, unframed. `imageKind` (`media.ts`)
+decides raster against vector: a cross-origin image whose URL names no known
+format is treated as vector, so it gets no "1:1 actual pixels" or pixelation.
+
+**Zoom session and identity.** Preview zoom lives for one session: the
+selected document, view mode and layout. A watched-file edit re-renders the
+same session, so `media-zoom.ts` saves each media's zoom before the body is
+replaced and restores it once the new copy knows its size (an image's load, a
+diagram's render; an image still on its placeholder or loading keeps what
+was saved for it). Images match by resolved URL without its `revision`
+parameter and by the link they open, copies of one image by their order
+among those copies (`occurrenceIdentities`); a responsive image matches by
+every source it can show. Diagrams match by position, and a changed diagram
+count resets them all. A changed shape (beyond 1%: the fit box's aspect ratio, or an
+image's intrinsic one, which a fixed `width` and `height` hide from the box)
+resets to fit, and so does a copy now under the small-media size. A body
+about to be replaced has its controllers disposed once their zoom is saved,
+or without saving (`releasePreviewZoom`) when a binary notice, commit, diff,
+empty state or media player replaces it. A diagram a theme change queued to
+render again in place keeps the zoom its last frame had, for an edit that
+comes first. An open viewer
+follows its media to the new copy even when that copy is off-screen: it loads
+an image's real source itself (`syncPreviewViewer`, after a mount or an
+in-place revision refresh), and its diagram renders ahead of the lazy queue
+(`setMermaidRenderPriority`). When the media is gone it stays on what it
+shows, at fit, without its "Open link". Each viewer load is owned by
+what it would show: the latest replacement request wins (one for the source
+already shown included), and losing the media abandons only a pending
+replacement, never the content the open is still loading. Any other
+session closes the viewer and drops all zoom, and so does selecting another
+file, at once, before that file has loaded
+(`executeLoadDocument`); until it mounts, the old body's media neither zooms
+nor opens the viewer (`InlineZoomOptions.active`). A responsive image is framed as its whole `<picture>`, and the viewer
+shows the source the browser picked (`currentSrc`), following a new copy
+once it has loaded rather than requesting its fallback; a new source the
+viewer swaps in brings its own format's actions (a picked SVG drops "1:1
+actual pixels"). A changed file only a `<source>` names is not refreshed
+live (see the `?revision=` paragraph above).
+Chat visuals keep their zoom across streamed text because the retained visual
+node, keyed by its resolved source, keeps its frame. Zoom is never persisted:
+no `appState`, storage or URL.
+
+**Commit at rest.** While input runs, the stage moves only through
+`transform`. About 120 ms (`COMMIT_DELAY_MS`) after input stops, the stage is
+laid out at its scaled size with only a `translate()` left, so SVG and Mermaid
+are redrawn sharp at the displayed scale. The committed state is
+`data-zoom-state` (on the viewer's stage, and on the inline frame relative to
+fit), with `data-zoom-pending` marking a commit still to come; tests read
+those instead of parsing `style.transform`. Raster media renders
+`image-rendering: pixelated` only once the reader has zoomed it in past fit
+and its pixels are then enlarged past native size (`rasterEnlarged` in
+`media.ts`, for both surfaces); at fit it is smoothed, even when fitting
+enlarges it.
+Device pixels are counted as `devicePixelRatio` times the page's pinch zoom
+(`devicePixelScale` in `media.ts`), for pixelation and "1:1 actual pixels"
+alike; the viewer's zoom range always reaches down to the actual-pixels
+scale. When the viewer's viewport changes size (a rotation, a resize), fitted
+media fits again and zoomed media keeps its scale within the pan bound; a
+relative zoom from a scale the new range no longer holds never moves against
+its direction (`zoomAt`, `pinchTransform`). A tap's slop is 12 px for a
+finger and 4 px for a mouse, so a slow, short mouse drag never dismisses.
 
 ## How to extend
 

@@ -1,3 +1,5 @@
+import { imageIdentity } from "../zoom/media";
+
 // An SVG loaded through <img> has its own animation timeline. CSS hiding and
 // native lazy loading do not release an already loaded image. Keep the real
 // source only while it intersects the viewport and the page is visible.
@@ -21,6 +23,8 @@ function placeholder(width: number, height: number): string {
   return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"/>`)}`;
 }
 
+// The path as written: zoom's own SVG test reads an encoded name
+// (`figure%2Esvg`) as the server does, but loading stays as it was.
 function isSvgSource(source: string): boolean {
   if (/^data:image\/svg\+xml[;,]/i.test(source)) return true;
   try {
@@ -30,10 +34,9 @@ function isSvgSource(source: string): boolean {
   }
 }
 
+// Revisions of one file share a key, so they share remembered dimensions.
 function dimensionsKey(source: string): string {
-  const url = new URL(source, document.baseURI);
-  url.searchParams.delete("revision");
-  return url.href;
+  return imageIdentity(source, document.baseURI);
 }
 
 // Parse before mounting. Even a detached div with innerHTML fetches images;

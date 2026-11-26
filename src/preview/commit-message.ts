@@ -8,7 +8,7 @@ import { appUrl } from "../shared/app-url";
 import { escapeHtml } from "../shared/html";
 import type { RepositorySnapshot } from "../shared/types";
 import { clearPreviewType } from "./header";
-import { closeMermaidViewer } from "./mermaid-viewer";
+import { releasePreviewZoom } from "./media-zoom";
 import { hideViewToggle } from "./view-mode";
 import { commitAgesRendered, commitBylineHtml } from "../shell/commit-ages";
 import { releaseMediaPreview } from "../media/preview";
@@ -41,7 +41,7 @@ export function renderCommitMessage(
   commit: RepositorySnapshot["commitLog"][number],
 ) {
   releaseMediaPreview();
-  closeMermaidViewer();
+  releasePreviewZoom();
   previewTitleElement.textContent = commit.subject;
   previewPathElement.textContent = `${repository.label} · ${commit.sha}`;
   clearPreviewType();

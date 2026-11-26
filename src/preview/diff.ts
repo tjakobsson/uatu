@@ -9,7 +9,7 @@ import { contextualAppUrl } from "../shell/watch-context";
 import { findDocumentById } from "../shell/storage";
 import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
 import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
-import { closeMermaidViewer } from "./mermaid-viewer";
+import { releasePreviewZoom } from "./media-zoom";
 import { writeDiffStylePreference, type DiffStyle, type DocumentMeta } from "../shared/types";
 import { appState, safeLocalStorage } from "../shell/state";
 import {
@@ -219,7 +219,7 @@ export async function renderDiffIntoPreview(
   });
   previewElement.classList.remove("empty", "is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
-  closeMermaidViewer();
+  releasePreviewZoom();
   // Diff view brings its own inline toolbar (Unified / Split) from the
   // document-diff-view module; the markdown/asciidoc layout toolbar must
   // not bleed across from a previous render of the same document.

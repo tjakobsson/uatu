@@ -1827,6 +1827,27 @@ describe("coordinated scrolling", () => {
     expect(f.anchor.isPinned()).toBe(false);
     expect(f.frames.size).toBe(0);
   });
+  test("a touch drag that content consumed (a zoomed visual panning) does not pause following", () => {
+    const f = fixture();
+    const media = f.document.createElement("span");
+    f.element.append(media);
+    // As the inline zoom controller does once it owns the touch sequence.
+    media.addEventListener("touchmove", event => event.preventDefault());
+    f.owner.latest();
+    const touch = (name: string, clientY: number) => {
+      const event = Object.assign(new f.document.defaultView!.Event(name, { bubbles: true, cancelable: true }), { touches: [{ clientY }] });
+      media.dispatchEvent(event as unknown as Event);
+    };
+    touch("touchstart", 100);
+    touch("touchmove", 140);
+    touch("touchmove", 180);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.frames.size).toBe(1);
+    // The same drag left to the browser scrolls the transcript up.
+    f.event("touchstart", { touches: [{ clientY: 100 }] });
+    f.event("touchmove", { touches: [{ clientY: 140 }] });
+    expect(f.anchor.isPinned()).toBe(false);
+  });
   test("a touch gesture inside a text control does not move the conversation", () => {
     const f = fixture();
     const input = f.document.createElement("input");

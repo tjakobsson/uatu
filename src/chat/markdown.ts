@@ -1,6 +1,7 @@
 import { highlightCodeBlocks } from "../render/markdown";
 import { appUrl } from "../shared/app-url";
 import { escapeHtml } from "../shared/html";
+import { ACTIVATOR_CLASS, inlineFrameHtml, STAGE_CLASS } from "../zoom/inline";
 import { prepareChatVisualMarkdown } from "./visual-markdown";
 import type { ChatVisualInput, ChatVisualSnapshot } from "./visual-types";
 import { CHAT_VISUAL_ID_PATTERN, VISUAL_MAX_COUNT } from "./visual-types";
@@ -45,7 +46,9 @@ function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): str
   if (input.kind === "svg" && !input.complete) message = options.streaming ? "Generating image…" : "SVG block is unfinished.";
   if (refusedCount) message = `At most ${VISUAL_MAX_COUNT} images can be displayed per message.`;
   const image = ready && !refusedCount
-    ? `<button type="button" class="chat-visual-enlarge" data-attachment-view="${escapeHtml(src)}" data-attachment-view-name="${escapeHtml(input.alt)}" aria-label="Enlarge ${escapeHtml(input.alt)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(input.alt)}" loading="lazy" decoding="async"></button><span class="chat-visual-fallback" role="status" hidden>Could not display ${escapeHtml(input.alt || "image")}.${reference ? ` ${reference}` : ""}</span>`
+    // Framed for inline zoom: the button stays the one named activator, and
+    // the zoom toolbar is its sibling, never inside it (visual-ui.ts binds it).
+    ? `${inlineFrameHtml(`<button type="button" class="chat-visual-enlarge ${ACTIVATOR_CLASS}" aria-label="Enlarge ${escapeHtml(input.alt)}"><img class="${STAGE_CLASS}" src="${escapeHtml(src)}" alt="${escapeHtml(input.alt)}" loading="lazy" decoding="async"></button>`)}<span class="chat-visual-fallback" role="status" hidden>Could not display ${escapeHtml(input.alt || "image")}.${reference ? ` ${reference}` : ""}</span>`
     : `<span class="chat-visual-fallback"${pending ? ' role="status"' : ""}>${escapeHtml(message)}${reference ? ` ${reference}` : ""}</span>`;
   const controls = svg
     ? `<span class="chat-visual-controls" role="group" aria-label="SVG view"><button type="button" data-visual-tab="preview" aria-pressed="true">Preview</button><button type="button" data-visual-tab="source" aria-pressed="false">Source</button><button type="button" data-visual-copy${input.kind === "svg" && !hasId ? "" : ' disabled title="Open Source to load SVG before copying"'}>Copy source</button></span>`

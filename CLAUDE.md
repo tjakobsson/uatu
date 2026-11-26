@@ -28,7 +28,9 @@ src/
 │                   the root (provider/types/adapter/agents/replay/
 │                   receipts/client/validation/timeline-renderer/ui;
 │                   ansi renders tool output as terminal text against the
-│                   terminal's palette; conversation-totals folds priced
+│                   terminal's palette; media-viewer opens attachments and
+│                   visuals in zoom/'s shared viewer behind the blob:/same-
+│                   origin source guard; conversation-totals folds priced
 │                   usage carriers and task rows into the cost receipt, which
 │                   receipt-view itemizes by agent, type, or model;
 │                   task-inspection drives the running-task drill-down —
@@ -111,11 +113,30 @@ src/
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
 │                   svg-images (visibility-bound image loading and suspension),
-│                   mermaid trigger, anchors, image/binary fallbacks,
+│                   mermaid (theme, lazy-render re-observation), media-zoom
+│                   (inline zoom and the viewer for preview images and
+│                   diagrams, and the zoom session that carries them across
+│                   edits of the shown file), anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
 ├── media/          page-local controller (one source/generation/captured order),
 │                   paused preview presentation, persistent dock, and measured
 │                   viewport reservation; playback never enters personal state
+├── zoom/           media zoom for the preview and chat — the engine
+│                   (transform: fit, clamp, anchored zoom, the viewer's
+│                   keep-visible and inline cover pan bounds, actual pixels;
+│                   gestures: the pan/pinch/tap/double-tap state machine fed
+│                   by Pointer or Touch events; motion: the intent-to-
+│                   transform step and the commit-at-rest protocol both
+│                   surfaces share), the media descriptor
+│                   (media: kind, identity, link, small-media test), the
+│                   inline controller (inline: frame, activator and toolbar
+│                   as siblings, no wheel listener, touch-action by zoom
+│                   state; the zoom carry that matches re-rendered media),
+│                   and the one shared fullscreen viewer (viewer:
+│                   `dialog.media-viewer`, layout committed at rest and
+│                   exposed as `data-zoom-state`). Surfaces pass in what they
+│                   know; zoom/ imports nothing from preview/, chat/ or
+│                   shell/ (boundary.test.ts), so zoom is never persisted
 ├── sidebar/        the left pane — tree-view, recent-model/recent-view
 │                   (incremental disk-write projection and windowed list),
 │                   ignored-visibility (Files options), panes
