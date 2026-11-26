@@ -170,18 +170,42 @@ export function startMediaHttpBoundary<S extends Server<any>>(options: MediaHttp
   front.timeout = 0;
   front.keepAliveTimeout = 0;
   front.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+  // Only a 101 turns the browser's connection into a tunnel. Any other answer
+  // ends it: the request asks Bun to close after a non-101 answer, which
+  // delimits the relayed response, and the browser is told not to reuse the
+  // connection. Reused, its next request would skip the media writer and be
+  // correlated with the refused upgrade's URL.
   front.on("upgrade", (request, socket, head) => {
     try {
       const context = incomingContext(request);
       const upstream = connect({ host: innerHost, port: innerPort });
       correlate(upstream, context);
+      let tunnel = false;
       upstream.on("error", () => socket.destroy()); socket.on("error", () => upstream.destroy());
-      socket.on("close", () => upstream.destroy()); upstream.on("close", () => socket.destroy());
+      socket.on("close", () => upstream.destroy());
+      upstream.on("close", () => { if (tunnel) socket.destroy(); else socket.end(); });
       upstream.once("connect", () => {
         upstream.write(`${request.method} ${request.url} HTTP/${request.httpVersion}\r\n`);
-        for (let i = 0; i < request.rawHeaders.length; i += 2) upstream.write(`${request.rawHeaders[i]}: ${request.rawHeaders[i + 1]}\r\n`);
-        upstream.write("\r\n"); if (head.length) upstream.write(head);
-        socket.pipe(upstream); upstream.pipe(socket);
+        let connection = false;
+        for (let i = 0; i < request.rawHeaders.length; i += 2) {
+          const name = request.rawHeaders[i]!, close = name.toLowerCase() === "connection" ? ", close" : "";
+          connection ||= close !== "";
+          upstream.write(`${name}: ${request.rawHeaders[i + 1]}${close}\r\n`);
+        }
+        upstream.write(connection ? "\r\n" : "Connection: close\r\n\r\n"); if (head.length) upstream.write(head);
+        let answer = Buffer.alloc(0);
+        const answered = (data: Buffer) => {
+          answer = Buffer.concat([answer, data]);
+          const end = answer.indexOf("\r\n\r\n");
+          if (end < 0) return;
+          upstream.pause(); upstream.off("data", answered);
+          const lines = answer.toString("latin1", 0, end).split("\r\n");
+          tunnel = /^HTTP\/1\.[01] 101( |$)/.test(lines[0]!);
+          if (tunnel) { socket.write(answer); socket.pipe(upstream); }
+          else socket.write(Buffer.concat([Buffer.from(`${lines.filter(line => !/^connection\s*:/i.test(line)).join("\r\n")}\r\nConnection: close\r\n\r\n`, "latin1"), answer.subarray(end + 4)]));
+          upstream.pipe(socket);
+        };
+        upstream.on("data", answered);
       });
     } catch { socket.destroy(); }
   });

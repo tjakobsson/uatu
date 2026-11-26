@@ -641,7 +641,11 @@ This avoids Bun 1.4.4's generic-stream length/error framing behavior without
 buffering clips or introducing another browser-facing origin/port.
 
 Other HTTP requests, early-flushed live streams, and WebSocket upgrades retain
-the private loopback Bun listener and its literal HTMLBundle assembly. Public
+the private loopback Bun listener and its literal HTMLBundle assembly. Only a
+101 makes an upgrade's connection a tunnel; a refused upgrade is relayed with
+`Connection: close` and ends the connection, because a browser that reuses it
+(WebKit does) would otherwise send its next request into the refused upgrade's
+tunnel and get the upgrade's answer. Public
 URL/TLS and peer context are restored using private connection correlation;
 untrusted forwarding headers grant no authority. The listener facade retains
 readiness, request-IP, upgrade, and graceful/forced shutdown semantics. Production,

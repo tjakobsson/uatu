@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { request as httpRequest } from "node:http";
 import { execFileSync } from "node:child_process";
+import { connect } from "node:net";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -230,4 +231,33 @@ test("graceful shutdown retains a public request whose private connection has no
   disposals.push(() => boundary.server.stop(true)); await boundary.ready;
   const response = await fetch(boundary.server.url);
   expect(await response.text()).toBe("accepted before stop"); await closing;
+});
+
+test("a refused upgrade closes the browser's connection instead of capturing its next request", async () => {
+  const app = fixture(request => {
+    const { pathname } = new URL(request.url);
+    return pathname === "/refused" ? new Response(`refused ${pathname}`, { status: 404 }) : new Response(`served ${pathname}`);
+  });
+  await app.ready;
+  const socket = connect(app.server.port!, "127.0.0.1");
+  disposals.push(() => socket.destroy());
+  let received = "", closed = false;
+  socket.on("data", data => { received += data.toString("latin1"); });
+  socket.on("close", () => { closed = true; });
+  socket.on("error", () => {});
+  const host = `127.0.0.1:${app.server.port}`;
+  socket.write(`GET /refused HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n`
+    + "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+  await until(() => received.endsWith("refused /refused") || closed);
+  const [refusal] = received.split("\r\n\r\n");
+  expect(refusal).toStartWith("HTTP/1.1 404");
+  expect(refusal).toMatch(/\r\nconnection: close(\r\n|$)/i);
+  received = "";
+  // WebKit reuses the connection for its next fetch. That request must get
+  // its own resource or a closed connection to retry on, never the refusal.
+  socket.write(`GET /status HTTP/1.1\r\nHost: ${host}\r\n\r\n`);
+  await until(() => closed || /\r\n\r\n(refused|served)/.test(received));
+  expect(received).not.toContain("/refused");
+  if (!closed) expect(received).toContain("served /status");
+  await until(() => closed);
 });
