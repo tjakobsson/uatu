@@ -488,6 +488,37 @@ test("Choosing a split while a single-pane reload fails keeps the pane and shows
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
 });
 
+test("A split's fallback pane retries when only the second view fails to reload", async ({ page }) => {
+  // The split fell back to one pane. A reload whose current view answers but
+  // whose other view fails keeps the pane and retries, and the split comes
+  // back once both views answer.
+  let sourceFails = true;
+  let reloading = false;
+  let sourceReloads = 0;
+  await routeLinksDemoViews(page, async view => {
+    if (view !== "source") return "continue";
+    if (reloading) sourceReloads += 1;
+    return sourceFails ? 500 : "continue";
+  });
+  await openTreeFile(page, "links-demo.md");
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+
+  reloading = true;
+  await editLinksDemo();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+
+  sourceFails = false;
+  const split = page.locator("#preview.is-split.is-split-h");
+  await expect(split.locator(".preview-pane-rendered")).toContainText("Reload landed marker.");
+  await expect(split.locator(".preview-pane-source")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
+  expect(sourceReloads).toBeGreaterThanOrEqual(2);
+});
+
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
   // A 404 is final: the file is gone, so keeping its old render would mislead.
   await reloadRenderedLinksDemo(page, async () => 404);

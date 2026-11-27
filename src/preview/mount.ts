@@ -596,13 +596,14 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
   let result = await fetchDocumentPayload(documentId, apiView);
   if (!isCurrent()) return false;
-  // A reload of the split on screen needs the other view too. Fetch it here,
-  // so a failure of that request keeps the split and retries exactly as a
-  // failure of the first does; renderSplitForDocument then finds both views
-  // cached. Without a split on screen, renderSplitForDocument fetches it and
-  // falls back to one pane as before.
+  // A reload of the split on screen, or of the pane it fell back to, needs
+  // the other view too. Fetch it here, so a failure of that request keeps
+  // what is on screen and retries exactly as a failure of the first does;
+  // renderSplitForDocument then finds both views cached. With nothing of the
+  // document on screen, renderSplitForDocument fetches it and falls back to
+  // one pane as before.
   if (result.ok && requestedLayout !== "single" && documentSupportsSplit(result.payload)
-    && presentedRender.shows(renderKey)) {
+    && showsRenderFor(renderKey)) {
     const companion = await fetchDocumentPayload(documentId, apiView === "source" ? "rendered" : "source");
     if (!isCurrent()) return false;
     if (companion.ok) rememberDocumentPayload(companion.payload);
