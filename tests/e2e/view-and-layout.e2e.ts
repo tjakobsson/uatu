@@ -497,6 +497,9 @@ test("Choosing a split while a single-pane reload fails keeps the pane and shows
   await expect(page.locator(".uatu-layout-toolbar [data-layout-value='single']")).toHaveAttribute("aria-checked", "false");
   await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  // Source and Diff stay reachable from the kept pane.
+  await expect(page.locator("#view-control")).toBeVisible();
+  await expect(page.locator("#view-diff")).toBeVisible();
 });
 
 test("A split's fallback pane retries when only the second view fails to reload", async ({ page }) => {

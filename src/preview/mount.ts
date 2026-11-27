@@ -645,8 +645,12 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     // load still owns the selection, view, layout and revision.
     if (showsRenderFor(renderKey)) {
       // Kept as the pane a split fell back to: it stands in for the split the
-      // reader chose, so the layout toolbar shows that choice.
-      if (!presentedRender.shows(renderKey)) mountLayoutToolbar(true);
+      // reader chose, so the layout toolbar shows that choice, and the view
+      // chooser (hidden by a layout switch that found nothing cached) is back.
+      if (!presentedRender.shows(renderKey)) {
+        mountLayoutToolbar(true);
+        syncViewToggle({ kind: doc.kind });
+      }
       setReloadNotice(retrying ? "retrying" : "gave-up");
       return false;
     }
