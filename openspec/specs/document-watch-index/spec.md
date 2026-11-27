@@ -581,7 +581,8 @@ The server SHALL classify failed document requests using the status and logging 
 - **AND** once those retries are exhausted it SHALL keep the render and show the persistent header notice "This file couldn't be reloaded." with a Retry button labelled "Retry loading this file"
 - **AND** activating Retry SHALL make exactly one new request, showing "This file couldn't be reloaded. Retrying…" without the button while it is in flight, and that request restarts the bounded schedule only if it fails transiently
 - **AND** a successful reload SHALL replace the render and hide the notice
-- **AND** a final failure of the reload, or a load of another document, view or layout, SHALL hide the notice and follow the other scenarios of this requirement
+- **AND** a load in Side-by-side or Stacked that fails transiently while a single pane of the document is on screen SHALL keep that pane the same way, with the chosen layout shown in the layout toolbar
+- **AND** a final failure of the reload, or a load of another document or view, SHALL hide the notice and follow the other scenarios of this requirement
 
 #### Scenario: A permission-denied document is final
 - **WHEN** the selected document exists in the index but the server process is not permitted to read it

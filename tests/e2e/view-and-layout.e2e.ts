@@ -469,6 +469,25 @@ test("A split layout that fell back to one pane keeps that pane when a later rel
   await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
 });
 
+test("Choosing a split while a single-pane reload fails keeps the pane and shows the chosen layout", async ({ page }) => {
+  // The kept single pane stands in for the split that could not load, as a
+  // split's own fallback pane does, so the layout toolbar shows the choice.
+  let failing = false;
+  await routeLinksDemoViews(page, async () => failing ? 500 : "continue");
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  failing = true;
+  await editLinksDemo();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='split-h']")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='single']")).toHaveAttribute("aria-checked", "false");
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
   // A 404 is final: the file is gone, so keeping its old render would mislead.
   await reloadRenderedLinksDemo(page, async () => 404);

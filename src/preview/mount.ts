@@ -636,6 +636,9 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     // Retry once the schedule is used up. The guard above already proved this
     // load still owns the selection, view, layout and revision.
     if (showsRenderFor(renderKey)) {
+      // Kept as the pane a split fell back to: it stands in for the split the
+      // reader chose, so the layout toolbar shows that choice.
+      if (!presentedRender.shows(renderKey)) mountLayoutToolbar(true);
       setReloadNotice(retrying ? "retrying" : "gave-up");
       return false;
     }
