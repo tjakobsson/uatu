@@ -273,6 +273,11 @@ for (const width of [320, 390, 1280]) for (const colorScheme of ["light", "dark"
       // OpenCode's zero is an unpriced model, not free: a dash, labeled as such.
       await expect(row.locator(".chat-worker-cost")).toHaveText("—");
       await expect(row.locator(".chat-worker-cost")).toHaveAttribute("aria-label", "No price reported for the subagent session's model");
+      // A zero on a model the (fake) list-price catalog prices is that list price:
+      // 1,200 input at $2 and 120 output and reasoning at $10 per million tokens.
+      await control(request, { op: "workerReport", childId: worker.childId, usedModel: "Subscription Fixture", usedEffort: "high", costUsd: 0 });
+      await expect(row.locator(".chat-worker-cost")).toHaveText("$0.0036");
+      await expect(row.locator(".chat-worker-cost")).toHaveAttribute("aria-label", "Cumulative subagent session cost: 0.0036 USD");
       await control(request, { op: "workerReport", childId: worker.childId, usedModel: "Fixture Model", usedEffort: "medium", costUsd: 0.0012 });
       await expect(row.locator(".chat-worker-effort")).toHaveText("medium");
       await expect(row.locator(".chat-worker-cost")).toHaveText("$0.0012");

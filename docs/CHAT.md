@@ -94,6 +94,34 @@ region rather than displacing the message field or primary actions.
    uatu hub or direct server. A service manager may have a different
    `PATH`, `HOME`, or provider environment from an interactive shell.
 
+**Cost on a subscription (OpenCode 2.x).** Signed in with a ChatGPT plan,
+OpenCode reports a cost of zero for the models the plan covers. Chat then
+computes what each such step would cost at pay-per-token list prices and shows
+that figure like any other cost: on the composer's usage chip, in the
+conversation receipt and on background worker rows. Claude Code does the same
+on a Pro/Max plan, where the CLI computes the figure. Neither is a bill.
+
+- **Prices.** They come from the model catalog OpenCode itself reads,
+  `https://models.opencode.ai/experimental/v2.0/api.json`. The workspace server
+  fetches it the first time a zero needs pricing, never waits for it, and
+  refreshes it at most hourly, revalidating with its ETag. Tests use a fake
+  catalog and make no request.
+- **Arithmetic.** OpenCode's own: per step, with the step's context (input plus
+  cache read and write) choosing a long-context tier, reasoning priced as
+  output, and the first listed cache-write rate.
+- **What stays unpriced.** Only the exact provider and model are priced, never
+  another provider's price for the same model id. A model mode such as
+  `gpt-6.1-sol-fast`, a model the catalog does not list, and usage read while the
+  catalog is unavailable keep OpenCode's zero, which reads as **no price
+  reported**. Usage read before the first fetch completes keeps its zero until
+  it is read again, for example when the conversation is reopened.
+- **Never replaced.** A nonzero cost OpenCode reports always stands.
+- **Settings.** Chat follows OpenCode's catalog settings in the server's
+  environment: `OPENCODE_MODELS_URL` names another source,
+  `OPENCODE_MODELS_PATH` reads a local file instead of the network, and
+  `OPENCODE_DISABLE_MODELS_FETCH=1` turns the fetch off, so these costs stay
+  unpriced. OpenCode 1.x usage is not priced this way.
+
 ### Claude Code
 
 1. Install the `claude` CLI by following the
@@ -307,13 +335,17 @@ Cost comes only from an authoritative cumulative session aggregate: OpenCode 2.x
 `SessionInfo.cost` on the existing history metadata read and live
 `session.usage.updated.cost` snapshots. They replace rather than add to each other.
 The native total includes compaction usage and retains spend hidden by revert;
-visible assistant-message sums cannot establish that total and are never a fallback.
+visible assistant-message sums cannot establish that total and are not a fallback,
+with one exception: a native total of zero means OpenCode priced none of the
+session's steps, and where Chat priced them at list prices (see
+[Cost on a subscription](#opencode)) the session cost is their sum. That sum
+leaves out compaction usage and any history outside the child-history read.
 Current Claude and OpenCode 1.x integrations do not provide this authoritative
 aggregate, so their worker session cost is not reported even when task/message
 prices are available. Missing aggregate data remains unknown, not a partial sum.
 OpenCode reports zero for a model it has no price for, so the worker row treats
-zero as unpriced, as the conversation receipt does, rather than asserting a free
-`$0.00`. Reused-child occurrences repeat one session snapshot
+an unpriced zero as unpriced, as the conversation receipt does, rather than
+asserting a free `$0.00`. Reused-child occurrences repeat one session snapshot
 without adding it to task/parent receipts or including descendant costs. Recovery
 uses existing child-history accounting; inspection reuses its own bounded read.
 Parent refreshes normally revalidate cached child history at most every 30 seconds,

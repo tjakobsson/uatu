@@ -2164,8 +2164,16 @@ Chat SHALL report provider-priced conversation cost from history and live update
 #### Scenario: An existing conversation opens or messages report zero or missing cost
 - **WHEN** an existing conversation opens or messages report zero or missing cost
 - **THEN** The cost SHALL be populated when an existing conversation is opened, from its stored history, not only after a new turn is taken; it SHALL NOT be qualified as "since" a later time, because the stored history carries every message's cost.
-- **AND** When every message in the conversation reports a cost of zero — a model OpenCode has no price for — Chat SHALL show no cost rather than a zero figure.
+- **AND** When every message in the conversation reports a cost of zero — a model OpenCode has no price for — and none is priced at list prices, Chat SHALL show no cost rather than a zero figure.
 - **AND** A message for which OpenCode reports no cost contributes nothing and SHALL NOT be presented as zero.
+
+#### Scenario: OpenCode 2.x reports zero for subscription-covered usage
+- **WHEN** OpenCode 2.x reports a cost of zero for an assistant message that has tokens, as it does for models a ChatGPT plan covers
+- **THEN** Chat SHALL price that message at pay-per-token list prices from the model catalog OpenCode reads, with OpenCode's per-step arithmetic: the message's context (input plus cache read and write) choosing the long-context tier, reasoning priced as output.
+- **AND** That figure SHALL be the message's cost everywhere a reported cost is used — chip, receipt, totals, task rows and worker rows — shown as an ordinary cost, as Claude Code's own estimate on a Pro/Max plan is.
+- **AND** Only the catalog entry for the message's exact provider and model SHALL price it; no other provider's price for the same model id SHALL be used, and a message without such an entry SHALL keep the zero.
+- **AND** A nonzero cost OpenCode reports SHALL NOT be replaced.
+- **AND** The catalog SHALL be fetched by the server lazily, cached for at most an hour and revalidated with its ETag; Chat SHALL NOT wait for it, and while it is unavailable, failed, or disabled by OpenCode's catalog settings (`OPENCODE_MODELS_URL`, `OPENCODE_MODELS_PATH`, `OPENCODE_DISABLE_MODELS_FETCH`) the zero SHALL stand.
 
 #### Scenario: The reader views or switches the conversation receipt itemization
 - **WHEN** the reader views or switches the conversation receipt itemization
@@ -3001,6 +3009,7 @@ Subagent worker rows SHALL report truthful latest execution model and effort, cu
 - **AND** A newer execution without effort SHALL clear the older effort.
 - **AND** Execution reports SHALL NOT claim independent downstream-provider confirmation.
 - **AND** Cost SHALL use authoritative cumulative session snapshots, including compaction and reverted spend, exclude parent/descendant spend, and repeat one session snapshot across aliases/reused-child occurrences without adding those snapshots to receipts.
+- **AND** When the authoritative snapshot is zero and Chat priced the session's own messages at list prices, the session cost SHALL be the sum of those messages' costs, as OpenCode's own total sums its steps; a nonzero snapshot SHALL stand as reported.
 - **AND** Unreported/incomplete cost or effort SHALL show a compact dash labeled "not reported" accessibly; a reported zero — OpenCode's cost for a model it has no price for — SHALL show a compact dash labeled "no price reported" accessibly, consistent with the conversation receipt, rather than a zero figure.
 - **AND** Shell work SHALL NOT claim subagent effort or session cost.
 - **AND** Sub-cent costs SHALL retain useful precision.

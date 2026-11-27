@@ -5,6 +5,7 @@ import type { ShellExited } from "@opencode/client";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, prepareStoredMessage, storedAccounting, storedExecutionLiveness, type OpenCodeV2Memory } from "./normalization";
+import { ListPrices, priceTable } from "./list-prices";
 import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
 import type { AssistantMessageItem } from "../../types";
@@ -91,6 +92,35 @@ test("private native shell identity hashes fixed Info fields and keeps its envel
   const partial = normalize.prepare({ ...envelope, data: { info: { ...info, file: undefined, time: { started: "19" }, pid: "123" } } }).evidence.shellBirth!;
   expect(partial.identity?.started).toBeUndefined(); expect(partial.identity?.file).toBeUndefined(); expect(partial.identity?.pid).toBeUndefined();
   expect(partial.proof).toEqual(full.proof);
+});
+
+test("usage OpenCode reports as zero is priced at list prices, live and stored, where the catalog has the exact model (#591)", async () => {
+  const table = priceTable({ fixture: { id: "fixture", models: { listed: { id: "listed", cost: { text: { input: { price: 2 }, output: { price: 10 } } } } } } });
+  const prices = new ListPrices(async () => ({ table }));
+  prices.warm();
+  await prices.settled();
+  const tokens = { input: 1_000, output: 100, reasoning: 20, cache: { read: 0, write: 0 } };
+  const listed = (1_000 * 2 + 120 * 10) / 1e6;
+  const normalize = createOpenCodeV2Normalizer(process.cwd());
+  const memory = createOpenCodeV2Memory({ prices });
+  const step = (id: string, model: string, cost: number) => {
+    normalize({ id: `start-${id}`, type: "session.step.started", created: 1, data: { sessionID: "child", assistantMessageID: id, started: 1, model: { providerID: "fixture", id: model } } }, memory);
+    return normalize({ id: `end-${id}`, type: "session.step.ended", created: 2, data: { sessionID: "child", assistantMessageID: id, finish: "stop", tokens, cost } }, memory);
+  };
+  const carrier = (event: NormalizedProviderEvent) => event.updates.flatMap(update => update.kind === "upsert" && update.item.id.startsWith("usage:") ? [update.item as AssistantMessageItem] : [])[0];
+  const live = step("a", "listed", 0);
+  expect(carrier(live)?.usage?.costUsd).toBeCloseTo(listed, 12);
+  expect(live.assistantUsage?.usage.costUsd).toBeCloseTo(listed, 12);
+  expect(carrier(step("b", "listed", 0.5))?.usage?.costUsd).toBe(0.5);
+  expect(carrier(step("c", "unlisted", 0))?.usage?.costUsd).toBe(0);
+  // Without a price list, OpenCode's figure stands.
+  expect(carrier(normalize({ id: "end-d", type: "session.step.ended", created: 2, data: { sessionID: "child", assistantMessageID: "a", finish: "stop", tokens, cost: 0 } }))?.usage?.costUsd).toBe(0);
+
+  const stored = { id: "s", type: "assistant", time: { created: 4 }, model: { providerID: "fixture", id: "listed" }, content: [], tokens, cost: 0 };
+  expect(storedAccounting(stored, prices)?.usage?.costUsd).toBeCloseTo(listed, 12);
+  expect(storedAccounting(stored)?.usage?.costUsd).toBe(0);
+  const history = normalizeStoredMessage(stored, true, undefined, undefined, undefined, prices).find(item => item.id === "usage:s") as AssistantMessageItem | undefined;
+  expect(history?.usage?.costUsd).toBeCloseTo(listed, 12);
 });
 
 test("only assistant execution metadata reports effort, live and stored, not parent/user selection", () => {

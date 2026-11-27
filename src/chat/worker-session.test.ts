@@ -9,6 +9,15 @@ test("only an authoritative aggregate prices a session, preserving zero and reje
   for (const value of [null, -1, Infinity, Number.NaN]) expect(workerSessionReport(value, models).costUsd).toBeNull();
 });
 
+test("a zero OpenCode total takes the sum of the steps Uatu priced at list prices; a reported total is never overridden (#591)", () => {
+  const models = new Map([["a", { model: "one", createdAt: 1 }]]);
+  const steps = new Map([["a", { input: 10, costUsd: 0.003 }], ["b", { input: 10, costUsd: 0 }], ["c", { input: 10 }], ["d", { input: 10, costUsd: 0.001 }]]);
+  expect(workerSessionReport(0, models, steps).costUsd).toBeCloseTo(0.004, 12);
+  expect(workerSessionReport(0.05, models, steps).costUsd).toBe(0.05);
+  expect(workerSessionReport(undefined, models, steps).costUsd).toBeNull();
+  expect(workerSessionReport(0, models, new Map([["b", { input: 10, costUsd: 0 }]])).costUsd).toBe(0);
+});
+
 test("latest execution model and effort travel together; opaque and explicit none/default survive", () => {
   const models = new Map<string, WorkerMessageModel>([["a", { model: "one", createdAt: 1, effort: "high" }], ["b", { model: "one", createdAt: 2, effort: "medium" }]]);
   expect(workerSessionReport(undefined, models)).toMatchObject({ model: "one", effort: "medium" });

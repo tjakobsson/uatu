@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
 import { McpServerNames, annotateMcpPermission, looksLikeMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
+import type { ListPrices } from "./list-prices";
 import { stableProviderId } from "../message-id";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../../history-reuse";
 import { BackgroundTaskUnavailableError, InterruptNotAppliedError, OperationOutcomeUnknownError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, type PendingInboxEntry } from "../../provider";
@@ -87,6 +88,8 @@ export function createOpenCodeV2Provider(options: {
   // Read-only test observer of each consumer's actual complete history,
   // including shared loads and cache hits. It grants no recovery authority.
   observeHistoryConsumption?: (sessionId: string, messages: readonly unknown[]) => void;
+  // List prices for usage OpenCode reports as costing 0; without them, OpenCode's figures stand.
+  listPrices?: ListPrices;
 }): ChatProvider {
   const authorization = `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`;
   const client = OpenCode.make({
@@ -94,7 +97,7 @@ export function createOpenCodeV2Provider(options: {
     headers: { authorization },
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
-  return new OpenCodeV2Provider(client, options.directory, options.commandAdmissionMs, options.reloadSettleMs, options.observeHistoryConsumption);
+  return new OpenCodeV2Provider(client, options.directory, options.commandAdmissionMs, options.reloadSettleMs, options.observeHistoryConsumption, options.listPrices);
 }
 
 export class OpenCodeV2Provider implements ChatProvider {
@@ -181,6 +184,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     // before reporting success anyway (see `reload()`).
     private readonly reloadSettleMs = 10_000,
     private readonly observeHistoryConsumption?: (sessionId: string, messages: readonly unknown[]) => void,
+    private readonly listPrices?: ListPrices,
   ) {
     this.workspace = path.resolve(directory);
     this.normalize = createOpenCodeV2Normalizer(directory);
@@ -429,7 +433,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       const message = visible[index]!;
       newestPrompt = storedPromptId(message) ?? newestPrompt;
       if (index < start) continue;
-      const reported = storedAccounting(message);
+      const reported = storedAccounting(message, this.listPrices);
       if (reported) accounting.push(newestPrompt === undefined ? reported : { ...reported, promptId: newestPrompt });
     }
     sourceRead.capture();
@@ -677,7 +681,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const normalized = new Map<string, { item: import("../../types").ConversationItem; index: number }>();
     const origins = new Map<string, number>();
     visible.forEach((message, index) => {
-      for (let item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index], executionLiveness.get(messageIdentity(message)))) {
+      for (let item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index], executionLiveness.get(messageIdentity(message)), this.listPrices)) {
         if (!origins.has(item.id)) origins.set(item.id, index);
         if (optionalEnrichment && item.type === "tool" && item.childConversationId && !verified.has(item.childConversationId)) {
           const { childConversationId: _unverified, ...transcript } = item;
@@ -1970,7 +1974,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Control revocations live in `this.controls`; its observation gap retired
     // every pre-gap Stop basis, so only workers born after it can gain Stop.
     const retained = this.streamWorkers?.controlEvidenceAvailable ? this.streamWorkers : undefined;
-    const memory = createOpenCodeV2Memory({ controls: this.controls, workers: retained });
+    const memory = createOpenCodeV2Memory({ controls: this.controls, workers: retained, ...(this.listPrices ? { prices: this.listPrices } : {}) });
     this.streamWorkers = memory.workers;
     this.eventMemory = memory;
     // Live only once a frame has arrived: until the subscription's first

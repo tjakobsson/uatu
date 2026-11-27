@@ -2,6 +2,7 @@ import type { ChatProvider } from "../provider";
 import type { AgentRuntime } from "../service";
 import { OpenCodeService, type OpenCodeGeneration, type OpenCodeServiceOptions } from "./opencode-service";
 import { createOpenCodeV1Provider } from "./v1/provider";
+import { sharedListPrices } from "./v2/list-prices";
 import { createOpenCodeV2Provider } from "./v2/provider";
 
 /**
@@ -12,9 +13,12 @@ import { createOpenCodeV2Provider } from "./v2/provider";
 export type OpenCodeProviderFactory = (options: { endpoint: string; password: string; directory: string; generation: OpenCodeGeneration }) => ChatProvider;
 export type OpenCodeProviderFactories = Partial<Record<OpenCodeGeneration, OpenCodeProviderFactory>>;
 
+/** The real 2.x stack. 2.x reports a zero cost for subscription-covered models; it prices those at list prices. */
+export const createListPricedOpenCodeV2Provider: OpenCodeProviderFactory = options => createOpenCodeV2Provider({ ...options, listPrices: sharedListPrices() });
+
 const DEFAULT_PROVIDER_FACTORIES: Record<OpenCodeGeneration, OpenCodeProviderFactory> = {
   1: createOpenCodeV1Provider,
-  2: createOpenCodeV2Provider,
+  2: createListPricedOpenCodeV2Provider,
 };
 
 export type OpenCodeAgentRuntimeOptions = OpenCodeServiceOptions & {

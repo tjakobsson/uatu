@@ -35,6 +35,7 @@ import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 import type { InboxDelta, PendingInboxEntry } from "../../provider";
 import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellBirthIdentity, shellCommandFingerprint, type ShellBirthIdentity, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
 import { executionEvidence } from "../../turn-liveness";
+import type { ListPrices } from "./list-prices";
 import { nativeVisualMessageIdentity } from "../../visual-identity";
 
 export type { NormalizedProviderEvent };
@@ -66,6 +67,8 @@ export type OpenCodeV2Memory = ProviderEventMemory & {
   // The step that produced an assistant message, for the usage carrier's
   // model and agent and for attributing the message on its parent's row.
   steps: Map<string, { agent?: string; model?: { providerId: string; modelId: string }; startedAt: number }>;
+  // List prices for the steps OpenCode reports as costing 0 (see list-prices.ts); none in tests that do not supply them.
+  prices?: ListPrices;
   // A form's field keys in order, so an answer map folds back to the ordered
   // answers the seam speaks.
   forms: Map<string, string[]>;
@@ -171,8 +174,8 @@ function prepareV2Event(value: unknown, memory?: OpenCodeV2Memory, controls?: Ba
   }) };
 }
 
-export function createOpenCodeV2Memory(options: { backgroundEntries?: number; backgroundBytes?: number; controls?: BackgroundControls; workers?: BackgroundWorkers } = {}): OpenCodeV2Memory {
-  return { ...createProviderEventMemory(), workers: options.workers ?? new BackgroundWorkers({ entries: options.backgroundEntries, bytes: options.backgroundBytes,
+export function createOpenCodeV2Memory(options: { backgroundEntries?: number; backgroundBytes?: number; controls?: BackgroundControls; workers?: BackgroundWorkers; prices?: ListPrices } = {}): OpenCodeV2Memory {
+  return { ...createProviderEventMemory(), ...(options.prices ? { prices: options.prices } : {}), workers: options.workers ?? new BackgroundWorkers({ entries: options.backgroundEntries, bytes: options.backgroundBytes,
     ...(options.controls ? { retained: () => options.controls!.usage, onSaturation: () => options.controls!.projectionSaturated() } : {}) }), toolNames: new Map(), toolInputs: new Map(), steps: new Map(), forms: new Map(), failures: new Map(), inbox: new Map() };
 }
 
@@ -425,9 +428,9 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
           messageID: messageId,
           timestamp: createdAt,
         }, { ...context, createdAt })) ?? { conversationId, updates: [] };
-        const usage = tokensToUsage(data.tokens, data.cost);
-        if (!usage) return canonical;
         const step = memory?.steps.get(messageId);
+        const usage = stepUsage(data.tokens, data.cost, step?.model, memory?.prices);
+        if (!usage) return canonical;
         const promptId = conversationId ? memory?.prompts.get(conversationId) : undefined;
         const reported: { messageId: string; usage: TokenUsage; promptId?: string } = { messageId, usage, ...(promptId === undefined ? {} : { promptId }) };
         return {
@@ -747,7 +750,7 @@ export function storedExecutionLiveness(messages: readonly unknown[]): ReadonlyM
  * carrier, as on 1.x. Idle markers and agent/model/location switches carry
  * nothing for the timeline.
  */
-export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, background?: { workers: BackgroundWorkers; parent: string }, prepared = prepareStoredMessage(value), executionLive?: boolean): ConversationItem[] {
+export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, background?: { workers: BackgroundWorkers; parent: string }, prepared = prepareStoredMessage(value), executionLive?: boolean, prices?: ListPrices): ConversationItem[] {
   const { message, createdAt } = prepared;
   const id = string(message.id, "message id");
   switch (message.type) {
@@ -767,9 +770,9 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
         return item ? [item.type === "assistant_message" ? { ...item, ...completed, ...textEnd } : item] : [];
       });
       if (background) for (const tool of tools.values()) items.push(...background.workers.launchPrepared(background.parent, tool, createdAt).flatMap(update => update.kind === "upsert" ? [update.item] : []));
-      const usage = tokensToUsage(message.tokens, message.cost);
+      const model = modelSelection(message.model);
+      const usage = stepUsage(message.tokens, message.cost, model, prices);
       if (usage && mintUsageCarrier) {
-        const model = modelSelection(message.model);
         const agent = optionalString(message.agent);
         items.push({ id: `usage:${id}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}), ...(agent ? { agent } : {}) });
       }
@@ -821,12 +824,18 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
   }
 }
 
+/** A step's usage, with OpenCode's zero priced at list prices where `prices` can. */
+function stepUsage(tokens: unknown, cost: unknown, model: { providerId: string; modelId: string } | undefined, prices: ListPrices | undefined): TokenUsage | undefined {
+  const usage = tokensToUsage(tokens, cost);
+  return usage && prices ? prices.price(usage, model) : usage;
+}
+
 /** A stored assistant record's own accounting; nothing for any other kind. */
-export function storedAccounting(value: unknown): StoredMessageAccounting | undefined {
+export function storedAccounting(value: unknown, prices?: ListPrices): StoredMessageAccounting | undefined {
   const message = record(value);
   const messageId = optionalString(message.id);
   if (!messageId || message.type !== "assistant") return undefined;
-  const usage = tokensToUsage(message.tokens, message.cost);
+  const usage = stepUsage(message.tokens, message.cost, modelSelection(message.model), prices);
   const model = optionalString(record(message.model).id);
   if (usage === undefined && model === undefined) return undefined;
   const effort = optionalString(record(message.model).variant);

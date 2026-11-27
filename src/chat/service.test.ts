@@ -9,11 +9,10 @@ const FAKE_AGENT: ChatAgent = { id: "opencode", name: "OpenCode", capabilities: 
 import { ChatAdapter, InteractionConflictError, ReversibleHistoryUnsupportedError, SteeringUnsupportedError } from "./adapter";
 import { OpenCodeService, type SpawnedOpenCode } from "./opencode/opencode-service";
 import { ChatUnavailableError, LazyChatService, type AgentRuntime } from "./service";
-import { openCodeAgentRuntime, resolveProviderFactories, type OpenCodeAgentRuntimeOptions } from "./opencode/agent-runtime";
+import { createListPricedOpenCodeV2Provider, openCodeAgentRuntime, resolveProviderFactories, type OpenCodeAgentRuntimeOptions } from "./opencode/agent-runtime";
 import { pathAgentRuntime } from "./path-agent-runtime";
 import { ClaudeRuntime } from "./claude/runtime";
 import { createOpenCodeV1Provider } from "./opencode/v1/provider";
-import { createOpenCodeV2Provider } from "./opencode/v2/provider";
 
 function provider(): ChatProvider {
   return {
@@ -784,8 +783,8 @@ describe("OpenCode generation selects the provider stack", () => {
     // A partial map overrides one generation and keeps the real stack for
     // the other; no override at all is the two real stacks.
     const only1 = () => provider();
-    expect(resolveProviderFactories({ 1: only1 })).toEqual({ 1: only1, 2: createOpenCodeV2Provider });
-    expect(resolveProviderFactories(undefined)).toEqual({ 1: createOpenCodeV1Provider, 2: createOpenCodeV2Provider });
+    expect(resolveProviderFactories({ 1: only1 })).toEqual({ 1: only1, 2: createListPricedOpenCodeV2Provider });
+    expect(resolveProviderFactories(undefined)).toEqual({ 1: createOpenCodeV1Provider, 2: createListPricedOpenCodeV2Provider });
     expect(resolveProviderFactories(only1)).toEqual({ 1: only1, 2: only1 });
   });
 });
