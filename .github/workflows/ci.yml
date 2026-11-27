@@ -134,7 +134,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The sum of the step caps: tests 20 + Playwright system dependencies 12
+    # + 3 for the other steps (together under a minute on recent runs) = 35.
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository
@@ -174,6 +176,7 @@ jobs:
         # files first. Real-process tests wait for the events they assert on
         # rather than for fixed delays, so they hold under the contention of
         # four workers on a four-core runner.
+        timeout-minutes: 20
         run: bun run test:ci
 
       - name: Run license audit
@@ -185,6 +188,9 @@ jobs:
       # The smoke test drives the compiled binary with Chromium; the unit
       # suite needs no browser. Browsers are cached per Playwright version;
       # the system libraries they link against are installed every run.
+      # apt can stall on a slow mirror, so install-playwright-deps.sh bounds
+      # and retries those installs (3 attempts of 180 s) under a step timeout.
+      # `exec` lets a cancellation reach it (see the script).
       - name: Resolve Playwright version
         id: playwright
         # The runner image (ImageOS, e.g. ubuntu24) is part of the cache key:
@@ -200,13 +206,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ steps.playwright.outputs.image }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
 
+      - name: Install Playwright Chromium system dependencies
+        timeout-minutes: 12
+        run: exec .github/scripts/install-playwright-deps.sh chromium
+
       - name: Install Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium
-
-      - name: Install Playwright Chromium system dependencies
-        if: steps.browsers.outputs.cache-hit == 'true'
-        run: bunx playwright install-deps chromium
+        run: bunx playwright install chromium
 
       - name: Save Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
@@ -232,7 +238,9 @@ jobs:
     # (what ubuntu-latest now resolves to) does not ship. Move this to a newer
     # image once a Playwright release supports it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # The sum of the step caps: Playwright system dependencies 12 + tests 25
+    # + 3 for the other steps (together under a minute on recent runs) = 40.
+    timeout-minutes: 40
     strategy:
       # Every leg runs to the end so the merged report shows all failures.
       fail-fast: false
@@ -286,13 +294,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ steps.playwright.outputs.image }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium-webkit
 
+      - name: Install Playwright system dependencies
+        timeout-minutes: 12
+        run: exec .github/scripts/install-playwright-deps.sh chromium webkit
+
       - name: Install Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium webkit
-
-      - name: Install Playwright system dependencies
-        if: steps.browsers.outputs.cache-hit == 'true'
-        run: bunx playwright install-deps chromium webkit
+        run: bunx playwright install chromium webkit
 
       - name: Save Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
@@ -302,6 +310,7 @@ jobs:
           key: ${{ steps.browsers.outputs.cache-primary-key }}
 
       - name: Run Playwright end-to-end tests
+        timeout-minutes: 25
         env:
           # CI reports as a blob per leg; e2e-report merges them into the
           # HTML report when a leg fails.
