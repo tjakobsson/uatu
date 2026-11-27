@@ -194,7 +194,13 @@ const fakeAttachmentStore = {
 };
 // Keep capture state in the test fixture, never the operator's real Uatu state.
 // All routers represent the same workspace and share its reader and snapshots.
-const fakeVisualStore = new VisualStore(E2E_WORKSPACE_ROOT, path.join(E2E_WORKSPACE_ROOT, "..", "chat-visual-state"));
+// The state lives as long as this process: fake conversation ids restart with
+// every process, so a run that reused an earlier run's records would reach
+// captures it never made. It outlives `/__e2e/reset`, which keeps the store
+// and its in-memory admissions; shutdown removes it. The store creates the
+// directory on its first capture, so a process that fails to start leaves none.
+const visualStateRoot = path.join(os.tmpdir(), `uatu-e2e-chat-visual-state-${crypto.randomUUID()}`);
+const fakeVisualStore = new VisualStore(E2E_WORKSPACE_ROOT, visualStateRoot);
 
 // fakeRouters[n - 1] offers the first n fakes.
 const fakeRouters = E2E_FAKE_AGENTS.map((_, index) => new MultiAgentChatService({
@@ -1090,6 +1096,8 @@ const shutdown = async () => {
   for (const router of fakeRouters) await router.dispose().catch(() => undefined);
   await openCodeV2Router?.dispose().catch(() => undefined);
   await openCodeV2Fake.stop().catch(() => undefined);
+  // Every router holding the visual store is disposed above.
+  await fs.rm(visualStateRoot, { recursive: true, force: true }).catch(() => undefined);
   await watchSession.stop();
   await server.stop(true);
   process.exit(0);
