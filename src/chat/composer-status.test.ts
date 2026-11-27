@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { composerRoutineState, latestPlanUtilization, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, sessionCostLabel, sessionTotalsTitle, standingSentence } from "./composer-status";
 import { relativeReset } from "./dates";
-import { isRateLimitStanding, RATE_LIMIT_ITEM_ID, type ConversationItem, type ScheduledWakeupItem } from "./types";
+import { isRateLimitStanding, PLAN_WARNING_UTILIZATION, RATE_LIMIT_ITEM_ID, type ConversationItem, type ScheduledWakeupItem } from "./types";
 import type { RateLimitStanding } from "./composer-status";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
@@ -203,6 +203,14 @@ describe("rate-limit badge and plan utilization", () => {
     expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, extraUsage: { enabled: false, utilization: 99 } })).toBe("normal");
     expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, extraUsage: { enabled: true, usedCredits: 95, monthlyLimit: 100 } })).toBe("normal");
     expect(planUtilizationLevel({})).toBe("normal");
+  });
+
+  test("the chip warns at the one plan warning line the Claude standing also uses", () => {
+    // Issue #463: the line lives in the shared types so the chip and the
+    // Claude normalizer cannot drift apart.
+    expect(PLAN_WARNING_UTILIZATION).toBe(80);
+    expect(planUtilizationLevel({ sevenDay: { utilization: PLAN_WARNING_UTILIZATION - 0.1 } })).toBe("normal");
+    expect(planUtilizationLevel({ sevenDay: { utilization: PLAN_WARNING_UTILIZATION } })).toBe("warning");
   });
 
   test("readout rows keep a fixed order and name per-model windows under their own labels", () => {

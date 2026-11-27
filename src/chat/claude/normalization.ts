@@ -5,7 +5,7 @@ import { claudeTextBlockId } from "./normalization-types";
 import { CHAT_TEXT_SEAL, CHAT_TURN, provisionalTurn, type ChatTurnToken } from "../turn-liveness";
 import { CHAT_TEXT_BLOCKS, nativeVisualMessageIdentity, type ChatTextBlock } from "../visual-identity";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
-import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
+import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, PLAN_WARNING_UTILIZATION, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
 import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, readsAsWakeupPrompt, scheduledWakeupPrompt, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
@@ -555,13 +555,24 @@ function normalizeMessage(
     const resetsAt = typeof info.resetsAt === "number" ? normalizeEpoch(info.resetsAt) : undefined;
     // The reset time travels as an epoch (resetsAt) and is formatted where
     // it is shown: the server's clock zone is not the reader's.
-    const utilization = typeof info.utilization === "number" ? ` (${Math.round(info.utilization * (info.utilization <= 1 ? 100 : 1))}% used)` : "";
+    // Both figures are fractions of the limit (the CLI's rate-limit schema:
+    // utilization "usually 0-1", above 1 once usage runs past the cap;
+    // surpassedThreshold the highest warning threshold passed).
+    const utilizationPct = typeof info.utilization === "number" ? info.utilization * 100 : undefined;
+    const thresholdPct = typeof info.surpassedThreshold === "number" ? info.surpassedThreshold * 100 : undefined;
+    const utilization = utilizationPct === undefined ? "" : ` (${Math.round(utilizationPct)}% used)`;
+    // The CLI also says `allowed_warning` on its own pace heuristic — a
+    // quarter of the week spent in its first days — which is not a limit
+    // that is close (issue #463). A warning stands only when a reported
+    // figure reaches the plan warning line, or when it reports no figure.
+    const figures = [utilizationPct, thresholdPct].filter((value): value is number => value !== undefined);
+    const close = figures.length === 0 || Math.max(...figures) >= PLAN_WARNING_UTILIZATION;
     // One item for the standing, whatever the login says and however often
     // it says it: the onset is kept from the first report so a conversation
     // held at one standing does not restate it, and a level that hardens
     // from warning to rejection updates the same row in place.
     const standing = info.status === "rejected" ? "rejected" as const
-      : info.status === "allowed_warning" ? "warning" as const : undefined;
+      : info.status === "allowed_warning" && close ? "warning" as const : undefined;
     if (standing) {
       const since = memory.rateLimit?.since ?? envelope.createdAt;
       memory.rateLimit = { level: standing, since };
@@ -570,7 +581,7 @@ function normalizeMessage(
         : { id: RATE_LIMIT_ITEM_ID, type: "notice", createdAt: since, level: "warning", code: "rate-limit-warning", message: `Approaching your ${kind} rate limit${utilization}.`, ...(resetsAt === undefined ? {} : { resetsAt }) };
       return { ...base, outcome: "handled", updates: [{ kind: "upsert", item }] };
     }
-    // Allowed again: the standing ended. A state that ended is retired, not
+    // Allowed again, or a warning that is not close: the standing ended. A state that ended is retired, not
     // announced as a further row — the surface says so where it showed the
     // standing. An allowed event with nothing in force says nothing at all.
     if (memory.rateLimit) {

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import { createClaudeEventMemory, describeSessionScopedUpdates, normalizeClaudeMessage, normalizeTranscriptEntries, sessionScopedSuggestions } from "./normalization";
+import { latestRateLimit, planChip } from "../composer-status";
+import { PLAN_WARNING_UTILIZATION } from "../types";
 import { CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
 import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE, visualAdmissionIdentity, visualCaptureIdentity, type ChatVisualIdentity } from "../visual-identity";
 import { parseConversationItem } from "../validation";
@@ -562,4 +564,55 @@ test("Claude Code normalization conforms to the liveness contract", () => {
   expect(updates.length).toBeGreaterThan(0);
   expect(checker.result()).toMatchObject({ repeats: 0, continuations: 0, both: 0, repeatOffCompleted: 0, continuesOffFailed: 0, textFactChanges: [], tokenChanges: [] });
   expect(memory.visualTurn).toBeUndefined(); // The footer closed the last turn.
+});
+
+// Issue #463. The CLI raises `allowed_warning` both when the server reports a
+// passed warning threshold (`surpassedThreshold`, a fraction of the limit) and
+// on its own pace heuristic (e.g. 25% of the week used in its first 15%), and
+// `utilization` is a fraction of the window (above 1 once past the cap). Uatu
+// names a standing only when a reported figure reaches the plan warning line.
+describe("Claude rate-limit warnings", () => {
+  const event = (uuid: string, info: Record<string, unknown>) => ({ type: "rate_limit_event", uuid, timestamp: "2026-09-24T10:00:00Z", rate_limit_info: info });
+  const weekWarning = (uuid: string, info: Record<string, unknown> = {}) => event(uuid, { status: "allowed_warning", rateLimitType: "seven_day", resetsAt: 1_788_400_000, ...info });
+  const message = (result: ReturnType<typeof normalizeClaudeMessage>) => (result.updates[0] as { item: { message: string } }).item.message;
+
+  test("a pace warning at 34% of the week is no standing, so the week chip stays calm", () => {
+    const result = normalizeClaudeMessage(weekWarning("rl1", { utilization: 0.34 }), createClaudeEventMemory(), "live");
+    expect(result.outcome).toBe("ignored");
+    expect(result.updates).toEqual([]);
+    const plan = { fiveHour: { utilization: 53 }, sevenDay: { utilization: 34 } };
+    expect(planChip({ plan }, latestRateLimit([]))).toEqual({ text: "Session 53% · Week 34%", level: "normal", kind: "plan" });
+  });
+
+  test("a figure at the plan warning line names the standing; one just below it does not", () => {
+    const below = PLAN_WARNING_UTILIZATION / 100 - 0.001;
+    expect(normalizeClaudeMessage(weekWarning("rl1", { utilization: below }), createClaudeEventMemory(), "live").updates).toEqual([]);
+    const at = normalizeClaudeMessage(weekWarning("rl2", { utilization: PLAN_WARNING_UTILIZATION / 100 }), createClaudeEventMemory(), "live");
+    expect(at.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ code: "rate-limit-warning", level: "warning" }) });
+    expect(message(at)).toBe(`Approaching your 7-day rate limit (${PLAN_WARNING_UTILIZATION}% used).`);
+  });
+
+  test("a passed server threshold counts as the figure when it is the larger one", () => {
+    expect(normalizeClaudeMessage(weekWarning("rl1", { utilization: 0.55, surpassedThreshold: 0.5 }), createClaudeEventMemory(), "live").updates).toEqual([]);
+    const passed = normalizeClaudeMessage(weekWarning("rl2", { surpassedThreshold: 0.9 }), createClaudeEventMemory(), "live");
+    expect(passed.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ code: "rate-limit-warning" }) });
+    expect(message(passed)).toBe("Approaching your 7-day rate limit.");
+  });
+
+  test("a warning without any figure still stands, since nothing contradicts it", () => {
+    const bare = normalizeClaudeMessage(weekWarning("rl1"), createClaudeEventMemory(), "live");
+    expect(bare.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ code: "rate-limit-warning" }) });
+  });
+
+  test("usage past the cap reads as a percentage above 100", () => {
+    expect(message(normalizeClaudeMessage(weekWarning("rl1", { utilization: 1.05 }), createClaudeEventMemory(), "live"))).toBe("Approaching your 7-day rate limit (105% used).");
+  });
+
+  test("a warning that falls below the line retires the standing in force", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage(weekWarning("rl1", { utilization: 0.85 }), memory, "live");
+    const eased = normalizeClaudeMessage(weekWarning("rl2", { utilization: 0.3 }), memory, "live");
+    expect(eased.updates).toEqual([{ kind: "remove", itemId: "notice:rate-limit" }]);
+    expect(memory.rateLimit).toBeUndefined();
+  });
 });

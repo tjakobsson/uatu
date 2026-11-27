@@ -6,8 +6,8 @@
 // plan-bearing report from any conversation the client holds. It also owns
 // the one refresh path both the pane and the readout use.
 
-import { PLAN_WARNING_UTILIZATION, planName, planReadoutRows, usageAsOf, usageReadFailureLabel, usageStale, type PlanReadoutRow } from "./composer-status";
-import type { PlanUtilization, UsageReadMode, UsageReadResult } from "./types";
+import { planName, planReadoutRows, usageAsOf, usageReadFailureLabel, usageStale, type PlanReadoutRow } from "./composer-status";
+import { PLAN_WARNING_UTILIZATION, type PlanUtilization, type UsageReadMode, type UsageReadResult } from "./types";
 
 export type UsageReport = { plan: PlanUtilization; reportedAt: number; conversationId?: string };
 export type UsageReadState = { reading: boolean; failure?: string };

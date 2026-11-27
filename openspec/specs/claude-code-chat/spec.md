@@ -870,6 +870,16 @@ Routine Claude Code signals SHALL surface where they affect waiting: retry and c
 - **THEN** the composer's plan summary is marked at that level
 - **AND** the readout it opens names the limit's window and when it resets
 
+#### Scenario: An early-pace warning is not a standing
+- **WHEN** Claude Code reports a 7-day rate-limit warning with 34% of the week used and no passed threshold at or past 80%
+- **THEN** no rate-limit standing is presented and no "approaching" message is shown
+- **AND** the composer summary reads its windows' percentages without being marked as a warning
+
+#### Scenario: A warning near the limit stands
+- **WHEN** Claude Code reports a rate-limit warning with 80% or more of the window used, or a passed threshold of 80% or more
+- **THEN** the standing is presented and the composer summary is marked as a warning
+- **AND** a later warning whose figures fall below 80% retires it
+
 #### Scenario: A rate limit is not timeline content
 - **WHEN** Claude Code reports a plan rate limit warning or rejection
 - **THEN** the timeline gains no row for it

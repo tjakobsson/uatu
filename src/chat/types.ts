@@ -689,6 +689,11 @@ export type ContextReportItem = TimelineItemBase & {
   session?: SessionTotals;
 };
 
+// The plan warning line, in percent of a window used: the point where the
+// rest of the window is a plan, not a margin. The chip, the readout rows,
+// and an agent's rate-limit standing all warn from here (issue #463).
+export const PLAN_WARNING_UTILIZATION = 80;
+
 export type PlanUtilizationWindow = { utilization?: number; resetsAt?: number };
 // A per-model weekly bucket the server labels itself ("Fable"); the label
 // is shown verbatim because the bucket set is the server's to define.
