@@ -818,7 +818,7 @@ outcome rather than remaining pending.
 
 ### Requirement: Session signals surface as status, not silence
 
-Routine Claude Code signals SHALL surface where they affect waiting: retry and compaction status, fallback attribution, recalled context, and plan standing. Rate-limit warnings and rejections SHALL appear once with reset time in the composer summary and readout, MUST NOT become timeline content, and SHALL update in place, retire when requests are allowed, and announce changes to assistive technology. Login-level plan usage SHALL remain readable on demand, not only after turns.
+Routine Claude Code signals SHALL surface where they affect waiting: retry and compaction status, fallback attribution, recalled context, and plan standing. Rate-limit rejections, and warnings near the limit, SHALL appear once with reset time in the composer summary and readout, MUST NOT become timeline content, and SHALL update in place, retire when requests are allowed, and announce changes to assistive technology. Login-level plan usage SHALL remain readable on demand, not only after turns.
 
 #### Scenario: Waiting signals name their native cause
 - **WHEN** Claude Code retries an API request, compacts, switches to a fallback model after refusal, or recalls memories
@@ -866,9 +866,19 @@ Routine Claude Code signals SHALL surface where they affect waiting: retry and c
 - **AND** it returns to working when the request succeeds
 
 #### Scenario: A rate limit names its reset
-- **WHEN** Claude Code reports a plan rate limit warning or rejection
+- **WHEN** Claude Code reports a plan rate limit rejection, or a warning that stands
 - **THEN** the composer's plan summary is marked at that level
 - **AND** the readout it opens names the limit's window and when it resets
+
+#### Scenario: An early-pace warning is not a standing
+- **WHEN** Claude Code reports a 7-day rate-limit warning with 34% of the week used and no passed threshold at or past 80%, and no other reported window is at or past 80%
+- **THEN** no rate-limit standing is presented and no "approaching" message is shown
+- **AND** the composer summary reads its windows' percentages without being marked as a warning
+
+#### Scenario: A warning near the limit stands
+- **WHEN** Claude Code reports a rate-limit warning with 80% or more of the window used, or a passed threshold of 80% or more, or neither figure
+- **THEN** the standing is presented and the composer summary is marked as a warning
+- **AND** a later warning whose figures fall below 80% retires it
 
 #### Scenario: A rate limit is not timeline content
 - **WHEN** Claude Code reports a plan rate limit warning or rejection
@@ -892,6 +902,7 @@ Routine Claude Code signals SHALL surface where they affect waiting: retry and c
 #### Scenario: A changed standing is announced
 - **WHEN** a rate-limit standing begins, changes level, or is retired
 - **THEN** the change is announced to assistive technology
+- **AND** a retired warning is announced as a cleared warning, while only a retired rejection says requests are allowed again
 
 #### Scenario: A refusal fallback is attributed truthfully
 - **WHEN** a turn is retried on a fallback model after a refusal

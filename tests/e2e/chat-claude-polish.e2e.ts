@@ -1097,6 +1097,20 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(live).toHaveText(/^Rate limit reached /);
   });
 
+  test("a cleared warning is not announced as requests allowed again", async ({ page, request }) => {
+    // A warning never blocked a request, so its retirement says only that
+    // the warning cleared.
+    const id = await bootClaude(page, request, "Eased warning", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const live = page.locator("#chat-rate-limit-live");
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "warning", message: "Approaching your 7-day rate limit (85% used).", code: "rate-limit-warning", resetsAt: Date.now() + 3_600_000 } });
+    await expect(live).toHaveText(/85% used/);
+    await control(request, { action: "removeItem", conversationId: id, itemId: "notice:rate-limit" });
+    await expect(page.locator("#chat-plan-usage-summary")).toBeHidden();
+    await expect(live).toHaveText("Rate-limit warning cleared.");
+  });
+
   test("a rolling reset repaints the opened readout, not only the chip", async ({ page, request }) => {
     // One standing restated with a later reset: the chip is painted before
     // the readout's repaint guard, so a guard blind to the reset would

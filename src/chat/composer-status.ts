@@ -7,7 +7,7 @@ import { backgroundStatusLabel } from "./background-tasks";
 import { scheduledStatusLabel } from "./scheduled-wakeups";
 import { statusLabel } from "./timeline-renderer";
 import { clockTime, localDaysBetween, relativeReset, resetClock, resetMoment, weekdayClock } from "./dates";
-import { isRateLimitStanding, type BackgroundTaskItem, type ScheduledWakeupItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals, type UsageReadFailure } from "./types";
+import { isRateLimitStanding, PLAN_WARNING_UTILIZATION, type BackgroundTaskItem, type ScheduledWakeupItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals, type UsageReadFailure } from "./types";
 
 export type ComposerRoutineState = {
   stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "scheduled" | "failed" | "ready";
@@ -136,6 +136,15 @@ export function standingSentence(standing: Pick<RateLimitStanding, "message" | "
 }
 
 /**
+ * What is announced when a standing is retired. Only a rejection blocked
+ * requests; a warning that ends — allowed again, or eased below the plan
+ * warning line — says only that the warning cleared.
+ */
+export function standingClearedSentence(previous: RateLimitStanding["level"]): string {
+  return previous === "rejected" ? "Rate limit cleared; requests are allowed again." : "Rate-limit warning cleared.";
+}
+
+/**
  * The newest report that speaks to the plan: one carrying windows, or an
  * empty plan (the login reports none). A report without the field — a
  * compaction's post-count — says nothing about the plan and is skipped.
@@ -228,10 +237,6 @@ export function planSummaryLabel(report: Pick<ContextReportItem, "plan" | "sessi
 export function planHasRows(plan: PlanUtilization): boolean {
   return planReadoutRows(plan).length > 0;
 }
-
-// The chip turns to the warning colour at this fill — the point where the
-// rest of the window is a plan, not a margin.
-export const PLAN_WARNING_UTILIZATION = 80;
 
 /**
  * Warning when any reported window, or enabled extra usage, is at or past
