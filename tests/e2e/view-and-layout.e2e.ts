@@ -522,23 +522,33 @@ test("A split's fallback pane retries when only the second view fails to reload"
 test("A re-selection that recovers from a failed load does not pulse Updated", async ({ page }) => {
   // Selecting the file on screen again makes a new request; if it fails and
   // its retry lands, the file itself never changed, so nothing says Updated.
-  let failing = false;
-  let failures = 0;
+  let phase: "open" | "fail" | "hold" = "open";
+  let retried = false;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
   await routeLinksDemoViews(page, async () => {
-    if (!failing) return "continue";
-    failures += 1;
-    failing = false;
-    return 500;
+    if (phase === "open") return "continue";
+    if (phase === "fail") {
+      phase = "hold";
+      return 500;
+    }
+    retried = true;
+    await retryGate;
+    return "continue";
   });
   await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
   await expect(page.locator("#file-facts-strip")).toBeVisible();
   await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
 
-  failing = true;
+  phase = "fail";
   await treeRow(page, "links-demo.md").click();
-  await expect.poll(() => failures).toBe(1);
-  await expect(page.locator("#preview-reload-notice")).toBeHidden();
+  // The retry is held until the notice shows the failed request was seen.
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect.poll(() => retried).toBe(true);
+  releaseRetry();
+  await expect(notice).toBeHidden();
   // Read once: a retrying assertion would wait the 3 s pulse out.
   expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
