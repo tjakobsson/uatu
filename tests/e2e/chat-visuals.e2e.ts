@@ -34,6 +34,13 @@ async function boot(page: Page, request: APIRequestContext): Promise<string> {
   return select.inputValue();
 }
 
+// Publish only once the page shows the running turn: a reply that reaches the
+// page before its turn is live is captured as finished, not streaming.
+async function startTurn(page: Page, request: APIRequestContext, conversationId: string): Promise<void> {
+  await control(request, { action: "status", conversationId, status: "running" });
+  await expect(page.locator("#chat-stop")).toBeEnabled();
+}
+
 async function publish(request: APIRequestContext, conversationId: string, id: string, markdown: string, completed = false): Promise<void> {
   await control(request, { action: "item", conversationId, item: { id, type: "assistant_message", createdAt: Date.now(), markdown, ...(completed ? { completedAt: Date.now() } : {}) } });
 }
@@ -44,7 +51,7 @@ test.describe("agent inline visuals", () => {
     test.use({ viewport: { width: viewport.width, height: viewport.height }, hasTouch: viewport.name === "mobile", isMobile: viewport.name === "mobile" });
     test(`${viewport.name}: SVG streams inline, preserves source, and enlarges`, async ({ page, request }, testInfo) => {
       const conversationId = await boot(page, request);
-      await control(request, { action: "status", conversationId, status: "running" });
+      await startTurn(page, request, conversationId);
       const id = `svg-${viewport.name}-${randomUUID()}`;
       await publish(request, conversationId, id, "Here is the architecture.\n\n```svg\n" + SVG);
       const visual = page.locator("#chat-items .chat-visual");
@@ -114,7 +121,7 @@ test.describe("agent inline visuals", () => {
         await route.continue();
       });
       try {
-        await control(request, { action: "status", conversationId, status: "running" });
+        await startTurn(page, request, conversationId);
         const requested = page.waitForRequest(request => /\/api\/chat\/visuals\/[0-9a-f]{64}$/.test(new URL(request.url()).pathname));
         const markdown = "![Delayed diagram](./delayed.svg)";
         await publish(request, conversationId, imageId, markdown);
@@ -246,7 +253,7 @@ test.describe("agent inline visuals", () => {
   test("missing local files retry at completion and invalid SVG stays copyable", async ({ page, request }) => {
     const conversationId = await boot(page, request);
     const lateId = `late-image-${randomUUID()}`;
-    await control(request, { action: "status", conversationId, status: "running" });
+    await startTurn(page, request, conversationId);
     await publish(request, conversationId, lateId, "![Late](late.svg)");
     await expect(page.locator("#chat-items .chat-visual")).toContainText(/prepar|not found|missing/i);
     await fs.writeFile(workspacePath("late.svg"), SVG);
@@ -275,7 +282,7 @@ test.describe("agent inline visuals", () => {
     const conversationId = await boot(page, request);
     await fs.writeFile(workspacePath("a.svg"), SVG.replace("Readable inline", "First image"));
     await fs.writeFile(workspacePath("b.svg"), SVG);
-    await control(request, { action: "status", conversationId, status: "running" });
+    await startTurn(page, request, conversationId);
     await publish(request, conversationId, "reference-style", "![First][ref]\n\n![Second](b.svg)");
     const image = page.locator('#chat-items img[alt="Second"]');
     await expect(image).toHaveCount(1);
@@ -305,7 +312,7 @@ test.describe("agent inline visuals", () => {
     const conversationId = await boot(page, request);
     const reference = `./broken.${raster.extension}`;
     await fs.writeFile(workspacePath(reference), raster.bytes);
-    await control(request, { action: "status", conversationId, status: "running" });
+    await startTurn(page, request, conversationId);
     const previewResponse = page.waitForResponse(response => /\/api\/chat\/visuals\/[0-9a-f]{64}$/.test(new URL(response.url()).pathname));
     const markdown = `Before the image.\n\n![Broken screenshot](${reference})\n\nThe rest of the reply remains readable.`;
     await publish(request, conversationId, "broken-raster", markdown);
@@ -410,7 +417,7 @@ for (const mobile of [false, true]) browserTest(`webkit ${mobile ? "mobile" : "d
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { Reflect.set(window, "__visualCopiedText", text); } } });
     });
     const conversationId = await boot(page, request);
-    await control(request, { action: "status", conversationId, status: "running" });
+    await startTurn(page, request, conversationId);
     const id = "growing-focused-svg";
     const prefix = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100">\r\n<text x="10" y="40">Exact &amp;';
     await publish(request, conversationId, id, `\`\`\`svg\r\n${prefix}`);
@@ -454,7 +461,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { Reflect.set(window, "__visualCopiedText", text); } } });
       });
       const conversationId = await boot(page, request);
-      await control(request, { action: "status", conversationId, status: "running" });
+      await startTurn(page, request, conversationId);
       const id = "growing-focused-svg";
       const prefix = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100">\r\n<text x="10" y="40">Exact &amp;';
       let source = prefix;
@@ -621,7 +628,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     const page = await browser.newPage({ baseURL });
     try {
       const conversationId = await boot(page, request);
-      await control(request, { action: "status", conversationId, status: "running" });
+      await startTurn(page, request, conversationId);
       const markdown = `\`\`\`svg\n${SVG}\`\`\`\n`;
       await publish(request, conversationId, "focused-visual", markdown);
       const row = page.locator('[data-chat-item-id="focused-visual"]');
