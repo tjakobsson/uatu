@@ -480,8 +480,9 @@ export async function renderSplitPayloads(
 // `trigger` is "retry" only from the retry schedule's own timer. Every other
 // caller (navigation, a view change, a live frame reloading the selection) is
 // a "request", and a request that fails transiently starts the schedule over.
-// Resolves to false only when the document could not be fetched, so a live
-// reload does not announce an update that did not land.
+// Resolves to true only when this load presented the document and still owns
+// the preview, so a live reload does not announce an update that did not land
+// (a failed fetch, a load a newer one overtook, a preview not yet shown).
 export async function loadDocument(
   documentId: string,
   onPresented?: () => void,
@@ -493,14 +494,15 @@ export async function loadDocument(
     const same = current === documentId && selectionGeneration === getSelectionGeneration();
     if (current && appState.previewMode.kind === "document") void loadDocument(current,
       same ? onPresented : undefined, same ? trigger : "request");
-  })) return true;
-  const fetched = await executeLoadDocument(documentId, trigger);
+  })) return false;
+  const presented = await executeLoadDocument(documentId, trigger);
   if (selectionGeneration === getSelectionGeneration() && appState.selectedId === documentId) onPresented?.();
-  return fetched;
+  return presented;
 }
 
-// False when the document could not be fetched: the preview shows why, or
-// keeps the render the reload failed to replace. True otherwise.
+// True when this load presented the document and still owns the preview.
+// False when the fetch failed (the preview shows why, or keeps the render the
+// reload failed to replace) or a newer load overtook this one.
 async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrigger): Promise<boolean> {
   const requestedView = appState.viewMode;
   const requestedLayout = appState.viewLayout;
@@ -593,7 +595,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // assertion narrows the param so the response stays well-typed.
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
   let result = await fetchDocumentPayload(documentId, apiView);
-  if (!isCurrent()) return true;
+  if (!isCurrent()) return false;
   // A reload of the split on screen needs the other view too. Fetch it here,
   // so a failure of that request keeps the split and retries exactly as a
   // failure of the first does; renderSplitForDocument then finds both views
@@ -602,7 +604,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   if (result.ok && requestedLayout !== "single" && documentSupportsSplit(result.payload)
     && presentedRender.shows(renderKey)) {
     const companion = await fetchDocumentPayload(documentId, apiView === "source" ? "rendered" : "source");
-    if (!isCurrent()) return true;
+    if (!isCurrent()) return false;
     if (companion.ok) rememberDocumentPayload(companion.payload);
     else result = companion;
   }
@@ -646,7 +648,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   rememberDocumentPayload(payload);
   if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
-  return true;
+  return isCurrent();
 }
 
 // One `/api/document` request, classified (see classifyDocumentResponse).

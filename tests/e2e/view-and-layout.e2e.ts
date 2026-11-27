@@ -251,6 +251,33 @@ test("A same-document reload that fails transiently keeps the render on screen w
   await expect(page.locator(".uatu-outline-link")).toHaveCount(2);
 });
 
+test("A reload overtaken by a newer one that fails does not pulse Updated", async ({ page }) => {
+  // Two quick edits: the first reload is held, the second fails. The first
+  // one's answer then arrives for a load that no longer owns the preview, so
+  // nothing on screen was updated and the strip must not say otherwise.
+  let releaseFirst: () => void = () => {};
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const reload = await reloadRenderedLinksDemo(page, async attempt => {
+    if (attempt !== 1) return 500;
+    await firstGate;
+    return "continue";
+  });
+  await fs.writeFile(workspacePath("links-demo.md"), "# Markdown Cross-Document Links\n\nSecond edit.\n", "utf8");
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  expect(reload.reloads()).toBeGreaterThanOrEqual(2);
+
+  const firstAnswer = page.waitForResponse(response =>
+    response.url().includes("links-demo.md") && response.url().includes("/api/document?") && response.status() === 200);
+  releaseFirst();
+  await firstAnswer;
+  // Let the page handle that answer before reading the strip once.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(notice).toBeVisible();
+});
+
 test("A text file that turns binary while a reload retries takes the reload notice down", async ({ page }) => {
   // An extensionless file is classified by its bytes, so the same document
   // can become binary. Its binary notice replaces the kept render.

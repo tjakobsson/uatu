@@ -370,8 +370,8 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   const reload = next !== selected || previousDocument?.revision !== current?.revision
     || Boolean(previousDocument) !== Boolean(current);
   if (next && reload && !(next === selected && retainMediaPreview(next, previousDocument))) {
-    const fetched = await loadDocument(next);
-    if (fetched && next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
+    const presented = await loadDocument(next);
+    if (presented && next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
   } else if (next && !mediaSelection(next) && appState.viewMode === "diff" && (attributesChanged || repositoryChanged && diffInputsMoved(next))) {
     await applyDiffForActiveDocument(next);
   } else if (!next && !renderPendingDocument() && reload) renderEmptyPreview("No document selected", "Waiting for viewable files");
@@ -478,8 +478,8 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
       // The file changed on disk — any cached payload is now stale.
       forgetDocumentCache(appState.selectedId);
     }
-    const fetched = await loadDocument(appState.selectedId);
-    if (fetched && shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
+    const presented = await loadDocument(appState.selectedId);
+    if (presented && shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
       // In-place reload of the document being viewed (Rule D): surface the
       // otherwise-silent swap. A selection switch is a new document, not an
       // update of what the user was reading — no signal there.
@@ -576,11 +576,11 @@ const stateReconciler = createStateReconciler<StatePayload>({
     const activeId = appState.selectedId;
     if (activeId && (activeId !== selectedId || staleSelection && !retainMediaPreview(activeId, previousDocument))) {
       forgetDocumentCache(activeId);
-      void loadDocument(activeId).then(() => {
+      void loadDocument(activeId).then(presented => {
         // Same signal the in-place reload gives on Rule D: the document the
         // user was reading changed under them, and the swap is otherwise
         // silent.
-        if (appState.selectedId === selectedId && hasDocument(appState.roots, selectedId)) signalActiveDocumentUpdated();
+        if (presented && appState.selectedId === selectedId && hasDocument(appState.roots, selectedId)) signalActiveDocumentUpdated();
       });
     } else if (activeId && !mediaSelection(activeId, previousDocument) && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(activeId))) {
       void applyDiffForActiveDocument(activeId);
