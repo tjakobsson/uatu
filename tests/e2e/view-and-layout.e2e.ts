@@ -395,10 +395,10 @@ for (const layout of ["split-h", "split-v"] as const) {
   });
 }
 
-test("A split layout that fell back to one pane does not count as the split on screen", async ({ page }) => {
+test("A split layout that fell back to one pane keeps that pane when a later reload fails", async ({ page }) => {
   // Entering Side-by-side with the Source request failing falls back to the
-  // single Rendered pane. A later failed reload in Side-by-side has no split
-  // of this document to keep, so it shows the unavailable notice as before.
+  // single Rendered pane. That pane is still this document on screen, so a
+  // later failed reload in Side-by-side keeps it, as it would keep the split.
   let reloading = false;
   await routeLinksDemoViews(page, async view => view === "source" || reloading ? 500 : "continue");
   await openTreeFile(page, "links-demo.md");
@@ -410,8 +410,11 @@ test("A split layout that fell back to one pane does not count as the split on s
 
   reloading = true;
   await editLinksDemo();
-  await expect(page.locator("#preview")).toContainText("This file couldn't be loaded. Retrying…");
-  await expect(page.locator("#preview-reload-notice")).toBeHidden();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+  await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
 });
 
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {

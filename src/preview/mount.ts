@@ -116,6 +116,14 @@ function notePresentedRender(documentId: string, layout: ViewLayout): void {
   setReloadNotice("hidden");
 }
 
+// Whether a render a failed reload of `key` may keep is on screen: the render
+// noted for exactly that key, or, in a split layout, the single pane that
+// split fell back to. Either is this document on screen.
+function showsRenderFor(key: PresentedRenderKey): boolean {
+  return presentedRender.shows(key)
+    || (key.layout !== "single" && presentedRender.shows({ ...key, layout: "single" }));
+}
+
 // The reload notice's Retry button, shown once the schedule is used up:
 // one new request for the render still on screen, like selecting the file
 // again (a transient failure of it starts the schedule over). The notice says
@@ -124,7 +132,7 @@ function notePresentedRender(documentId: string, layout: ViewLayout): void {
 document.querySelector<HTMLButtonElement>("#preview-reload-notice .preview-reload-retry")
   ?.addEventListener("click", () => {
     const documentId = appState.selectedId;
-    if (documentId && presentedRender.shows({ documentId, view: appState.viewMode, layout: appState.viewLayout })) {
+    if (documentId && showsRenderFor({ documentId, view: appState.viewMode, layout: appState.viewLayout })) {
       setReloadNotice("retrying");
       void loadDocument(documentId);
     }
@@ -303,8 +311,8 @@ export async function renderSinglePayload(
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
   // A document without a split form shows this single pane in every layout;
-  // one with a split form is in the single layout only (or a split that fell
-  // back to it, which a reload in that split must not mistake for itself).
+  // one with a split form is in the single layout only, or in a split that
+  // fell back to it (showsRenderFor lets a reload in that split keep it).
   notePresentedRender(payload.id, documentSupportsSplit(payload) ? "single" : appState.viewLayout);
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
@@ -500,7 +508,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   const renderKey: PresentedRenderKey = { documentId, view: requestedView, layout: requestedLayout };
   // The reload notice belongs to the render it is keeping; any other load
   // replaces that render, so the notice goes with it.
-  if (!presentedRender.shows(renderKey)) setReloadNotice("hidden");
+  if (!showsRenderFor(renderKey)) setReloadNotice("hidden");
   const activation = getSelectionActivation();
   const isCurrent = () => documentLoadGuard.isCurrent(
     loadToken,
@@ -622,7 +630,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     // gone. The notice says whether another attempt is pending or offers
     // Retry once the schedule is used up. The guard above already proved this
     // load still owns the selection, view, layout and revision.
-    if (presentedRender.shows(renderKey)) {
+    if (showsRenderFor(renderKey)) {
       setReloadNotice(retrying ? "retrying" : "gave-up");
       return false;
     }
