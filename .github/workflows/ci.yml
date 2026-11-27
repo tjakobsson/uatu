@@ -185,6 +185,8 @@ jobs:
       # The smoke test drives the compiled binary with Chromium; the unit
       # suite needs no browser. Browsers are cached per Playwright version;
       # the system libraries they link against are installed every run.
+      # apt can stall on a slow mirror, so those installs go through
+      # retry-bounded.sh (3 attempts of 180 s) under a step timeout.
       - name: Resolve Playwright version
         id: playwright
         # The runner image (ImageOS, e.g. ubuntu24) is part of the cache key:
@@ -202,11 +204,13 @@ jobs:
 
       - name: Install Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium
+        timeout-minutes: 12
+        run: .github/scripts/retry-bounded.sh bunx playwright install --with-deps chromium
 
       - name: Install Playwright Chromium system dependencies
         if: steps.browsers.outputs.cache-hit == 'true'
-        run: bunx playwright install-deps chromium
+        timeout-minutes: 12
+        run: .github/scripts/retry-bounded.sh bunx playwright install-deps chromium
 
       - name: Save Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
@@ -288,11 +292,13 @@ jobs:
 
       - name: Install Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium webkit
+        timeout-minutes: 12
+        run: .github/scripts/retry-bounded.sh bunx playwright install --with-deps chromium webkit
 
       - name: Install Playwright system dependencies
         if: steps.browsers.outputs.cache-hit == 'true'
-        run: bunx playwright install-deps chromium webkit
+        timeout-minutes: 12
+        run: .github/scripts/retry-bounded.sh bunx playwright install-deps chromium webkit
 
       - name: Save Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
