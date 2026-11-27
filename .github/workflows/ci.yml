@@ -134,7 +134,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The sum of the step caps: tests 20 + Playwright system dependencies 12
+    # + 3 for the other steps (together under a minute on recent runs) = 35.
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository
@@ -174,6 +176,7 @@ jobs:
         # files first. Real-process tests wait for the events they assert on
         # rather than for fixed delays, so they hold under the contention of
         # four workers on a four-core runner.
+        timeout-minutes: 20
         run: bun run test:ci
 
       - name: Run license audit
@@ -235,7 +238,9 @@ jobs:
     # (what ubuntu-latest now resolves to) does not ship. Move this to a newer
     # image once a Playwright release supports it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # The sum of the step caps: Playwright system dependencies 12 + tests 25
+    # + 3 for the other steps (together under a minute on recent runs) = 40.
+    timeout-minutes: 40
     strategy:
       # Every leg runs to the end so the merged report shows all failures.
       fail-fast: false
@@ -305,6 +310,7 @@ jobs:
           key: ${{ steps.browsers.outputs.cache-primary-key }}
 
       - name: Run Playwright end-to-end tests
+        timeout-minutes: 25
         env:
           # CI reports as a blob per leg; e2e-report merges them into the
           # HTML report when a leg fails.
