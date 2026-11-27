@@ -206,13 +206,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ steps.playwright.outputs.image }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
 
-      - name: Install Playwright Chromium
-        if: steps.browsers.outputs.cache-hit != 'true'
-        run: bunx playwright install chromium
-
       - name: Install Playwright Chromium system dependencies
         timeout-minutes: 12
         run: exec .github/scripts/install-playwright-deps.sh chromium
+
+      - name: Install Playwright Chromium
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: bunx playwright install chromium
 
       - name: Save Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
@@ -294,13 +294,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ steps.playwright.outputs.image }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium-webkit
 
-      - name: Install Playwright Chromium and WebKit
-        if: steps.browsers.outputs.cache-hit != 'true'
-        run: bunx playwright install chromium webkit
-
       - name: Install Playwright system dependencies
         timeout-minutes: 12
         run: exec .github/scripts/install-playwright-deps.sh chromium webkit
+
+      - name: Install Playwright Chromium and WebKit
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: bunx playwright install chromium webkit
 
       - name: Save Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
