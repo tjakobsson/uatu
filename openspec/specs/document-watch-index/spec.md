@@ -575,6 +575,7 @@ The server SHALL classify failed document requests using the status and logging 
 #### Scenario: A same-document reload keeps the last good render while it retries
 - **WHEN** the preview shows a render of a document and a reload of that document in the same view and layout fails transiently
 - **THEN** the preview SHALL keep that render, its outline and its facts strip in place instead of the notices above
+- **AND** in the Side-by-side and Stacked layouts a transient failure of the request for either view SHALL keep both panes, and a split that fell back to a single pane SHALL NOT count as a render in that layout
 - **AND** while retries remain it SHALL show the non-modal header notice "This file couldn't be reloaded. Retrying…"
 - **AND** once those retries are exhausted it SHALL keep the render and show the persistent header notice "This file couldn't be reloaded." with a Retry button labelled "Retry loading this file"
 - **AND** activating Retry SHALL make exactly one new request, which restarts the bounded schedule only if it fails transiently

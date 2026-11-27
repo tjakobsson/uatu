@@ -10,7 +10,7 @@ import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
-import type { FileFacts, RootGroup, ViewMode } from "../shared/types";
+import type { FileFacts, RootGroup, ViewLayout, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
 import { previewObserverRoot, previewScrollRoot } from "../shell/preview-scroll-root";
 import { renderBinaryUnavailable } from "./binary";
@@ -108,9 +108,11 @@ const alwaysCurrent = () => true;
 const presentedRender = createPresentedRender(previewElement);
 
 // A document render was just mounted: it is the last good render a failed
-// reload of the same document, view and layout may keep on screen.
-function notePresentedRender(documentId: string): void {
-  presentedRender.note({ documentId, view: appState.viewMode, layout: appState.viewLayout });
+// reload of the same document, view and layout may keep on screen. `layout`
+// is the layout that render is in, which differs from the chosen one when a
+// split falls back to a single pane.
+function notePresentedRender(documentId: string, layout: ViewLayout): void {
+  presentedRender.note({ documentId, view: appState.viewMode, layout });
   setReloadNotice("hidden");
 }
 
@@ -297,7 +299,10 @@ export async function renderSinglePayload(
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
-  notePresentedRender(payload.id);
+  // A document without a split form shows this single pane in every layout;
+  // one with a split form is in the single layout only (or a split that fell
+  // back to it, which a reload in that split must not mistake for itself).
+  notePresentedRender(payload.id, documentSupportsSplit(payload) ? "single" : appState.viewLayout);
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
@@ -432,7 +437,7 @@ export async function renderSplitPayloads(
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
-  notePresentedRender(sourcePayload.id);
+  notePresentedRender(sourcePayload.id, appState.viewLayout);
   refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
 
@@ -568,9 +573,21 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // the viewMode is somehow "diff" we already short-circuited above; this
   // assertion narrows the param so the response stays well-typed.
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
-  const result = await fetchDocumentPayload(documentId, apiView);
-
+  let result = await fetchDocumentPayload(documentId, apiView);
   if (!isCurrent()) return;
+  // A reload of the split on screen needs the other view too. Fetch it here,
+  // so a failure of that request keeps the split and retries exactly as a
+  // failure of the first does; renderSplitForDocument then finds both views
+  // cached. Without a split on screen, renderSplitForDocument fetches it and
+  // falls back to one pane as before.
+  if (result.ok && requestedLayout !== "single" && documentSupportsSplit(result.payload)
+    && presentedRender.shows(renderKey)) {
+    const companion = await fetchDocumentPayload(documentId, apiView === "source" ? "rendered" : "source");
+    if (!isCurrent()) return;
+    if (companion.ok) rememberDocumentPayload(companion.payload);
+    else result = companion;
+  }
+
   if (!result.ok) {
     const { failure } = result;
     if (!isTransientDocumentFailure(failure)) {
