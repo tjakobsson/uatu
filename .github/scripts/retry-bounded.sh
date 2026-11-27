@@ -20,10 +20,11 @@ limit=${RETRY_TIMEOUT:-180}
 pause=${RETRY_PAUSE:-10}
 
 # A cancellation signals this script, not timeout's group: clear the group too.
-# $! is set the moment an attempt starts, before `group=$!` runs. Killing the
-# pid as well covers a timeout that has not yet made its group; it forks the
-# command only after that.
-trap 'kill -KILL -- "-${!:-}" "${!:-}" 2>/dev/null; exit 143' TERM INT
+# $! is set the moment an attempt starts, before `group=$!` runs. The pid goes
+# first: a timeout killed before making its group has forked nothing, and once
+# it is dead it can fork nothing more, so the group sweep that follows catches
+# any command it did start.
+trap 'kill -KILL -- "${!:-}" "-${!:-}" 2>/dev/null; exit 143' TERM INT
 
 for ((attempt = 1; attempt <= attempts; attempt++)); do
   # In the background so its pid, which is the group id, is known; <&0 keeps
