@@ -519,6 +519,31 @@ test("A split's fallback pane retries when only the second view fails to reload"
   expect(sourceReloads).toBeGreaterThanOrEqual(2);
 });
 
+test("A re-selection that recovers from a failed load does not pulse Updated", async ({ page }) => {
+  // Selecting the file on screen again makes a new request; if it fails and
+  // its retry lands, the file itself never changed, so nothing says Updated.
+  let failing = false;
+  let failures = 0;
+  await routeLinksDemoViews(page, async () => {
+    if (!failing) return "continue";
+    failures += 1;
+    failing = false;
+    return 500;
+  });
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+
+  failing = true;
+  await treeRow(page, "links-demo.md").click();
+  await expect.poll(() => failures).toBe(1);
+  await expect(page.locator("#preview-reload-notice")).toBeHidden();
+  // Read once: a retrying assertion would wait the 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
   // A 404 is final: the file is gone, so keeping its old render would mislead.
   await reloadRenderedLinksDemo(page, async () => 404);

@@ -106,6 +106,9 @@ const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration, docume
 const documentLoadRetry = createDocumentLoadRetry();
 const alwaysCurrent = () => true;
 const presentedRender = createPresentedRender(previewElement);
+// The file revision the noted render shows, so a load that lands after a
+// failed reload pulses Updated only if the file itself changed.
+let presentedRevision: string | null = null;
 
 // A document render was just mounted: it is the last good render a failed
 // reload of the same document, view and layout may keep on screen. `layout`
@@ -113,6 +116,7 @@ const presentedRender = createPresentedRender(previewElement);
 // split falls back to a single pane.
 function notePresentedRender(documentId: string, layout: ViewLayout): void {
   presentedRender.note({ documentId, view: appState.viewMode, layout });
+  presentedRevision = documentRevisionKey(documentId);
   setReloadNotice("hidden");
 }
 
@@ -649,10 +653,11 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
 
   const payload = result.payload;
   documentLoadRetry.settle();
-  // A notice still up here is this render's: an earlier reload failed and
-  // this one lands the change it was carrying, which the live frame that
-  // started it could not announce.
-  const landsFailedReload = reloadNoticeShown();
+  // A notice still up here is this render's: an earlier reload failed. If the
+  // file changed since the render on screen, this load lands that change,
+  // which the live frame that started it could not announce. A re-selection
+  // of an unchanged file that failed and recovered is no update.
+  const landsFailedReload = reloadNoticeShown() && presentedRevision !== documentRevisionKey(documentId);
   rememberDocumentPayload(payload);
   if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
