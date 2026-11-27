@@ -2716,11 +2716,21 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   border: 1px solid var(--notice-warn-border);
   background: var(--notice-warn-bg);
   padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  flex-shrink: 0;
+  /* Not a full pill: in a preview column narrower than the message (Chat or
+     a right-docked terminal beside it) the chip shrinks and its text wraps,
+     and a pill's round ends would clip the wrapped lines. */
+  border-radius: 0.6rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.preview-reload-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .preview-reload-retry {
+  flex-shrink: 0;
   font: inherit;
   color: inherit;
   background: transparent;

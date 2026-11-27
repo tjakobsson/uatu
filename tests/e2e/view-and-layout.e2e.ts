@@ -338,6 +338,17 @@ test("A same-document reload whose retries all fail keeps the render and offers 
   await page.clock.runFor(60_000);
   expect(reload.reloads()).toBe(5);
 
+  // Chat or a right-docked terminal can leave the preview heading narrower
+  // than the notice without the header stacking. The notice wraps inside the
+  // heading instead of running past it, and Retry stays inside too.
+  const narrow = await page.addStyleTag({ content: ".preview-heading { width: 150px; max-width: 150px; }" });
+  const heading = (await page.locator(".preview-heading").boundingBox())!;
+  for (const part of [notice, retry]) {
+    const box = (await part.boundingBox())!;
+    expect(box.x + box.width).toBeLessThanOrEqual(heading.x + heading.width + 0.5);
+  }
+  await narrow.evaluate(element => element.remove());
+
   recovered = true;
   await retry.focus();
   await page.keyboard.press("Enter");
