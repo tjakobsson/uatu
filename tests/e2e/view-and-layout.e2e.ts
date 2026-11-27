@@ -251,6 +251,29 @@ test("A same-document reload that fails transiently keeps the render on screen w
   await expect(page.locator(".uatu-outline-link")).toHaveCount(2);
 });
 
+test("A text file that turns binary while a reload retries takes the reload notice down", async ({ page }) => {
+  // An extensionless file is classified by its bytes, so the same document
+  // can become binary. Its binary notice replaces the kept render.
+  let reloading = false;
+  await page.route("**/api/document?*", route => {
+    const id = new URL(route.request().url()).searchParams.get("id") ?? "";
+    if (reloading && id.endsWith("/notes")) return route.fulfill({ status: 500, json: { error: "document render failed" } });
+    return route.continue();
+  });
+  await fs.writeFile(workspacePath("notes"), "plain notes\n", "utf8");
+  await openTreeFile(page, "notes");
+  await expect(page.locator("#preview")).toContainText("plain notes");
+
+  reloading = true;
+  await fs.writeFile(workspacePath("notes"), "plain notes, edited\n", "utf8");
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await fs.writeFile(workspacePath("notes"), Buffer.from([0x00, 0x01, 0x02, 0x00]));
+  await expect(page.locator("#preview")).toContainText("This file type isn't viewable in uatu.");
+  await expect(notice).toBeHidden();
+});
+
 test("A same-document reload whose retries all fail keeps the render and offers Retry", async ({ page }) => {
   // The schedule (250 ms, 1 s, 3 s, 10 s) is driven by a fake clock so the
   // test does not wait 14 s of real time. Every reload fails until the server

@@ -564,6 +564,9 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   setPreviewMode({ kind: "document" });
   if (doc.kind === "binary") {
     documentLoadRetry.settle();
+    // An extensionless file can turn binary under the same id, replacing a
+    // render a failed reload of it was keeping.
+    setReloadNotice("hidden");
     syncFileFactsStrip({ kind: "hidden" });
     if (mediaKind(doc.name)) {
       renderMediaPreview(doc, documentIndex.epoch);
