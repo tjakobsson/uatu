@@ -2736,6 +2736,26 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   border-radius: 2px;
 }
 
+/* Touch target, matching the 44px the rest of touch mode guarantees. Drawn
+   as an overlay, as on .connection-state: growing the button would push the
+   preview header open whenever the chip appears. Keyed on the pointer, not
+   the ui-mode attribute. */
+@media (pointer: coarse) {
+  .preview-reload-retry {
+    position: relative;
+  }
+
+  .preview-reload-retry::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+
 /* Toolbar in the preview header. View chooser and Layout chooser live
    here as separate pills (they each carry their own background and
    border via .view-control / .layout-chooser), so the toolbar itself is
