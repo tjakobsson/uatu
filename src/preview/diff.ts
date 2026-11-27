@@ -103,6 +103,10 @@ export function cancelDiffPresentation(): void {
 }
 
 export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
+  // A failed reload's notice belongs to the Rendered or Source view the reader
+  // has left: its retry no longer runs and its Retry button would do nothing.
+  // It goes now, not when the diff mounts, which may be late or never.
+  setReloadNotice("hidden");
   requestedDiffKeys.set(documentId, currentDiffInputKey(documentId));
   const selectionGeneration = getSelectionGeneration();
   const generation = ++diffLoadGeneration;
@@ -221,9 +225,6 @@ export async function renderDiffIntoPreview(
   previewElement.classList.remove("empty", "is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   closeMermaidViewer();
-  // The diff replaces any render a failed reload was keeping, and its notice
-  // with it (the Retry button only reloads Rendered or Source).
-  setReloadNotice("hidden");
   // Diff view brings its own inline toolbar (Unified / Split) from the
   // document-diff-view module; the markdown/asciidoc layout toolbar must
   // not bleed across from a previous render of the same document.

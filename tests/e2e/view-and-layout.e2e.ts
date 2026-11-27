@@ -297,6 +297,24 @@ test("Switching to Diff while a failed reload retries takes the reload notice do
   await expect(notice).toBeHidden();
 });
 
+test("Switching to Diff takes the reload notice down before the diff arrives", async ({ page }) => {
+  // The retry belongs to the Rendered view the reader just left, so the
+  // notice goes as soon as Diff is chosen, while its request is in flight or
+  // if it fails, and the Retry button is never left doing nothing.
+  let diffRequested = false;
+  await page.route("**/api/document/diff?*", () => {
+    diffRequested = true;
+    return new Promise<never>(() => {});
+  });
+  await reloadRenderedLinksDemo(page, async attempt => attempt === 1 ? 500 : new Promise<never>(() => {}));
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await page.locator("#view-diff").click();
+  await expect.poll(() => diffRequested).toBe(true);
+  await expect(notice).toBeHidden();
+});
+
 // Answers every /api/document request for links-demo.md through `answer`,
 // which sees the requested view; other documents pass through.
 async function routeLinksDemoViews(

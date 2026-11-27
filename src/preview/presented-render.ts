@@ -48,8 +48,9 @@ export function createPresentedRender(container: HTMLElement): PresentedRender {
 // otherwise. Looked up per call so importing this module needs no DOM.
 // The notice, unlike the tracker, must be taken down by whatever replaces the
 // kept render: mount.ts does it for document loads (including the binary,
-// image and media bodies they mount), and empty.ts, commit-message.ts and
-// diff.ts do it for the bodies they mount outside a document load.
+// image and media bodies they mount), empty.ts and commit-message.ts do it
+// for the bodies they mount outside a document load, and diff.ts does it as
+// soon as a diff is asked for.
 export type ReloadNoticeState = "hidden" | "retrying" | "gave-up";
 
 const RELOAD_NOTICE_MESSAGES: Record<Exclude<ReloadNoticeState, "hidden">, string> = {
