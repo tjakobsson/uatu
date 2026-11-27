@@ -544,6 +544,34 @@ test("A re-selection that recovers from a failed load does not pulse Updated", a
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
 });
 
+test("A resumed page whose reload of the file fails does not pulse Updated", async ({ page, request }) => {
+  // Resuming reconciles against /api/state. When that reports the file on
+  // screen changed and its reload fails, the render is kept and nothing says
+  // Updated, since nothing new landed.
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+  const state: StatePayload = await request.get("/api/state").then(response => response.json());
+  state.changedId = state.roots.flatMap(root => root.docs).find(doc => doc.relativePath === "links-demo.md")!.id;
+  let failedReloads = 0;
+  await routeLinksDemoViews(page, async () => {
+    failedReloads += 1;
+    return 500;
+  });
+  await page.route("**/api/state*", route => route.fulfill({ json: { ...state, generatedAt: Date.now() + 10_000 } }));
+  await page.evaluate(() => {
+    const event = new Event("pageshow");
+    Object.defineProperty(event, "persisted", { value: true });
+    window.dispatchEvent(event);
+  });
+
+  await expect(page.locator("#preview-reload-notice")).toBeVisible();
+  expect(failedReloads).toBeGreaterThanOrEqual(1);
+  // Read once: a retrying assertion would wait the 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
   // A 404 is final: the file is gone, so keeping its old render would mislead.
   await reloadRenderedLinksDemo(page, async () => 404);
