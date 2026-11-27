@@ -7,7 +7,7 @@
 import { subagentSpend, type ConversationModelTotals, type ConversationTotals, type ReceiptAmount } from "./conversation-totals";
 import { subagentLabel, type SubagentEntry } from "./timeline-renderer";
 import type { ConversationItem } from "./types";
-import { formatTokens, formatUsd } from "./usage";
+import { formatTokens, formatUsd, hasPrice } from "./usage";
 
 /** How the receipt is itemized. The same total, three ways. */
 export type ReceiptView = "agents" | "types" | "models";
@@ -97,7 +97,7 @@ function receiptRows(totals: ConversationTotals, view: ReceiptView, modelName: M
     return receipt.lines.map(line => ({
       label: line.label,
       note: said(models(line.models), role(line.kind), line.sameAgentAs === undefined ? undefined : `same agent as “${described.get(line.sameAgentAs) ?? "an earlier task"}”`),
-      amount: line, dash: !line.costUsd, depth: line.depth, kind: line.kind,
+      amount: line, dash: !hasPrice(line.costUsd), depth: line.depth, kind: line.kind,
     }));
   }
   if (receipt && view === "types") {
@@ -106,7 +106,7 @@ function receiptRows(totals: ConversationTotals, view: ReceiptView, modelName: M
       ...(line.agents === undefined ? {} : { count: line.agents }),
       // Tasks are only worth stating where they are not one per agent.
       note: said(models(line.models), role(line.kind), line.agents !== undefined && (line.tasks ?? 0) > line.agents ? `${line.tasks} tasks` : undefined),
-      amount: line, dash: !line.costUsd, kind: line.kind,
+      amount: line, dash: !hasPrice(line.costUsd), kind: line.kind,
     }));
   }
   // The agent's own totals are plain session rows; the folded ones also say
@@ -130,7 +130,7 @@ export function subagentTranscriptTitle(entries: readonly SubagentEntry[], items
   const entry = entries.find(candidate => candidate.conversationId === conversationId);
   if (!entry) return "Subagent";
   const spent = subagentSpend(items, conversationId)?.costUsd;
-  return spent ? `${subagentLabel(entry)} · ${formatUsd(spent)}` : subagentLabel(entry);
+  return hasPrice(spent) ? `${subagentLabel(entry)} · ${formatUsd(spent)}` : subagentLabel(entry);
 }
 
 /**

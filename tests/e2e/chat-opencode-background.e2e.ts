@@ -270,7 +270,9 @@ for (const width of [320, 390, 1280]) for (const colorScheme of ["light", "dark"
       await expect(row.locator(".chat-worker-cost")).toHaveAttribute("aria-label", "Subagent session cost not reported");
       await control(request, { op: "workerReport", childId: worker.childId, usedModel: "Fixture Model", usedEffort: "high", costUsd: 0 });
       await expect(row.locator(".chat-worker-effort")).toHaveText("high");
-      await expect(row.locator(".chat-worker-cost")).toHaveText("$0.00");
+      // OpenCode's zero is an unpriced model, not free: a dash, labeled as such.
+      await expect(row.locator(".chat-worker-cost")).toHaveText("—");
+      await expect(row.locator(".chat-worker-cost")).toHaveAttribute("aria-label", "No price reported for the subagent session's model");
       await control(request, { op: "workerReport", childId: worker.childId, usedModel: "Fixture Model", usedEffort: "medium", costUsd: 0.0012 });
       await expect(row.locator(".chat-worker-effort")).toHaveText("medium");
       await expect(row.locator(".chat-worker-cost")).toHaveText("$0.0012");

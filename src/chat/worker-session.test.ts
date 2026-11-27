@@ -22,9 +22,10 @@ test("latest execution model and effort travel together; opaque and explicit non
   }
 });
 
-test("cost formatting distinguishes absent, zero, sub-cent and tiny nonzero USD", () => {
+test("cost formatting distinguishes absent, unpriced zero, sub-cent and tiny nonzero USD", () => {
   expect(formatWorkerCost(null)).toBe("—");
-  expect(formatWorkerCost(0)).toBe("$0.00");
+  // OpenCode reports 0 for a model it has no price for: unpriced, not free (#591).
+  expect(formatWorkerCost(0)).toBe("—");
   expect(formatWorkerCost(0.0012)).toBe("$0.0012");
   expect(formatWorkerCost(0.000001)).toBe("<$0.0001");
   expect(formatWorkerCost(12.345)).toBe("$12.35");

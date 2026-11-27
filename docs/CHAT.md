@@ -295,8 +295,9 @@ Wide desktop rows align on one line with separate 28px Stop targets; touch keeps
 44px targets and normally two lines. Very narrow phones use a third metadata
 line rather than hiding the agent/model. Finished workers use dense rows.
 An explicit dash means **not reported**, with an accessible label and tooltip;
-shell tasks have no reasoning/session cost. Reported zero is `$0.00`, sub-cent
-costs retain four decimal places, and smaller nonzero costs show `<$0.0001`.
+shell tasks have no reasoning/session cost. A reported zero is also a dash,
+labeled **no price reported**, sub-cent costs retain four decimal places, and
+smaller nonzero costs show `<$0.0001`.
 Effort comes only from the child's own execution metadata: OpenCode 2.x reports
 `model.variant` on step-start/history assistant records. It is the agent's
 execution report, not an independent downstream provider echo. Current OpenCode
@@ -310,8 +311,9 @@ visible assistant-message sums cannot establish that total and are never a fallb
 Current Claude and OpenCode 1.x integrations do not provide this authoritative
 aggregate, so their worker session cost is not reported even when task/message
 prices are available. Missing aggregate data remains unknown, not a partial sum.
-OpenCode can itself report zero for unpriced models: this is a reported zero,
-not a promise of free billing. Reused-child occurrences repeat one session snapshot
+OpenCode reports zero for a model it has no price for, so the worker row treats
+zero as unpriced, as the conversation receipt does, rather than asserting a free
+`$0.00`. Reused-child occurrences repeat one session snapshot
 without adding it to task/parent receipts or including descendant costs. Recovery
 uses existing child-history accounting; inspection reuses its own bounded read.
 Parent refreshes normally revalidate cached child history at most every 30 seconds,

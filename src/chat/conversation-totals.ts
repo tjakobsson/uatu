@@ -15,6 +15,7 @@
 import { describeToolDetail } from "./tool-detail";
 import { subagentLabel } from "./timeline-renderer";
 import type { ConversationItem, SessionModelTotals, SessionTotals, TokenUsage } from "./types";
+import { hasPrice } from "./usage";
 
 /** Tokens and money, summed. `costUsd` is absent when nothing priced contributed: listed, not asserted as free. */
 export type ReceiptAmount = { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number };
@@ -115,9 +116,8 @@ export function conversationTotals(items: readonly ConversationItem[]): Conversa
     const before = row.costUsd;
     add(row as ReceiptAmount, usage);
     row.costUsd = usage.costUsd === undefined ? before : before + usage.costUsd;
-    // Zero is OpenCode's "no price for this model", not free: the row stays
-    // unpriced until something positive is reported for it.
-    if ((usage.costUsd ?? 0) > 0) delete row.unpriced;
+    // The row stays unpriced until something is priced for it.
+    if (hasPrice(usage.costUsd)) delete row.unpriced;
     if (line.kind === "task") {
       const kind = line.agent ?? "subagent";
       row.kinds.set(kind, (row.kinds.get(kind) ?? new Set()).add(line.conversationId ?? line.id));
@@ -174,7 +174,7 @@ export function conversationTotals(items: readonly ConversationItem[]): Conversa
   const lines = [...mains.values(), ...tasks];
   const total = amount();
   for (const line of lines) add(total, line);
-  if (!priced || (total.costUsd ?? 0) <= 0) return undefined;
+  if (!priced || !hasPrice(total.costUsd)) return undefined;
 
   // By type: the main agents as they are, then one line per kind of subagent.
   const types: ReceiptTypeLine[] = [...mains.values()].map(line => ({ ...amountOf(line), id: line.id, label: line.label, kind: line.kind, models: [...line.models] }));

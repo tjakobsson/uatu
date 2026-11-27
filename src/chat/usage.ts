@@ -25,6 +25,15 @@ export function totalTokens(usage: TokenUsage): number {
 }
 
 /**
+ * Whether a reported cost is a price. Absent is unreported, and zero is what
+ * OpenCode reports for a model it has no price for — unpriced, not free — so
+ * no readout asserts "$0.00". The one rule every cost readout applies.
+ */
+export function hasPrice(costUsd: number | null | undefined): costUsd is number {
+  return (costUsd ?? 0) > 0;
+}
+
+/**
  * Dollars as the readouts show them: cents for anything a reader would
  * budget, four places below ten cents so a cheap turn does not round to
  * nothing.

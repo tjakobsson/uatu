@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { contextTokens, formatTokens, formatUsd, sameUsage, totalTokens } from "./usage";
+import { contextTokens, formatTokens, formatUsd, hasPrice, sameUsage, totalTokens } from "./usage";
 import type { TokenUsage } from "./types";
 
 describe("formatTokens", () => {
@@ -52,6 +52,14 @@ describe("formatUsd", () => {
   test("budgetable figures read as cents, cheap turns keep their four places", () => {
     expect(formatUsd(12.5)).toBe("$12.50");
     expect(formatUsd(0.004)).toBe("$0.004");
+  });
+});
+
+describe("hasPrice", () => {
+  test("only a positive cost is a price: absent is unreported and zero is OpenCode's unpriced model", () => {
+    for (const value of [undefined, null, 0]) expect(hasPrice(value)).toBe(false);
+    expect(hasPrice(0.000001)).toBe(true);
+    expect(hasPrice(12.5)).toBe(true);
   });
 });
 
