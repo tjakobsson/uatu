@@ -73,3 +73,10 @@ export function setReloadNotice(state: ReloadNoticeState): void {
   if (message && state !== "hidden") message.textContent = RELOAD_NOTICE_MESSAGES[state];
   if (retry) retry.hidden = state !== "gave-up";
 }
+
+// Whether the notice is up, i.e. the render on screen is one a failed reload
+// kept.
+export function reloadNoticeShown(): boolean {
+  const notice = document.querySelector<HTMLElement>("#preview-reload-notice");
+  return notice !== null && !notice.hidden;
+}

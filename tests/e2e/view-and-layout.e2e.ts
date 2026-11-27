@@ -249,6 +249,8 @@ test("A same-document reload that fails transiently keeps the render on screen w
   await expect(page.locator("#preview")).toContainText("Reload landed marker.");
   await expect(notice).toBeHidden();
   await expect(page.locator(".uatu-outline-link")).toHaveCount(2);
+  // The edit has landed now, so now the strip says so.
+  await expect(page.locator("#file-facts-strip")).toHaveClass(/is-updated/);
 });
 
 test("A reload overtaken by a newer one that fails does not pulse Updated", async ({ page }) => {

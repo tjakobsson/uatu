@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { createPresentedRender, setReloadNotice, type PresentedRenderKey } from "./presented-render";
+import { createPresentedRender, reloadNoticeShown, setReloadNotice, type PresentedRenderKey } from "./presented-render";
 
 function preview(): HTMLElement {
   const { document } = parseHTML("<!doctype html><html><body><article id='preview'></article></body></html>");
@@ -114,6 +114,18 @@ describe("setReloadNotice", () => {
       expect(retry.hidden).toBe(false);
       expect(retry.tagName).toBe("BUTTON");
       expect(retry.getAttribute("aria-label")).toBe("Retry loading this file");
+    });
+  });
+
+  test("reloadNoticeShown follows the notice through its states", () => {
+    withNotice(() => {
+      expect(reloadNoticeShown()).toBe(false);
+      setReloadNotice("retrying");
+      expect(reloadNoticeShown()).toBe(true);
+      setReloadNotice("gave-up");
+      expect(reloadNoticeShown()).toBe(true);
+      setReloadNotice("hidden");
+      expect(reloadNoticeShown()).toBe(false);
     });
   });
 

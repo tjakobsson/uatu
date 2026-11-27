@@ -577,7 +577,7 @@ The server SHALL classify failed document requests using the status and logging 
 - **THEN** the preview SHALL keep that render, its outline and its facts strip in place instead of the notices above
 - **AND** in the Side-by-side and Stacked layouts a transient failure of the request for either view SHALL keep both panes, and a single pane that a split fell back to SHALL count as the render of that document on screen
 - **AND** while retries remain it SHALL show the non-modal header notice "This file couldn't be reloaded. Retrying…"
-- **AND** a failed or overtaken reload SHALL NOT signal the document as updated
+- **AND** a failed or overtaken reload SHALL NOT signal the document as updated; the reload that later lands the change SHALL
 - **AND** once those retries are exhausted it SHALL keep the render and show the persistent header notice "This file couldn't be reloaded." with a Retry button labelled "Retry loading this file"
 - **AND** activating Retry SHALL make exactly one new request, showing "This file couldn't be reloaded. Retrying…" without the button while it is in flight, and that request restarts the bounded schedule only if it fails transiently
 - **AND** a successful reload SHALL replace the render and hide the notice

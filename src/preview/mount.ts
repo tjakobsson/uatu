@@ -43,7 +43,7 @@ import { renderMediaPreview, releaseMediaPreview } from "../media/preview";
 import { documentIndex } from "../shell/document-state";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
-import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
+import { clearUpdateSignal, signalActiveDocumentUpdated, syncFileFactsStrip } from "./file-facts-strip";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
 import { getSelectedDestination, getSelectionActivation, getSelectionGeneration, setPreviewMode } from "../shell/selection";
@@ -59,7 +59,7 @@ import {
   type DocumentLoadFailure,
   type DocumentLoadTrigger,
 } from "./load-retry";
-import { createPresentedRender, setReloadNotice, type PresentedRenderKey } from "./presented-render";
+import { createPresentedRender, reloadNoticeShown, setReloadNotice, type PresentedRenderKey } from "./presented-render";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -645,10 +645,16 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
 
   const payload = result.payload;
   documentLoadRetry.settle();
+  // A notice still up here is this render's: an earlier reload failed and
+  // this one lands the change it was carrying, which the live frame that
+  // started it could not announce.
+  const landsFailedReload = reloadNoticeShown();
   rememberDocumentPayload(payload);
   if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
-  return isCurrent();
+  if (!isCurrent()) return false;
+  if (landsFailedReload) signalActiveDocumentUpdated();
+  return true;
 }
 
 // One `/api/document` request, classified (see classifyDocumentResponse).
