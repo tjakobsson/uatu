@@ -239,6 +239,11 @@ test("A same-document reload that fails transiently keeps the render on screen w
   await expect(notice).toBeVisible();
   await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(notice.getByRole("button", { name: "Retry loading this file" })).toBeHidden();
+  // Nothing was updated: the facts strip does not pulse "Updated" next to it.
+  // Read once rather than with a retrying assertion, which would wait the
+  // 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  expect(await page.locator("#preview-updated").isHidden()).toBe(true);
 
   releaseRetry();
   await expect(page.locator("#preview")).toContainText("Reload landed marker.");

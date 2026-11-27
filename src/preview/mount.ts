@@ -472,23 +472,28 @@ export async function renderSplitPayloads(
 // `trigger` is "retry" only from the retry schedule's own timer. Every other
 // caller (navigation, a view change, a live frame reloading the selection) is
 // a "request", and a request that fails transiently starts the schedule over.
+// Resolves to false only when the document could not be fetched, so a live
+// reload does not announce an update that did not land.
 export async function loadDocument(
   documentId: string,
   onPresented?: () => void,
   trigger: DocumentLoadTrigger = "request",
-) {
+): Promise<boolean> {
   const selectionGeneration = getSelectionGeneration();
   if (deferHiddenPreview(() => {
     const current = appState.selectedId;
     const same = current === documentId && selectionGeneration === getSelectionGeneration();
     if (current && appState.previewMode.kind === "document") void loadDocument(current,
       same ? onPresented : undefined, same ? trigger : "request");
-  })) return;
-  await executeLoadDocument(documentId, trigger);
+  })) return true;
+  const fetched = await executeLoadDocument(documentId, trigger);
   if (selectionGeneration === getSelectionGeneration() && appState.selectedId === documentId) onPresented?.();
+  return fetched;
 }
 
-async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrigger) {
+// False when the document could not be fetched: the preview shows why, or
+// keeps the render the reload failed to replace. True otherwise.
+async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrigger): Promise<boolean> {
   const requestedView = appState.viewMode;
   const requestedLayout = appState.viewLayout;
   const loadToken = documentLoadGuard.begin(documentId, requestedView, requestedLayout);
@@ -546,7 +551,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   if (!doc) {
     documentLoadRetry.settle();
     renderUnavailableDocument(documentId);
-    return;
+    return true;
   }
   setPreviewMode({ kind: "document" });
   if (doc.kind === "binary") {
@@ -559,7 +564,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     } else {
       renderBinaryUnavailable(doc);
     }
-    return;
+    return true;
   }
 
   // Diff view bypasses the rendered/source pipeline entirely — it has its
@@ -569,7 +574,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     documentLoadRetry.settle();
     void learnEmbeddedImages(documentId);
     await applyDiffForActiveDocument(documentId);
-    return;
+    return true;
   }
 
   // Server-side renderDocument only understands "rendered" | "source". If
@@ -577,7 +582,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // assertion narrows the param so the response stays well-typed.
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
   let result = await fetchDocumentPayload(documentId, apiView);
-  if (!isCurrent()) return;
+  if (!isCurrent()) return true;
   // A reload of the split on screen needs the other view too. Fetch it here,
   // so a failure of that request keeps the split and retries exactly as a
   // failure of the first does; renderSplitForDocument then finds both views
@@ -586,7 +591,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   if (result.ok && requestedLayout !== "single" && documentSupportsSplit(result.payload)
     && presentedRender.shows(renderKey)) {
     const companion = await fetchDocumentPayload(documentId, apiView === "source" ? "rendered" : "source");
-    if (!isCurrent()) return;
+    if (!isCurrent()) return true;
     if (companion.ok) rememberDocumentPayload(companion.payload);
     else result = companion;
   }
@@ -601,7 +606,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
       // selecting it again makes one new request.
       documentLoadRetry.settle();
       renderUnavailableDocument(documentId, documentFailureMessage(failure, false));
-      return;
+      return false;
     }
     // The server failed, or no complete answer arrived. Nothing else will
     // ask again, so retry while this is still the load the user is waiting on.
@@ -619,10 +624,10 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     // load still owns the selection, view, layout and revision.
     if (presentedRender.shows(renderKey)) {
       setReloadNotice(retrying ? "retrying" : "gave-up");
-      return;
+      return false;
     }
     renderUnavailableDocument(documentId, documentFailureMessage(failure, retrying));
-    return;
+    return false;
   }
 
   const payload = result.payload;
@@ -630,6 +635,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   rememberDocumentPayload(payload);
   if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
+  return true;
 }
 
 // One `/api/document` request, classified (see classifyDocumentResponse).

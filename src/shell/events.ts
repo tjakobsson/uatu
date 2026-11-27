@@ -370,8 +370,8 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   const reload = next !== selected || previousDocument?.revision !== current?.revision
     || Boolean(previousDocument) !== Boolean(current);
   if (next && reload && !(next === selected && retainMediaPreview(next, previousDocument))) {
-    await loadDocument(next);
-    if (next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
+    const fetched = await loadDocument(next);
+    if (fetched && next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
   } else if (next && !mediaSelection(next) && appState.viewMode === "diff" && (attributesChanged || repositoryChanged && diffInputsMoved(next))) {
     await applyDiffForActiveDocument(next);
   } else if (!next && !renderPendingDocument() && reload) renderEmptyPreview("No document selected", "Waiting for viewable files");
@@ -478,8 +478,8 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
       // The file changed on disk — any cached payload is now stale.
       forgetDocumentCache(appState.selectedId);
     }
-    await loadDocument(appState.selectedId);
-    if (shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
+    const fetched = await loadDocument(appState.selectedId);
+    if (fetched && shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
       // In-place reload of the document being viewed (Rule D): surface the
       // otherwise-silent swap. A selection switch is a new document, not an
       // update of what the user was reading — no signal there.
