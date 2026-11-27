@@ -186,7 +186,10 @@ jobs:
       # suite needs no browser. Browsers are cached per Playwright version;
       # the system libraries they link against are installed every run.
       # apt can stall on a slow mirror, so those installs go through
-      # retry-bounded.sh (3 attempts of 180 s) under a step timeout.
+      # retry-bounded.sh (3 attempts of 180 s) under a step timeout. It runs
+      # as root so that killing a stalled attempt also stops the apt-get
+      # Playwright would otherwise start through sudo; PATH is passed on so
+      # root finds bun. install-deps writes no browser files.
       - name: Resolve Playwright version
         id: playwright
         # The runner image (ImageOS, e.g. ubuntu24) is part of the cache key:
@@ -204,13 +207,11 @@ jobs:
 
       - name: Install Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
-        timeout-minutes: 12
-        run: .github/scripts/retry-bounded.sh bunx playwright install --with-deps chromium
+        run: bunx playwright install chromium
 
       - name: Install Playwright Chromium system dependencies
-        if: steps.browsers.outputs.cache-hit == 'true'
         timeout-minutes: 12
-        run: .github/scripts/retry-bounded.sh bunx playwright install-deps chromium
+        run: sudo env "PATH=$PATH" .github/scripts/retry-bounded.sh bunx playwright install-deps chromium
 
       - name: Save Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
@@ -292,13 +293,12 @@ jobs:
 
       - name: Install Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
-        timeout-minutes: 12
-        run: .github/scripts/retry-bounded.sh bunx playwright install --with-deps chromium webkit
+        run: bunx playwright install chromium webkit
 
       - name: Install Playwright system dependencies
-        if: steps.browsers.outputs.cache-hit == 'true'
+        # Bounded and run as root for the reasons given in the unit job.
         timeout-minutes: 12
-        run: .github/scripts/retry-bounded.sh bunx playwright install-deps chromium webkit
+        run: sudo env "PATH=$PATH" .github/scripts/retry-bounded.sh bunx playwright install-deps chromium webkit
 
       - name: Save Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'

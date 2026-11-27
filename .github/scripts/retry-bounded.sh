@@ -5,6 +5,11 @@
 # on a slow mirror for most of a job's time limit. A stalled attempt is killed
 # and retried instead of being left to run until the job is cancelled.
 #
+# `timeout` leads its own process group. After a failed attempt the whole group
+# is killed, so no process from it (an apt-get still holding the apt lock, say)
+# outlives the attempt. Signals reach only processes of the same user: run this
+# script as root when the command escalates with sudo.
+#
 # Usage: retry-bounded.sh <command> [args...]
 # Tuning (environment): RETRY_ATTEMPTS (3), RETRY_TIMEOUT seconds (180),
 # RETRY_PAUSE seconds between attempts (10).
@@ -14,9 +19,18 @@ attempts=${RETRY_ATTEMPTS:-3}
 limit=${RETRY_TIMEOUT:-180}
 pause=${RETRY_PAUSE:-10}
 
+group=
+# A step timeout signals this script, not timeout's group: clear the group too.
+trap '[ -n "$group" ] && kill -KILL -- "-$group" 2>/dev/null; exit 143' TERM INT
+
 for ((attempt = 1; attempt <= attempts; attempt++)); do
-  timeout --kill-after=15 "$limit" "$@" && exit 0
+  # In the background so its pid, which is the group id, is known; <&0 keeps
+  # stdin, which a background command would otherwise lose to /dev/null.
+  timeout --kill-after=15 "$limit" "$@" <&0 &
+  group=$!
+  wait "$group" && exit 0
   status=$?
+  kill -KILL -- "-$group" 2>/dev/null
   echo "::warning::attempt $attempt of $attempts failed (exit $status): $*"
   if ((attempt < attempts)); then
     sleep "$pause"
