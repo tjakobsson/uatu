@@ -22,6 +22,7 @@ import { syncFileFactsStrip } from "./file-facts-strip";
 import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { documentDiffCache, type RenderedDocument } from "./mount";
 import { refreshOutline } from "./outline";
+import { setReloadNotice } from "./presented-render";
 import { extensionToLanguage, syncViewToggle } from "./view-mode";
 import { getSelectionGeneration, setPreviewMode } from "../shell/selection";
 
@@ -220,6 +221,9 @@ export async function renderDiffIntoPreview(
   previewElement.classList.remove("empty", "is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   closeMermaidViewer();
+  // The diff replaces any render a failed reload was keeping, and its notice
+  // with it (the Retry button only reloads Rendered or Source).
+  setReloadNotice("hidden");
   // Diff view brings its own inline toolbar (Unified / Split) from the
   // document-diff-view module; the markdown/asciidoc layout toolbar must
   // not bleed across from a previous render of the same document.

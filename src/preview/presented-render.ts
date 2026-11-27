@@ -46,6 +46,10 @@ export function createPresentedRender(container: HTMLElement): PresentedRender {
 // "retrying" while the schedule has another attempt pending, "gave-up" once
 // it is used up (with a Retry button; mount.ts wires its click), "hidden"
 // otherwise. Looked up per call so importing this module needs no DOM.
+// The notice, unlike the tracker, must be taken down by whatever replaces the
+// kept render: mount.ts does it for document loads (including the binary,
+// image and media bodies they mount), and empty.ts, commit-message.ts and
+// diff.ts do it for the bodies they mount outside a document load.
 export type ReloadNoticeState = "hidden" | "retrying" | "gave-up";
 
 const RELOAD_NOTICE_MESSAGES: Record<Exclude<ReloadNoticeState, "hidden">, string> = {

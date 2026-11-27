@@ -285,6 +285,18 @@ test("A same-document reload whose retries all fail keeps the render and offers 
   expect(reload.reloads()).toBe(6);
 });
 
+test("Switching to Diff while a failed reload retries takes the reload notice down", async ({ page }) => {
+  // The notice belongs to the render it kept. Diff replaces that render
+  // without going through a document load, so it must clear the notice too.
+  await reloadRenderedLinksDemo(page, async attempt => attempt === 1 ? 500 : new Promise<never>(() => {}));
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await page.locator("#view-diff").click();
+  await expect(page.locator(".uatu-diff-host")).toBeVisible();
+  await expect(notice).toBeHidden();
+});
+
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
   // A 404 is final: the file is gone, so keeping its old render would mislead.
   await reloadRenderedLinksDemo(page, async () => 404);
