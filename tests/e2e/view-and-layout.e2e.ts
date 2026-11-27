@@ -582,6 +582,45 @@ test("A resumed page whose reload of the file fails does not pulse Updated", asy
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
 });
 
+test("A retry after a session restart does not pulse Updated for an unchanged file", async ({ page, request }) => {
+  // A restarted session has a new epoch, so the file on screen reloads. Its
+  // first request fails and the retry lands the same file: nothing on disk
+  // changed, so nothing says Updated.
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+  const state = await request.get("/api/state").then(response => response.json()) as StatePayload & { epoch: string };
+  state.epoch = `${state.epoch}-restarted`;
+  let phase: "fail" | "hold" = "fail";
+  let retried = false;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  await routeLinksDemoViews(page, async () => {
+    if (phase === "fail") {
+      phase = "hold";
+      return 500;
+    }
+    retried = true;
+    await retryGate;
+    return "continue";
+  });
+  await page.route("**/api/state*", route => route.fulfill({ json: { ...state, generatedAt: Date.now() + 10_000 } }));
+  await page.evaluate(() => {
+    const event = new Event("pageshow");
+    Object.defineProperty(event, "persisted", { value: true });
+    window.dispatchEvent(event);
+  });
+
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect.poll(() => retried).toBe(true);
+  releaseRetry();
+  await expect(notice).toBeHidden();
+  // Read once: a retrying assertion would wait the 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
 test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
   // A 404 is final: the file is gone, so keeping its old render would mislead.
   await reloadRenderedLinksDemo(page, async () => 404);
