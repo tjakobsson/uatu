@@ -187,6 +187,7 @@ jobs:
       # the system libraries they link against are installed every run.
       # apt can stall on a slow mirror, so install-playwright-deps.sh bounds
       # and retries those installs (3 attempts of 180 s) under a step timeout.
+      # `exec` lets a cancellation reach it (see the script).
       - name: Resolve Playwright version
         id: playwright
         # The runner image (ImageOS, e.g. ubuntu24) is part of the cache key:
@@ -208,7 +209,7 @@ jobs:
 
       - name: Install Playwright Chromium system dependencies
         timeout-minutes: 12
-        run: .github/scripts/install-playwright-deps.sh chromium
+        run: exec .github/scripts/install-playwright-deps.sh chromium
 
       - name: Save Playwright Chromium
         if: steps.browsers.outputs.cache-hit != 'true'
@@ -294,7 +295,7 @@ jobs:
 
       - name: Install Playwright system dependencies
         timeout-minutes: 12
-        run: .github/scripts/install-playwright-deps.sh chromium webkit
+        run: exec .github/scripts/install-playwright-deps.sh chromium webkit
 
       - name: Save Playwright Chromium and WebKit
         if: steps.browsers.outputs.cache-hit != 'true'
