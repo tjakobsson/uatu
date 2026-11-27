@@ -293,22 +293,29 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   `dev` / password `dev`) with `testdata/watch-docs` registered and opened
 - `bun test` — unit suite, one file at a time (about 3 min on a CI runner)
 - `bun run test:ci` — the same suite in parallel, and what CI's required
-  `unit` job runs: `bun test --parallel=4` (four worker processes, each file
-  isolated) with `tests/unit-timings.json` starting the slowest files first;
-  the longest file, `src/hub/worktree-lifecycle.integration.test.ts`, sets
-  the floor (on a 6-core laptop about 70 s, against about 280 s one file at
-  a time). Under that contention a test must wait for the event it asserts
+  `unit` job runs: `scripts/test-ci.ts` runs `bun test --parallel=N` (N
+  worker processes, each file isolated) with `tests/unit-timings.json`
+  starting the slowest files first; the longest file,
+  `src/hub/worktree-lifecycle.integration.test.ts`, sets the floor (4
+  workers on a 6-core laptop took about 70 s, against about 280 s one file
+  at a time). Under that contention a test must wait for the event it asserts
   on (a process exit, a pump that has handled an event), never for a fixed
   delay, and a test driving real processes or real Git may need a budget
   above the 5 s default.
   Refresh the timings with `bun run test:ci --update-timings` when files
   move a lot
+- Worker count, for `test:ci` and Playwright alike: one per available core
+  (`os.availableParallelism()`), from 1 to 8, so CI's 4-core runners get 4.
+  `UATU_TEST_WORKERS=<n>` sets it exactly, past 8 too. One helper,
+  `scripts/test-workers.ts`; `scripts/playwright-policy.test.ts` holds the
+  policy. The ceiling limits load, not ports: e2e ports are per worker slot
+  (`tests/e2e/ports.ts`)
 - When developing Uatu inside a Hub-managed workspace, credential tests may
   discover Uatu's projected Git/SSH wrappers. Use a clean tool environment for
   those tests; do not change product behavior to accommodate nested projection.
 - `bun run test:e2e` — the whole Playwright suite, both projects (about 870
-  tests, 4 workers, `fullyParallel`, retries only on CI). CI splits the `e2e`
-  project into two legs by file list (`UATU_E2E_LEG=1`/`2`, see
+  tests, one worker per core up to 8, `fullyParallel`, retries only on CI).
+  CI splits the `e2e` project into two legs by file list (`UATU_E2E_LEG=1`/`2`, see
   `playwright.config.ts`; each leg takes about 15–17 min on a 4-core runner)
   and runs `perf` in its own job, then merges their blob reports into one
   HTML report. Unset, `UATU_E2E_LEG` runs the whole project.

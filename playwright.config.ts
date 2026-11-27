@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { testWorkers } from "./scripts/test-workers";
 
 // Per-worker servers are spawned by the `serverPort` fixture in
 // `tests/e2e/fixtures.ts`; the global `webServer` config is intentionally
@@ -49,7 +50,9 @@ export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: "**/*.e2e.ts",
   fullyParallel: true,
-  workers: 4,
+  // One worker per available core, capped; UATU_TEST_WORKERS overrides
+  // (scripts/test-workers.ts). Ports are per slot (tests/e2e/ports.ts).
+  workers: testWorkers(),
   // CI re-runs failed tests up to twice so parallel-worker flakes don't
   // block PRs; real regressions still fail consistently. Locally `retries:
   // 0` keeps tests strict so flakes surface immediately. The per-project
