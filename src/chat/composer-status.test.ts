@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { composerRoutineState, latestPlanUtilization, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, sessionCostLabel, sessionTotalsTitle, standingSentence } from "./composer-status";
+import { composerRoutineState, latestPlanUtilization, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, sessionCostLabel, sessionTotalsTitle, standingClearedSentence, standingSentence } from "./composer-status";
 import { relativeReset } from "./dates";
 import { isRateLimitStanding, PLAN_WARNING_UTILIZATION, RATE_LIMIT_ITEM_ID, type ConversationItem, type ScheduledWakeupItem } from "./types";
 import type { RateLimitStanding } from "./composer-status";
@@ -249,6 +249,15 @@ describe("rate-limit badge and plan utilization", () => {
     expect(relativeReset(now + 4 * 86_400_000 + 11 * 3_600_000 + 40 * 60_000, now)).toBe("in 4d 11h");
     expect(relativeReset(now + 10_000, now)).toBe("now");
     expect(relativeReset(now - 60_000, now)).toBe("now");
+  });
+});
+
+describe("a retired standing", () => {
+  test("a cleared rejection says requests are allowed again; a cleared warning claims no block ended", () => {
+    // A warning never blocked anything, so its retirement must not tell a
+    // screen-reader user that requests are allowed again.
+    expect(standingClearedSentence("rejected")).toBe("Rate limit cleared; requests are allowed again.");
+    expect(standingClearedSentence("warning")).toBe("Rate-limit warning cleared.");
   });
 });
 

@@ -902,6 +902,7 @@ Routine Claude Code signals SHALL surface where they affect waiting: retry and c
 #### Scenario: A changed standing is announced
 - **WHEN** a rate-limit standing begins, changes level, or is retired
 - **THEN** the change is announced to assistive technology
+- **AND** a retired warning is announced as a cleared warning, while only a retired rejection says requests are allowed again
 
 #### Scenario: A refusal fallback is attributed truthfully
 - **WHEN** a turn is retried on a fallback model after a refusal

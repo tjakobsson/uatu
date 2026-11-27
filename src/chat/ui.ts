@@ -37,7 +37,7 @@ import { expandedWorkBudget } from "./work-budget";
 import { renderChatMarkdown } from "./markdown";
 import { decorateChatVisuals } from "./visual-ui";
 import { SHELL_WORKER_STOP_WARNING, SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
-import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingClearedSentence, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import type { BackgroundTaskItem } from "./types";
@@ -2726,7 +2726,7 @@ export function initChat(api = new ChatApiClient()): void {
         // was told it began, and the chip is about to go quiet.
         rateLimitLive.textContent = limit
           ? standingSentence(limit)
-          : previous ? "Rate limit cleared; requests are allowed again." : "";
+          : previous ? standingClearedSentence(previous) : "";
         boundedSet(announcedStandings, projection.conversationId, limit?.level, ANNOUNCED_STANDING_LIMIT);
       }
     }

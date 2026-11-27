@@ -136,6 +136,15 @@ export function standingSentence(standing: Pick<RateLimitStanding, "message" | "
 }
 
 /**
+ * What is announced when a standing is retired. Only a rejection blocked
+ * requests; a warning that ends — allowed again, or eased below the plan
+ * warning line — says only that the warning cleared.
+ */
+export function standingClearedSentence(previous: RateLimitStanding["level"]): string {
+  return previous === "rejected" ? "Rate limit cleared; requests are allowed again." : "Rate-limit warning cleared.";
+}
+
+/**
  * The newest report that speaks to the plan: one carrying windows, or an
  * empty plan (the login reports none). A report without the field — a
  * compaction's post-count — says nothing about the plan and is skipped.
