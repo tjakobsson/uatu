@@ -255,7 +255,13 @@ test("A same-document reload whose retries all fail keeps the render and offers 
   await page.reload();
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   let recovered = false;
-  const reload = await reloadRenderedLinksDemo(page, async () => recovered ? "continue" : 500);
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  const reload = await reloadRenderedLinksDemo(page, async () => {
+    if (!recovered) return 500;
+    await retryGate;
+    return "continue";
+  });
 
   const notice = page.locator("#preview-reload-notice");
   const retry = notice.getByRole("button", { name: "Retry loading this file" });
@@ -278,10 +284,18 @@ test("A same-document reload whose retries all fail keeps the render and offers 
   recovered = true;
   await retry.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#preview")).toContainText("Reload landed marker.");
-  await expect(notice).toBeHidden();
+  // While that request is in flight the notice says so and Retry is gone,
+  // so a second press cannot start a load that discards this one's answer.
+  await expect.poll(() => reload.reloads()).toBe(6);
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(retry).toBeHidden();
   // The keyboard user is not dropped onto the page body when Retry hides.
   expect(await page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body)).toBe(true);
+  await page.keyboard.press("Enter");
+
+  releaseRetry();
+  await expect(page.locator("#preview")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
   expect(reload.reloads()).toBe(6);
 });
 

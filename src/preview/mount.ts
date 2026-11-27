@@ -118,11 +118,14 @@ function notePresentedRender(documentId: string, layout: ViewLayout): void {
 
 // The reload notice's Retry button, shown once the schedule is used up:
 // one new request for the render still on screen, like selecting the file
-// again (a transient failure of it starts the schedule over).
+// again (a transient failure of it starts the schedule over). The notice says
+// "Retrying…" while that request is in flight, which takes the button away so
+// a second press cannot start a load that discards this one's answer.
 document.querySelector<HTMLButtonElement>("#preview-reload-notice .preview-reload-retry")
   ?.addEventListener("click", () => {
     const documentId = appState.selectedId;
     if (documentId && presentedRender.shows({ documentId, view: appState.viewMode, layout: appState.viewLayout })) {
+      setReloadNotice("retrying");
       void loadDocument(documentId);
     }
   });
