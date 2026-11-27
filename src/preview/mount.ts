@@ -59,6 +59,7 @@ import {
   type DocumentLoadFailure,
   type DocumentLoadTrigger,
 } from "./load-retry";
+import { createPresentedRender, setReloadNotice, type PresentedRenderKey } from "./presented-render";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -104,6 +105,25 @@ let lastLoadedDocumentId: string | null = null;
 const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration, documentRevisionKey);
 const documentLoadRetry = createDocumentLoadRetry();
 const alwaysCurrent = () => true;
+const presentedRender = createPresentedRender(previewElement);
+
+// A document render was just mounted: it is the last good render a failed
+// reload of the same document, view and layout may keep on screen.
+function notePresentedRender(documentId: string): void {
+  presentedRender.note({ documentId, view: appState.viewMode, layout: appState.viewLayout });
+  setReloadNotice("hidden");
+}
+
+// The reload notice's Retry button, shown once the schedule is used up:
+// one new request for the render still on screen, like selecting the file
+// again (a transient failure of it starts the schedule over).
+document.querySelector<HTMLButtonElement>("#preview-reload-notice .preview-reload-retry")
+  ?.addEventListener("click", () => {
+    const documentId = appState.selectedId;
+    if (documentId && presentedRender.shows({ documentId, view: appState.viewMode, layout: appState.viewLayout })) {
+      void loadDocument(documentId);
+    }
+  });
 
 // `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
 // the client type stays in lockstep with the renderer's view of the
@@ -277,6 +297,7 @@ export async function renderSinglePayload(
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
+  notePresentedRender(payload.id);
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
@@ -411,6 +432,7 @@ export async function renderSplitPayloads(
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
+  notePresentedRender(sourcePayload.id);
   refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
 
@@ -462,6 +484,10 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   const requestedView = appState.viewMode;
   const requestedLayout = appState.viewLayout;
   const loadToken = documentLoadGuard.begin(documentId, requestedView, requestedLayout);
+  const renderKey: PresentedRenderKey = { documentId, view: requestedView, layout: requestedLayout };
+  // The reload notice belongs to the render it is keeping; any other load
+  // replaces that render, so the notice goes with it.
+  if (!presentedRender.shows(renderKey)) setReloadNotice("hidden");
   const activation = getSelectionActivation();
   const isCurrent = () => documentLoadGuard.isCurrent(
     loadToken,
@@ -566,6 +592,15 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     }), () => {
       if (isCurrent()) void loadDocument(documentId, undefined, "retry");
     }, trigger);
+    // A reload of the render already on screen keeps it, with its outline and
+    // facts strip: the file was readable a moment ago and nothing says it is
+    // gone. The notice says whether another attempt is pending or offers
+    // Retry once the schedule is used up. The guard above already proved this
+    // load still owns the selection, view, layout and revision.
+    if (presentedRender.shows(renderKey)) {
+      setReloadNotice(retrying ? "retrying" : "gave-up");
+      return;
+    }
     renderUnavailableDocument(documentId, documentFailureMessage(failure, retrying));
     return;
   }

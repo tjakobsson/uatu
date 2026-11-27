@@ -13,6 +13,7 @@ import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { refreshOutline } from "./outline";
 import { cancelDiffPresentation } from "./diff";
 import { releaseMediaPreview } from "../media/preview";
+import { setReloadNotice } from "./presented-render";
 
 const previewTitleElementMaybe = document.querySelector<HTMLElement>("#preview-title");
 const previewPathElementMaybe = document.querySelector<HTMLElement>("#preview-path");
@@ -39,6 +40,7 @@ export function renderEmptyPreview(title: string, body: string) {
   clearPreviewType();
   hideViewToggle();
   clearUpdateSignal();
+  setReloadNotice("hidden");
   syncFileFactsStrip({ kind: "hidden" });
   mountLayoutToolbar(false);
   syncLayoutChooser(null);

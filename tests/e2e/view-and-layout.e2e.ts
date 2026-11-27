@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 import type { StatePayload } from "../../src/shared/types";
 import type { Page } from "@playwright/test";
@@ -180,6 +180,121 @@ test("A document load the server fails transiently recovers without another clic
 
   await expect(page.locator("#preview-title")).toHaveText("Diagram Fixture");
   await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+});
+
+// Opens links-demo.md with its outline open, then edits it on disk so the
+// live document topic reloads the render already on screen. `answer` decides
+// the response to each reload of the file; earlier reads pass through.
+async function reloadRenderedLinksDemo(
+  page: Page,
+  answer: (reload: number) => Promise<"continue" | number>,
+): Promise<{ reloads: () => number }> {
+  let reloading = false;
+  let reloads = 0;
+  await page.route("**/api/document?*", async route => {
+    const id = new URL(route.request().url()).searchParams.get("id") ?? "";
+    if (!reloading || !id.endsWith("/links-demo.md")) return route.continue();
+    reloads += 1;
+    const outcome = await answer(reloads);
+    if (outcome === "continue") return route.continue();
+    return route.fulfill({ status: outcome, json: { error: outcome === 404 ? "document not found" : "document render failed" } });
+  });
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  await page.locator("#outline-toggle").click();
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
+
+  reloading = true;
+  await fs.writeFile(
+    workspacePath("links-demo.md"),
+    "# Markdown Cross-Document Links\n\nReload landed marker.\n\n## Sibling document\n",
+    "utf8",
+  );
+  await expect.poll(() => reloads).toBeGreaterThanOrEqual(1);
+  return { reloads: () => reloads };
+}
+
+test("A same-document reload that fails transiently keeps the render on screen while it retries", async ({ page }) => {
+  // The file on screen changed on disk, and the reload hits a server that is
+  // briefly failing. The reader keeps the document, its outline and its
+  // facts strip; a small notice says the reload is retrying (#468).
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  const reload = await reloadRenderedLinksDemo(page, async attempt => {
+    if (attempt === 1) return 500;
+    await retryGate;
+    return "continue";
+  });
+
+  // The first reload has failed and the retry is held at the gate.
+  await expect.poll(() => reload.reloads()).toBeGreaterThanOrEqual(2);
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+  await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.getByRole("button", { name: "Retry loading this file" })).toBeHidden();
+
+  releaseRetry();
+  await expect(page.locator("#preview")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(2);
+});
+
+test("A same-document reload whose retries all fail keeps the render and offers Retry", async ({ page }) => {
+  // The schedule (250 ms, 1 s, 3 s, 10 s) is driven by a fake clock so the
+  // test does not wait 14 s of real time. Every reload fails until the server
+  // "recovers"; the reader keeps the document and gets a Retry button that
+  // makes one new request.
+  await page.clock.install();
+  await page.reload();
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  let recovered = false;
+  const reload = await reloadRenderedLinksDemo(page, async () => recovered ? "continue" : 500);
+
+  const notice = page.locator("#preview-reload-notice");
+  const retry = notice.getByRole("button", { name: "Retry loading this file" });
+  // The first request plus the four scheduled retries; advance the clock
+  // only after each failure has scheduled its successor.
+  await expect.poll(async () => {
+    await page.clock.runFor(10_000);
+    return reload.reloads();
+  }, { timeout: 20_000 }).toBe(5);
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded.");
+  await expect(retry).toBeVisible();
+  await page.clock.runFor(60_000);
+  expect(reload.reloads()).toBe(5);
+
+  recovered = true;
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#preview")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
+  // The keyboard user is not dropped onto the page body when Retry hides.
+  expect(await page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body)).toBe(true);
+  expect(reload.reloads()).toBe(6);
+});
+
+test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
+  // A 404 is final: the file is gone, so keeping its old render would mislead.
+  await reloadRenderedLinksDemo(page, async () => 404);
+
+  await expect(page.locator("#preview")).toContainText(
+    "File unavailable. It may have been removed or excluded from this workspace.",
+  );
+  await expect(page.locator("#preview-reload-notice")).toBeHidden();
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(0);
+  await expect(page.locator("#file-facts-strip")).toBeHidden();
 });
 
 const permissionNoticeTitle = "A document the server cannot read shows the permission notice once and loads on the next selection";
