@@ -5,8 +5,8 @@
 // CI's four-core runners get the four workers they always had. The ceiling is
 // a resource limit, not a port limit: each e2e worker drives a browser and its
 // own servers, and CI measures only four, so eight is a cautious step past
-// that. Ports allow far more (tests/e2e/ports.ts; scripts/playwright-policy.test.ts checks the
-// ranges stay disjoint up to the ceiling).
+// that. Ports allow far more: playwright.config.ts refuses any count whose
+// port ranges would collide (checkPortLayout in tests/e2e/ports.ts).
 
 import os from "node:os";
 

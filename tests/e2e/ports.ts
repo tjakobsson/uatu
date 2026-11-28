@@ -26,6 +26,23 @@ export const HUB_BASE_PORT = Number.parseInt(process.env.UATU_E2E_HUB_BASE_PORT 
 // With the defaults the harness family (20000 + slot) stays below the hub
 // family (21000 + 10 × slot) for any worker count under 1000.
 export const HUB_PORTS_PER_WORKER = 10;
+// Linux hands out ephemeral ports from 32768 (macOS from 49152).
+const EPHEMERAL_PORT_START = 32768;
+
+// Throws unless `workers` slots fit: the harness and hub ranges disjoint and
+// both below the ephemeral range. playwright.config.ts checks its worker
+// count, so a larger machine or UATU_TEST_WORKERS can't silently collide.
+export function checkPortLayout(workers: number, basePort = BASE_PORT, hubBasePort = HUB_BASE_PORT): void {
+  const harnessEnd = basePort + workers;
+  const hubEnd = hubBasePort + workers * HUB_PORTS_PER_WORKER;
+  const overlap = basePort < hubEnd && hubBasePort < harnessEnd;
+  if (!overlap && Math.max(harnessEnd, hubEnd) <= EPHEMERAL_PORT_START) return;
+  throw new Error(
+    `${workers} e2e workers need ports ${basePort}–${harnessEnd - 1} and ${hubBasePort}–${hubEnd - 1}, which ` +
+      (overlap ? "overlap" : `reach the ephemeral range at ${EPHEMERAL_PORT_START}`) +
+      "; lower UATU_TEST_WORKERS or move UATU_E2E_BASE_PORT / UATU_E2E_HUB_BASE_PORT",
+  );
+}
 
 export function workerServerPort(parallelIndex: number): number {
   return BASE_PORT + parallelIndex;
