@@ -597,6 +597,50 @@ test.describe("touch preview chrome", () => {
     await expect(increase).toBeDisabled();
     await expect(decrease).toBeEnabled();
   });
+
+  test("a reload whose retries all fail keeps the document and offers a 44px Retry", async ({ page }) => {
+    // The retry schedule runs on a fake clock. Every reload of README.md
+    // fails until the server recovers; the Preview tab keeps the document.
+    await page.clock.install();
+    await page.reload();
+    await waitForPreviewToSettle(page);
+    await expect(page.locator("#preview-path")).toHaveText("README.md");
+    let reloading = false;
+    let recovered = false;
+    let reloads = 0;
+    await page.route("**/api/document?*", async route => {
+      const id = new URL(route.request().url()).searchParams.get("id") ?? "";
+      if (!reloading || !id.endsWith("/README.md")) return route.continue();
+      reloads += 1;
+      if (recovered) return route.continue();
+      return route.fulfill({ status: 500, json: { error: "document render failed" } });
+    });
+    reloading = true;
+    await fs.writeFile(workspacePath("README.md"), "# Uatu\n\nReload landed marker.\n", "utf8");
+    await expect.poll(async () => {
+      await page.clock.runFor(10_000);
+      return reloads;
+    }, { timeout: 20_000 }).toBe(5);
+
+    await expect(page.locator("#preview")).toContainText("This is a sample README for the live watch fixture.");
+    const retry = page.locator("#preview-reload-notice").getByRole("button", { name: "Retry loading this file" });
+    await expect(retry).toBeVisible();
+    // A finger anywhere in the 44px box centred on the button lands on it.
+    const box = (await retry.boundingBox())!;
+    const [cx, cy] = [box.x + box.width / 2, box.y + box.height / 2];
+    for (const [dx, dy] of [[0, -21], [0, 21], [-21, 0], [21, 0]] as const) {
+      const hit = await page.evaluate(([x, y]) => {
+        const target = document.elementFromPoint(x, y);
+        return target?.closest(".preview-reload-retry") !== null && target !== null;
+      }, [cx + dx, cy + dy]);
+      expect(hit, `tap at (${dx}, ${dy}) from the centre reaches Retry`).toBe(true);
+    }
+
+    recovered = true;
+    await retry.tap();
+    await expect(page.locator("#preview")).toContainText("Reload landed marker.");
+    await expect(page.locator("#preview-reload-notice")).toBeHidden();
+  });
 });
 
 test.describe("touch mermaid viewer", () => {

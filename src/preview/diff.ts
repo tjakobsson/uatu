@@ -22,6 +22,7 @@ import { syncFileFactsStrip } from "./file-facts-strip";
 import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { documentDiffCache, type RenderedDocument } from "./mount";
 import { refreshOutline } from "./outline";
+import { setReloadNotice } from "./presented-render";
 import { extensionToLanguage, syncViewToggle } from "./view-mode";
 import { getSelectionGeneration, setPreviewMode } from "../shell/selection";
 
@@ -102,6 +103,10 @@ export function cancelDiffPresentation(): void {
 }
 
 export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
+  // A failed reload's notice belongs to the Rendered or Source view the reader
+  // has left: its retry no longer runs and its Retry button would do nothing.
+  // It goes now, not when the diff mounts, which may be late or never.
+  setReloadNotice("hidden");
   requestedDiffKeys.set(documentId, currentDiffInputKey(documentId));
   const selectionGeneration = getSelectionGeneration();
   const generation = ++diffLoadGeneration;

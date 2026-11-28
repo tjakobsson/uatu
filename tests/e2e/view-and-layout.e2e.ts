@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 import type { StatePayload } from "../../src/shared/types";
 import type { Page } from "@playwright/test";
@@ -180,6 +180,474 @@ test("A document load the server fails transiently recovers without another clic
 
   await expect(page.locator("#preview-title")).toHaveText("Diagram Fixture");
   await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+});
+
+// Opens links-demo.md with its outline open, then edits it on disk so the
+// live document topic reloads the render already on screen. `answer` decides
+// the response to each reload of the file; earlier reads pass through.
+async function reloadRenderedLinksDemo(
+  page: Page,
+  answer: (reload: number) => Promise<"continue" | number>,
+): Promise<{ reloads: () => number }> {
+  let reloading = false;
+  let reloads = 0;
+  await page.route("**/api/document?*", async route => {
+    const id = new URL(route.request().url()).searchParams.get("id") ?? "";
+    if (!reloading || !id.endsWith("/links-demo.md")) return route.continue();
+    reloads += 1;
+    const outcome = await answer(reloads);
+    if (outcome === "continue") return route.continue();
+    return route.fulfill({ status: outcome, json: { error: outcome === 404 ? "document not found" : "document render failed" } });
+  });
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  await page.locator("#outline-toggle").click();
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
+
+  reloading = true;
+  await fs.writeFile(
+    workspacePath("links-demo.md"),
+    "# Markdown Cross-Document Links\n\nReload landed marker.\n\n## Sibling document\n",
+    "utf8",
+  );
+  await expect.poll(() => reloads).toBeGreaterThanOrEqual(1);
+  return { reloads: () => reloads };
+}
+
+test("A same-document reload that fails transiently keeps the render on screen while it retries", async ({ page }) => {
+  // The file on screen changed on disk, and the reload hits a server that is
+  // briefly failing. The reader keeps the document, its outline and its
+  // facts strip; a small notice says the reload is retrying (#468).
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  const reload = await reloadRenderedLinksDemo(page, async attempt => {
+    if (attempt === 1) return 500;
+    await retryGate;
+    return "continue";
+  });
+
+  // The first reload has failed and the retry is held at the gate.
+  await expect.poll(() => reload.reloads()).toBeGreaterThanOrEqual(2);
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+  await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  // Screen readers hear it through the page's always-exposed status region.
+  await expect(page.locator("#preview-reload-status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.getByRole("button", { name: "Retry loading this file" })).toBeHidden();
+  // Nothing was updated: the facts strip does not pulse "Updated" next to it.
+  // Read once rather than with a retrying assertion, which would wait the
+  // 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  expect(await page.locator("#preview-updated").isHidden()).toBe(true);
+
+  releaseRetry();
+  await expect(page.locator("#preview")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
+  await expect(page.locator("#preview-reload-status")).toHaveText("");
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(2);
+  // The edit has landed now, so now the strip says so.
+  await expect(page.locator("#file-facts-strip")).toHaveClass(/is-updated/);
+});
+
+test("A reload overtaken by a newer one that fails does not pulse Updated", async ({ page }) => {
+  // Two quick edits: the first reload is held, the second fails. The first
+  // one's answer then arrives for a load that no longer owns the preview, so
+  // nothing on screen was updated and the strip must not say otherwise.
+  let releaseFirst: () => void = () => {};
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const reload = await reloadRenderedLinksDemo(page, async attempt => {
+    if (attempt !== 1) return 500;
+    await firstGate;
+    return "continue";
+  });
+  await fs.writeFile(workspacePath("links-demo.md"), "# Markdown Cross-Document Links\n\nSecond edit.\n", "utf8");
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  expect(reload.reloads()).toBeGreaterThanOrEqual(2);
+
+  const firstAnswer = page.waitForResponse(response =>
+    response.url().includes("links-demo.md") && response.url().includes("/api/document?") && response.status() === 200);
+  releaseFirst();
+  await firstAnswer;
+  // Let the page handle that answer before reading the strip once.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(notice).toBeVisible();
+});
+
+test("A text file that turns binary while a reload retries takes the reload notice down", async ({ page }) => {
+  // An extensionless file is classified by its bytes, so the same document
+  // can become binary. Its binary notice replaces the kept render.
+  let reloading = false;
+  await page.route("**/api/document?*", route => {
+    const id = new URL(route.request().url()).searchParams.get("id") ?? "";
+    if (reloading && id.endsWith("/notes")) return route.fulfill({ status: 500, json: { error: "document render failed" } });
+    return route.continue();
+  });
+  await fs.writeFile(workspacePath("notes"), "plain notes\n", "utf8");
+  await openTreeFile(page, "notes");
+  await expect(page.locator("#preview")).toContainText("plain notes");
+
+  reloading = true;
+  await fs.writeFile(workspacePath("notes"), "plain notes, edited\n", "utf8");
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await fs.writeFile(workspacePath("notes"), Buffer.from([0x00, 0x01, 0x02, 0x00]));
+  await expect(page.locator("#preview")).toContainText("This file type isn't viewable in uatu.");
+  await expect(notice).toBeHidden();
+});
+
+test("A same-document reload whose retries all fail keeps the render and offers Retry", async ({ page }) => {
+  // The schedule (250 ms, 1 s, 3 s, 10 s) is driven by a fake clock so the
+  // test does not wait 14 s of real time. Every reload fails until the server
+  // "recovers"; the reader keeps the document and gets a Retry button that
+  // makes one new request.
+  await page.clock.install();
+  await page.reload();
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  let recovered = false;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  const reload = await reloadRenderedLinksDemo(page, async () => {
+    if (!recovered) return 500;
+    await retryGate;
+    return "continue";
+  });
+
+  const notice = page.locator("#preview-reload-notice");
+  const retry = notice.getByRole("button", { name: "Retry loading this file" });
+  // The first request plus the four scheduled retries; advance the clock
+  // only after each failure has scheduled its successor.
+  await expect.poll(async () => {
+    await page.clock.runFor(10_000);
+    return reload.reloads();
+  }, { timeout: 20_000 }).toBe(5);
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded.");
+  await expect(retry).toBeVisible();
+  await page.clock.runFor(60_000);
+  expect(reload.reloads()).toBe(5);
+
+  // Chat or a right-docked terminal can leave the preview heading narrower
+  // than the notice without the header stacking. The notice wraps inside the
+  // heading instead of running past it, and Retry stays inside too.
+  const narrow = await page.addStyleTag({ content: ".preview-heading { width: 150px; max-width: 150px; }" });
+  const heading = (await page.locator(".preview-heading").boundingBox())!;
+  for (const part of [notice, retry]) {
+    const box = (await part.boundingBox())!;
+    expect(box.x + box.width).toBeLessThanOrEqual(heading.x + heading.width + 0.5);
+  }
+  await narrow.evaluate(element => element.remove());
+
+  recovered = true;
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  // While that request is in flight the notice says so and Retry is gone,
+  // so a second press cannot start a load that discards this one's answer.
+  await expect.poll(() => reload.reloads()).toBe(6);
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(retry).toBeHidden();
+  // The keyboard user is not dropped onto the page body when Retry hides.
+  expect(await page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body)).toBe(true);
+  await page.keyboard.press("Enter");
+
+  releaseRetry();
+  await expect(page.locator("#preview")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
+  expect(reload.reloads()).toBe(6);
+});
+
+test("Switching to Diff while a failed reload retries takes the reload notice down", async ({ page }) => {
+  // The notice belongs to the render it kept. Diff replaces that render
+  // without going through a document load, so it must clear the notice too.
+  await reloadRenderedLinksDemo(page, async attempt => attempt === 1 ? 500 : new Promise<never>(() => {}));
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await page.locator("#view-diff").click();
+  await expect(page.locator(".uatu-diff-host")).toBeVisible();
+  await expect(notice).toBeHidden();
+});
+
+test("Switching to Diff takes the reload notice down before the diff arrives", async ({ page }) => {
+  // The retry belongs to the Rendered view the reader just left, so the
+  // notice goes as soon as Diff is chosen, while its request is in flight or
+  // if it fails, and the Retry button is never left doing nothing.
+  let diffRequested = false;
+  await page.route("**/api/document/diff?*", () => {
+    diffRequested = true;
+    return new Promise<never>(() => {});
+  });
+  await reloadRenderedLinksDemo(page, async attempt => attempt === 1 ? 500 : new Promise<never>(() => {}));
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await page.locator("#view-diff").click();
+  await expect.poll(() => diffRequested).toBe(true);
+  await expect(notice).toBeHidden();
+});
+
+// Answers every /api/document request for links-demo.md through `answer`,
+// which sees the requested view; other documents pass through.
+async function routeLinksDemoViews(
+  page: Page,
+  answer: (view: string) => Promise<"continue" | number>,
+): Promise<void> {
+  await page.route("**/api/document?*", async route => {
+    const url = new URL(route.request().url());
+    if (!(url.searchParams.get("id") ?? "").endsWith("/links-demo.md")) return route.continue();
+    const outcome = await answer(url.searchParams.get("view") ?? "");
+    if (outcome === "continue") return route.continue();
+    return route.fulfill({ status: outcome, json: { error: "document render failed" } });
+  });
+}
+
+function editLinksDemo(): Promise<void> {
+  return fs.writeFile(
+    workspacePath("links-demo.md"),
+    "# Markdown Cross-Document Links\n\nReload landed marker.\n\n## Sibling document\n",
+    "utf8",
+  );
+}
+
+for (const layout of ["split-h", "split-v"] as const) {
+  test(`A ${layout} reload whose second view fails transiently keeps both panes while it retries`, async ({ page }) => {
+    // A split reload asks for the current view, then the other one. When only
+    // the second request fails, the split on screen stays, as it does when
+    // the first fails, instead of collapsing to one pane.
+    let reloading = false;
+    let sourceReloads = 0;
+    let releaseRetry: () => void = () => {};
+    const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+    await routeLinksDemoViews(page, async view => {
+      if (!reloading || view !== "source") return "continue";
+      sourceReloads += 1;
+      if (sourceReloads === 1) return 500;
+      await retryGate;
+      return "continue";
+    });
+    await openTreeFile(page, "links-demo.md");
+    await page.locator(`.uatu-layout-toolbar [data-layout-value='${layout}']`).click();
+    const split = page.locator(`#preview.is-split.is-${layout}`);
+    await expect(split.locator(".preview-pane-source")).toContainText("External links are unaffected");
+    await expect(split.locator(".preview-pane-rendered")).toContainText("External links are unaffected");
+
+    reloading = true;
+    await editLinksDemo();
+    await expect.poll(() => sourceReloads).toBeGreaterThanOrEqual(2);
+    const notice = page.locator("#preview-reload-notice");
+    await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+    await expect(split.locator(".preview-pane-source")).toContainText("External links are unaffected");
+    await expect(split.locator(".preview-pane-rendered")).toContainText("External links are unaffected");
+    await expect(page.locator("#file-facts-strip")).toBeVisible();
+
+    releaseRetry();
+    await expect(split.locator(".preview-pane-rendered")).toContainText("Reload landed marker.");
+    await expect(split.locator(".preview-pane-source")).toContainText("Reload landed marker.");
+    await expect(notice).toBeHidden();
+  });
+}
+
+test("A split layout that fell back to one pane keeps that pane when a later reload fails", async ({ page }) => {
+  // Entering Side-by-side with the Source request failing falls back to the
+  // single Rendered pane. That pane is still this document on screen, so a
+  // later failed reload in Side-by-side keeps it, as it would keep the split.
+  let reloading = false;
+  await routeLinksDemoViews(page, async view => view === "source" || reloading ? 500 : "continue");
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='split-h']")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+
+  reloading = true;
+  await editLinksDemo();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+  await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
+});
+
+test("Choosing a split while a single-pane reload fails keeps the pane and shows the chosen layout", async ({ page }) => {
+  // The kept single pane stands in for the split that could not load, as a
+  // split's own fallback pane does, so the layout toolbar shows the choice.
+  let failing = false;
+  await routeLinksDemoViews(page, async () => failing ? 500 : "continue");
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  failing = true;
+  await editLinksDemo();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice).toBeVisible();
+
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='split-h']")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='single']")).toHaveAttribute("aria-checked", "false");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  // Source and Diff stay reachable from the kept pane.
+  await expect(page.locator("#view-control")).toBeVisible();
+  await expect(page.locator("#view-diff")).toBeVisible();
+});
+
+test("A split's fallback pane retries when only the second view fails to reload", async ({ page }) => {
+  // The split fell back to one pane. A reload whose current view answers but
+  // whose other view fails keeps the pane and retries, and the split comes
+  // back once both views answer.
+  let sourceFails = true;
+  let reloading = false;
+  let sourceReloads = 0;
+  await routeLinksDemoViews(page, async view => {
+    if (view !== "source") return "continue";
+    if (reloading) sourceReloads += 1;
+    return sourceFails ? 500 : "continue";
+  });
+  await openTreeFile(page, "links-demo.md");
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+
+  reloading = true;
+  await editLinksDemo();
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+
+  sourceFails = false;
+  const split = page.locator("#preview.is-split.is-split-h");
+  await expect(split.locator(".preview-pane-rendered")).toContainText("Reload landed marker.");
+  await expect(split.locator(".preview-pane-source")).toContainText("Reload landed marker.");
+  await expect(notice).toBeHidden();
+  expect(sourceReloads).toBeGreaterThanOrEqual(2);
+});
+
+test("A re-selection that recovers from a failed load does not pulse Updated", async ({ page }) => {
+  // Selecting the file on screen again makes a new request; if it fails and
+  // its retry lands, the file itself never changed, so nothing says Updated.
+  let phase: "open" | "fail" | "hold" = "open";
+  let retried = false;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  await routeLinksDemoViews(page, async () => {
+    if (phase === "open") return "continue";
+    if (phase === "fail") {
+      phase = "hold";
+      return 500;
+    }
+    retried = true;
+    await retryGate;
+    return "continue";
+  });
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#file-facts-strip")).toBeVisible();
+  await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+
+  phase = "fail";
+  await treeRow(page, "links-demo.md").click();
+  // The retry is held until the notice shows the failed request was seen.
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect.poll(() => retried).toBe(true);
+  releaseRetry();
+  await expect(notice).toBeHidden();
+  // Read once: a retrying assertion would wait the 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
+test("A resumed page whose reload of the file fails does not pulse Updated", async ({ page, request }) => {
+  // Resuming reconciles against /api/state. When that reports the file on
+  // screen changed and its reload fails, the render is kept and nothing says
+  // Updated, since nothing new landed.
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+  const state: StatePayload = await request.get("/api/state").then(response => response.json());
+  state.changedId = state.roots.flatMap(root => root.docs).find(doc => doc.relativePath === "links-demo.md")!.id;
+  let failedReloads = 0;
+  await routeLinksDemoViews(page, async () => {
+    failedReloads += 1;
+    return 500;
+  });
+  await page.route("**/api/state*", route => route.fulfill({ json: { ...state, generatedAt: Date.now() + 10_000 } }));
+  await page.evaluate(() => {
+    const event = new Event("pageshow");
+    Object.defineProperty(event, "persisted", { value: true });
+    window.dispatchEvent(event);
+  });
+
+  await expect(page.locator("#preview-reload-notice")).toBeVisible();
+  expect(failedReloads).toBeGreaterThanOrEqual(1);
+  // Read once: a retrying assertion would wait the 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
+test("A retry after a session restart does not pulse Updated for an unchanged file", async ({ page, request }) => {
+  // A restarted session has a new epoch, so the file on screen reloads. Its
+  // first request fails and the retry lands the same file: nothing on disk
+  // changed, so nothing says Updated.
+  await openTreeFile(page, "links-demo.md");
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+  await expect(page.locator("#file-facts-strip")).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+  const state = await request.get("/api/state").then(response => response.json()) as StatePayload & { epoch: string };
+  state.epoch = `${state.epoch}-restarted`;
+  let phase: "fail" | "hold" = "fail";
+  let retried = false;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  await routeLinksDemoViews(page, async () => {
+    if (phase === "fail") {
+      phase = "hold";
+      return 500;
+    }
+    retried = true;
+    await retryGate;
+    return "continue";
+  });
+  await page.route("**/api/state*", route => route.fulfill({ json: { ...state, generatedAt: Date.now() + 10_000 } }));
+  await page.evaluate(() => {
+    const event = new Event("pageshow");
+    Object.defineProperty(event, "persisted", { value: true });
+    window.dispatchEvent(event);
+  });
+
+  const notice = page.locator("#preview-reload-notice");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect.poll(() => retried).toBe(true);
+  releaseRetry();
+  await expect(notice).toBeHidden();
+  // Read once: a retrying assertion would wait the 3 s pulse out.
+  expect(await page.locator("#file-facts-strip").evaluate(strip => strip.classList.contains("is-updated"))).toBe(false);
+  await expect(page.locator("#preview")).toContainText("External links are unaffected");
+});
+
+test("A same-document reload that fails for good still shows the unavailable notice", async ({ page }) => {
+  // A 404 is final: the file is gone, so keeping its old render would mislead.
+  await reloadRenderedLinksDemo(page, async () => 404);
+
+  await expect(page.locator("#preview")).toContainText(
+    "File unavailable. It may have been removed or excluded from this workspace.",
+  );
+  await expect(page.locator("#preview-reload-notice")).toBeHidden();
+  await expect(page.locator(".uatu-outline-link")).toHaveCount(0);
+  await expect(page.locator("#file-facts-strip")).toBeHidden();
 });
 
 const permissionNoticeTitle = "A document the server cannot read shows the permission notice once and loads on the next selection";

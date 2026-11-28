@@ -2697,6 +2697,75 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   flex-shrink: 0;
 }
 
+/* A reload of the document on screen failed; the last good render stays in
+   place below, so this is a quiet chip, not a banner. Once the retries are
+   used up it carries a Retry button. */
+.preview-reload-notice[hidden],
+.preview-reload-retry[hidden] {
+  display: none;
+}
+
+.preview-reload-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: light-dark(#6f4e00, #eac54f);
+  border: 1px solid var(--notice-warn-border);
+  background: var(--notice-warn-bg);
+  padding: 0.1rem 0.5rem;
+  /* Not a full pill: in a preview column narrower than the message (Chat or
+     a right-docked terminal beside it) the chip shrinks and its text wraps,
+     and a pill's round ends would clip the wrapped lines. */
+  border-radius: 0.6rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.preview-reload-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.preview-reload-retry {
+  flex-shrink: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.preview-reload-retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Touch target, matching the 44px the rest of touch mode guarantees. Drawn
+   as an overlay, as on .connection-state: growing the button would push the
+   preview header open whenever the chip appears. Keyed on the pointer, not
+   the ui-mode attribute. */
+@media (pointer: coarse) {
+  .preview-reload-retry {
+    position: relative;
+  }
+
+  .preview-reload-retry::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+
 /* Toolbar in the preview header. View chooser and Layout chooser live
    here as separate pills (they each carry their own background and
    border via .view-control / .layout-chooser), so the toolbar itself is

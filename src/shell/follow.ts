@@ -117,7 +117,7 @@ export function applyChipClick(): void {
 // one chokepoint — rather than in each caller. Doing it before the load
 // also means the reveal logic downstream (search's match jump) measures a
 // visible surface.
-export function applyUserRowClick(documentId: string): Promise<void> {
+export async function applyUserRowClick(documentId: string): Promise<void> {
   revealPreviewSurface();
   setFollowEnabled(false);
   setSelectedId(documentId, "navigation");
@@ -128,10 +128,10 @@ export function applyUserRowClick(documentId: string): Promise<void> {
   }
   syncFollowToggle();
   renderSidebar();
-  // Returns the load so callers that need to act on the mounted document —
-  // project search jumping to a match — can await it. Callers that don't
+  // Awaits the load so callers that need to act on the mounted document —
+  // project search jumping to a match — can await this. Callers that don't
   // simply ignore it, as the tree's selection handler does.
-  return loadDocument(documentId);
+  await loadDocument(documentId);
 }
 
 // Rule A's close variant deliberately does not reveal the touch Preview tab.

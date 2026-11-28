@@ -10,7 +10,7 @@ import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
-import type { FileFacts, RootGroup, ViewMode } from "../shared/types";
+import type { FileFacts, RootGroup, ViewLayout, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
 import { previewObserverRoot, previewScrollRoot } from "../shell/preview-scroll-root";
 import { renderBinaryUnavailable } from "./binary";
@@ -43,7 +43,7 @@ import { renderMediaPreview, releaseMediaPreview } from "../media/preview";
 import { documentIndex } from "../shell/document-state";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
-import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
+import { clearUpdateSignal, signalActiveDocumentUpdated, syncFileFactsStrip } from "./file-facts-strip";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
 import { getSelectedDestination, getSelectionActivation, getSelectionGeneration, setPreviewMode } from "../shell/selection";
@@ -59,6 +59,7 @@ import {
   type DocumentLoadFailure,
   type DocumentLoadTrigger,
 } from "./load-retry";
+import { createPresentedRender, fileChanged, reloadNoticeShown, setReloadNotice, type FileStamp, type PresentedRenderKey } from "./presented-render";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -104,6 +105,46 @@ let lastLoadedDocumentId: string | null = null;
 const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration, documentRevisionKey);
 const documentLoadRetry = createDocumentLoadRetry();
 const alwaysCurrent = () => true;
+const presentedRender = createPresentedRender(previewElement);
+// The index's view of the file the noted render shows, so a load that lands
+// after a failed reload pulses Updated only if the file itself changed.
+let presentedFile: FileStamp | null = null;
+function fileStamp(documentId: string): FileStamp | null {
+  const doc = documentIndex.find(documentId);
+  return doc ? { epoch: documentIndex.epoch, revision: doc.revision, mtimeMs: doc.mtimeMs } : null;
+}
+
+// A document render was just mounted: it is the last good render a failed
+// reload of the same document, view and layout may keep on screen. `layout`
+// is the layout that render is in, which differs from the chosen one when a
+// split falls back to a single pane.
+function notePresentedRender(documentId: string, layout: ViewLayout): void {
+  presentedRender.note({ documentId, view: appState.viewMode, layout });
+  presentedFile = fileStamp(documentId);
+  setReloadNotice("hidden");
+}
+
+// Whether a render a failed reload of `key` may keep is on screen: the render
+// noted for exactly that key, or, in a split layout, the single pane that
+// split fell back to. Either is this document on screen.
+function showsRenderFor(key: PresentedRenderKey): boolean {
+  return presentedRender.shows(key)
+    || (key.layout !== "single" && presentedRender.shows({ ...key, layout: "single" }));
+}
+
+// The reload notice's Retry button, shown once the schedule is used up:
+// one new request for the render still on screen, like selecting the file
+// again (a transient failure of it starts the schedule over). The notice says
+// "Retrying…" while that request is in flight, which takes the button away so
+// a second press cannot start a load that discards this one's answer.
+document.querySelector<HTMLButtonElement>("#preview-reload-notice .preview-reload-retry")
+  ?.addEventListener("click", () => {
+    const documentId = appState.selectedId;
+    if (documentId && showsRenderFor({ documentId, view: appState.viewMode, layout: appState.viewLayout })) {
+      setReloadNotice("retrying");
+      void loadDocument(documentId);
+    }
+  });
 
 // `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
 // the client type stays in lockstep with the renderer's view of the
@@ -277,6 +318,10 @@ export async function renderSinglePayload(
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
+  // A document without a split form shows this single pane in every layout;
+  // one with a split form is in the single layout only, or in a split that
+  // fell back to it (showsRenderFor lets a reload in that split keep it).
+  notePresentedRender(payload.id, documentSupportsSplit(payload) ? "single" : appState.viewLayout);
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
@@ -411,6 +456,7 @@ export async function renderSplitPayloads(
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
+  notePresentedRender(sourcePayload.id, appState.viewLayout);
   refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
   observePreviewSvgImages(previewElement);
 
@@ -442,26 +488,37 @@ export async function renderSplitPayloads(
 // `trigger` is "retry" only from the retry schedule's own timer. Every other
 // caller (navigation, a view change, a live frame reloading the selection) is
 // a "request", and a request that fails transiently starts the schedule over.
+// Resolves to true only when this load presented the document and still owns
+// the preview, so a live reload does not announce an update that did not land
+// (a failed fetch, a load a newer one overtook, a preview not yet shown).
 export async function loadDocument(
   documentId: string,
   onPresented?: () => void,
   trigger: DocumentLoadTrigger = "request",
-) {
+): Promise<boolean> {
   const selectionGeneration = getSelectionGeneration();
   if (deferHiddenPreview(() => {
     const current = appState.selectedId;
     const same = current === documentId && selectionGeneration === getSelectionGeneration();
     if (current && appState.previewMode.kind === "document") void loadDocument(current,
       same ? onPresented : undefined, same ? trigger : "request");
-  })) return;
-  await executeLoadDocument(documentId, trigger);
+  })) return false;
+  const presented = await executeLoadDocument(documentId, trigger);
   if (selectionGeneration === getSelectionGeneration() && appState.selectedId === documentId) onPresented?.();
+  return presented;
 }
 
-async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrigger) {
+// True when this load presented the document and still owns the preview.
+// False when the fetch failed (the preview shows why, or keeps the render the
+// reload failed to replace) or a newer load overtook this one.
+async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrigger): Promise<boolean> {
   const requestedView = appState.viewMode;
   const requestedLayout = appState.viewLayout;
   const loadToken = documentLoadGuard.begin(documentId, requestedView, requestedLayout);
+  const renderKey: PresentedRenderKey = { documentId, view: requestedView, layout: requestedLayout };
+  // The reload notice belongs to the render it is keeping; any other load
+  // replaces that render, so the notice goes with it.
+  if (!showsRenderFor(renderKey)) setReloadNotice("hidden");
   const activation = getSelectionActivation();
   const isCurrent = () => documentLoadGuard.isCurrent(
     loadToken,
@@ -512,11 +569,14 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   if (!doc) {
     documentLoadRetry.settle();
     renderUnavailableDocument(documentId);
-    return;
+    return true;
   }
   setPreviewMode({ kind: "document" });
   if (doc.kind === "binary") {
     documentLoadRetry.settle();
+    // An extensionless file can turn binary under the same id, replacing a
+    // render a failed reload of it was keeping.
+    setReloadNotice("hidden");
     syncFileFactsStrip({ kind: "hidden" });
     if (mediaKind(doc.name)) {
       renderMediaPreview(doc, documentIndex.epoch);
@@ -525,7 +585,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     } else {
       renderBinaryUnavailable(doc);
     }
-    return;
+    return true;
   }
 
   // Diff view bypasses the rendered/source pipeline entirely — it has its
@@ -535,16 +595,29 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     documentLoadRetry.settle();
     void learnEmbeddedImages(documentId);
     await applyDiffForActiveDocument(documentId);
-    return;
+    return true;
   }
 
   // Server-side renderDocument only understands "rendered" | "source". If
   // the viewMode is somehow "diff" we already short-circuited above; this
   // assertion narrows the param so the response stays well-typed.
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
-  const result = await fetchDocumentPayload(documentId, apiView);
+  let result = await fetchDocumentPayload(documentId, apiView);
+  if (!isCurrent()) return false;
+  // A reload of the split on screen, or of the pane it fell back to, needs
+  // the other view too. Fetch it here, so a failure of that request keeps
+  // what is on screen and retries exactly as a failure of the first does;
+  // renderSplitForDocument then finds both views cached. With nothing of the
+  // document on screen, renderSplitForDocument fetches it and falls back to
+  // one pane as before.
+  if (result.ok && requestedLayout !== "single" && documentSupportsSplit(result.payload)
+    && showsRenderFor(renderKey)) {
+    const companion = await fetchDocumentPayload(documentId, apiView === "source" ? "rendered" : "source");
+    if (!isCurrent()) return false;
+    if (companion.ok) rememberDocumentPayload(companion.payload);
+    else result = companion;
+  }
 
-  if (!isCurrent()) return;
   if (!result.ok) {
     const { failure } = result;
     if (!isTransientDocumentFailure(failure)) {
@@ -555,7 +628,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
       // selecting it again makes one new request.
       documentLoadRetry.settle();
       renderUnavailableDocument(documentId, documentFailureMessage(failure, false));
-      return;
+      return false;
     }
     // The server failed, or no complete answer arrived. Nothing else will
     // ask again, so retry while this is still the load the user is waiting on.
@@ -566,15 +639,39 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
     }), () => {
       if (isCurrent()) void loadDocument(documentId, undefined, "retry");
     }, trigger);
+    // A reload of the render already on screen keeps it, with its outline and
+    // facts strip: the file was readable a moment ago and nothing says it is
+    // gone. The notice says whether another attempt is pending or offers
+    // Retry once the schedule is used up. The guard above already proved this
+    // load still owns the selection, view, layout and revision.
+    if (showsRenderFor(renderKey)) {
+      // Kept as the pane a split fell back to: it stands in for the split the
+      // reader chose, so the layout toolbar shows that choice, and the view
+      // chooser (hidden by a layout switch that found nothing cached) is back.
+      if (!presentedRender.shows(renderKey)) {
+        mountLayoutToolbar(true);
+        syncViewToggle({ kind: doc.kind });
+      }
+      setReloadNotice(retrying ? "retrying" : "gave-up");
+      return false;
+    }
     renderUnavailableDocument(documentId, documentFailureMessage(failure, retrying));
-    return;
+    return false;
   }
 
   const payload = result.payload;
   documentLoadRetry.settle();
+  // A notice still up here is this render's: an earlier reload failed. If the
+  // file changed since the render on screen, this load lands that change,
+  // which the live frame that started it could not announce. A re-selection
+  // of an unchanged file that failed and recovered is no update.
+  const landsFailedReload = reloadNoticeShown() && fileChanged(presentedFile, fileStamp(documentId));
   rememberDocumentPayload(payload);
   if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
+  if (!isCurrent()) return false;
+  if (landsFailedReload) signalActiveDocumentUpdated();
+  return true;
 }
 
 // One `/api/document` request, classified (see classifyDocumentResponse).
