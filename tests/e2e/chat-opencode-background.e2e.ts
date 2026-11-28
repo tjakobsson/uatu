@@ -280,7 +280,8 @@ for (const width of [320, 390, 1280]) for (const colorScheme of ["light", "dark"
       await expect(row.locator(".chat-worker-cost")).toHaveAttribute("aria-label", "Cumulative subagent session cost: 0.0036 USD");
       await control(request, { op: "workerReport", childId: worker.childId, usedModel: "Fixture Model", usedEffort: "medium", costUsd: 0.0012 });
       await expect(row.locator(".chat-worker-effort")).toHaveText("medium");
-      await expect(row.locator(".chat-worker-cost")).toHaveText("$0.0012");
+      // OpenCode's own $0.0012 plus the list-priced $0.0036 step, as the receipt counts them.
+      await expect(row.locator(".chat-worker-cost")).toHaveText("$0.0048");
       await expect(row.locator(".chat-worker-tokens")).not.toHaveText("—");
       const bounds = await row.evaluate(node => {
         const parts = [node, ...node.querySelectorAll(".chat-worker-inspect, .chat-worker-model, .chat-worker-tokens, .chat-worker-cost, .chat-task-stop")];

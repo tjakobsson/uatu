@@ -104,7 +104,10 @@ describe("ListPrices", () => {
     // The first zero starts the load; nothing waits for it.
     expect(prices.price(usage, SOL)).toBe(usage);
     await prices.settled();
-    expect(prices.price(usage, SOL).costUsd).toBeCloseTo((1_000_000 * 4 + 150_000 * 15 + 200_000 * 0.2) / 1e6, 12);
+    const priced = prices.price(usage, SOL);
+    expect(priced.costUsd).toBeCloseTo((1_000_000 * 4 + 150_000 * 15 + 200_000 * 0.2) / 1e6, 12);
+    // Marked, so a session total can add it to what OpenCode reported.
+    expect(priced.listPriced).toBe(true);
   });
 
   test("never overrides a reported price, and leaves usage without tokens, model or catalog match unpriced", async () => {

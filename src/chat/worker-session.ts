@@ -5,10 +5,10 @@ export type WorkerMessageModel = { model: string; createdAt: number; effort?: st
 
 /** Only a provider's authoritative session aggregate can price a session.
  * Message sums can omit compaction, reverted history and truncated pages.
- * One exception: an OpenCode total of zero means OpenCode priced none of the
- * session's steps, and where Uatu priced them at list prices
- * (`opencode/v2/list-prices.ts`) the session costs their sum, as OpenCode's
- * own total sums its steps. `steps` is the session's per-message usage.
+ * The steps OpenCode reported as costing 0 and Uatu priced at list prices
+ * (`listPriced`, from `opencode/v2/list-prices.ts`) are not in that aggregate,
+ * so they are added to it: OpenCode's figure stands, and the session costs
+ * what the receipt counts for it. `steps` is the session's per-message usage.
  */
 export function workerSessionReport(costUsd: number | null | undefined, models: ReadonlyMap<string, WorkerMessageModel> | undefined, steps?: ReadonlyMap<string, TokenUsage>): WorkerSessionReport {
   let latest: { id: string; value: WorkerMessageModel } | undefined;
@@ -20,10 +20,9 @@ export function workerSessionReport(costUsd: number | null | undefined, models: 
 
 function sessionCost(costUsd: number | null | undefined, steps: ReadonlyMap<string, TokenUsage> | undefined): number | null {
   if (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd < 0) return null;
-  if (costUsd > 0) return costUsd;
   let listed = 0;
-  for (const usage of steps?.values() ?? []) listed += usage.costUsd ?? 0;
-  return listed;
+  for (const usage of steps?.values() ?? []) if (usage.listPriced) listed += usage.costUsd ?? 0;
+  return costUsd + listed;
 }
 
 /** A dash for an unreported or unpriced session; the label says which. */

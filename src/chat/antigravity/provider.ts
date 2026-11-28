@@ -1169,7 +1169,7 @@ function inputsWithoutUsage(turn: Turn): Array<{ position: number; text: string 
 function addUsage(total: TokenUsage, usage: unknown): void {
   if (!usage || typeof usage !== "object") return;
   const value = usage as Record<string, unknown>;
-  const add = (key: keyof TokenUsage, source: string) => {
+  const add = (key: Exclude<keyof TokenUsage, "listPriced">, source: string) => {
     const amount = value[source];
     if (typeof amount === "number" && Number.isFinite(amount) && amount >= 0) total[key] = (total[key] ?? 0) + amount;
   };

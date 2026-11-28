@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { contextTokens, formatTokens, formatUsd, hasPrice, sameUsage, totalTokens } from "./usage";
+import { contextTokens, formatTokens, formatUsd, hasPrice, mergeAssistantMessage, sameUsage, totalTokens } from "./usage";
 import type { TokenUsage } from "./types";
 
 describe("formatTokens", () => {
@@ -78,5 +78,13 @@ describe("sameUsage", () => {
     expect(sameUsage({ input: 1 }, { input: 1 })).toBe(true);
     expect(sameUsage({ input: 1 }, {})).toBe(false);
     expect(sameUsage({ input: 1, costUsd: 0.5 }, { input: 1, costUsd: 0.6 })).toBe(false);
+  });
+});
+
+describe("mergeAssistantMessage", () => {
+  test("a restated usage carrier keeps the list-price marker only while the incoming figure carries it", () => {
+    const carrier = (usage: TokenUsage) => ({ id: "usage:m", type: "assistant_message" as const, createdAt: 1, markdown: "", usage });
+    expect(mergeAssistantMessage(carrier({ input: 5, costUsd: 0.01, listPriced: true }), carrier({ input: 5, costUsd: 0.02 })).usage).toEqual({ input: 5, costUsd: 0.02 });
+    expect(mergeAssistantMessage(carrier({ input: 5, costUsd: 0 }), carrier({ input: 5, costUsd: 0.01, listPriced: true })).usage).toEqual({ input: 5, costUsd: 0.01, listPriced: true });
   });
 });

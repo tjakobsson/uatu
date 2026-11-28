@@ -3009,7 +3009,7 @@ Subagent worker rows SHALL report truthful latest execution model and effort, cu
 - **AND** A newer execution without effort SHALL clear the older effort.
 - **AND** Execution reports SHALL NOT claim independent downstream-provider confirmation.
 - **AND** Cost SHALL use authoritative cumulative session snapshots, including compaction and reverted spend, exclude parent/descendant spend, and repeat one session snapshot across aliases/reused-child occurrences without adding those snapshots to receipts.
-- **AND** When the authoritative snapshot is zero and Chat priced the session's own messages at list prices, the session cost SHALL be the sum of those messages' costs, as OpenCode's own total sums its steps; a nonzero snapshot SHALL stand as reported.
+- **AND** Where Chat priced some of the session's own messages at list prices because OpenCode reported them as costing zero, the session cost SHALL be the authoritative snapshot plus those messages' list-price costs; the snapshot SHALL never be lowered or replaced.
 - **AND** Unreported/incomplete cost or effort SHALL show a compact dash labeled "not reported" accessibly; a reported zero — OpenCode's cost for a model it has no price for — SHALL show a compact dash labeled "no price reported" accessibly, consistent with the conversation receipt, rather than a zero figure.
 - **AND** Shell work SHALL NOT claim subagent effort or session cost.
 - **AND** Sub-cent costs SHALL retain useful precision.

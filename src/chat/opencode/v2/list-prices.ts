@@ -215,7 +215,7 @@ export class ListPrices {
     const current = this.now() - this.validatedAt < this.maxAgeMs ? this.table : undefined;
     const rates = current && ratesFor(current, model.providerId, model.modelId);
     const costUsd = rates ? stepCost(rates, usage) : 0;
-    return costUsd > 0 ? { ...usage, costUsd } : usage;
+    return costUsd > 0 ? { ...usage, costUsd, listPriced: true } : usage;
   }
 }
 

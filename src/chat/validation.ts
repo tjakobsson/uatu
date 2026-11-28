@@ -389,12 +389,13 @@ function expectWorkerSession(value: unknown): void {
 function expectTokenUsage(value: unknown, label: string): void {
   if (value === undefined) return;
   const usage = expectRecord(value, label);
-  expectKeys(usage, [...TOKEN_USAGE_COMPONENTS, "costUsd"], label);
+  expectKeys(usage, [...TOKEN_USAGE_COMPONENTS, "costUsd", "listPriced"], label);
   for (const key of TOKEN_USAGE_COMPONENTS) {
     expectOptionalCount(usage[key], `${label} ${key}`);
   }
   // Money, not a count: fractional cents are the normal case.
   expectOptionalNonNegative(usage.costUsd, `${label} costUsd`);
+  if (usage.listPriced !== undefined && usage.listPriced !== true) throw new Error(`${label} listPriced must be true when present`);
 }
 
 function expectPositiveLimit(value: unknown, label: string): void {

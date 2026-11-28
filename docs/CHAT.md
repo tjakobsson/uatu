@@ -337,11 +337,12 @@ Cost comes only from an authoritative cumulative session aggregate: OpenCode 2.x
 `SessionInfo.cost` on the existing history metadata read and live
 `session.usage.updated.cost` snapshots. They replace rather than add to each other.
 The native total includes compaction usage and retains spend hidden by revert;
-visible assistant-message sums cannot establish that total and are not a fallback,
-with one exception: a native total of zero means OpenCode priced none of the
-session's steps, and where Chat priced them at list prices (see
-[Cost on a subscription](#opencode)) the session cost is their sum. That sum
-leaves out compaction usage and any history outside the child-history read.
+visible assistant-message sums cannot establish that total and are never a fallback.
+Steps OpenCode reported as costing 0 and Chat priced at list prices (see
+[Cost on a subscription](#opencode)) are not in that total, so their figures are
+added to it. OpenCode's own figure always stands, and the worker row agrees with
+the receipt. List-priced compaction usage, and list-priced steps outside the
+child-history read, are not added.
 Current Claude and OpenCode 1.x integrations do not provide this authoritative
 aggregate, so their worker session cost is not reported even when task/message
 prices are available. Missing aggregate data remains unknown, not a partial sum.

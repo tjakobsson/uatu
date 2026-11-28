@@ -84,6 +84,12 @@ export function mergeAssistantMessage(current: AssistantMessageItem, incoming: A
     createdAt: usageOnly ? current.createdAt : incoming.createdAt,
     markdown: incoming.markdown || current.markdown,
     model: incoming.model ?? current.model,
-    ...(current.usage || incoming.usage ? { usage: { ...current.usage, ...incoming.usage } } : {}),
+    ...(current.usage || incoming.usage ? { usage: mergedUsage(current.usage, incoming.usage) } : {}),
   };
+}
+
+// A restated figure decides whether it is a list price; an older marker does not outlive it.
+function mergedUsage(current: TokenUsage | undefined, incoming: TokenUsage | undefined): TokenUsage {
+  const { listPriced: _marker, ...kept } = current ?? {};
+  return { ...(incoming ? kept : current), ...incoming };
 }
