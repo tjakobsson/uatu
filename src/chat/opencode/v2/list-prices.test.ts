@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { ListPrices, catalogLoader, priceTable, stepCost, type CatalogLoad } from "./list-prices";
+import { ListPrices, catalogLoader, priceTable, ratesFor, stepCost, type CatalogLoad } from "./list-prices";
 
 // The shape of models.opencode.ai's v2 catalog, trimmed to what pricing reads.
 // gpt-6.1-sol's figures are the public list prices on the day this was written.
@@ -40,23 +40,29 @@ describe("priceTable and stepCost replicate OpenCode's catalog pricing", () => {
   test("a step below the context tier is priced at the base rates, reasoning at the output rate", () => {
     const small = { input: 10_000, output: 1_000, reasoning: 500, cacheRead: 2_000, cacheWrite: 1_000 };
     // 10k×$2 + 1.5k×$10 + 2k×$0.1 + 1k×$2.5 (the first cache-write TTL), per million.
-    expect(stepCost(table.get("openai/gpt-6.1-sol")!, small)).toBeCloseTo((10_000 * 2 + 1_500 * 10 + 2_000 * 0.1 + 1_000 * 2.5) / 1e6, 12);
+    expect(stepCost(ratesFor(table, "openai", "gpt-6.1-sol")!, small)).toBeCloseTo((10_000 * 2 + 1_500 * 10 + 2_000 * 0.1 + 1_000 * 2.5) / 1e6, 12);
   });
 
   test("context — input plus cache read and write — above the tier size takes the tier's rates", () => {
-    expect(stepCost(table.get("openai/gpt-6.1-sol")!, usage)).toBeCloseTo((1_000_000 * 4 + 150_000 * 15 + 200_000 * 0.2) / 1e6, 12);
+    expect(stepCost(ratesFor(table, "openai", "gpt-6.1-sol")!, usage)).toBeCloseTo((1_000_000 * 4 + 150_000 * 15 + 200_000 * 0.2) / 1e6, 12);
     // Exactly at the size is not above it.
-    expect(stepCost(table.get("openai/gpt-6.1-sol")!, { input: 272_000 })).toBeCloseTo(272_000 * 2 / 1e6, 12);
-    expect(stepCost(table.get("openai/gpt-6.1-sol")!, { input: 271_000, cacheWrite: 1_001 })).toBeCloseTo((271_000 * 4 + 1_001 * 5) / 1e6, 12);
+    expect(stepCost(ratesFor(table, "openai", "gpt-6.1-sol")!, { input: 272_000 })).toBeCloseTo(272_000 * 2 / 1e6, 12);
+    expect(stepCost(ratesFor(table, "openai", "gpt-6.1-sol")!, { input: 271_000, cacheWrite: 1_001 })).toBeCloseTo((271_000 * 4 + 1_001 * 5) / 1e6, 12);
   });
 
   test("only per-token text prices are kept; an explicit cache write price is used when no TTL is listed", () => {
-    expect(table.has("openai/per-image")).toBe(false);
-    expect(stepCost(table.get("openai/explicit-cache")!, { cacheWrite: 1_000_000 })).toBe(3);
+    expect((ratesFor(table, "openai", "per-image") !== undefined)).toBe(false);
+    expect(stepCost(ratesFor(table, "openai", "explicit-cache")!, { cacheWrite: 1_000_000 })).toBe(3);
+  });
+
+  test("provider and model ids stay separate: a model id with a slash cannot price another provider's model", () => {
+    const ambiguous = priceTable({ a: { id: "a", models: { "b/c": { id: "b/c", cost: { text: { input: { price: 1 }, output: { price: 1 } } } } } } });
+    expect(ratesFor(ambiguous, "a", "b/c")).toBeDefined();
+    expect(ratesFor(ambiguous, "a/b", "c")).toBeUndefined();
   });
 
   test("entries are keyed by provider and model id; a malformed catalog prices nothing", () => {
-    expect(stepCost(table.get("reseller/gpt-6.1-sol")!, { input: 1_000_000 })).toBe(9);
+    expect(stepCost(ratesFor(table, "reseller", "gpt-6.1-sol")!, { input: 1_000_000 })).toBe(9);
     for (const value of [undefined, null, [], "catalog", { openai: { id: "openai", models: { x: { id: "x", cost: { text: { input: { price: "2" }, output: { price: 1 } } } } } } }]) {
       expect(priceTable(value).size).toBe(0);
     }
@@ -154,7 +160,7 @@ describe("catalogLoader follows OpenCode's own catalog settings", () => {
     })!;
     const first = await load(undefined);
     expect(first !== "unchanged" && first.etag).toBe('"v1"');
-    expect(first !== "unchanged" && first.table.has("openai/gpt-6.1-sol")).toBe(true);
+    expect(first !== "unchanged" && ratesFor(first.table, "openai", "gpt-6.1-sol") !== undefined).toBe(true);
     expect(await load('"v1"')).toBe("unchanged");
     expect(requests).toEqual([
       { url: "https://models.opencode.ai/experimental/v2.0/api.json?type=chat", etag: null },
@@ -178,7 +184,7 @@ describe("catalogLoader follows OpenCode's own catalog settings", () => {
       const file = path.join(directory, "models.json");
       writeFileSync(file, JSON.stringify(CATALOG));
       const loaded = await catalogLoader({ OPENCODE_MODELS_PATH: file, OPENCODE_DISABLE_MODELS_FETCH: "1" }, refuse)!(undefined);
-      expect(loaded !== "unchanged" && loaded.table.has("openai/gpt-6.1-sol")).toBe(true);
+      expect(loaded !== "unchanged" && ratesFor(loaded.table, "openai", "gpt-6.1-sol") !== undefined).toBe(true);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 });

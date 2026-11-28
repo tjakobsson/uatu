@@ -22,8 +22,16 @@ import { totalTokens } from "../../usage";
 /** USD per million tokens, and the context size above which a tier applies. */
 type Rates = { input: number; output: number; cacheRead: number; cacheWrite: number; above?: number };
 
-/** Each model's base rates and context tiers, keyed `<providerId>/<modelId>`. */
+/** Each model's base rates and context tiers, keyed by the exact provider and model pair (`ratesFor`). */
 export type PriceTable = ReadonlyMap<string, readonly Rates[]>;
+
+// A tuple, not `<provider>/<model>`: ids may themselves contain a slash.
+const key = (providerId: string, modelId: string) => JSON.stringify([providerId, modelId]);
+
+/** The rates for exactly this provider and model, if the table has them. */
+export function ratesFor(table: PriceTable, providerId: string, modelId: string): readonly Rates[] | undefined {
+  return table.get(key(providerId, modelId));
+}
 
 /** A fresh table and its ETag, or "unchanged" for a 304. Throws when the catalog cannot be had. */
 export type CatalogLoad = (etag: string | undefined) => Promise<{ table: PriceTable; etag?: string } | "unchanged">;
@@ -97,7 +105,7 @@ export function priceTable(catalog: unknown): PriceTable {
     for (const entry of Object.values(object(provider.models) ?? {})) {
       const model = object(entry);
       const rates = typeof model?.id === "string" ? modelRates(model.cost) : undefined;
-      if (rates) table.set(`${provider.id}/${model!.id}`, rates);
+      if (rates) table.set(key(provider.id, model!.id as string), rates);
     }
   }
   return table;
@@ -151,7 +159,7 @@ export class ListPrices {
   price(usage: TokenUsage, model: ModelRef | undefined): TokenUsage {
     if (usage.costUsd !== 0 || !model || totalTokens(usage) === 0) return usage;
     this.warm();
-    const rates = this.table?.get(`${model.providerId}/${model.modelId}`);
+    const rates = this.table && ratesFor(this.table, model.providerId, model.modelId);
     const costUsd = rates ? stepCost(rates, usage) : 0;
     return costUsd > 0 ? { ...usage, costUsd } : usage;
   }
