@@ -77,7 +77,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
 
   hubProcess: [
     async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts, hubChatPolicy, hubChatPolicyTrust, hubWorkerDismissals }, use, workerInfo) => {
-      const { hubPort, end } = hubPortBlock(workerInfo.parallelIndex);
+      const { hubPort, end } = hubPortBlock(workerInfo);
       if (hubWorkspaces.length >= HUB_PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${HUB_PORTS_PER_WORKER - 1} workspaces`);
       }

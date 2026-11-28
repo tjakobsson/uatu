@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import packageJson from "../package.json";
-import { checkPortLayout } from "../tests/e2e/ports";
+import { checkPortLayout, hubPortBlock, workerServerPort } from "../tests/e2e/ports";
 import { unitTestCommand } from "./test-ci";
 import { availableCores, MAX_WORKERS, testWorkers } from "./test-workers";
 
-function config(ci: boolean, workers?: string, ports?: { base: string; hub: string }) {
+function config(ci: boolean, workers?: string) {
   const env = { ...process.env };
   delete env.CI;
   delete env.UATU_E2E_LEG;
@@ -13,10 +13,6 @@ function config(ci: boolean, workers?: string, ports?: { base: string; hub: stri
   delete env.UATU_TEST_WORKERS;
   if (ci) env.CI = "true";
   if (workers !== undefined) env.UATU_TEST_WORKERS = workers;
-  if (ports) {
-    env.UATU_E2E_BASE_PORT = ports.base;
-    env.UATU_E2E_HUB_BASE_PORT = ports.hub;
-  }
   // --no-env-file: a local .env must not put back what this deleted.
   const result = Bun.spawnSync([
     process.execPath, "--no-env-file", "--eval",
@@ -82,21 +78,26 @@ test("Playwright and test:ci both take their worker count from the shared helper
   expect(unitTestCommand([], {}, 4)).toContain("--parallel=4");
 });
 
-test("e2e port ranges must stay disjoint and below the ephemeral range for the worker count", () => {
+test("e2e port ranges must stay disjoint and below the platform's ephemeral range", () => {
   // Each slot (parallelIndex, 0..workers-1) takes one harness port and a hub
-  // block of 10; Linux hands out ephemeral ports from 32768.
-  expect(() => checkPortLayout(MAX_WORKERS, 20000, 21000)).not.toThrow();
-  expect(() => checkPortLayout(4, 20000, 20004)).not.toThrow();
-  expect(() => checkPortLayout(5, 20000, 20004)).toThrow("overlap");
-  expect(() => checkPortLayout(5, 20005, 20000)).toThrow("overlap");
-  expect(() => checkPortLayout(1000, 20000, 21000)).not.toThrow();
-  expect(() => checkPortLayout(1001, 20000, 21000)).toThrow("overlap");
-  expect(() => checkPortLayout(176, 30000, 31000)).not.toThrow();
-  expect(() => checkPortLayout(177, 30000, 31000)).toThrow("ephemeral");
-  expect(() => checkPortLayout(999_999_999, 20000, 21000)).toThrow("UATU_TEST_WORKERS");
+  // block of 10. Linux hands out ephemeral ports from 32768, macOS from 49152.
+  expect(() => checkPortLayout(MAX_WORKERS, 20000, 21000, "linux")).not.toThrow();
+  expect(() => checkPortLayout(4, 20000, 20004, "linux")).not.toThrow();
+  expect(() => checkPortLayout(5, 20000, 20004, "linux")).toThrow("overlap");
+  expect(() => checkPortLayout(5, 20005, 20000, "linux")).toThrow("overlap");
+  expect(() => checkPortLayout(1000, 20000, 21000, "linux")).not.toThrow();
+  expect(() => checkPortLayout(1001, 20000, 21000, "linux")).toThrow("overlap");
+  expect(() => checkPortLayout(176, 30000, 31000, "linux")).not.toThrow();
+  expect(() => checkPortLayout(177, 30000, 31000, "linux")).toThrow("ephemeral");
+  expect(() => checkPortLayout(MAX_WORKERS, 40000, 41000, "darwin")).not.toThrow();
+  expect(() => checkPortLayout(MAX_WORKERS, 40000, 41000, "linux")).toThrow("ephemeral");
+  expect(() => checkPortLayout(999_999_999, 20000, 21000, "linux")).toThrow("UATU_TEST_WORKERS");
 });
 
-test("Playwright refuses a worker count whose port ranges would collide", () => {
-  expect(config(false, "4", { base: "20000", hub: "20004" }).workers).toBe(4);
-  expect(() => config(false, "5", { base: "20000", hub: "20004" })).toThrow("overlap");
+test("a worker's ports are checked against the worker count Playwright resolved", () => {
+  // Fixtures pass workerInfo, whose config.workers already reflects
+  // --workers and --debug. No base ports fit 5000 slots on any platform.
+  const slot = (workers: number) => ({ parallelIndex: 0, config: { workers } });
+  expect(() => workerServerPort(slot(5000))).toThrow("UATU_TEST_WORKERS");
+  expect(() => hubPortBlock(slot(5000))).toThrow("UATU_TEST_WORKERS");
 });

@@ -309,8 +309,9 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   `UATU_TEST_WORKERS=<n>` sets it exactly, past 8 too. One helper,
   `scripts/test-workers.ts`; `scripts/playwright-policy.test.ts` holds the
   policy. The ceiling limits load, not ports: e2e ports are per worker slot,
-  and Playwright refuses a count whose port ranges would overlap or reach the
-  ephemeral range (`checkPortLayout` in `tests/e2e/ports.ts`)
+  and each e2e worker refuses a resolved count (including `--workers`) whose
+  port ranges would overlap or reach the ephemeral range (`checkPortLayout`
+  in `tests/e2e/ports.ts`)
 - When developing Uatu inside a Hub-managed workspace, credential tests may
   discover Uatu's projected Git/SSH wrappers. Use a clean tool environment for
   those tests; do not change product behavior to accommodate nested projection.
