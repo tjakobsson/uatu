@@ -2173,7 +2173,7 @@ Chat SHALL report provider-priced conversation cost from history and live update
 - **AND** That figure SHALL be the message's cost everywhere a reported cost is used — chip, receipt, totals, task rows and worker rows — shown as an ordinary cost, as Claude Code's own estimate on a Pro/Max plan is.
 - **AND** Only the catalog entry for the message's exact provider and model SHALL price it; no other provider's price for the same model id SHALL be used, and a message without such an entry SHALL keep the zero.
 - **AND** A nonzero cost OpenCode reports SHALL NOT be replaced.
-- **AND** The catalog SHALL be fetched by the server lazily, cached for at most an hour and revalidated with its ETag; Chat SHALL NOT wait for it, and while it is unavailable, failed, or disabled by OpenCode's catalog settings (`OPENCODE_MODELS_URL`, `OPENCODE_MODELS_PATH`, `OPENCODE_DISABLE_MODELS_FETCH`) the zero SHALL stand.
+- **AND** The catalog SHALL be fetched by the server lazily, cached for at most an hour and revalidated with its ETag, and not used once a day has passed without a successful validation; Chat SHALL NOT wait for it, and while it is unavailable, failed, or disabled by OpenCode's catalog settings (`OPENCODE_MODELS_URL`, `OPENCODE_MODELS_PATH`, `OPENCODE_DISABLE_MODELS_FETCH`) the zero SHALL stand.
 
 #### Scenario: The reader views or switches the conversation receipt itemization
 - **WHEN** the reader views or switches the conversation receipt itemization

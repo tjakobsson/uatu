@@ -131,6 +131,30 @@ describe("ListPrices", () => {
     expect(hasCost(prices.price(usage, SOL))).toBe(true);
   });
 
+  test("a catalog not validated for 24 hours is no longer used; a 304 validates it again", async () => {
+    let clock = 0;
+    const results: (Awaited<ReturnType<CatalogLoad>> | Error)[] = [{ table: priceTable(CATALOG), etag: '"v1"' }, new Error("offline"), "unchanged"];
+    const prices = new ListPrices(async () => {
+      const next = results.shift()!;
+      if (next instanceof Error) throw next;
+      return next;
+    }, { ttlMs: 1_000, maxAgeMs: 10_000, now: () => clock });
+    prices.warm();
+    await prices.settled();
+    clock = 5_000;
+    prices.warm();
+    await prices.settled();
+    // A failed refresh keeps a still-valid catalog in use.
+    expect(hasCost(prices.price(usage, SOL))).toBe(true);
+    clock = 9_999;
+    expect(hasCost(prices.price(usage, SOL))).toBe(true);
+    clock = 10_000;
+    // Expired: unpriced, and this lookup starts the next validation.
+    expect(prices.price(usage, SOL)).toBe(usage);
+    await prices.settled();
+    expect(hasCost(prices.price(usage, SOL))).toBe(true);
+  });
+
   test("one load runs at a time", async () => {
     let count = 0;
     let release!: () => void;

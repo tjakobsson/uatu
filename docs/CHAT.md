@@ -104,8 +104,9 @@ on a Pro/Max plan, where the CLI computes the figure. Neither is a bill.
 - **Prices.** They come from the model catalog OpenCode itself reads,
   `https://models.opencode.ai/experimental/v2.0/api.json`. The workspace server
   fetches it the first time a zero needs pricing, never waits for it, and
-  refreshes it at most hourly, revalidating with its ETag. Tests use a fake
-  catalog and make no request.
+  refreshes it at most hourly, revalidating with its ETag. If refreshes keep
+  failing, it stops using a copy that no fetch has validated for a day. Tests
+  use a fake catalog and make no request.
 - **Arithmetic.** OpenCode's own: per step, with the step's context (input plus
   cache read and write) choosing a long-context tier, reasoning priced as
   output, and the first listed cache-write rate.

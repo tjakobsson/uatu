@@ -40,6 +40,8 @@ export type ModelRef = { providerId: string; modelId: string };
 
 // The catalog's own Cache-Control is an hour.
 const TTL_MS = 60 * 60 * 1000;
+// A catalog no fetch has validated for a day is too old to price from.
+const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
 const DEFAULT_SOURCE = "https://models.opencode.ai";
 // OpenCode's v2 catalog (packages/core/src/models-dev.ts `catalogPath`); chat models are the ones sessions run.
@@ -130,20 +132,29 @@ export class ListPrices {
   private table: PriceTable | undefined;
   private etag: string | undefined;
   private attemptedAt = Number.NEGATIVE_INFINITY;
+  private validatedAt = Number.NEGATIVE_INFINITY;
   private loading: Promise<void> | undefined;
   private readonly ttlMs: number;
+  private readonly maxAgeMs: number;
   private readonly now: () => number;
 
-  constructor(private readonly load: CatalogLoad | undefined, options: { ttlMs?: number; now?: () => number } = {}) {
+  constructor(private readonly load: CatalogLoad | undefined, options: { ttlMs?: number; maxAgeMs?: number; now?: () => number } = {}) {
     this.ttlMs = options.ttlMs ?? TTL_MS;
+    this.maxAgeMs = options.maxAgeMs ?? MAX_AGE_MS;
     this.now = options.now ?? Date.now;
   }
 
-  /** Starts a load when there is none yet or it is older than the TTL. A failure waits out the TTL too. */
+  /**
+   * Starts a load when there is none yet or it is older than the TTL. A failure
+   * waits out the TTL too, and keeps the catalog in use until it is a day past
+   * its last validation.
+   */
   warm(): void {
     if (!this.load || this.loading || this.now() - this.attemptedAt < this.ttlMs) return;
     this.attemptedAt = this.now();
+    const started = this.attemptedAt;
     this.loading = this.load(this.etag).then(result => {
+      this.validatedAt = started;
       if (result === "unchanged") return;
       this.table = result.table;
       this.etag = result.etag;
@@ -159,7 +170,8 @@ export class ListPrices {
   price(usage: TokenUsage, model: ModelRef | undefined): TokenUsage {
     if (usage.costUsd !== 0 || !model || totalTokens(usage) === 0) return usage;
     this.warm();
-    const rates = this.table && ratesFor(this.table, model.providerId, model.modelId);
+    const current = this.now() - this.validatedAt < this.maxAgeMs ? this.table : undefined;
+    const rates = current && ratesFor(current, model.providerId, model.modelId);
     const costUsd = rates ? stepCost(rates, usage) : 0;
     return costUsd > 0 ? { ...usage, costUsd } : usage;
   }
