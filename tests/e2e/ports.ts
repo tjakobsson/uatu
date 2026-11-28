@@ -14,7 +14,11 @@
 // bad-port list that WebKit and Chromium refuse to load (a range starting at
 // 4173 once put a worker on 4190), and below macOS's ephemeral range (49152).
 // UATU_E2E_BASE_PORT / UATU_E2E_HUB_BASE_PORT move them, e.g. to run two
-// suites side by side.
+// suites side by side. A run takes `workers` harness ports and 10 × `workers`
+// hub ports, and the worker count follows the machine's cores
+// (scripts/test-workers.ts), so space the bases for the largest count either
+// run uses (e.g. 28600 / 29600 against the defaults), or pin
+// UATU_TEST_WORKERS. checkPortLayout guards one run's ranges, not another's.
 
 import net from "node:net";
 

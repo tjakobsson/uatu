@@ -306,7 +306,7 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   move a lot
 - Worker count, for `test:ci` and Playwright alike: one per available core
   (`os.availableParallelism()`), from 1 to 8, so CI's 4-core runners get 4.
-  `UATU_TEST_WORKERS=<n>` sets it exactly, past 8 too. One helper,
+  `UATU_TEST_WORKERS=<n>` sets it exactly, past 8 too (up to 1000). One helper,
   `scripts/test-workers.ts`; `scripts/playwright-policy.test.ts` holds the
   policy. The ceiling limits load, not ports: e2e ports are per worker slot,
   and each e2e worker refuses a resolved count (including `--workers`) whose

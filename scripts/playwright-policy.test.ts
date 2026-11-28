@@ -60,7 +60,10 @@ test("UATU_TEST_WORKERS sets the count exactly, past the ceiling too, and reject
   expect(testWorkers({ UATU_TEST_WORKERS: "2" }, 16)).toBe(2);
   expect(testWorkers({ UATU_TEST_WORKERS: "12" }, 4)).toBe(12);
   expect(testWorkers({ UATU_TEST_WORKERS: "" }, 4)).toBe(4);
-  for (const bad of ["0", "-1", "2.5", "four", " 4"]) {
+  // Playwright allocates a slot per configured worker before any fixture
+  // checks ports, so an absurd count must stop here.
+  expect(testWorkers({ UATU_TEST_WORKERS: "1000" }, 4)).toBe(1000);
+  for (const bad of ["0", "-1", "2.5", "four", " 4", "1001", "100000000"]) {
     expect(() => testWorkers({ UATU_TEST_WORKERS: bad }, 4)).toThrow("UATU_TEST_WORKERS");
   }
 });
