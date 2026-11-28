@@ -1,7 +1,7 @@
 import type { CompactWorker } from "./compact-work";
 import { workerIsActive, workerStateLabel } from "./worker-state";
 import { formatTaskElapsed } from "./task-inspection";
-import { formatTokens } from "./usage";
+import { formatTokens, hasPrice } from "./usage";
 import { formatWorkerCost } from "./worker-session";
 import { workerCanDismissRow } from "./worker-dismissal-client";
 
@@ -77,7 +77,8 @@ export class CompactWorkersView {
       inspect.title = worker.name;
       const stateLabel = workerStateLabel(worker.state, false, worker.activity);
       const effortLabel = worker.effort == null ? "Reasoning effort not reported" : `Last-used reasoning effort: ${worker.effort}`;
-      const costLabel = worker.costUsd == null ? "Subagent session cost not reported" : `Cumulative subagent session cost: ${worker.costUsd} USD`;
+      const costLabel = worker.costUsd == null ? "Subagent session cost not reported"
+        : hasPrice(worker.costUsd) ? `Cumulative subagent session cost: ${worker.costUsd} USD` : "No price reported for the subagent session's model";
       inspect.setAttribute("aria-label", [worker.name, worker.agent, stateLabel, worker.model, worker.kind === "agent" ? effortLabel : undefined, worker.tokens === undefined ? undefined : `${worker.tokens.toLocaleString()} cumulative tokens`, worker.kind === "agent" ? costLabel : undefined].filter(Boolean).join(" · "));
       // The handler looks up the current row model, not a stale closure.
       inspect.querySelector(".chat-worker-glyph")!.textContent = glyphs[worker.state];

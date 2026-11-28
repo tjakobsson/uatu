@@ -414,3 +414,28 @@ test.each(["unknown", "stopping", "completed", "removed", "dismiss"] as const)("
     focus.mockRestore();
   } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
 });
+
+test("an agent worker's zero session cost reads as unpriced, distinct from unreported and priced (#591)", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const costs = { unreported: null, unpriced: 0, priced: 0.0012 } as const;
+    const items: import("./types").ConversationItem[] = Object.entries(costs).map(([id, costUsd], index) => ({
+      type: "background_task", id, taskId: id, taskType: "agent", childConversationId: `child:${id}`, description: id, status: "completed", createdAt: index + 1,
+      usage: { totalTokens: 121_000, toolUses: 4, durationMs: 1_000 }, workerSession: { model: "GPT-6.1 Sol", effort: null, costUsd },
+    }));
+    new CompactWorkersView(host).paint("parent", compactWorkers(items), new Set(), true);
+    const cost = (id: string) => host.querySelector<HTMLElement>(`[data-worker-id="${id}"] .chat-worker-cost`)!;
+    const inspect = (id: string) => host.querySelector<HTMLElement>(`[data-worker-id="${id}"] .chat-worker-inspect`)!.getAttribute("aria-label");
+    expect(cost("unreported").textContent).toBe("—");
+    expect(cost("unreported").getAttribute("aria-label")).toBe("Subagent session cost not reported");
+    expect(cost("unpriced").textContent).toBe("—");
+    expect(cost("unpriced").getAttribute("aria-label")).toBe("No price reported for the subagent session's model");
+    expect(inspect("unpriced")).toContain("No price reported for the subagent session's model");
+    expect(inspect("unpriced")).not.toContain("0 USD");
+    expect(cost("priced").textContent).toBe("$0.0012");
+    expect(cost("priced").getAttribute("aria-label")).toBe("Cumulative subagent session cost: 0.0012 USD");
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});

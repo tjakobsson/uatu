@@ -610,5 +610,12 @@ tail -f /tmp/uatu-hub.log
   cookie to every port on that host (cookies never isolate by port), so
   forward only hubs you would hand your password to. A fronting proxy must
   still pass `Host` through unchanged (see Path C).
+- **Egress for subscription costs**: when OpenCode 2.x reports a zero cost,
+  a session fetches OpenCode's model catalog from `models.opencode.ai` (about
+  11 MB, at most hourly) to price that usage at list prices. Blocked or
+  offline, those costs read as "no price reported". OpenCode's own
+  `OPENCODE_MODELS_URL`, `OPENCODE_MODELS_PATH` and
+  `OPENCODE_DISABLE_MODELS_FETCH` settings apply. See
+  [CHAT.md](CHAT.md#opencode).
 - **Sizing**: each running session is one Bun process (plus a watchdog and
   your shells). A handful of sessions is well within a small homelab box.

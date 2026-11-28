@@ -342,6 +342,10 @@ export type TokenUsage = {
   // (OpenCode does, per message). Not a token component: token sums leave
   // it out, and absent means unpriced, which is not the same as free.
   costUsd?: number;
+  // `costUsd` is Uatu's list-price figure for a step OpenCode reported as
+  // costing 0 (opencode/v2/list-prices.ts), so it is not in OpenCode's own
+  // session total.
+  listPriced?: true;
 };
 
 export type AssistantMessageItem = TimelineItemBase & {

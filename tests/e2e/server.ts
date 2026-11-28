@@ -12,6 +12,7 @@ import { mintSessionToken } from "../../src/session-contract/token";
 import { MultiAgentChatService, addressableItemIdFields, mapAddressableItemIds, parseQualifiedConversationId, qualifyAgentEvent, qualifyAgentSnapshot, qualifyAgentSummary, qualifyConversationId } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
+import { ListPrices, priceTable } from "../../src/chat/opencode/v2/list-prices";
 import { VisualStore } from "../../src/chat/visual-store";
 import { CLAUDE_PERMISSION_SCOPE_NOTE } from "../../src/chat/claude/provider";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../../src/chat/opencode/v1/provider";
@@ -210,6 +211,10 @@ const singleAgentRouter = fakeRouters[0]!;
 // `{ action: "opencode", op }`. Built on first selection and retired on
 // reset, so every test starts with a fresh adapter over an empty server.
 const openCodeV2Fake = startOpenCodeV2Fake({ directory: E2E_WORKSPACE_ROOT });
+// A fake list-price catalog, never the network: only "Subscription Fixture"
+// has a price, so a zero-cost step on it is priced and any other stays unpriced.
+const openCodeV2ListPrices = new ListPrices(async () => ({ table: priceTable({ fixture: { id: "fixture", models: { subscription: { id: "Subscription Fixture", cost: { text: { input: { price: 2 }, output: { price: 10 } } } } } } }) }));
+openCodeV2ListPrices.warm();
 let openCodeV2Router: MultiAgentChatService | null = null;
 let openCodeV2Adapter: ChatAdapter | null = null;
 function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
@@ -221,7 +226,7 @@ function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
     restart: async () => ready,
     dispose: async () => undefined,
     createProvider: () => {
-      const provider = createOpenCodeV2Provider({ endpoint: openCodeV2Fake.url, password: openCodeV2Fake.password, directory: E2E_WORKSPACE_ROOT });
+      const provider = createOpenCodeV2Provider({ endpoint: openCodeV2Fake.url, password: openCodeV2Fake.password, directory: E2E_WORKSPACE_ROOT, listPrices: openCodeV2ListPrices });
       // Only the negative capability test hides the production declarations.
       if (!backgroundPreview) {
         const describe = provider.describe.bind(provider);

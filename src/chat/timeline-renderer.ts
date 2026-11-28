@@ -14,7 +14,7 @@ import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import { formatUsd } from "./usage";
+import { formatUsd, hasPrice } from "./usage";
 import { wakeupRowLabel } from "./scheduled-wakeups";
 import { dateTime, dayLabel, fullDate, knownTime, localDayKey, localDaysBetween, nextLocalMidnight, weekdayClock } from "./dates";
 import { LOGIN_FAILED_NOTICE_CODE, isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type StructuredQuestion, type TokenUsage, type ToolItem } from "./types";
@@ -1735,8 +1735,8 @@ function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: 
   // list each time reprints it verbatim on every tool call.
   const label = detail.kind === "todo" && todo ? todo.label : detail.label;
   // A subagent's row states what its child session cost, in context, once
-  // the child has reported a price; zero is an unpriced model, not free.
-  const subagentCost = detail.kind === "agent" && item.usage?.costUsd ? ` · ${formatUsd(item.usage.costUsd)}` : "";
+  // the child has reported a price.
+  const subagentCost = detail.kind === "agent" && hasPrice(item.usage?.costUsd) ? ` · ${formatUsd(item.usage.costUsd)}` : "";
   const subject = detail.kind === "todo" ? todo?.task : `${toolSubject(detail) ?? ""}${subagentCost}` || undefined;
   const outcome = worker ? workerActivityStatus(worker) : item.status;
   const state = worker ? workerStateLabel(worker.status, worker.stateUncertain, worker.activity) : undefined;

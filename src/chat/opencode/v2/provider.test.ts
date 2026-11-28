@@ -9,6 +9,7 @@ import type { FormCancelled, FormCreated, FormReplied, PermissionAsked, Permissi
 
 import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../provider";
 import { createOpenCodeV2Provider, formAnswerFromChoices, type OpenCodeV2Provider } from "./provider";
+import { ListPrices, priceTable } from "./list-prices";
 import { ChatAdapter, SteerAlreadyDeliveredError, SteerWithdrawalUnconfirmedError } from "../../adapter";
 import { ProviderUpdateCoalescer } from "../../coalescer";
 import { conversationTotals } from "../../conversation-totals";
@@ -70,7 +71,7 @@ function fakeOpenCode(routes: Record<string, Handler>) {
     // list routes answer their own shapes, which it returns whole.
     return Response.json(ENVELOPED.some(pattern => pattern.test(`${request.method} ${url.pathname}`)) ? { data: result } : result);
   }) as typeof globalThis.fetch;
-  const provider = (directory = WORKSPACE, options: { commandAdmissionMs?: number; reloadSettleMs?: number } = {}) => createOpenCodeV2Provider({ endpoint: "http://opencode.test", password: "pw", directory, fetch, ...options }) as OpenCodeV2Provider;
+  const provider = (directory = WORKSPACE, options: { commandAdmissionMs?: number; reloadSettleMs?: number; listPrices?: ListPrices } = {}) => createOpenCodeV2Provider({ endpoint: "http://opencode.test", password: "pw", directory, fetch, ...options }) as OpenCodeV2Provider;
   const requests = (method: string, pathname: string) => calls.filter(call => call.method === method && call.path === pathname);
   return { calls, provider, requests };
 }
@@ -13208,3 +13209,60 @@ describe("OpenCodeV2Provider accounts", () => {
     ]);
   });
 });
+
+test("usage read before the list-price catalog arrives is priced and republished once it does (#591)", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const prices = new ListPrices(async () => {
+    await gate;
+    return { table: priceTable({ fixture: { id: "fixture", models: { listed: { id: "listed", cost: { text: { input: { price: 2 }, output: { price: 10 } } } } } } }) };
+  });
+  const tokens = { input: 1_000, output: 100, reasoning: 20, cache: { read: 0, write: 0 } };
+  const listed = (1_000 * 2 + 120 * 10) / 1e6;
+  const model = { providerID: "fixture", id: "listed" };
+  const stored = [
+    { id: "msg_read", type: "assistant", time: { created: 10, completed: 11 }, model, agent: "build", content: [], tokens, cost: 0 },
+    { id: "msg_paid", type: "assistant", time: { created: 12, completed: 13 }, model, agent: "build", content: [], tokens, cost: 0.5 },
+    { id: "msg_unlisted", type: "assistant", time: { created: 14, completed: 15 }, model: { providerID: "fixture", id: "unlisted" }, content: [], tokens, cost: 0 },
+  ];
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const frame = (type: string, data: Record<string, unknown>) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, location: { directory: WORKSPACE }, created: 30 })}\n\n`));
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller;
+      controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/ses_spend": () => session("ses_spend"),
+    "GET /api/session/ses_spend/message": () => ({ data: stored, cursor: {} }),
+  });
+  const provider = server.provider(WORKSPACE, { listPrices: prices });
+  const controller = new AbortController();
+  const events: import("../../provider").NormalizedProviderEvent[] = [];
+  let seen: (() => void) | undefined;
+  const pump = (async () => { for await (const event of provider.events(controller.signal)) { events.push(event); seen?.(); } })();
+  const until = async (check: () => boolean) => { while (!check()) await new Promise<void>(resolve => { seen = resolve; }); };
+  const carrier = (event: import("../../provider").NormalizedProviderEvent, id: string) => event.updates.flatMap(update => update.kind === "upsert" && update.item.id === `usage:${id}` ? [update.item as AssistantMessageItem] : [])[0];
+  try {
+    await until(() => events.some(event => event.eventType === "server.connected"));
+    const page = await provider.listMessages("ses_spend", { limit: 100 });
+    expect((page.items.find(item => item.id === "usage:msg_read") as AssistantMessageItem).usage?.costUsd).toBe(0);
+    frame("session.step.started", { sessionID: "ses_spend", assistantMessageID: "msg_live", started: 20, model });
+    frame("session.step.ended", { sessionID: "ses_spend", assistantMessageID: "msg_live", finish: "stop", tokens, cost: 0 });
+    await until(() => events.some(event => carrier(event, "msg_live")));
+    expect(carrier(events.find(event => carrier(event, "msg_live"))!, "msg_live")!.usage?.costUsd).toBe(0);
+    release();
+    await prices.settled();
+    await until(() => events.filter(event => event.assistantUsage?.usage.listPriced).length >= 2);
+    const republished = events.filter(event => event.assistantUsage?.usage.listPriced);
+    expect(republished.map(event => event.assistantUsage!.messageId).sort()).toEqual(["msg_live", "msg_read"]);
+    for (const event of republished) {
+      const id = event.assistantUsage!.messageId;
+      expect(event.conversationId).toBe("ses_spend");
+      expect(event.assistantUsage!.usage.costUsd).toBeCloseTo(listed, 12);
+      expect(carrier(event, id)).toMatchObject({ type: "assistant_message", markdown: "", model: { providerId: "fixture", modelId: "listed" }, usage: { costUsd: event.assistantUsage!.usage.costUsd, listPriced: true } });
+    }
+    // Neither a reported price nor an unlisted model is republished, and nothing is republished twice.
+    expect(events.some(event => event.assistantUsage?.messageId === "msg_paid" || event.assistantUsage?.messageId === "msg_unlisted")).toBe(false);
+  } finally { controller.abort(); await pump; await provider.dispose(); }
+}, 10_000);

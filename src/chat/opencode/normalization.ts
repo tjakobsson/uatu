@@ -70,7 +70,7 @@ export function remember<T>(map: Map<string, T>, key: string, value: T): void {
  */
 export function tokensToUsage(value: unknown, cost?: unknown): TokenUsage | undefined {
   const usage: TokenUsage = {};
-  const put = (key: keyof TokenUsage, raw: unknown) => {
+  const put = (key: Exclude<keyof TokenUsage, "listPriced">, raw: unknown) => {
     if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) usage[key] = raw;
   };
   if (value && typeof value === "object" && !Array.isArray(value)) {

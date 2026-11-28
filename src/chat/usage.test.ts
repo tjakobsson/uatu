@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { contextTokens, formatTokens, formatUsd, sameUsage, totalTokens } from "./usage";
+import { contextTokens, formatTokens, formatUsd, hasPrice, mergeAssistantMessage, sameUsage, totalTokens } from "./usage";
 import type { TokenUsage } from "./types";
 
 describe("formatTokens", () => {
@@ -55,6 +55,14 @@ describe("formatUsd", () => {
   });
 });
 
+describe("hasPrice", () => {
+  test("only a positive cost is a price: absent is unreported and zero is OpenCode's unpriced model", () => {
+    for (const value of [undefined, null, 0]) expect(hasPrice(value)).toBe(false);
+    expect(hasPrice(0.000001)).toBe(true);
+    expect(hasPrice(12.5)).toBe(true);
+  });
+});
+
 describe("totalTokens and contextTokens", () => {
   test("the spend total sums every component; the context total only what occupies the window", () => {
     const usage: TokenUsage = { input: 10, output: 20, reasoning: 30, cacheRead: 40, cacheWrite: 50, costUsd: 1 };
@@ -70,5 +78,13 @@ describe("sameUsage", () => {
     expect(sameUsage({ input: 1 }, { input: 1 })).toBe(true);
     expect(sameUsage({ input: 1 }, {})).toBe(false);
     expect(sameUsage({ input: 1, costUsd: 0.5 }, { input: 1, costUsd: 0.6 })).toBe(false);
+  });
+});
+
+describe("mergeAssistantMessage", () => {
+  test("a restated usage carrier keeps the list-price marker only while the incoming figure carries it", () => {
+    const carrier = (usage: TokenUsage) => ({ id: "usage:m", type: "assistant_message" as const, createdAt: 1, markdown: "", usage });
+    expect(mergeAssistantMessage(carrier({ input: 5, costUsd: 0.01, listPriced: true }), carrier({ input: 5, costUsd: 0.02 })).usage).toEqual({ input: 5, costUsd: 0.02 });
+    expect(mergeAssistantMessage(carrier({ input: 5, costUsd: 0 }), carrier({ input: 5, costUsd: 0.01, listPriced: true })).usage).toEqual({ input: 5, costUsd: 0.01, listPriced: true });
   });
 });

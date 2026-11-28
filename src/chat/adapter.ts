@@ -1509,7 +1509,7 @@ export class ChatAdapter {
             // Preserve only this surviving occurrence's session metadata; any
             // current cached component or returned accounting page wins. Never
             // copy result usage, summary, activity, visibility or Stop proof.
-            const report = item.workerSession ?? workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key));
+            const report = item.workerSession ?? workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key), this.childUsage.get(key));
             const priorModel = report.model === undefined && !this.childModels.has(key) && prior.workerSession.model !== undefined;
             items[index] = { ...item, workerSession: { ...report,
               ...(priorModel ? { model: prior.workerSession.model, effort: prior.workerSession.effort } : {}),
@@ -5810,7 +5810,7 @@ export class ChatAdapter {
       && (rewriteOwner.allocationOccurrences === undefined || rewriteOwner.allocationOccurrences === occurrenceSignature(tasks))
       && rows.every(row => sameLauncherBinding(launcherBinding(row), this.accountedTask(parentId, conversationId, row)?.binding));
     const attributions = unresolved || blocked && !currentRewrite ? [] : this.rowAttributions(parentId, conversationId, tasks, sources);
-    const workerSession = workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key));
+    const workerSession = workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key), this.childUsage.get(key));
     const backgroundUpdates: NormalizedProviderUpdate[][] = parent.filter(item => item.type === "background_task" && item.childConversationId === conversationId).flatMap(row =>
       row.type === "background_task" && (this.childSessionCosts.get(key)?.costUsd != null || this.childUsage.get(key)?.size || this.childModels.get(key)?.size || row.workerSession) && !sameWorkerSession(row.workerSession, workerSession)
         ? [[{ kind: "upsert" as const, item: { ...row, workerSession } }]] : []);
@@ -6728,7 +6728,7 @@ export class ChatAdapter {
       const item = items[index]!;
       if ((item.type === "tool" || item.type === "background_task") && item.childConversationId) {
         const key = attributionKey(id, item.childConversationId);
-        if (this.childSessionCosts.get(key)?.costUsd != null || this.childUsage.get(key)?.size || this.childModels.get(key)?.size || item.workerSession) items[index] = { ...item, workerSession: workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key)) };
+        if (this.childSessionCosts.get(key)?.costUsd != null || this.childUsage.get(key)?.size || this.childModels.get(key)?.size || item.workerSession) items[index] = { ...item, workerSession: workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key), this.childUsage.get(key)) };
       }
       if (item.type !== "tool") continue;
       if (item.childConversationId && incomplete.has(item.childConversationId)) {

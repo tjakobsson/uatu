@@ -25,6 +25,15 @@ export function totalTokens(usage: TokenUsage): number {
 }
 
 /**
+ * Whether a reported cost is a price. Absent is unreported, and zero is what
+ * OpenCode reports for a model it has no price for — unpriced, not free — so
+ * no readout asserts "$0.00". The one rule every cost readout applies.
+ */
+export function hasPrice(costUsd: number | null | undefined): costUsd is number {
+  return (costUsd ?? 0) > 0;
+}
+
+/**
  * Dollars as the readouts show them: cents for anything a reader would
  * budget, four places below ten cents so a cheap turn does not round to
  * nothing.
@@ -75,6 +84,12 @@ export function mergeAssistantMessage(current: AssistantMessageItem, incoming: A
     createdAt: usageOnly ? current.createdAt : incoming.createdAt,
     markdown: incoming.markdown || current.markdown,
     model: incoming.model ?? current.model,
-    ...(current.usage || incoming.usage ? { usage: { ...current.usage, ...incoming.usage } } : {}),
+    ...(current.usage || incoming.usage ? { usage: mergedUsage(current.usage, incoming.usage) } : {}),
   };
+}
+
+// A restated figure decides whether it is a list price; an older marker does not outlive it.
+function mergedUsage(current: TokenUsage | undefined, incoming: TokenUsage | undefined): TokenUsage {
+  const { listPriced: _marker, ...kept } = current ?? {};
+  return { ...(incoming ? kept : current), ...incoming };
 }

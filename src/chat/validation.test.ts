@@ -452,6 +452,9 @@ describe("chat domain validation", () => {
     // present on the subagent mirror as well as the message's own record.
     expect(parseConversationItem({ ...items[1], usage: { ...usage, costUsd: 0.0123 } })).toBeDefined();
     expect(parseConversationItem({ ...items[3], model: "anthropic/claude-sonnet", usage: { input: 5, costUsd: 0 } })).toBeDefined();
+    // A cost Uatu priced at list prices says so; the marker is only ever true.
+    expect(parseConversationItem({ ...items[1], usage: { input: 5, costUsd: 0.01, listPriced: true } })).toBeDefined();
+    expect(() => parseConversationItem({ ...items[1], usage: { input: 5, costUsd: 0.01, listPriced: false } })).toThrow(/listPriced/);
     expect(() => parseConversationItem({ ...items[1], usage: { costUsd: -0.01 } })).toThrow(/non-negative/);
     expect(() => parseConversationItem({ ...items[1], usage: { costUsd: "0.01" } })).toThrow(/non-negative/);
     expect(() => parseConversationItem({ ...items[1], usage: { input: "12000" } })).toThrow(/non-negative/);
