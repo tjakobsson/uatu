@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { createPresentedRender, reloadNoticeShown, setReloadNotice, type PresentedRenderKey } from "./presented-render";
+import { createPresentedRender, fileChanged, reloadNoticeShown, setReloadNotice, type PresentedRenderKey } from "./presented-render";
 
 function preview(): HTMLElement {
   const { document } = parseHTML("<!doctype html><html><body><article id='preview'></article></body></html>");
@@ -138,5 +138,25 @@ describe("setReloadNotice", () => {
       expect(notice.hidden).toBe(true);
       expect(retry.hidden).toBe(true);
     });
+  });
+});
+
+describe("fileChanged", () => {
+  const shown = { epoch: "e1", revision: 7, mtimeMs: 1_000 };
+
+  test("within a session the index revision decides, even when an edit kept the mtime", () => {
+    expect(fileChanged(shown, { ...shown, revision: 8 })).toBe(true);
+    expect(fileChanged(shown, { ...shown })).toBe(false);
+  });
+
+  test("across a session restart the revision restarts, so the mtime decides", () => {
+    expect(fileChanged(shown, { epoch: "e2", revision: 3, mtimeMs: 1_000 })).toBe(false);
+    expect(fileChanged(shown, { epoch: "e2", revision: 3, mtimeMs: 2_000 })).toBe(true);
+  });
+
+  test("a file that appeared or went missing counts as changed", () => {
+    expect(fileChanged(null, shown)).toBe(true);
+    expect(fileChanged(shown, null)).toBe(true);
+    expect(fileChanged(null, null)).toBe(false);
   });
 });

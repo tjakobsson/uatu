@@ -80,3 +80,16 @@ export function reloadNoticeShown(): boolean {
   const notice = document.querySelector<HTMLElement>("#preview-reload-notice");
   return notice !== null && !notice.hidden;
 }
+
+// What the index says about a file, to tell whether a load that lands after
+// a failed reload brings an on-disk change (and so pulses Updated).
+export type FileStamp = { epoch: string | null; revision: number | undefined; mtimeMs: number };
+
+// Within one session the index revision advances with every change, even one
+// that kept the modification time. A restarted session starts its revision
+// counter over, so across sessions only the modification time can tell.
+export function fileChanged(shown: FileStamp | null, now: FileStamp | null): boolean {
+  if (!shown || !now) return shown !== now;
+  if (shown.epoch === now.epoch) return shown.revision !== now.revision;
+  return shown.mtimeMs !== now.mtimeMs;
+}

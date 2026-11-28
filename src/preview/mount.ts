@@ -59,7 +59,7 @@ import {
   type DocumentLoadFailure,
   type DocumentLoadTrigger,
 } from "./load-retry";
-import { createPresentedRender, reloadNoticeShown, setReloadNotice, type PresentedRenderKey } from "./presented-render";
+import { createPresentedRender, fileChanged, reloadNoticeShown, setReloadNotice, type FileStamp, type PresentedRenderKey } from "./presented-render";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -106,12 +106,13 @@ const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration, docume
 const documentLoadRetry = createDocumentLoadRetry();
 const alwaysCurrent = () => true;
 const presentedRender = createPresentedRender(previewElement);
-// The modification time of the file the noted render shows, so a load that
-// lands after a failed reload pulses Updated only if the file itself changed.
-// Not the index revision: that is a per-session counter and changes with the
-// epoch when the session restarts, though the file may not have.
-let presentedMtime: number | null = null;
-const fileMtime = (documentId: string): number | null => documentIndex.find(documentId)?.mtimeMs ?? null;
+// The index's view of the file the noted render shows, so a load that lands
+// after a failed reload pulses Updated only if the file itself changed.
+let presentedFile: FileStamp | null = null;
+function fileStamp(documentId: string): FileStamp | null {
+  const doc = documentIndex.find(documentId);
+  return doc ? { epoch: documentIndex.epoch, revision: doc.revision, mtimeMs: doc.mtimeMs } : null;
+}
 
 // A document render was just mounted: it is the last good render a failed
 // reload of the same document, view and layout may keep on screen. `layout`
@@ -119,7 +120,7 @@ const fileMtime = (documentId: string): number | null => documentIndex.find(docu
 // split falls back to a single pane.
 function notePresentedRender(documentId: string, layout: ViewLayout): void {
   presentedRender.note({ documentId, view: appState.viewMode, layout });
-  presentedMtime = fileMtime(documentId);
+  presentedFile = fileStamp(documentId);
   setReloadNotice("hidden");
 }
 
@@ -664,7 +665,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // file changed since the render on screen, this load lands that change,
   // which the live frame that started it could not announce. A re-selection
   // of an unchanged file that failed and recovered is no update.
-  const landsFailedReload = reloadNoticeShown() && presentedMtime !== fileMtime(documentId);
+  const landsFailedReload = reloadNoticeShown() && fileChanged(presentedFile, fileStamp(documentId));
   rememberDocumentPayload(payload);
   if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
