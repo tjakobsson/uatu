@@ -75,8 +75,9 @@ describe("setReloadNotice", () => {
   function withNotice(run: (document: Document) => void): void {
     const { document } = parseHTML(`<!doctype html><html><body>
       <main class="preview-shell" tabindex="-1">
+        <span id="preview-reload-status" class="sr-only" role="status"></span>
         <span id="preview-reload-notice" hidden>
-          <span class="preview-reload-message" role="status"></span>
+          <span class="preview-reload-message"></span>
           <button type="button" class="preview-reload-retry" aria-label="Retry loading this file" hidden>Retry</button>
         </span>
       </main></body></html>`);
@@ -91,6 +92,7 @@ describe("setReloadNotice", () => {
   const parts = (document: Document) => ({
     notice: document.querySelector<HTMLElement>("#preview-reload-notice")!,
     message: document.querySelector<HTMLElement>(".preview-reload-message")!,
+    status: document.querySelector<HTMLElement>("#preview-reload-status")!,
     retry: document.querySelector<HTMLButtonElement>(".preview-reload-retry")!,
   });
 
@@ -114,6 +116,22 @@ describe("setReloadNotice", () => {
       expect(retry.hidden).toBe(false);
       expect(retry.tagName).toBe("BUTTON");
       expect(retry.getAttribute("aria-label")).toBe("Retry loading this file");
+    });
+  });
+
+  test("the status region stays exposed and carries what the notice says", () => {
+    // A live region revealed and filled in one step can go unannounced, so
+    // the region is never hidden: only its text changes.
+    withNotice(document => {
+      const { status } = parts(document);
+      setReloadNotice("retrying");
+      expect(status.hidden).toBe(false);
+      expect(status.textContent).toBe("This file couldn't be reloaded. Retrying…");
+      setReloadNotice("gave-up");
+      expect(status.textContent).toBe("This file couldn't be reloaded.");
+      setReloadNotice("hidden");
+      expect(status.hidden).toBe(false);
+      expect(status.textContent).toBe("");
     });
   });
 

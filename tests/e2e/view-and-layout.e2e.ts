@@ -237,7 +237,9 @@ test("A same-document reload that fails transiently keeps the render on screen w
   await expect(page.locator("#file-facts-strip")).toBeVisible();
   const notice = page.locator("#preview-reload-notice");
   await expect(notice).toBeVisible();
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
+  // Screen readers hear it through the page's always-exposed status region.
+  await expect(page.locator("#preview-reload-status")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(notice.getByRole("button", { name: "Retry loading this file" })).toBeHidden();
   // Nothing was updated: the facts strip does not pulse "Updated" next to it.
   // Read once rather than with a retrying assertion, which would wait the
@@ -248,6 +250,7 @@ test("A same-document reload that fails transiently keeps the render on screen w
   releaseRetry();
   await expect(page.locator("#preview")).toContainText("Reload landed marker.");
   await expect(notice).toBeHidden();
+  await expect(page.locator("#preview-reload-status")).toHaveText("");
   await expect(page.locator(".uatu-outline-link")).toHaveCount(2);
   // The edit has landed now, so now the strip says so.
   await expect(page.locator("#file-facts-strip")).toHaveClass(/is-updated/);
@@ -266,7 +269,7 @@ test("A reload overtaken by a newer one that fails does not pulse Updated", asyn
   });
   await fs.writeFile(workspacePath("links-demo.md"), "# Markdown Cross-Document Links\n\nSecond edit.\n", "utf8");
   const notice = page.locator("#preview-reload-notice");
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   expect(reload.reloads()).toBeGreaterThanOrEqual(2);
 
   const firstAnswer = page.waitForResponse(response =>
@@ -333,7 +336,7 @@ test("A same-document reload whose retries all fail keeps the render and offers 
   await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
   await expect(page.locator(".uatu-outline-link")).toHaveCount(4);
   await expect(page.locator("#file-facts-strip")).toBeVisible();
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded.");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded.");
   await expect(retry).toBeVisible();
   await page.clock.runFor(60_000);
   expect(reload.reloads()).toBe(5);
@@ -355,7 +358,7 @@ test("A same-document reload whose retries all fail keeps the render and offers 
   // While that request is in flight the notice says so and Retry is gone,
   // so a second press cannot start a load that discards this one's answer.
   await expect.poll(() => reload.reloads()).toBe(6);
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(retry).toBeHidden();
   // The keyboard user is not dropped onto the page body when Retry hides.
   expect(await page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body)).toBe(true);
@@ -446,7 +449,7 @@ for (const layout of ["split-h", "split-v"] as const) {
     await editLinksDemo();
     await expect.poll(() => sourceReloads).toBeGreaterThanOrEqual(2);
     const notice = page.locator("#preview-reload-notice");
-    await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+    await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
     await expect(split.locator(".preview-pane-source")).toContainText("External links are unaffected");
     await expect(split.locator(".preview-pane-rendered")).toContainText("External links are unaffected");
     await expect(page.locator("#file-facts-strip")).toBeVisible();
@@ -474,7 +477,7 @@ test("A split layout that fell back to one pane keeps that pane when a later rel
   reloading = true;
   await editLinksDemo();
   const notice = page.locator("#preview-reload-notice");
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
   await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
   await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
@@ -495,7 +498,7 @@ test("Choosing a split while a single-pane reload fails keeps the pane and shows
   await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
   await expect(page.locator(".uatu-layout-toolbar [data-layout-value='split-h']")).toHaveAttribute("aria-checked", "true");
   await expect(page.locator(".uatu-layout-toolbar [data-layout-value='single']")).toHaveAttribute("aria-checked", "false");
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
   // Source and Diff stay reachable from the kept pane.
   await expect(page.locator("#view-control")).toBeVisible();
@@ -522,7 +525,7 @@ test("A split's fallback pane retries when only the second view fails to reload"
   reloading = true;
   await editLinksDemo();
   const notice = page.locator("#preview-reload-notice");
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect(page.locator("#preview")).toContainText("External links are unaffected");
 
   sourceFails = false;
@@ -559,7 +562,7 @@ test("A re-selection that recovers from a failed load does not pulse Updated", a
   await treeRow(page, "links-demo.md").click();
   // The retry is held until the notice shows the failed request was seen.
   const notice = page.locator("#preview-reload-notice");
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect.poll(() => retried).toBe(true);
   releaseRetry();
   await expect(notice).toBeHidden();
@@ -626,7 +629,7 @@ test("A retry after a session restart does not pulse Updated for an unchanged fi
   });
 
   const notice = page.locator("#preview-reload-notice");
-  await expect(notice.getByRole("status")).toHaveText("This file couldn't be reloaded. Retrying…");
+  await expect(notice.locator(".preview-reload-message")).toHaveText("This file couldn't be reloaded. Retrying…");
   await expect.poll(() => retried).toBe(true);
   releaseRetry();
   await expect(notice).toBeHidden();

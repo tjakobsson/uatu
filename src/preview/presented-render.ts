@@ -71,6 +71,10 @@ export function setReloadNotice(state: ReloadNoticeState): void {
   }
   notice.hidden = state === "hidden";
   if (message && state !== "hidden") message.textContent = RELOAD_NOTICE_MESSAGES[state];
+  // Screen readers hear the notice through a status region that is always
+  // exposed: one revealed and filled in the same step can go unannounced.
+  const status = document.querySelector<HTMLElement>("#preview-reload-status");
+  if (status) status.textContent = state === "hidden" ? "" : RELOAD_NOTICE_MESSAGES[state];
   if (retry) retry.hidden = state !== "gave-up";
 }
 
