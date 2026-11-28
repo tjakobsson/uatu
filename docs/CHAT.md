@@ -114,9 +114,12 @@ on a Pro/Max plan, where the CLI computes the figure. Neither is a bill.
   another provider's price for the same model id. A mode such as
   `gpt-6.1-sol-fast` is its own model, priced as OpenCode prices it: its own
   rates, or its service tier's multiplier on the base rates. A model the
-  catalog does not list, and usage read while the catalog is unavailable, keep
-  OpenCode's zero, which reads as **no price reported**. Usage read before the first fetch completes keeps its zero until
-  it is read again, for example when the conversation is reopened.
+  catalog does not list keeps OpenCode's zero, which reads as **no price
+  reported**, and so does all such usage while the catalog cannot be had.
+- **When the catalog arrives.** Usage already read with a zero, live or from
+  history, is priced and republished as its catalog arrives, so the receipt
+  and worker rows update without a reload. Chat remembers up to 1,024 such
+  messages per workspace; older ones keep their zero until read again.
 - **Never replaced.** A nonzero cost OpenCode reports always stands.
 - **Settings.** Chat follows OpenCode's catalog settings in the server's
   environment: `OPENCODE_MODELS_URL` names another source,

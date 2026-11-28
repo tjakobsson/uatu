@@ -176,6 +176,7 @@ export class ListPrices {
   private attemptedAt = Number.NEGATIVE_INFINITY;
   private validatedAt = Number.NEGATIVE_INFINITY;
   private loading: Promise<void> | undefined;
+  private readonly listeners = new Set<() => void>();
   private readonly ttlMs: number;
   private readonly maxAgeMs: number;
   private readonly now: () => number;
@@ -200,7 +201,19 @@ export class ListPrices {
       if (result === "unchanged") return;
       this.table = result.table;
       this.etag = result.etag;
+      for (const listener of this.listeners) listener();
     }, () => undefined).finally(() => { this.loading = undefined; });
+  }
+
+  /** Whether a current catalog is held: without one, a zero stays unpriced only for now. */
+  available(): boolean {
+    return this.table !== undefined && this.now() - this.validatedAt < this.maxAgeMs;
+  }
+
+  /** Calls `listener` whenever a load installs a new catalog; returns the unsubscribe. */
+  onCatalog(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
   }
 
   /** Settles when the load in flight has. */
@@ -212,8 +225,7 @@ export class ListPrices {
   price(usage: TokenUsage, model: ModelRef | undefined): TokenUsage {
     if (usage.costUsd !== 0 || !model || totalTokens(usage) === 0) return usage;
     this.warm();
-    const current = this.now() - this.validatedAt < this.maxAgeMs ? this.table : undefined;
-    const rates = current && ratesFor(current, model.providerId, model.modelId);
+    const rates = this.available() ? ratesFor(this.table!, model.providerId, model.modelId) : undefined;
     const costUsd = rates ? stepCost(rates, usage) : 0;
     return costUsd > 0 ? { ...usage, costUsd, listPriced: true } : usage;
   }

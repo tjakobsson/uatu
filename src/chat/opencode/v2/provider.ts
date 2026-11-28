@@ -7,6 +7,7 @@ import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
 import { McpServerNames, annotateMcpPermission, looksLikeMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
 import type { ListPrices } from "./list-prices";
+import { totalTokens } from "../../usage";
 import { stableProviderId } from "../message-id";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../../history-reuse";
 import { BackgroundTaskUnavailableError, InterruptNotAppliedError, OperationOutcomeUnknownError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, type PendingInboxEntry } from "../../provider";
@@ -168,6 +169,13 @@ export class OpenCodeV2Provider implements ChatProvider {
   // stream ever coming they must not grow without limit.
   private readonly injected: NormalizedProviderEvent[] = [];
   private static readonly INJECTED_LIMIT = 64;
+  // Usage carriers read with OpenCode's zero while no list-price catalog was
+  // available, keyed by conversation and carrier. Once a catalog arrives the
+  // stream prices and republishes them (`republishListPriced`). Bounded: the
+  // oldest are forgotten and keep their zero until read again.
+  private readonly unpricedCarriers = new Map<string, { conversationId: string; carrier: import("../../types").AssistantMessageItem; promptId?: string }>();
+  private static readonly UNPRICED_CARRIER_LIMIT = 1_024;
+  private readonly stopListPrices: (() => void) | undefined;
   private wake: (() => void) | undefined;
   // Reloads waiting for the workspace's rebuilt catalogs to be announced.
   private readonly reloadWaiters = new Set<ReloadWaiter>();
@@ -188,6 +196,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   ) {
     this.workspace = path.resolve(directory);
     this.normalize = createOpenCodeV2Normalizer(directory);
+    this.stopListPrices = listPrices?.onCatalog(() => this.wake?.());
     this.nativeHistory = new V2NativeHistory({
       client, directory,
       version: () => this.streamConnected ? String(this.streamGeneration) : undefined,
@@ -682,6 +691,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const origins = new Map<string, number>();
     visible.forEach((message, index) => {
       for (let item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index], executionLiveness.get(messageIdentity(message)), this.listPrices)) {
+        this.deferUnpriced(sessionId, item);
         if (!origins.has(item.id)) origins.set(item.id, index);
         if (optionalEnrichment && item.type === "tool" && item.childConversationId && !verified.has(item.childConversationId)) {
           const { childConversationId: _unverified, ...transcript } = item;
@@ -1992,6 +2002,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         // The provider's own events go first: a refusal reported here must
         // not queue behind a stream that may stay quiet.
         while (this.injected.length > 0) yield this.injected.shift()!;
+        yield* this.republishListPriced();
         next ??= source.next();
         const woken = new Promise<undefined>(resolve => { this.wake = () => resolve(undefined); });
         const arrived = await Promise.race([next, woken]);
@@ -2218,6 +2229,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         } catch {
           normalized = { updates: [], outcome: "unparseable", eventType: "" };
         }
+        if (normalized.conversationId) for (const update of normalized.updates) if (update.kind === "upsert") this.deferUnpriced(normalized.conversationId, update.item, normalized.assistantUsage?.promptId);
         yield normalized;
         // Child execution and workspace lifecycle facts revoke rows on their
         // owning parent's timeline, never on the child's conversation.
@@ -2396,6 +2408,40 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
   }
 
+  /**
+   * Remembers a usage carrier left at OpenCode's zero, in case only the
+   * catalog's absence left it there. One read after the catalog arrived is
+   * remembered too: a load can complete between pricing and this call.
+   */
+  private deferUnpriced(conversationId: string, item: import("../../types").ConversationItem, promptId?: string): void {
+    if (!this.listPrices || item.type !== "assistant_message" || !item.id.startsWith("usage:")) return;
+    if (item.usage?.costUsd !== 0 || !item.model || totalTokens(item.usage) === 0) return;
+    const key = JSON.stringify([conversationId, item.id]);
+    this.unpricedCarriers.delete(key);
+    this.unpricedCarriers.set(key, { conversationId, carrier: item, ...(promptId === undefined ? {} : { promptId }) });
+    if (this.unpricedCarriers.size > OpenCodeV2Provider.UNPRICED_CARRIER_LIMIT) this.unpricedCarriers.delete(this.unpricedCarriers.keys().next().value!);
+    if (this.listPrices.available()) this.wake?.();
+  }
+
+  /**
+   * Once a catalog is available, the remembered carriers it prices, each as
+   * the event a live step's end would have been: the carrier for the
+   * conversation's receipt, and the message's usage for its launcher's rows.
+   */
+  private *republishListPriced(): Generator<NormalizedProviderEvent> {
+    if (!this.listPrices?.available() || this.unpricedCarriers.size === 0) return;
+    const pending = [...this.unpricedCarriers.values()];
+    this.unpricedCarriers.clear();
+    for (const { conversationId, carrier, promptId } of pending) {
+      const usage = this.listPrices.price(carrier.usage!, carrier.model);
+      if (!usage.listPriced) continue;
+      const messageId = carrier.id.slice("usage:".length);
+      yield { conversationId, eventType: "uatu.list-prices", outcome: "handled",
+        updates: [{ kind: "upsert", item: { ...carrier, usage } }],
+        assistantUsage: { messageId, usage, ...(promptId === undefined ? {} : { promptId }) } };
+    }
+  }
+
   private inject(event: NormalizedProviderEvent): void {
     this.injected.push(event);
     if (this.injected.length > OpenCodeV2Provider.INJECTED_LIMIT) this.injected.shift();
@@ -2461,6 +2507,8 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   async dispose(): Promise<void> {
     this.readLifetime.abort();
+    this.stopListPrices?.();
+    this.unpricedCarriers.clear();
     for (const ready of this.streamReadyWaiters) ready(false);
     this.nativeHistory.dispose();
     this.childParents.dispose();
