@@ -94,10 +94,46 @@ function modelRates(cost: unknown): Rates[] | undefined {
   return [base, ...tiers.values()];
 }
 
+// Prices an object factor does not name keep factor 1; a cache-write factor
+// keyed by TTL keeps the first (models-dev.ts `factorAt`).
+function factorAt(factor: unknown, path: readonly string[]): number {
+  let node = factor;
+  for (const key of path) if (object(node)) node = (node as Json)[key];
+  if (typeof node === "number" && Number.isFinite(node)) return node;
+  const first = object(node) ? Object.values(node as Json)[0] : undefined;
+  return typeof first === "number" && Number.isFinite(first) ? first : 1;
+}
+
 /**
- * The base models a v2 catalog prices. Modes (`<model>-fast` and the like)
- * are left out: they are not the exact model a step names here, so they stay
- * unpriced.
+ * A mode's rates (models-dev.ts `modeCost`): its own cost replaces the base
+ * default; otherwise its service tier's multiplier (the mode's name by
+ * default) scales the base default. The base context tiers stay unscaled.
+ */
+function modeRates(cost: unknown, base: Rates[], name: string, mode: Json): Rates[] {
+  const [baseDefault, ...baseTiers] = base;
+  if (mode.cost !== undefined) return [modelRates(mode.cost)?.[0] ?? ZERO, ...baseTiers];
+  const tier = typeof mode.service_tier === "string" ? mode.service_tier : name;
+  const multipliers = object(cost)?.multipliers;
+  const factor = (Array.isArray(multipliers) ? multipliers : []).map(object).find(multiplier => {
+    const when = object(multiplier?.when);
+    return when && Object.keys(when).length === 1 && object(when.service_tier)?.equals === tier;
+  })?.factor;
+  if (factor === undefined || !baseDefault) return base;
+  const scale = (value: number, path: readonly string[]) => Math.round(value * factorAt(factor, path) * 1e10) / 1e10;
+  return [{
+    input: scale(baseDefault.input, ["text", "input", "price"]),
+    output: scale(baseDefault.output, ["text", "output", "price"]),
+    cacheRead: scale(baseDefault.cacheRead, ["text", "input", "cache", "read"]),
+    cacheWrite: scale(baseDefault.cacheWrite, ["text", "input", "cache", "write"]),
+  }, ...baseTiers];
+}
+
+const ZERO: Rates = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+/**
+ * The models a v2 catalog prices, with each mode OpenCode derives from
+ * `experimental.modes` as its own exact model, `<model>-<mode>`
+ * (models-dev.ts `normalize`).
  */
 export function priceTable(catalog: unknown): PriceTable {
   const table = new Map<string, Rates[]>();
@@ -106,8 +142,14 @@ export function priceTable(catalog: unknown): PriceTable {
     if (typeof provider?.id !== "string") continue;
     for (const entry of Object.values(object(provider.models) ?? {})) {
       const model = object(entry);
-      const rates = typeof model?.id === "string" ? modelRates(model.cost) : undefined;
-      if (rates) table.set(key(provider.id, model!.id as string), rates);
+      if (typeof model?.id !== "string") continue;
+      const rates = modelRates(model.cost);
+      if (rates) table.set(key(provider.id, model.id), rates);
+      for (const [name, value] of Object.entries(object(object(model.experimental)?.modes) ?? {})) {
+        const mode = object(value);
+        if (!mode || mode.service_tier !== undefined && typeof mode.service_tier !== "string") continue;
+        table.set(key(provider.id, `${model.id}-${name}`), modeRates(model.cost, rates ?? [ZERO], name, mode));
+      }
     }
   }
   return table;

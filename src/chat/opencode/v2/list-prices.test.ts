@@ -18,8 +18,18 @@ const CATALOG = {
             input: { price: 2, cache: { read: 0.1, write: { "30m": 2.5, "12h": 5 } }, overrides: [{ when: { context: { gt: 272_000 } }, price: 4, cache: { read: 0.2, write: { "30m": 5, "12h": 10 } } }] },
             output: { price: 10, overrides: [{ when: { context: { gt: 272_000 } }, price: 15 }] },
           },
-          multipliers: [{ when: { service_tier: { equals: "priority" } }, factor: { text: 2 } }],
+          multipliers: [
+            { when: { service_tier: { equals: "priority" } }, factor: { text: 2 } },
+            { when: { service_tier: { equals: "flex" } }, factor: { text: { input: 0.5, output: 0.25 } } },
+            { when: { not: { region: { equals: "global" } } }, factor: { text: 1.1 } },
+          ],
         },
+        experimental: { modes: {
+          fast: { service_tier: "priority", body: { service_tier: "priority" } },
+          flex: { body: { service_tier: "flex" } },
+          pro: { body: { reasoning: { mode: "pro" } } },
+          own: { cost: { text: { input: { price: 7 }, output: { price: 8 } } } },
+        } },
       },
       "per-image": { id: "per-image", type: "image", cost: { text: { input: { unit: "image", price: 1 }, output: { price: 1 } } } },
       "explicit-cache": { id: "explicit-cache", type: "chat", cost: { text: { input: { price: 1, cache: { explicit: { write: 3 } } }, output: { price: 2 } } } },
@@ -48,6 +58,23 @@ describe("priceTable and stepCost replicate OpenCode's catalog pricing", () => {
     // Exactly at the size is not above it.
     expect(stepCost(ratesFor(table, "openai", "gpt-6.1-sol")!, { input: 272_000 })).toBeCloseTo(272_000 * 2 / 1e6, 12);
     expect(stepCost(ratesFor(table, "openai", "gpt-6.1-sol")!, { input: 271_000, cacheWrite: 1_001 })).toBeCloseTo((271_000 * 4 + 1_001 * 5) / 1e6, 12);
+  });
+
+  test("catalog modes are their own exact models, priced as OpenCode prices them (models-dev.ts modeCost)", () => {
+    const rates = (model: string) => ratesFor(table, "openai", model)!;
+    // Below the context tier; each component is 100k tokens, a tenth of the per-million rate.
+    const small = { input: 100_000, output: 100_000, cacheRead: 100_000 };
+    // A service tier's multiplier scales the base rates; "fast" names the priority tier.
+    expect(stepCost(rates("gpt-6.1-sol-fast"), small)).toBeCloseTo((4 + 20 + 0.2) / 10, 10);
+    // Without a service tier the mode's own name is the tier; a factor object scales only what it names.
+    expect(stepCost(rates("gpt-6.1-sol-flex"), small)).toBeCloseTo((1 + 2.5 + 0.05) / 10, 10);
+    // No multiplier for the tier: the base rates.
+    expect(stepCost(rates("gpt-6.1-sol-pro"), small)).toBeCloseTo((2 + 10 + 0.1) / 10, 10);
+    // A mode's own cost replaces the base default.
+    expect(stepCost(rates("gpt-6.1-sol-own"), { input: 100_000, output: 100_000 })).toBeCloseTo(1.5, 10);
+    // The base context tiers stay unscaled.
+    expect(stepCost(rates("gpt-6.1-sol-fast"), { input: 300_000, output: 100_000 })).toBeCloseTo((300_000 * 4 + 100_000 * 15) / 1e6, 10);
+    expect(ratesFor(table, "openai", "gpt-6.1-sol-missing")).toBeUndefined();
   });
 
   test("only per-token text prices are kept; an explicit cache write price is used when no TTL is listed", () => {
@@ -93,7 +120,7 @@ describe("ListPrices", () => {
     expect(prices.price(usage, undefined)).toBe(usage);
     // No fallback to another provider's price for the same model id.
     expect(prices.price(usage, { providerId: "chatgpt", modelId: "gpt-6.1-sol" })).toBe(usage);
-    expect(prices.price(usage, { providerId: "openai", modelId: "gpt-6.1-sol-fast" })).toBe(usage);
+    expect(prices.price(usage, { providerId: "openai", modelId: "gpt-6.1-sol-turbo" })).toBe(usage);
   });
 
   test("a zero list price stays unpriced", async () => {

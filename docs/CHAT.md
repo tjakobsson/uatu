@@ -111,10 +111,11 @@ on a Pro/Max plan, where the CLI computes the figure. Neither is a bill.
   cache read and write) choosing a long-context tier, reasoning priced as
   output, and the first listed cache-write rate.
 - **What stays unpriced.** Only the exact provider and model are priced, never
-  another provider's price for the same model id. A model mode such as
-  `gpt-6.1-sol-fast`, a model the catalog does not list, and usage read while the
-  catalog is unavailable keep OpenCode's zero, which reads as **no price
-  reported**. Usage read before the first fetch completes keeps its zero until
+  another provider's price for the same model id. A mode such as
+  `gpt-6.1-sol-fast` is its own model, priced as OpenCode prices it: its own
+  rates, or its service tier's multiplier on the base rates. A model the
+  catalog does not list, and usage read while the catalog is unavailable, keep
+  OpenCode's zero, which reads as **no price reported**. Usage read before the first fetch completes keeps its zero until
   it is read again, for example when the conversation is reopened.
 - **Never replaced.** A nonzero cost OpenCode reports always stands.
 - **Settings.** Chat follows OpenCode's catalog settings in the server's
