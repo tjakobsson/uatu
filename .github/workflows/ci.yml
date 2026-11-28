@@ -169,7 +169,8 @@ jobs:
         run: bun run audit
 
       - name: Run unit and integration tests
-        # `bun test --parallel=4`: four worker processes, each running whole
+        # `bun test --parallel=N`, one worker process per available core
+        # (four on this runner, scripts/test-workers.ts), each running whole
         # files in isolation, the committed timings starting the slowest
         # files first. Real-process tests wait for the events they assert on
         # rather than for fixed delays, so they hold under the contention of
@@ -240,7 +241,7 @@ jobs:
         include:
           # The functional project runs in two legs split by file list
           # (UATU_E2E_LEG, see playwright.config.ts), balanced by measured
-          # worker time; each leg runs the config's 4 workers.
+          # worker time; each leg runs one worker per core (4 on this runner).
           - name: leg 1 of 2
             id: leg-1
             leg: "1"

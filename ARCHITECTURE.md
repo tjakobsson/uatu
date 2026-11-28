@@ -2180,7 +2180,7 @@ one that matches what actually broke.
 ```bash
 bun run dev               # dev hub on :4702 with testdata/watch-docs (user dev / dev)
 bun test                  # unit + integration suite (~18s)
-bun run test:e2e          # Playwright (~5min, workers: 1, serial)
+bun run test:e2e          # Playwright (one worker per core up to 8; UATU_TEST_WORKERS overrides)
 bun run build             # compile single-file dist/uatu binary
 bun run check:licenses    # audit npm dependencies
 bun run bench:render      # informational render baseline

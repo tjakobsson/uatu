@@ -14,7 +14,11 @@
 // bad-port list that WebKit and Chromium refuse to load (a range starting at
 // 4173 once put a worker on 4190), and below macOS's ephemeral range (49152).
 // UATU_E2E_BASE_PORT / UATU_E2E_HUB_BASE_PORT move them, e.g. to run two
-// suites side by side.
+// suites side by side. A run takes `workers` harness ports and 10 × `workers`
+// hub ports, and the worker count follows the machine's cores
+// (scripts/test-workers.ts), so space the bases for the largest count either
+// run uses (e.g. 28600 / 29600 against the defaults), or pin
+// UATU_TEST_WORKERS. checkPortLayout guards one run's ranges, not another's.
 
 import net from "node:net";
 
@@ -26,14 +30,41 @@ export const HUB_BASE_PORT = Number.parseInt(process.env.UATU_E2E_HUB_BASE_PORT 
 // With the defaults the harness family (20000 + slot) stays below the hub
 // family (21000 + 10 × slot) for any worker count under 1000.
 export const HUB_PORTS_PER_WORKER = 10;
+// Each worker's slot and Playwright's resolved worker count (`workerInfo`:
+// `config.workers` already reflects --workers and --debug).
+type WorkerSlot = { parallelIndex: number; config: { workers: number } };
 
-export function workerServerPort(parallelIndex: number): number {
-  return BASE_PORT + parallelIndex;
+export function workerServerPort(slot: WorkerSlot): number {
+  checkPortLayout(slot.config.workers);
+  return BASE_PORT + slot.parallelIndex;
 }
 
-export function hubPortBlock(parallelIndex: number): { hubPort: number; end: number } {
-  const hubPort = HUB_BASE_PORT + parallelIndex * HUB_PORTS_PER_WORKER;
+export function hubPortBlock(slot: WorkerSlot): { hubPort: number; end: number } {
+  checkPortLayout(slot.config.workers);
+  const hubPort = HUB_BASE_PORT + slot.parallelIndex * HUB_PORTS_PER_WORKER;
   return { hubPort, end: hubPort + HUB_PORTS_PER_WORKER };
+}
+
+// Throws unless `workers` slots fit: the harness and hub ranges disjoint and
+// both below the ephemeral range, where the OS hands out ports of its own
+// (Linux from 32768; macOS and Windows from 49152). More workers lengthen
+// both ranges, so bases that fit four workers may not fit eight.
+export function checkPortLayout(
+  workers: number,
+  basePort = BASE_PORT,
+  hubBasePort = HUB_BASE_PORT,
+  platform: string = process.platform,
+): void {
+  const ephemeralStart = platform === "linux" ? 32768 : 49152;
+  const harnessEnd = basePort + workers;
+  const hubEnd = hubBasePort + workers * HUB_PORTS_PER_WORKER;
+  const overlap = basePort < hubEnd && hubBasePort < harnessEnd;
+  if (!overlap && Math.max(harnessEnd, hubEnd) <= ephemeralStart) return;
+  throw new Error(
+    `${workers} e2e workers need ports ${basePort}–${harnessEnd - 1} and ${hubBasePort}–${hubEnd - 1}, which ` +
+      (overlap ? "overlap" : `reach the ephemeral range at ${ephemeralStart}`) +
+      "; lower UATU_TEST_WORKERS or --workers, or move UATU_E2E_BASE_PORT / UATU_E2E_HUB_BASE_PORT",
+  );
 }
 
 const PORT_WAIT_MS = 15_000;

@@ -36,7 +36,7 @@ export const test = base.extend<{}, WorkerFixtures>({
       // The port follows the worker's parallel slot (see ports.ts for why
       // not workerIndex). The workspace keeps workerIndex: a replacement
       // worker must not inherit a predecessor's leftover files.
-      const port = workerServerPort(workerInfo.parallelIndex);
+      const port = workerServerPort(workerInfo);
       const workspace = path.resolve(
         process.env.UATU_E2E_WORKSPACE_ROOT ?? path.join(process.cwd(), ".e2e"),
         `watch-docs-w${workerInfo.workerIndex}`,
